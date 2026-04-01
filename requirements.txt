@@ -1,0 +1,25 @@
+﻿# ============================================================
+# ZK_Data Fabric - 数据基座 MVP 依赖清单
+# 安装命令: pip install -r requirements.txt
+# ============================================================
+
+# --- 调度引擎 ---
+prefect==3.6.22
+
+# --- 配置管理 ---
+pydantic==2.11.5
+pydantic-settings==2.6.1
+
+# --- 日志 ---
+loguru==0.7.3
+
+# --- 网络采集 ---
+scrapling[all]==0.4.2
+trafilatura==1.12.2
+
+# --- 云端 API 调用 ---
+openai>=1.0                  # 用于调用 Qwen（通义千问）兼容 OpenAI 接口
+httpx>=0.27                  # MinerU 云端 API HTTP 客户端
+
+# --- 工具 ---
+python-dotenv>=1.0           # .env 文件加载
