@@ -61,6 +61,99 @@ def _ensure_dirs():
 #  子流程 1：网页采集流水线
 # ===================================================================
 
+def _get_list_page_urls(start_url: str, profile: dict) -> list[str]:
+    """
+    根据站点翻页配置，生成所有列表页 URL。
+
+    支持两种模式：
+    - url_pattern: 按 URL 规律拼接，如 index.html / index_1.html / index_2.html
+    - css_next_btn: 实际爬取时动态跟随"下一页"按钮（此处只返回第一页，翻页在爬取时处理）
+    """
+    pagination = profile.get("pagination", {})
+    max_pages = profile.get("max_pages", 1)
+    base_url = start_url.rsplit("/", 1)[0] + "/"
+
+    if pagination.get("type") == "url_pattern":
+        first_page = pagination.get("first_page", "index.html")
+        other_pages = pagination.get("other_pages", "index_{n}.html")
+        urls = [base_url + first_page]
+        for n in range(1, max_pages):
+            urls.append(base_url + other_pages.replace("{n}", str(n)))
+        return urls
+
+    # css_next_btn 模式：只返回第一页，翻页逻辑在 crawl_site_list_pages 里动态处理
+    return [start_url]
+
+
+def _extract_detail_urls(page, profile: dict, base_url: str) -> list[str]:
+    """从列表页提取所有详情页链接。"""
+    selector = profile.get("list_item_selector")
+    if not selector:
+        return []
+
+    urls = []
+    for a in page.css(selector):
+        href = a.attrib.get("href", "")
+        if not href:
+            continue
+        if href.startswith("http"):
+            urls.append(href)
+        elif href.startswith("/"):
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            urls.append(f"{parsed.scheme}://{parsed.netloc}{href}")
+        else:
+            urls.append(base_url.rsplit("/", 1)[0] + "/" + href)
+    return urls
+
+
+@task(
+    name="crawl_detail_page",
+    retries=APP.TASK_RETRIES,
+    retry_delay_seconds=APP.TASK_RETRY_DELAY,
+)
+def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
+    """
+    爬取单条详情页并完成解析 → 质检 → 落盘。
+    这是 Prefect 并发调度的最小单元。
+    """
+    stats = {"total": 0, "passed": 0, "quarantined": 0}
+
+    page_data = fetch_page.fn(
+        url=detail_url,
+        delay=profile.get("request_delay_seconds", 2.0),
+        wait_selector=profile.get("detail_wait_selector"),  # 详情页可单独配置等待选择器
+    )
+
+    parsed = route_webpage.fn(page_data)
+    stats["total"] += 1
+
+    # 处理附件
+    for att in parsed.get("attachment_links", []):
+        att_url = att.get("url", "")
+        if not att_url:
+            continue
+        if att_url.startswith("/"):
+            from urllib.parse import urljoin
+            att_url = urljoin(detail_url, att_url)
+
+        att_info = download_pdf.fn(
+            pdf_url=att_url,
+            parent_uuid=parsed["uuid"],
+            source_site=site_key,
+        )
+        file_ext = (att_info.get("file_ext") or "").lower()
+        if file_ext == ".pdf":
+            pdf_parsed = route_pdf.fn(att_info)
+            _process_single_result(pdf_parsed, stats)
+            stats["total"] += 1
+        elif file_ext in {".doc", ".docx"}:
+            logger.info(f"附件已下载但暂不解析: {att_info.get('local_path', '')}")
+
+    _process_single_result(parsed, stats)
+    return {"detail_url": detail_url, "stats": stats}
+
+
 @task(
     name="crawl_single_start_url",
     retries=APP.TASK_RETRIES,
@@ -68,57 +161,66 @@ def _ensure_dirs():
 )
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict:
     """
-    单个站点入口 URL 的完整处理任务（Prefect 队列最小执行单元）。
+    单个站点入口的完整爬取任务：
+    1. 按翻页配置遍历所有列表页
+    2. 从每页提取详情页链接
+    3. 逐条爬取详情页 → 解析 → 质检 → 落盘
 
-    说明：
-    - Prefect 在这个粒度做并发与失败监控（哪个站点/URL失败一目了然）
-    - 站点内部逻辑（正文解析、附件下载）仍在代码内串行执行，便于维护
+    css_next_btn 模式下动态跟随"下一页"按钮翻页。
+    url_pattern 模式下直接按 URL 规律生成所有列表页 URL。
     """
     stats = {"total": 0, "passed": 0, "quarantined": 0}
+    pagination = profile.get("pagination", {})
+    pagination_type = pagination.get("type", "url_pattern")
+    max_pages = profile.get("max_pages", 1)
+    delay = profile.get("request_delay_seconds", 2.0)
+    wait_sel = profile.get("wait_selector")
 
-    # 1) 抓取页面（调用 task.fn，避免 task 内再套 task）
-    page_data = fetch_page.fn(
-        url=start_url,
-        headers=profile.get("headers"),
-        delay=profile.get("request_delay_seconds", 2.0),
-    )
+    if pagination_type == "url_pattern":
+        list_urls = _get_list_page_urls(start_url, profile)
+        for list_url in list_urls:
+            logger.info(f"[列表页] {list_url}")
+            page_data = fetch_page.fn(url=list_url, delay=delay, wait_selector=wait_sel)
+            detail_urls = _extract_detail_urls(page_data["page"], profile, list_url)
+            logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
+            for detail_url in detail_urls:
+                try:
+                    result = crawl_detail_page.fn(site_key, profile, detail_url)
+                    s = result["stats"]
+                    stats["total"] += s["total"]
+                    stats["passed"] += s["passed"]
+                    stats["quarantined"] += s["quarantined"]
+                except Exception as e:
+                    logger.error(f"详情页处理失败: {detail_url} | {e}")
 
-    # 2) 路由解析正文
-    parsed = route_webpage.fn(page_data)
-    stats["total"] += 1
+    elif pagination_type == "css_next_btn":
+        next_selector = pagination.get("selector", "")
+        current_url = start_url
+        page_count = 0
+        while current_url and page_count < max_pages:
+            logger.info(f"[列表页 {page_count+1}] {current_url}")
+            page_data = fetch_page.fn(url=current_url, delay=delay, wait_selector=wait_sel)
+            detail_urls = _extract_detail_urls(page_data["page"], profile, current_url)
+            logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
+            for detail_url in detail_urls:
+                try:
+                    result = crawl_detail_page.fn(site_key, profile, detail_url)
+                    s = result["stats"]
+                    stats["total"] += s["total"]
+                    stats["passed"] += s["passed"]
+                    stats["quarantined"] += s["quarantined"]
+                except Exception as e:
+                    logger.error(f"详情页处理失败: {detail_url} | {e}")
 
-    # 3) 处理附件：支持下载 pdf/doc/docx；当前仅 PDF 进入解析
-    for att in parsed.get("attachment_links", []):
-        att_url = att.get("url", "")
-        if not att_url:
-            continue
-
-        if att_url.startswith("/"):
-            from urllib.parse import urljoin
-            att_url = urljoin(start_url, att_url)
-
-        att_info = download_pdf.fn(
-            pdf_url=att_url,
-            parent_uuid=parsed["uuid"],
-            source_site=site_key,
-        )
-
-        file_ext = (att_info.get("file_ext") or "").lower()
-        if file_ext == ".pdf":
-            pdf_parsed = route_pdf.fn(att_info)
-            _process_single_result(pdf_parsed, stats)
-            stats["total"] += 1
-        elif file_ext in {".doc", ".docx"}:
-            logger.info(
-                f"附件已下载但暂不解析（仅保留原始文件）: {att_info.get('local_path', '')}"
-            )
-        else:
-            logger.warning(
-                f"附件类型不在当前处理范围，已仅保存原始文件: {att_info.get('local_path', '')}"
-            )
-
-    # 4) 主文档质检和落盘
-    _process_single_result(parsed, stats)
+            # 找下一页
+            next_btns = page_data["page"].css(next_selector) if next_selector else []
+            next_href = next_btns[0].attrib.get("href", "") if next_btns else ""
+            if next_href:
+                from urllib.parse import urljoin
+                current_url = urljoin(current_url, next_href)
+            else:
+                current_url = None
+            page_count += 1
 
     return {
         "site_key": site_key,

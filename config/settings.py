@@ -28,7 +28,7 @@ class _AppSettings(BaseSettings):
     QWEN_MODEL_NAME: str = "qwen-plus"
 
     # ======================== 本地数据根目录 ========================
-    DATA_ROOT: Path = Path("/data")
+    DATA_ROOT: Path = Path("data")
 
     @property
     def RAW_DIR(self) -> Path:

@@ -24,10 +24,10 @@ import re
 
 # 把 CSS 选择器单独写成常量，方便随时修改
 NMPA_SELECTORS = {
-    "title": "div.content h3, div.content h4.article-title",
-    "date": "div.content span.article-date, div.content .info-date",
-    "body": "div.content div.article-content, div.content div.main-content",
-    "attachments": "div.content a[href$='.pdf'], div.content a[href$='.doc']",
+    "title": "title, h1, div.wenzhang h2, div.wenzhang h3",
+    "date": "meta[name='PubDate']",          # <meta name="PubDate" content="2026-02-25 09:22">
+    "body": "div.wenzhang",
+    "attachments": "div.wenzhang a",
 }
 
 
@@ -56,33 +56,39 @@ def extract_nmpa_detail(page) -> dict:
         "attachment_links": [],
     }
 
-    # --- 提取标题 ---
-    title_el = page.css_first(NMPA_SELECTORS["title"])
-    if title_el:
-        result["title"] = title_el.text().strip()
+    # --- 提取标题：优先 meta ArticleTitle，其次 <title> ---
+    meta_title = page.css("meta[name='ArticleTitle']")
+    if meta_title:
+        result["title"] = meta_title[0].attrib.get("content", "").strip()
+    if not result["title"]:
+        title_els = page.css("title")
+        if title_els:
+            result["title"] = title_els[0].get_all_text(strip=True)
 
-    # --- 提取日期 ---
-    date_el = page.css_first(NMPA_SELECTORS["date"])
-    if date_el:
-        raw_date = date_el.text().strip()
-        # 用正则从文本中找日期
-        date_match = re.search(r"\d{4}[-年/.]\d{1,2}[-月/.]\d{1,2}", raw_date)
+    # --- 提取日期：从 meta PubDate 取 content 属性 ---
+    date_els = page.css("meta[name='PubDate']")
+    if date_els:
+        raw_date = date_els[0].attrib.get("content", "").strip()
+        date_match = re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw_date)
         if date_match:
             result["publish_date"] = date_match.group()
 
     # --- 提取正文 ---
-    body_el = page.css_first(NMPA_SELECTORS["body"])
+    body_els = page.css(NMPA_SELECTORS["body"])
+    body_el = body_els[0] if body_els else None
     if body_el:
-        result["body_html"] = body_el.html
-        result["body_text"] = body_el.text().strip()
+        result["body_html"] = body_el.html_content
+        result["body_text"] = body_el.get_all_text(strip=True)
 
-    # --- 提取附件链接 ---
-    attachment_els = page.css(NMPA_SELECTORS["attachments"])
-    for a_tag in attachment_els:
-        href = a_tag.attrib.get("href", "")
-        name = a_tag.text().strip() or "未命名附件"
-        if href:
-            result["attachment_links"].append({"name": name, "url": href})
+    # --- 提取附件链接：找正文区域内所有文件链接 ---
+    if body_el:
+        for a_tag in body_el.css("a"):
+            href = a_tag.attrib.get("href", "")
+            name = a_tag.get_all_text(strip=True) or "未命名附件"
+            if href and re.search(r'\.(pdf|doc|docx|xls|xlsx|zip|wps)$', href, re.I):
+                if href.startswith("/"):
+                    href = "https://www.nmpa.gov.cn" + href
+                result["attachment_links"].append({"name": name, "url": href})
 
     return result
 
@@ -118,12 +124,13 @@ def extract_nmpa_list(page) -> dict:
     items = page.css(NMPA_LIST_SELECTORS["items"])
     for item in items:
         href = item.attrib.get("href", "")
-        title = item.text().strip()
+        title = item.get_all_text(strip=True)
         if href and title:
             result["links"].append({"title": title, "url": href})
 
     # --- 提取下一页 ---
-    next_btn = page.css_first(NMPA_LIST_SELECTORS["next_page"])
+    next_btns = page.css(NMPA_LIST_SELECTORS["next_page"])
+    next_btn = next_btns[0] if next_btns else None
     if next_btn:
         result["next_page_url"] = next_btn.attrib.get("href")
 

@@ -45,6 +45,15 @@ def check_quality(parsed_result: dict) -> dict:
     markdown = parsed_result.get("markdown", "")
     structured = parsed_result.get("structured_data", {})
 
+    # 调试：质检前打印关键字段
+    print(f"\n[质检前数据]")
+    print(f"  title      : {parsed_result.get('title', '')!r}")
+    print(f"  publish_date: {parsed_result.get('publish_date', '')!r}")
+    print(f"  parse_method: {parsed_result.get('parse_method', '')!r}")
+    print(f"  markdown_len: {len(markdown)}")
+    print(f"  markdown前200: {markdown[:200]!r}")
+    print(f"  structured : {structured}\n")
+
     # ---- 检查 1: Markdown 长度 ----
     if len(markdown) < APP.MIN_MARKDOWN_LENGTH:
         issues.append(

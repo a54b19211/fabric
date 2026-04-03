@@ -103,7 +103,7 @@ def route_webpage(page_data: dict) -> dict:
     # ---------- Slow Track：Trafilatura + Qwen ----------
     logger.info(f"[Slow Track] 走 Trafilatura 兜底: {url}")
 
-    html_content = page.html if hasattr(page, "html") else str(page)
+    html_content = page.html_content if hasattr(page, "html_content") else str(page)
     extracted_text = trafilatura.extract(
         html_content,
         include_comments=False,

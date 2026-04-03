@@ -54,14 +54,16 @@ def _guess_attachment_ext(file_url: str) -> str:
     retries=APP.TASK_RETRIES,
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
-def fetch_page(url: str, headers: dict = None, delay: float = 1.0):
+def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None):
     """
     抓取单个网页，返回 scrapling 页面对象。
 
     参数:
-        url: 目标网页 URL
-        headers: 自定义请求头（默认用全局配置）
-        delay: 请求前等待秒数（礼貌爬取，防止高并发被封）
+        url:           目标网页 URL
+        headers:       已废弃，保留参数签名兼容旧调用，不再传给 StealthyFetcher
+                       （传自定义 headers 会破坏 StealthyFetcher 的内置浏览器指纹）
+        delay:         请求前等待秒数（礼貌爬取，防止高并发被封）
+        wait_selector: 等待该 CSS 选择器出现后再返回，用于 JS 动态渲染页面
 
     返回:
         dict: {"page": 页面对象, "url": url, "uuid": 幂等UUID, "timestamp": ISO时间}
@@ -69,23 +71,25 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0):
     if delay > 0:
         time.sleep(delay)
 
-    # headers 真正参与请求：
-    # 1) 优先使用站点传入 headers
-    # 2) 若未传入，回退到 DEFAULT_HEADERS
-    # 3) 若只传了部分字段，用 DEFAULT_HEADERS 补全缺失项
-    effective_headers = dict(DEFAULT_HEADERS)
-    if headers:
-        effective_headers.update(headers)
-
-    # 【修复核心】使用 StealthyFetcher 替代普通的 Fetcher
-    # headless=True 隐藏浏览器窗口
-    # 若遇到极难的验证码，可以加上 solve_cloudflare=True 参数
-    page = StealthyFetcher.fetch(url, headers=effective_headers, headless=True)
+    # 不传自定义 headers —— StealthyFetcher 内置完整浏览器指纹，
+    # 手动覆盖 User-Agent 反而会暴露爬虫特征，导致 412 反爬拦截。
+    page = StealthyFetcher.fetch(
+        url,
+        headless=True,
+        network_idle=True,       # 等待页面网络请求全部完成，解决 JS 动态渲染问题
+        disable_resources=True,  # 禁止加载图片/字体/CSS，提速并降低反爬特征
+        timeout=30000,
+        wait_selector=wait_selector,  # 等待关键元素出现（None 则不等待）
+    )
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")
 
+    # 非 2xx 状态码视为失败，抛出异常让 Prefect 重试机制接管
+    if not (200 <= page.status < 300):
+        raise RuntimeError(f"HTTP {page.status}，页面请求被拒绝: {url}")
+
     return {
-        "page": page, # 这个 page 对象返回后，路由层就可以用 page.css() 和 page.find_similar() 了
+        "page": page,
         "url": url,
         "uuid": make_uuid(url),
         "timestamp": _now_iso(),
