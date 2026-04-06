@@ -61,15 +61,9 @@ def _ensure_dirs():
 #  子流程 1：网页采集流水线
 # ===================================================================
 
-def _get_list_page_urls(start_url: str, profile: dict) -> list[str]:
-    """
-    根据站点翻页配置，生成所有列表页 URL。
-
-    支持两种模式：
-    - url_pattern: 按 URL 规律拼接，如 index.html / index_1.html / index_2.html
-    - css_next_btn: 实际爬取时动态跟随"下一页"按钮（此处只返回第一页，翻页在爬取时处理）
-    """
-    pagination = profile.get("pagination", {})
+def _get_list_page_urls(start_url: str, profile: dict, site_cfg: dict) -> list[str]:
+    """根据站点解析配置生成所有列表页 URL。"""
+    pagination = site_cfg.get("pagination", {})
     max_pages = profile.get("max_pages", 1)
     base_url = start_url.rsplit("/", 1)[0] + "/"
 
@@ -81,13 +75,13 @@ def _get_list_page_urls(start_url: str, profile: dict) -> list[str]:
             urls.append(base_url + other_pages.replace("{n}", str(n)))
         return urls
 
-    # css_next_btn 模式：只返回第一页，翻页逻辑在 crawl_site_list_pages 里动态处理
+    # css_next_btn 模式：只返回第一页，翻页在爬取时动态处理
     return [start_url]
 
 
-def _extract_detail_urls(page, profile: dict, base_url: str) -> list[str]:
+def _extract_detail_urls(page, site_cfg: dict, base_url: str) -> list[str]:
     """从列表页提取所有详情页链接。"""
-    selector = profile.get("list_item_selector")
+    selector = site_cfg.get("list_item_selector")
     if not selector:
         return []
 
@@ -116,13 +110,15 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
     """
     爬取单条详情页并完成解析 → 质检 → 落盘。
     这是 Prefect 并发调度的最小单元。
+    router.route_webpage 内部会自动判断走特解还是通解。
     """
     stats = {"total": 0, "passed": 0, "quarantined": 0}
+    site_cfg = SITE_PROFILES.get(site_key, {})
 
     page_data = fetch_page.fn(
         url=detail_url,
         delay=profile.get("request_delay_seconds", 2.0),
-        wait_selector=profile.get("detail_wait_selector"),  # 详情页可单独配置等待选择器
+        wait_selector=site_cfg.get("detail_wait_selector"),
     )
 
     parsed = route_webpage.fn(page_data)
@@ -162,26 +158,24 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict:
     """
     单个站点入口的完整爬取任务：
-    1. 按翻页配置遍历所有列表页
-    2. 从每页提取详情页链接
-    3. 逐条爬取详情页 → 解析 → 质检 → 落盘
-
-    css_next_btn 模式下动态跟随"下一页"按钮翻页。
-    url_pattern 模式下直接按 URL 规律生成所有列表页 URL。
+    1. 从 site_configs 读取翻页和列表选择器配置
+    2. 遍历所有列表页，提取详情页链接
+    3. 逐条爬取详情页 → 解析（特解/通解）→ 质检 → 落盘
     """
     stats = {"total": 0, "passed": 0, "quarantined": 0}
-    pagination = profile.get("pagination", {})
+    site_cfg = SITE_PROFILES.get(site_key, {})
+    pagination = site_cfg.get("pagination", {})
     pagination_type = pagination.get("type", "url_pattern")
     max_pages = profile.get("max_pages", 1)
     delay = profile.get("request_delay_seconds", 2.0)
-    wait_sel = profile.get("wait_selector")
+    wait_sel = site_cfg.get("wait_selector")
 
     if pagination_type == "url_pattern":
-        list_urls = _get_list_page_urls(start_url, profile)
+        list_urls = _get_list_page_urls(start_url, profile, site_cfg)
         for list_url in list_urls:
             logger.info(f"[列表页] {list_url}")
             page_data = fetch_page.fn(url=list_url, delay=delay, wait_selector=wait_sel)
-            detail_urls = _extract_detail_urls(page_data["page"], profile, list_url)
+            detail_urls = _extract_detail_urls(page_data["page"], site_cfg, list_url)
             logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
             for detail_url in detail_urls:
                 try:
@@ -200,7 +194,7 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
         while current_url and page_count < max_pages:
             logger.info(f"[列表页 {page_count+1}] {current_url}")
             page_data = fetch_page.fn(url=current_url, delay=delay, wait_selector=wait_sel)
-            detail_urls = _extract_detail_urls(page_data["page"], profile, current_url)
+            detail_urls = _extract_detail_urls(page_data["page"], site_cfg, current_url)
             logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
             for detail_url in detail_urls:
                 try:
@@ -212,7 +206,6 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
                 except Exception as e:
                     logger.error(f"详情页处理失败: {detail_url} | {e}")
 
-            # 找下一页
             next_btns = page_data["page"].css(next_selector) if next_selector else []
             next_href = next_btns[0].attrib.get("href", "") if next_btns else ""
             if next_href:
@@ -228,6 +221,7 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
         "start_url": start_url,
         "stats": stats,
     }
+
 
 
 @flow(
