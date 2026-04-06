@@ -70,3 +70,4 @@ class _AppSettings(BaseSettings):
 
 # 全局单例——整个项目统一用这个
 APP = _AppSettings()
+
