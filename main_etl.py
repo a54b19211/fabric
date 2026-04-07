@@ -13,7 +13,6 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 """
 
 import sys
-import time
 import argparse
 import concurrent.futures
 from typing import Optional
@@ -25,6 +24,7 @@ from prefect.task_runners import ConcurrentTaskRunner
 from config.settings import APP
 from config.crawler_settings import SITE_PROFILES, LOCAL_PDF_SCAN_DIRS
 from core_engine.scrapling_client import fetch_page, download_pdf, scan_local_pdfs
+from core_engine.pagination_driver import make_driver
 from core_engine.router import route_webpage, route_pdf
 from core_engine.quality_checker import check_quality, quarantine_data
 from core_engine.storage_writer import write_three_in_one
@@ -32,7 +32,6 @@ from core_engine.review_exporter import export_review_csv
 
 
 # ======================== 日志配置 ========================
-# 移除默认 handler，统一用 loguru 格式
 logger.remove()
 logger.add(
     sys.stderr,
@@ -55,54 +54,28 @@ logger.add(
 
 # ======================== 确保输出目录存在 ========================
 def _ensure_dirs():
-    """创建所有需要的输出目录。"""
     for d in [APP.RAW_DIR, APP.MARKDOWN_DIR, APP.JSON_DIR, APP.QUARANTINE_DIR, APP.REVIEW_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
 # ===================================================================
-#  子流程 1：网页采集流水线
+#  公共处理逻辑：质检 → 落盘 / 隔离
 # ===================================================================
 
-def _get_list_page_urls(start_url: str, profile: dict, site_cfg: dict) -> list[str]:
-    """根据站点解析配置生成所有列表页 URL。"""
-    pagination = site_cfg.get("pagination", {})
-    max_pages = profile.get("max_pages", 1)
-    base_url = start_url.rsplit("/", 1)[0] + "/"
-
-    if pagination.get("type") == "url_pattern":
-        first_page = pagination.get("first_page", "index.html")
-        other_pages = pagination.get("other_pages", "index_{n}.html")
-        urls = [base_url + first_page]
-        for n in range(1, max_pages):
-            urls.append(base_url + other_pages.replace("{n}", str(n)))
-        return urls
-
-    # css_next_btn 模式：只返回第一页，翻页在爬取时动态处理
-    return [start_url]
+def _process_single_result(parsed: dict, stats: dict):
+    """对单条解析结果执行质检和落盘。"""
+    checked = check_quality.fn(parsed)
+    if checked["quality_passed"]:
+        write_three_in_one.fn(checked)
+        stats["passed"] += 1
+    else:
+        quarantine_data.fn(checked)
+        stats["quarantined"] += 1
 
 
-def _extract_detail_urls(page, site_cfg: dict, base_url: str) -> list[str]:
-    """从列表页提取所有详情页链接。"""
-    selector = site_cfg.get("list_item_selector")
-    if not selector:
-        return []
-
-    urls = []
-    for a in page.css(selector):
-        href = a.attrib.get("href", "")
-        if not href:
-            continue
-        if href.startswith("http"):
-            urls.append(href)
-        elif href.startswith("/"):
-            from urllib.parse import urlparse
-            parsed = urlparse(base_url)
-            urls.append(f"{parsed.scheme}://{parsed.netloc}{href}")
-        else:
-            urls.append(base_url.rsplit("/", 1)[0] + "/" + href)
-    return urls
-
+# ===================================================================
+#  子流程 1：网页采集流水线
+# ===================================================================
 
 @task(
     name="crawl_detail_page",
@@ -113,50 +86,52 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
     """
     爬取单条详情页并完成解析 → 质检 → 落盘。
     这是 Prefect 并发调度的最小单元。
-    router.route_webpage 内部会自动判断走特解还是通解。
     """
     stats = {"total": 0, "passed": 0, "quarantined": 0}
     site_cfg = SITE_PROFILES.get(site_key, {})
 
-    def _fetch():
-        return fetch_page.fn(
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        page_data = executor.submit(
+            fetch_page.fn,
             url=detail_url,
             delay=profile.get("request_delay_seconds", 2.0),
             wait_selector=site_cfg.get("detail_wait_selector"),
-        )
-
-    # StealthyFetcher 底层是 Playwright，不能在 asyncio 事件循环里直接调用
-    # 用线程池隔离，确保在独立线程中运行
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        page_data = executor.submit(_fetch).result()
+        ).result()
 
     parsed = route_webpage.fn(page_data)
     stats["total"] += 1
 
-    # 处理附件
-    for att in parsed.get("attachment_links", []):
+    # 附件处理委托给 router
+    for att_parsed in route_pdf_attachments(parsed.get("attachment_links", []), parsed["uuid"], site_key):
+        _process_single_result(att_parsed, stats)
+        stats["total"] += 1
+
+    _process_single_result(parsed, stats)
+    return {"detail_url": detail_url, "stats": stats}
+
+
+def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: str) -> list[dict]:
+    """
+    下载并解析详情页的 PDF 附件，返回解析结果列表。
+    doc/docx 只下载不解析（暂不支持）。
+    """
+    results = []
+    for att in attachment_links:
         att_url = att.get("url", "")
         if not att_url:
             continue
-        if att_url.startswith("/"):
-            from urllib.parse import urljoin
-            att_url = urljoin(detail_url, att_url)
 
         att_info = download_pdf.fn(
             pdf_url=att_url,
-            parent_uuid=parsed["uuid"],
+            parent_uuid=parent_uuid,
             source_site=site_key,
         )
         file_ext = (att_info.get("file_ext") or "").lower()
         if file_ext == ".pdf":
-            pdf_parsed = route_pdf.fn(att_info)
-            _process_single_result(pdf_parsed, stats)
-            stats["total"] += 1
+            results.append(route_pdf.fn(att_info))
         elif file_ext in {".doc", ".docx"}:
             logger.info(f"附件已下载但暂不解析: {att_info.get('local_path', '')}")
-
-    _process_single_result(parsed, stats)
-    return {"detail_url": detail_url, "stats": stats}
+    return results
 
 
 @task(
@@ -167,140 +142,31 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict:
     """
     单个站点入口的完整爬取任务：
-    1. 从 site_configs 读取翻页和列表选择器配置
-    2. 遍历所有列表页，提取详情页链接
-    3. 逐条爬取详情页 → 解析（特解/通解）→ 质检 → 落盘
+    通过 make_driver 实例化对应翻页驱动，边翻页边处理详情页。
+    JsClickDriver 通过回调实现每页翻完立刻处理，其余驱动用 generator。
     """
+    from core_engine.pagination_driver import JsClickDriver
+
     stats = {"total": 0, "passed": 0, "quarantined": 0}
-    site_cfg = SITE_PROFILES.get(site_key, {})
-    pagination = site_cfg.get("pagination", {})
-    pagination_type = pagination.get("type", "url_pattern")
-    max_pages = profile.get("max_pages", 1)
-    delay = profile.get("request_delay_seconds", 2.0)
-    wait_sel = site_cfg.get("wait_selector")
 
-    if pagination_type == "url_pattern":
-        list_urls = _get_list_page_urls(start_url, profile, site_cfg)
-        for list_url in list_urls:
-            logger.info(f"[列表页] {list_url}")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                page_data = executor.submit(fetch_page.fn, url=list_url, delay=delay, wait_selector=wait_sel).result()
-            detail_urls = _extract_detail_urls(page_data["page"], site_cfg, list_url)
-            logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
-            for detail_url in detail_urls:
-                try:
-                    result = crawl_detail_page.fn(site_key, profile, detail_url)
-                    s = result["stats"]
-                    stats["total"] += s["total"]
-                    stats["passed"] += s["passed"]
-                    stats["quarantined"] += s["quarantined"]
-                except Exception as e:
-                    logger.error(f"详情页处理失败: {detail_url} | {e}")
+    def _process_urls(urls: list[str]):
+        for detail_url in urls:
+            try:
+                result = crawl_detail_page.fn(site_key, profile, detail_url)
+                s = result["stats"]
+                stats["total"] += s["total"]
+                stats["passed"] += s["passed"]
+                stats["quarantined"] += s["quarantined"]
+            except Exception as e:
+                logger.error(f"详情页处理失败: {detail_url} | {e}")
 
-    elif pagination_type == "css_next_btn":
-        next_selector = pagination.get("selector", "")
-        current_url = start_url
-        page_count = 0
-        while current_url and page_count < max_pages:
-            logger.info(f"[列表页 {page_count+1}] {current_url}")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                page_data = executor.submit(fetch_page.fn, url=current_url, delay=delay, wait_selector=wait_sel).result()
-            detail_urls = _extract_detail_urls(page_data["page"], site_cfg, current_url)
-            logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
-            for detail_url in detail_urls:
-                try:
-                    result = crawl_detail_page.fn(site_key, profile, detail_url)
-                    s = result["stats"]
-                    stats["total"] += s["total"]
-                    stats["passed"] += s["passed"]
-                    stats["quarantined"] += s["quarantined"]
-                except Exception as e:
-                    logger.error(f"详情页处理失败: {detail_url} | {e}")
+    driver = make_driver(site_key, profile, start_url)
 
-            next_btns = page_data["page"].css(next_selector) if next_selector else []
-            next_href = next_btns[0].attrib.get("href", "") if next_btns else ""
-            if next_href:
-                from urllib.parse import urljoin
-                current_url = urljoin(current_url, next_href)
-            else:
-                current_url = None
-            page_count += 1
-
-    elif pagination_type == "js_click":
-        # JS 驱动翻页（如 CDE）：Playwright Sync API 不能在 asyncio 里直接跑
-        # 用线程池隔离，避免 "Playwright Sync API inside asyncio loop" 错误
-        def _js_click_crawl():
-            from playwright.sync_api import sync_playwright
-            from urllib.parse import urlparse
-            next_btn_selector = pagination.get("next_btn_selector", "a.layui-laypage-next:not(.layui-disabled)")
-            item_link_selector = site_cfg.get("list_item_selector", "")
-            base = f"{urlparse(start_url).scheme}://{urlparse(start_url).netloc}"
-            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            _stats = {"total": 0, "passed": 0, "quarantined": 0}
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
-                ctx = browser.new_context(user_agent=ua, locale="zh-CN")
-                pw_page = ctx.new_page()
-                pw_page.goto(start_url, wait_until="networkidle", timeout=30000)
-                if wait_sel:
-                    pw_page.wait_for_selector(wait_sel, timeout=15000)
-
-                page_count = 0
-                while page_count < max_pages:
-                    logger.info(f"[列表页 {page_count+1}]")
-                    detail_urls = []
-                    for a in pw_page.query_selector_all(item_link_selector):
-                        href = a.get_attribute("href") or ""
-                        if href and href not in detail_urls:
-                            detail_urls.append(href)
-                    logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
-
-                    for href in detail_urls:
-                        full_url = f"{base}{href}" if href.startswith("/") else href
-                        try:
-                            result = crawl_detail_page.fn(site_key, profile, full_url)
-                            s = result["stats"]
-                            _stats["total"] += s["total"]
-                            _stats["passed"] += s["passed"]
-                            _stats["quarantined"] += s["quarantined"]
-                        except Exception as e:
-                            logger.error(f"详情页处理失败: {full_url} | {e}")
-
-                    next_btn = pw_page.query_selector(next_btn_selector)
-                    if not next_btn:
-                        logger.info("没有下一页，翻页结束")
-                        break
-
-                    first_links = pw_page.query_selector_all(item_link_selector)
-                    old_first = first_links[0].get_attribute("href") if first_links else ""
-                    next_btn.click()
-                    if old_first:
-                        try:
-                            pw_page.wait_for_function(
-                                f"""() => {{
-                                    const els = document.querySelectorAll('{item_link_selector}');
-                                    return els.length > 0 && els[0].getAttribute('href') !== '{old_first}';
-                                }}""",
-                                timeout=10000,
-                            )
-                        except Exception:
-                            pw_page.wait_for_timeout(3000)
-                    else:
-                        pw_page.wait_for_timeout(3000)
-
-                    page_count += 1
-                    time.sleep(delay)
-
-                browser.close()
-            return _stats
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_js_click_crawl)
-            js_stats = future.result()
-            stats["total"] += js_stats["total"]
-            stats["passed"] += js_stats["passed"]
-            stats["quarantined"] += js_stats["quarantined"]
+    if isinstance(driver, JsClickDriver):
+        driver.run_with_callback(_process_urls)
+    else:
+        for detail_url in driver.iter_detail_urls():
+            _process_urls([detail_url])
 
     return {
         "site_key": site_key,
@@ -310,15 +176,12 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
     }
 
 
-
 @flow(
     name="crawl_websites",
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
 def crawl_websites_flow(only_site: Optional[str] = None):
-    """
-    爬取站点网页。only_site 不为 None 时只爬指定站点（调试用）。
-    """
+    """爬取站点网页。only_site 不为 None 时只爬指定站点（调试用）。"""
     logger.info("========== 开始网页采集流水线 ==========")
     stats = {"total": 0, "passed": 0, "quarantined": 0}
 
@@ -334,14 +197,7 @@ def crawl_websites_flow(only_site: Optional[str] = None):
         logger.info(f"站点已入队: {profile['name']} ({site_key})")
         for start_url in profile["start_urls"]:
             future = crawl_single_start_url.submit(site_key, profile, start_url)
-            jobs.append(
-                {
-                    "site_key": site_key,
-                    "site_name": profile["name"],
-                    "start_url": start_url,
-                    "future": future,
-                }
-            )
+            jobs.append({"site_key": site_key, "site_name": profile["name"], "start_url": start_url, "future": future})
 
     failed_sites = {}
     for job in jobs:
@@ -356,23 +212,18 @@ def crawl_websites_flow(only_site: Optional[str] = None):
                 f"总计={sub_stats['total']} 通过={sub_stats['passed']} 隔离={sub_stats['quarantined']}"
             )
         except Exception as e:
-            key = job["site_key"]
-            failed_sites.setdefault(key, []).append(job["start_url"])
-            logger.error(
-                f"站点入口处理失败: {job['site_name']} | {job['start_url']} | 错误: {e}"
-            )
+            failed_sites.setdefault(job["site_key"], []).append(job["start_url"])
+            logger.error(f"站点入口处理失败: {job['site_name']} | {job['start_url']} | 错误: {e}")
 
     logger.info(
         f"========== 网页采集完成 | "
-        f"总计: {stats['total']} | 通过: {stats['passed']} | "
-        f"隔离: {stats['quarantined']} =========="
+        f"总计: {stats['total']} | 通过: {stats['passed']} | 隔离: {stats['quarantined']} =========="
     )
-
     if failed_sites:
         for site_key, failed_urls in failed_sites.items():
             logger.error(f"站点失败汇总: {site_key} | 失败入口数: {len(failed_urls)}")
-            for failed_url in failed_urls:
-                logger.error(f"  - 失败入口: {failed_url}")
+            for url in failed_urls:
+                logger.error(f"  - 失败入口: {url}")
 
 
 # ===================================================================
@@ -384,41 +235,20 @@ def crawl_websites_flow(only_site: Optional[str] = None):
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
 def process_local_pdfs_flow():
-    """
-    批量扫描本地目录中的 PDF → MinerU 解析 → 质检 → 落盘。
-    """
+    """批量扫描本地目录中的 PDF → MinerU 解析 → 质检 → 落盘。"""
     logger.info("========== 开始本地 PDF 处理流水线 ==========")
     stats = {"total": 0, "passed": 0, "quarantined": 0}
 
     for scan_dir in LOCAL_PDF_SCAN_DIRS:
-        pdf_list = scan_local_pdfs(scan_dir)
-
-        for pdf_info in pdf_list:
+        for pdf_info in scan_local_pdfs(scan_dir):
             parsed = route_pdf(pdf_info)
             stats["total"] += 1
             _process_single_result(parsed, stats)
 
     logger.info(
         f"========== 本地 PDF 处理完成 | "
-        f"总计: {stats['total']} | 通过: {stats['passed']} | "
-        f"隔离: {stats['quarantined']} =========="
+        f"总计: {stats['total']} | 通过: {stats['passed']} | 隔离: {stats['quarantined']} =========="
     )
-
-
-# ===================================================================
-#  公共处理逻辑：质检 → 落盘 / 隔离
-# ===================================================================
-
-def _process_single_result(parsed: dict, stats: dict):
-    """对单条解析结果执行质检和落盘。"""
-    checked = check_quality(parsed)
-
-    if checked["quality_passed"]:
-        write_three_in_one(checked)
-        stats["passed"] += 1
-    else:
-        quarantine_data(checked)
-        stats["quarantined"] += 1
 
 
 # ===================================================================
@@ -431,12 +261,8 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None):
     总调度入口。
 
     参数:
-        mode: 运行模式
-            - "all": 完整流水线（爬取 + 本地 PDF + 导出审核）
-            - "crawl": 仅爬取网页
-            - "local": 仅处理本地 PDF
-            - "export_review": 仅导出待审核 CSV
-        site: 调试用，指定只爬某个站点（如 "nmpa"），None 则爬所有站点
+        mode: "all" | "crawl" | "local" | "export_review"
+        site: 调试用，指定只爬某个站点，None 则爬所有站点
     """
     _ensure_dirs()
     logger.info(f"ZK_Data Fabric ETL 启动 | 模式: {mode}" + (f" | 站点: {site}" if site else ""))

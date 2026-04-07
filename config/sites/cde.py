@@ -7,7 +7,7 @@ CONFIG = {
     "name": "国家药品审评中心",
     "url_pattern": "cde.org.cn",
     "start_urls": [
-        "https://www.cde.org.cn/main/news/listpage/3cc45b396497b598341ce3af000490e5",
+        "https://www.cde.org.cn/main/news/listpage/545cf855a50574699b46b26bcb165f32",
     ],
     "request_delay_seconds": 2.0,
     "max_pages": 365,
