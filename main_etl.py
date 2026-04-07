@@ -13,7 +13,10 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 """
 
 import sys
+import time
 import argparse
+import concurrent.futures
+from typing import Optional
 
 from loguru import logger
 from prefect import flow, task
@@ -115,11 +118,17 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
     stats = {"total": 0, "passed": 0, "quarantined": 0}
     site_cfg = SITE_PROFILES.get(site_key, {})
 
-    page_data = fetch_page.fn(
-        url=detail_url,
-        delay=profile.get("request_delay_seconds", 2.0),
-        wait_selector=site_cfg.get("detail_wait_selector"),
-    )
+    def _fetch():
+        return fetch_page.fn(
+            url=detail_url,
+            delay=profile.get("request_delay_seconds", 2.0),
+            wait_selector=site_cfg.get("detail_wait_selector"),
+        )
+
+    # StealthyFetcher 底层是 Playwright，不能在 asyncio 事件循环里直接调用
+    # 用线程池隔离，确保在独立线程中运行
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        page_data = executor.submit(_fetch).result()
 
     parsed = route_webpage.fn(page_data)
     stats["total"] += 1
@@ -174,7 +183,8 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
         list_urls = _get_list_page_urls(start_url, profile, site_cfg)
         for list_url in list_urls:
             logger.info(f"[列表页] {list_url}")
-            page_data = fetch_page.fn(url=list_url, delay=delay, wait_selector=wait_sel)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                page_data = executor.submit(fetch_page.fn, url=list_url, delay=delay, wait_selector=wait_sel).result()
             detail_urls = _extract_detail_urls(page_data["page"], site_cfg, list_url)
             logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
             for detail_url in detail_urls:
@@ -193,7 +203,8 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
         page_count = 0
         while current_url and page_count < max_pages:
             logger.info(f"[列表页 {page_count+1}] {current_url}")
-            page_data = fetch_page.fn(url=current_url, delay=delay, wait_selector=wait_sel)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                page_data = executor.submit(fetch_page.fn, url=current_url, delay=delay, wait_selector=wait_sel).result()
             detail_urls = _extract_detail_urls(page_data["page"], site_cfg, current_url)
             logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
             for detail_url in detail_urls:
@@ -215,6 +226,82 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
                 current_url = None
             page_count += 1
 
+    elif pagination_type == "js_click":
+        # JS 驱动翻页（如 CDE）：Playwright Sync API 不能在 asyncio 里直接跑
+        # 用线程池隔离，避免 "Playwright Sync API inside asyncio loop" 错误
+        def _js_click_crawl():
+            from playwright.sync_api import sync_playwright
+            from urllib.parse import urlparse
+            next_btn_selector = pagination.get("next_btn_selector", "a.layui-laypage-next:not(.layui-disabled)")
+            item_link_selector = site_cfg.get("list_item_selector", "")
+            base = f"{urlparse(start_url).scheme}://{urlparse(start_url).netloc}"
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            _stats = {"total": 0, "passed": 0, "quarantined": 0}
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+                ctx = browser.new_context(user_agent=ua, locale="zh-CN")
+                pw_page = ctx.new_page()
+                pw_page.goto(start_url, wait_until="networkidle", timeout=30000)
+                if wait_sel:
+                    pw_page.wait_for_selector(wait_sel, timeout=15000)
+
+                page_count = 0
+                while page_count < max_pages:
+                    logger.info(f"[列表页 {page_count+1}]")
+                    detail_urls = []
+                    for a in pw_page.query_selector_all(item_link_selector):
+                        href = a.get_attribute("href") or ""
+                        if href and href not in detail_urls:
+                            detail_urls.append(href)
+                    logger.info(f"  提取到 {len(detail_urls)} 条详情页链接")
+
+                    for href in detail_urls:
+                        full_url = f"{base}{href}" if href.startswith("/") else href
+                        try:
+                            result = crawl_detail_page.fn(site_key, profile, full_url)
+                            s = result["stats"]
+                            _stats["total"] += s["total"]
+                            _stats["passed"] += s["passed"]
+                            _stats["quarantined"] += s["quarantined"]
+                        except Exception as e:
+                            logger.error(f"详情页处理失败: {full_url} | {e}")
+
+                    next_btn = pw_page.query_selector(next_btn_selector)
+                    if not next_btn:
+                        logger.info("没有下一页，翻页结束")
+                        break
+
+                    first_links = pw_page.query_selector_all(item_link_selector)
+                    old_first = first_links[0].get_attribute("href") if first_links else ""
+                    next_btn.click()
+                    if old_first:
+                        try:
+                            pw_page.wait_for_function(
+                                f"""() => {{
+                                    const els = document.querySelectorAll('{item_link_selector}');
+                                    return els.length > 0 && els[0].getAttribute('href') !== '{old_first}';
+                                }}""",
+                                timeout=10000,
+                            )
+                        except Exception:
+                            pw_page.wait_for_timeout(3000)
+                    else:
+                        pw_page.wait_for_timeout(3000)
+
+                    page_count += 1
+                    time.sleep(delay)
+
+                browser.close()
+            return _stats
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_js_click_crawl)
+            js_stats = future.result()
+            stats["total"] += js_stats["total"]
+            stats["passed"] += js_stats["passed"]
+            stats["quarantined"] += js_stats["quarantined"]
+
     return {
         "site_key": site_key,
         "site_name": profile.get("name", site_key),
@@ -228,15 +315,22 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
     name="crawl_websites",
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
-def crawl_websites_flow():
+def crawl_websites_flow(only_site: Optional[str] = None):
     """
-    爬取所有配置站点的网页，走路由解析 → 质检 → 落盘。
+    爬取站点网页。only_site 不为 None 时只爬指定站点（调试用）。
     """
     logger.info("========== 开始网页采集流水线 ==========")
     stats = {"total": 0, "passed": 0, "quarantined": 0}
 
+    profiles = SITE_PROFILES
+    if only_site:
+        if only_site not in SITE_PROFILES:
+            logger.error(f"站点 '{only_site}' 不存在，可用站点: {list(SITE_PROFILES.keys())}")
+            return
+        profiles = {only_site: SITE_PROFILES[only_site]}
+
     jobs = []
-    for site_key, profile in SITE_PROFILES.items():
+    for site_key, profile in profiles.items():
         logger.info(f"站点已入队: {profile['name']} ({site_key})")
         for start_url in profile["start_urls"]:
             future = crawl_single_start_url.submit(site_key, profile, start_url)
@@ -332,7 +426,7 @@ def _process_single_result(parsed: dict, stats: dict):
 # ===================================================================
 
 @flow(name="zk_data_fabric_main")
-def main_pipeline(mode: str = "all"):
+def main_pipeline(mode: str = "all", site: Optional[str] = None):
     """
     总调度入口。
 
@@ -342,12 +436,13 @@ def main_pipeline(mode: str = "all"):
             - "crawl": 仅爬取网页
             - "local": 仅处理本地 PDF
             - "export_review": 仅导出待审核 CSV
+        site: 调试用，指定只爬某个站点（如 "nmpa"），None 则爬所有站点
     """
     _ensure_dirs()
-    logger.info(f"ZK_Data Fabric ETL 启动 | 模式: {mode}")
+    logger.info(f"ZK_Data Fabric ETL 启动 | 模式: {mode}" + (f" | 站点: {site}" if site else ""))
 
     if mode in ("all", "crawl"):
-        crawl_websites_flow()
+        crawl_websites_flow(only_site=site)
 
     if mode in ("all", "local"):
         if LOCAL_PDF_SCAN_DIRS:
@@ -375,5 +470,10 @@ if __name__ == "__main__":
         default="all",
         help="运行模式: all=完整流水线, crawl=仅爬取, local=仅本地PDF, export_review=仅导出审核CSV",
     )
+    parser.add_argument(
+        "--site",
+        default=None,
+        help="调试用：只爬指定站点，如 --site nmpa。不传则爬所有站点",
+    )
     args = parser.parse_args()
-    main_pipeline(mode=args.mode)
+    main_pipeline(mode=args.mode, site=args.site)

@@ -14,11 +14,15 @@ from config.settings import APP
 
 
 def _count_filled_fields(data: dict) -> float:
-    """计算 dict 中非空字段的填充率。"""
+    """计算顶层解析结果中关键字段的填充率。"""
     if not data:
         return 0.0
+    # 从顶层字段取值，兼容特解（css_extract）和通解（trafilatura+qwen）两种路径
     key_fields = ["title", "publish_date", "category", "summary", "drug_name"]
-    filled = sum(1 for k in key_fields if data.get(k))
+    # 顶层有 title/publish_date，structured_data 里有 category/summary/drug_name
+    structured = data.get("structured_data", {}) or {}
+    merged = {**structured, "title": data.get("title", ""), "publish_date": data.get("publish_date", "")}
+    filled = sum(1 for k in key_fields if merged.get(k))
     return filled / len(key_fields)
 
 
@@ -61,7 +65,7 @@ def check_quality(parsed_result: dict) -> dict:
         )
 
     # ---- 检查 2: 结构化字段填充率 ----
-    fill_ratio = _count_filled_fields(structured)
+    fill_ratio = _count_filled_fields(parsed_result)
     if fill_ratio < APP.MIN_JSON_FILLED_RATIO:
         issues.append(
             f"结构化字段填充率过低({fill_ratio:.0%} < {APP.MIN_JSON_FILLED_RATIO:.0%})"

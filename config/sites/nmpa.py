@@ -1,4 +1,4 @@
-from biz_rules.css_extractors import extract_nmpa_detail
+from biz_rules.extractors.nmpa import extract_nmpa_detail
 
 SITE_KEY = "nmpa"
 

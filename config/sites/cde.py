@@ -1,3 +1,5 @@
+from biz_rules.extractors.cde import extract_cde_detail
+
 SITE_KEY = "cde"
 
 CONFIG = {
@@ -5,22 +7,22 @@ CONFIG = {
     "name": "国家药品审评中心",
     "url_pattern": "cde.org.cn",
     "start_urls": [
-        "https://www.cde.org.cn/main/news/listpage/545b4c0545e88c8f3ca727c0b55f63e1",
+        "https://www.cde.org.cn/main/news/listpage/3cc45b396497b598341ce3af000490e5",
     ],
-    "request_delay_seconds": 3.0,
-    "max_pages": 30,
+    "request_delay_seconds": 2.0,
+    "max_pages": 365,
 
-    # ── 列表页解析（待确认页面结构后填入）──
-    "wait_selector": None,
-    "list_item_selector": None,
+    # ── 列表页解析 ──
+    "wait_selector": "div.news_item",
+    "list_item_selector": "div.news_item a[href*='/main/news/viewInfoCommon/']",
 
     # ── 翻页配置 ──
     "pagination": {
-        "type": "css_next_btn",
-        "selector": "a.next, a.page-next",
+        "type": "js_click",
+        "next_btn_selector": "a.layui-laypage-next:not(.layui-disabled)",
     },
 
-    # ── 详情页解析（暂无特解，走通解）──
-    "detail_extractor": None,
-    "detail_wait_selector": None,
+    # ── 详情页解析 ──
+    "detail_extractor": extract_cde_detail,
+    "detail_wait_selector": "div.news_detail_box",
 }
