@@ -38,6 +38,8 @@ class BasePaginationDriver(ABC):
         self.delay = profile.get("request_delay_seconds", 2.0)
         self.max_pages = profile.get("max_pages", 1)
         self.wait_sel = self.site_cfg.get("wait_selector")
+        self.disable_resources = self.site_cfg.get("disable_resources", True)
+        self.solve_cloudflare = self.site_cfg.get("solve_cloudflare", False)
 
     def iter_detail_urls(self):
         """
@@ -87,6 +89,8 @@ class BasePaginationDriver(ABC):
                 url=url,
                 delay=self.delay,
                 wait_selector=self.wait_sel,
+                disable_resources=self.disable_resources,
+                solve_cloudflare=self.solve_cloudflare,
             ).result()
 
 
@@ -97,18 +101,33 @@ class BasePaginationDriver(ABC):
 class UrlPatternDriver(BasePaginationDriver):
     """
     翻页 URL 按规律生成，提前算出所有列表页 URL，逐一抓取。
-    参数来自 site_cfg["pagination"]: first_page, other_pages
+
+    支持两种子模式（通过 pagination.subtype 区分）：
+    - path（默认）: URL 路径拼接，如 index.html / index_1.html
+      参数: first_page, other_pages（含 {n} 占位符）
+    - query_param: query string 翻页，如 ?page=0 / ?page=1
+      参数: param（参数名，默认 "page"），start（起始值，默认 0）
     """
 
     def _iter_list_pages(self):
         pagination = self.site_cfg.get("pagination", {})
-        first_page = pagination.get("first_page", "index.html")
-        other_pages = pagination.get("other_pages", "index_{n}.html")
-        base = self.start_url.rsplit("/", 1)[0] + "/"
+        subtype = pagination.get("subtype", "path")
 
-        urls = [base + first_page]
-        for n in range(1, self.max_pages):
-            urls.append(base + other_pages.replace("{n}", str(n)))
+        if subtype == "query_param":
+            param = pagination.get("param", "page")
+            start = pagination.get("start", 0)
+            urls = [
+                f"{self.start_url}?{param}={start + n}"
+                for n in range(self.max_pages)
+            ]
+        else:
+            first_page = pagination.get("first_page", "index.html")
+            other_pages = pagination.get("other_pages", "index_{n}.html")
+            base = self.start_url.rsplit("/", 1)[0] + "/"
+            urls = [base + first_page] + [
+                base + other_pages.replace("{n}", str(n))
+                for n in range(1, self.max_pages)
+            ]
 
         for url in urls:
             logger.info(f"[列表页] {url}")

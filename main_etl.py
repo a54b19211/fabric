@@ -7,7 +7,7 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 
   运行方式:
     python main_etl.py                        # 运行完整流水线
-    python main_etl.py --mode crawl           # 仅爬取网页
+    python main_etl.py --mode crawl           # 仅采集（网页 + API）
     python main_etl.py --mode local           # 仅处理本地 PDF
     python main_etl.py --mode export_review   # 仅导出待审核 CSV
 """
@@ -26,6 +26,7 @@ from config.crawler_settings import SITE_PROFILES, LOCAL_PDF_SCAN_DIRS
 from core_engine.scrapling_client import fetch_page, download_pdf, scan_local_pdfs
 from core_engine.pagination_driver import make_driver
 from core_engine.router import route_webpage, route_pdf
+from core_engine.api_router import iter_api_results
 from core_engine.quality_checker import check_quality, quarantine_data
 from core_engine.storage_writer import write_three_in_one
 from core_engine.review_exporter import export_review_csv
@@ -74,7 +75,7 @@ def _process_single_result(parsed: dict, stats: dict):
 
 
 # ===================================================================
-#  子流程 1：网页采集流水线
+#  子流程 1：数据采集流水线（网页爬取 + API 拉取）
 # ===================================================================
 
 @task(
@@ -83,10 +84,7 @@ def _process_single_result(parsed: dict, stats: dict):
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
 def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
-    """
-    爬取单条详情页并完成解析 → 质检 → 落盘。
-    这是 Prefect 并发调度的最小单元。
-    """
+    """爬取单条详情页并完成解析 → 质检 → 落盘。"""
     stats = {"total": 0, "passed": 0, "quarantined": 0}
     site_cfg = SITE_PROFILES.get(site_key, {})
 
@@ -96,12 +94,13 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
             url=detail_url,
             delay=profile.get("request_delay_seconds", 2.0),
             wait_selector=site_cfg.get("detail_wait_selector"),
+            disable_resources=site_cfg.get("disable_resources", True),
+            solve_cloudflare=site_cfg.get("solve_cloudflare", False),
         ).result()
 
     parsed = route_webpage.fn(page_data)
     stats["total"] += 1
 
-    # 附件处理委托给 router
     for att_parsed in route_pdf_attachments(parsed.get("attachment_links", []), parsed["uuid"], site_key):
         _process_single_result(att_parsed, stats)
         stats["total"] += 1
@@ -111,21 +110,13 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
 
 
 def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: str) -> list[dict]:
-    """
-    下载并解析详情页的 PDF 附件，返回解析结果列表。
-    doc/docx 只下载不解析（暂不支持）。
-    """
+    """下载并解析详情页的 PDF 附件。doc/docx 只下载不解析。"""
     results = []
     for att in attachment_links:
         att_url = att.get("url", "")
         if not att_url:
             continue
-
-        att_info = download_pdf.fn(
-            pdf_url=att_url,
-            parent_uuid=parent_uuid,
-            source_site=site_key,
-        )
+        att_info = download_pdf.fn(pdf_url=att_url, parent_uuid=parent_uuid, source_site=site_key)
         file_ext = (att_info.get("file_ext") or "").lower()
         if file_ext == ".pdf":
             results.append(route_pdf.fn(att_info))
@@ -140,11 +131,7 @@ def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: st
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict:
-    """
-    单个站点入口的完整爬取任务：
-    通过 make_driver 实例化对应翻页驱动，边翻页边处理详情页。
-    JsClickDriver 通过回调实现每页翻完立刻处理，其余驱动用 generator。
-    """
+    """单个站点入口的完整爬取任务：翻页驱动 → 详情页处理。"""
     from core_engine.pagination_driver import JsClickDriver
 
     stats = {"total": 0, "passed": 0, "quarantined": 0}
@@ -161,19 +148,13 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
                 logger.error(f"详情页处理失败: {detail_url} | {e}")
 
     driver = make_driver(site_key, profile, start_url)
-
     if isinstance(driver, JsClickDriver):
         driver.run_with_callback(_process_urls)
     else:
         for detail_url in driver.iter_detail_urls():
             _process_urls([detail_url])
 
-    return {
-        "site_key": site_key,
-        "site_name": profile.get("name", site_key),
-        "start_url": start_url,
-        "stats": stats,
-    }
+    return {"site_key": site_key, "site_name": profile.get("name", site_key), "start_url": start_url, "stats": stats}
 
 
 @flow(
@@ -181,8 +162,12 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
 def crawl_websites_flow(only_site: Optional[str] = None):
-    """爬取站点网页。only_site 不为 None 时只爬指定站点（调试用）。"""
-    logger.info("========== 开始网页采集流水线 ==========")
+    """
+    统一数据采集入口。根据站点 source_type 自动分发：
+    - source_type='api'：API 拉取
+    - 其他（默认）：网页爬取
+    """
+    logger.info("========== 开始数据采集流水线 ==========")
     stats = {"total": 0, "passed": 0, "quarantined": 0}
 
     profiles = SITE_PROFILES
@@ -192,9 +177,25 @@ def crawl_websites_flow(only_site: Optional[str] = None):
             return
         profiles = {only_site: SITE_PROFILES[only_site]}
 
+    # ---- API 来源站点（串行，受限于 API 速率）----
+    for site_key, profile in profiles.items():
+        if profile.get("source_type") != "api":
+            continue
+        logger.info(f"[API] 站点已入队: {profile['name']} ({site_key})")
+        try:
+            for parsed in iter_api_results(site_key, profile):
+                stats["total"] += 1
+                _process_single_result(parsed, stats)
+            logger.info(f"[API] 站点完成: {profile['name']}")
+        except Exception as e:
+            logger.error(f"[API] 站点失败: {profile['name']} | {e}")
+
+    # ---- 网页爬取站点（Prefect 并发）----
     jobs = []
     for site_key, profile in profiles.items():
-        logger.info(f"站点已入队: {profile['name']} ({site_key})")
+        if profile.get("source_type") == "api":
+            continue
+        logger.info(f"[Web] 站点已入队: {profile['name']} ({site_key})")
         for start_url in profile["start_urls"]:
             future = crawl_single_start_url.submit(site_key, profile, start_url)
             jobs.append({"site_key": site_key, "site_name": profile["name"], "start_url": start_url, "future": future})
@@ -203,20 +204,20 @@ def crawl_websites_flow(only_site: Optional[str] = None):
     for job in jobs:
         try:
             result = job["future"].result()
-            sub_stats = result["stats"]
-            stats["total"] += sub_stats["total"]
-            stats["passed"] += sub_stats["passed"]
-            stats["quarantined"] += sub_stats["quarantined"]
+            s = result["stats"]
+            stats["total"] += s["total"]
+            stats["passed"] += s["passed"]
+            stats["quarantined"] += s["quarantined"]
             logger.info(
-                f"站点入口处理完成: {result['site_name']} | {result['start_url']} | "
-                f"总计={sub_stats['total']} 通过={sub_stats['passed']} 隔离={sub_stats['quarantined']}"
+                f"[Web] 站点入口完成: {result['site_name']} | {result['start_url']} | "
+                f"总计={s['total']} 通过={s['passed']} 隔离={s['quarantined']}"
             )
         except Exception as e:
             failed_sites.setdefault(job["site_key"], []).append(job["start_url"])
-            logger.error(f"站点入口处理失败: {job['site_name']} | {job['start_url']} | 错误: {e}")
+            logger.error(f"[Web] 站点入口失败: {job['site_name']} | {job['start_url']} | 错误: {e}")
 
     logger.info(
-        f"========== 网页采集完成 | "
+        f"========== 数据采集完成 | "
         f"总计: {stats['total']} | 通过: {stats['passed']} | 隔离: {stats['quarantined']} =========="
     )
     if failed_sites:
@@ -262,7 +263,7 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None):
 
     参数:
         mode: "all" | "crawl" | "local" | "export_review"
-        site: 调试用，指定只爬某个站点，None 则爬所有站点
+        site: 调试用，指定只跑某个站点，None 则跑所有站点
     """
     _ensure_dirs()
     logger.info(f"ZK_Data Fabric ETL 启动 | 模式: {mode}" + (f" | 站点: {site}" if site else ""))
@@ -294,12 +295,12 @@ if __name__ == "__main__":
         "--mode",
         choices=["all", "crawl", "local", "export_review"],
         default="all",
-        help="运行模式: all=完整流水线, crawl=仅爬取, local=仅本地PDF, export_review=仅导出审核CSV",
+        help="运行模式: all=完整流水线, crawl=仅采集(网页+API), local=仅本地PDF, export_review=仅导出审核CSV",
     )
     parser.add_argument(
         "--site",
         default=None,
-        help="调试用：只爬指定站点，如 --site nmpa。不传则爬所有站点",
+        help="调试用：只跑指定站点，如 --site fda_api_enforcement。不传则跑所有站点",
     )
     args = parser.parse_args()
     main_pipeline(mode=args.mode, site=args.site)

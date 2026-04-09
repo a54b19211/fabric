@@ -54,32 +54,29 @@ def _guess_attachment_ext(file_url: str) -> str:
     retries=APP.TASK_RETRIES,
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
-def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None):
+def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None, disable_resources: bool = True, solve_cloudflare: bool = False):
     """
     抓取单个网页，返回 scrapling 页面对象。
 
     参数:
-        url:           目标网页 URL
-        headers:       已废弃，保留参数签名兼容旧调用，不再传给 StealthyFetcher
-                       （传自定义 headers 会破坏 StealthyFetcher 的内置浏览器指纹）
-        delay:         请求前等待秒数（礼貌爬取，防止高并发被封）
-        wait_selector: 等待该 CSS 选择器出现后再返回，用于 JS 动态渲染页面
-
-    返回:
-        dict: {"page": 页面对象, "url": url, "uuid": 幂等UUID, "timestamp": ISO时间}
+        url:               目标网页 URL
+        headers:           已废弃，保留参数签名兼容旧调用
+        delay:             请求前等待秒数
+        wait_selector:     等待该 CSS 选择器出现后再返回
+        disable_resources: 是否禁止加载图片/字体/CSS（默认 True 提速）
+                           对启用 Cloudflare 的站点需设为 False
     """
     if delay > 0:
         time.sleep(delay)
 
-    # 不传自定义 headers —— StealthyFetcher 内置完整浏览器指纹，
-    # 手动覆盖 User-Agent 反而会暴露爬虫特征，导致 412 反爬拦截。
     page = StealthyFetcher.fetch(
         url,
         headless=True,
-        network_idle=True,       # 等待页面网络请求全部完成，解决 JS 动态渲染问题
-        disable_resources=True,  # 禁止加载图片/字体/CSS，提速并降低反爬特征
+        network_idle=True,
+        disable_resources=disable_resources,
         timeout=30000,
-        wait_selector=wait_selector,  # 等待关键元素出现（None 则不等待）
+        wait_selector=wait_selector,
+        solve_cloudflare=solve_cloudflare,
     )
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")

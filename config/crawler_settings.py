@@ -21,7 +21,6 @@
 """
 
 import importlib
-import pkgutil
 from pathlib import Path
 
 # httpx 下载附件时使用的请求头（不用于 StealthyFetcher）
@@ -34,12 +33,17 @@ DEFAULT_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
-# 自动扫描 config/sites/ 下所有 .py 文件，加载 SITE_KEY + CONFIG
+# 递归扫描 config/sites/ 下所有 .py 文件（含子目录），加载 SITE_KEY + CONFIG
 SITE_PROFILES: dict = {}
 
 _sites_dir = Path(__file__).parent / "sites"
-for _mod_info in pkgutil.iter_modules([str(_sites_dir)]):
-    _mod = importlib.import_module(f"config.sites.{_mod_info.name}")
+for _py_file in sorted(_sites_dir.rglob("*.py")):
+    if _py_file.name.startswith("_"):
+        continue
+    # 将文件路径转成模块路径，如 config/sites/fda/press.py → config.sites.fda.press
+    _rel = _py_file.relative_to(Path(__file__).parent.parent)
+    _mod_path = ".".join(_rel.with_suffix("").parts)
+    _mod = importlib.import_module(_mod_path)
     if hasattr(_mod, "SITE_KEY") and hasattr(_mod, "CONFIG"):
         SITE_PROFILES[_mod.SITE_KEY] = _mod.CONFIG
 

@@ -61,6 +61,7 @@ KNOWN_SITES = [
     "fda.gov",             # 美国 FDA
     "ema.europa.eu",       # 欧洲药品管理局
     "pharmnet.com.cn",     # 药智网
+    "drugbank.com",        # DrugBank 药物数据库
 ]
 
 
