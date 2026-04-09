@@ -29,6 +29,8 @@ from core_engine.router import route_webpage, route_pdf
 from core_engine.quality_checker import check_quality, quarantine_data
 from core_engine.storage_writer import write_three_in_one
 from core_engine.review_exporter import export_review_csv
+from core_engine.api_collector import APICollector
+
 
 
 # ======================== 日志配置 ========================
@@ -134,6 +136,7 @@ def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: st
     return results
 
 
+
 @task(
     name="crawl_single_start_url",
     retries=APP.TASK_RETRIES,
@@ -176,6 +179,57 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
     }
 
 
+@task(
+    name="collect_api_site",
+    retries=APP.TASK_RETRIES,
+    retry_delay_seconds=APP.TASK_RETRY_DELAY,
+)
+def collect_api_site(site_key: str, profile: dict) -> dict:
+    """采集 API 类型的站点"""
+    logger.info(f"开始 API 采集: {profile['name']}")
+
+    try:
+        from core_engine.api_collector import APICollector
+        collector = APICollector(site_key)
+
+        # 获取查询配置（如果有多个查询条件）
+        queries = profile.get("queries", [{}])
+        all_data = []
+
+        for query in queries:
+            logger.info(f"执行查询: {query}")
+            data = collector.collect(query_params=query)
+            all_data.extend(data)
+            logger.info(f"查询完成，获取 {len(data)} 条数据")
+
+        if all_data:
+            result = collector.save_data(all_data)
+            logger.info(f"API 采集完成: {result['count']} 条数据已保存")
+            return {
+                "site_key": site_key,
+                "site_name": profile["name"],
+                "start_url": "API_CALL",
+                "stats": {"total": result['count'], "passed": result['count'], "quarantined": 0}
+            }
+        else:
+            logger.warning(f"未获取到数据: {profile['name']}")
+            return {
+                "site_key": site_key,
+                "site_name": profile["name"],
+                "start_url": "API_CALL",
+                "stats": {"total": 0, "passed": 0, "quarantined": 0}
+            }
+
+    except Exception as e:
+        logger.error(f"API 采集失败: {site_key} | {e}")
+        return {
+            "site_key": site_key,
+            "site_name": profile["name"],
+            "start_url": "API_CALL",
+            "stats": {"total": 0, "passed": 0, "quarantined": 0},
+            "error": str(e)
+        }
+
 @flow(
     name="crawl_websites",
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
@@ -195,9 +249,27 @@ def crawl_websites_flow(only_site: Optional[str] = None):
     jobs = []
     for site_key, profile in profiles.items():
         logger.info(f"站点已入队: {profile['name']} ({site_key})")
-        for start_url in profile["start_urls"]:
-            future = crawl_single_start_url.submit(site_key, profile, start_url)
-            jobs.append({"site_key": site_key, "site_name": profile["name"], "start_url": start_url, "future": future})
+
+        # 判断站点类型
+        if profile.get("type") == "api":
+            # API 类型站点：直接采集，不需要遍历 start_urls
+            future = collect_api_site.submit(site_key, profile)
+            jobs.append({
+                "site_key": site_key,
+                "site_name": profile["name"],
+                "start_url": "API_CALL",  # API 站点没有具体的 start_url
+                "future": future
+            })
+        else:
+            # 网页类型站点：遍历 start_urls（原有逻辑）
+            for start_url in profile["start_urls"]:
+                future = crawl_single_start_url.submit(site_key, profile, start_url)
+                jobs.append({
+                    "site_key": site_key,
+                    "site_name": profile["name"],
+                    "start_url": start_url,
+                    "future": future
+                })
 
     failed_sites = {}
     for job in jobs:
