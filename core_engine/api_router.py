@@ -66,6 +66,12 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
     uid_field = profile.get("uid_field", "")  # 站点指定用哪个字段做 UUID 种子
 
     for record in iter_api_records(profile):
+        # fetcher 已经返回标准格式（含 uuid/markdown/structured_data）时直接透传，跳过字段映射
+        if "uuid" in record and "markdown" in record and "structured_data" in record:
+            if record.get("source_site") or record.get("parse_method"):
+                yield record
+                continue
+
         # 生成幂等 UUID
         uid_src = (
             _get_nested(record, uid_field) if uid_field
