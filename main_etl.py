@@ -96,6 +96,7 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
             wait_selector=site_cfg.get("detail_wait_selector"),
             disable_resources=site_cfg.get("disable_resources", True),
             solve_cloudflare=site_cfg.get("solve_cloudflare", False),
+            use_simple_fetch=site_cfg.get("use_simple_fetch", False),
         ).result()
 
     parsed = route_webpage.fn(page_data)

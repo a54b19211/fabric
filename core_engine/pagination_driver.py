@@ -40,6 +40,7 @@ class BasePaginationDriver(ABC):
         self.wait_sel = self.site_cfg.get("wait_selector")
         self.disable_resources = self.site_cfg.get("disable_resources", True)
         self.solve_cloudflare = self.site_cfg.get("solve_cloudflare", False)
+        self.use_simple_fetch = self.site_cfg.get("use_simple_fetch", False)
 
     def iter_detail_urls(self):
         """
@@ -69,16 +70,22 @@ class BasePaginationDriver(ABC):
         origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
 
         urls = []
+        seen = set()
         for a in page.css(selector):
             href = a.attrib.get("href", "")
             if not href:
                 continue
             if href.startswith("http"):
-                urls.append(href)
+                full = href
             elif href.startswith("/"):
-                urls.append(origin + href)
+                full = origin + href
             else:
-                urls.append(base_url.rsplit("/", 1)[0] + "/" + href)
+                full = base_url.rsplit("/", 1)[0] + "/" + href
+            # 去掉 query string 后去重（同一篇文章可能带不同 tracking 参数）
+            dedup_key = full.split("?")[0]
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                urls.append(full)
         return urls
 
     def _fetch(self, url: str):
@@ -91,6 +98,7 @@ class BasePaginationDriver(ABC):
                 wait_selector=self.wait_sel,
                 disable_resources=self.disable_resources,
                 solve_cloudflare=self.solve_cloudflare,
+                use_simple_fetch=self.use_simple_fetch,
             ).result()
 
 

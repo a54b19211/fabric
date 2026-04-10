@@ -9,11 +9,13 @@ from urllib.parse import urlparse, unquote
 from pathlib import Path
 from datetime import datetime, timezone
 
+import httpx
+
 from loguru import logger
 from prefect import task
 
 # 引入 Scrapling 的高级反爬抓取器
-from scrapling.fetchers import StealthyFetcher
+from scrapling.fetchers import StealthyFetcher, Fetcher
 
 from config.settings import APP
 from config.crawler_settings import DEFAULT_HEADERS
@@ -54,7 +56,7 @@ def _guess_attachment_ext(file_url: str) -> str:
     retries=APP.TASK_RETRIES,
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
-def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None, disable_resources: bool = True, solve_cloudflare: bool = False):
+def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None, disable_resources: bool = True, solve_cloudflare: bool = False, network_idle: bool = True, use_simple_fetch: bool = False):
     """
     抓取单个网页，返回 scrapling 页面对象。
 
@@ -64,20 +66,30 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
         delay:             请求前等待秒数
         wait_selector:     等待该 CSS 选择器出现后再返回
         disable_resources: 是否禁止加载图片/字体/CSS（默认 True 提速）
-                           对启用 Cloudflare 的站点需设为 False
+        network_idle:      是否等待网络空闲后再返回（默认 True）
+        use_simple_fetch:  True = 用 httpx 直接请求（StaticFetcher），跳过 Playwright
+                           适合无反爬、无 JS 渲染需求的站点，速度快 10x
     """
     if delay > 0:
         time.sleep(delay)
 
-    page = StealthyFetcher.fetch(
-        url,
-        headless=True,
-        network_idle=True,
-        disable_resources=disable_resources,
-        timeout=30000,
-        wait_selector=wait_selector,
-        solve_cloudflare=solve_cloudflare,
-    )
+    if use_simple_fetch:
+        page = Fetcher.get(
+            url,
+            stealthy_headers=True,
+            follow_redirects=True,
+            timeout=30,
+        )
+    else:
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=network_idle,
+            disable_resources=disable_resources,
+            timeout=30000,
+            wait_selector=wait_selector,
+            solve_cloudflare=solve_cloudflare,
+        )
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")
 

@@ -1,0 +1,46 @@
+"""中国医药创新促进会（PhIRDA）详情页特解"""
+import re
+
+
+def extract_phirda_detail(page) -> dict:
+    result = {
+        "title": "",
+        "publish_date": "",
+        "body_html": "",
+        "body_text": "",
+        "attachment_links": [],
+    }
+
+    # 标题：<title> 标签，去掉站点后缀
+    title_els = page.css("title")
+    if title_els:
+        raw = title_els[0].get_all_text(strip=True)
+        result["title"] = re.sub(r"\s*[-_|]\s*中国.*$", "", raw).strip()
+
+    # 日期：dl.xq_dl 里的 i 标签
+    for i_el in page.css("dl.xq_dl i"):
+        raw = i_el.get_all_text(strip=True)
+        m = re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw)
+        if m:
+            result["publish_date"] = m.group()
+            break
+
+    # 正文：div.xq_con
+    body_els = page.css("div.xq_con")
+    body_el = body_els[0] if body_els else None
+
+    if body_el:
+        result["body_html"] = body_el.html_content
+        result["body_text"] = body_el.get_all_text(strip=True)
+
+    # 附件：正文内的文件链接
+    search_el = body_el or page
+    for a in search_el.css("a"):
+        href = a.attrib.get("href", "")
+        name = a.get_all_text(strip=True) or "未命名附件"
+        if href and re.search(r'\.(pdf|doc|docx|xls|xlsx|zip|wps)$', href, re.I):
+            if href.startswith("/"):
+                href = "https://www.phirda.com" + href
+            result["attachment_links"].append({"name": name, "url": href})
+
+    return result
