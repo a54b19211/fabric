@@ -64,6 +64,7 @@ KNOWN_SITES = [
     "drugbank.com",        # DrugBank 药物数据库
     "phirda.com",          # 中国医药创新促进会
     "fiercepharma.com",    # Fierce Pharma 行业资讯
+    "chictr.org.cn",       # 中国临床试验注册中心
 ]
 
 
