@@ -99,6 +99,12 @@ def write_three_in_one(parsed_result: dict) -> dict:
         approval_number=structured.get("approval_number", ""),
         manufacturer=structured.get("manufacturer", ""),
         keywords=structured.get("keywords", []),
+
+        # 港股字段
+        stock_code=parsed_result.get("stock_code", "") or structured.get("stock_code", ""),
+        stock_name=parsed_result.get("stock_name", "") or structured.get("stock_name", ""),
+        stock_id=parsed_result.get("stock_id", 0) or structured.get("stock_id", 0),
+
         provenance=ProvenanceInfo(
             source_url=parsed_result.get("source_url", ""),
             source_site=site,

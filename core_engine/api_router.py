@@ -102,7 +102,7 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
             if k.startswith("sniffed_meta.")
         }
 
-        yield {
+        base_result = {
             "uuid": doc_uuid,
             "title": title,
             "publish_date": publish_date,
@@ -122,3 +122,10 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
             "sniffed_meta": sniffed_meta,
             "timestamp": _now_iso(),
         }
+
+        # 保留额外字段（用于 hkex 等站点）
+        for key in ["stock_code", "stock_name", "stock_id", "announcement_type"]:
+            if key in record:
+                base_result[key] = record[key]
+
+        yield base_result

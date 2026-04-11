@@ -70,6 +70,14 @@ class MetadataEnvelope(BaseModel):
     manufacturer: str = Field(default="", description="生产企业")
     keywords: List[str] = Field(default_factory=list, description="关键词列表")
 
+    # --- 港股特定字段 ---
+    stock_code: str = Field(default="", description="港股股票代码（如 00241）")
+    stock_name: str = Field(default="", description="港股股票名称（如 阿里健康）")
+    stock_id: int = Field(default=0, description="港交所内部 stockId")
+
+    # --- 来源追溯 ---
+    provenance: ProvenanceInfo = Field(description="来源信息")
+
     # --- 血缘信息 ---
     provenance: ProvenanceInfo = Field(default_factory=ProvenanceInfo)
 
