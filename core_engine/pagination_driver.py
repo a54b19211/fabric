@@ -75,12 +75,8 @@ class BasePaginationDriver(ABC):
             href = a.attrib.get("href", "")
             if not href:
                 continue
-            if href.startswith("http"):
-                full = href
-            elif href.startswith("/"):
-                full = origin + href
-            else:
-                full = base_url.rsplit("/", 1)[0] + "/" + href
+            # urljoin handles absolute, root-relative, and ../relative paths correctly
+            full = urljoin(base_url, href)
             # 去掉 query string 后去重（同一篇文章可能带不同 tracking 参数）
             dedup_key = full.split("?")[0]
             if dedup_key not in seen:

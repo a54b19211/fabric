@@ -64,6 +64,26 @@ class _AppSettings(BaseSettings):
     TASK_RETRIES: int = 3
     TASK_RETRY_DELAY: int = 10              # 秒
 
+    # ======================== 远程数据库 ========================
+    # 支持 PostgreSQL / MySQL，留空则不推送
+    DB_HOST: str = ""
+    DB_PORT: int = 5432
+    DB_NAME: str = ""
+    DB_USER: str = ""
+    DB_PASSWORD: str = ""
+    # 连接池大小
+    DB_POOL_SIZE: int = 5
+
+    @property
+    def DB_URL(self) -> str:
+        """SQLAlchemy 连接串，未配置时返回空字符串。"""
+        if not self.DB_HOST or not self.DB_NAME:
+            return ""
+        return (
+            f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}"
+            f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        )
+
     # ======================== MinIO 船票预留（二期使用）========================
     FUTURE_MINIO_BUCKET: str = "zk-data-fabric"
 

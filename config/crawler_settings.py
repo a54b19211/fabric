@@ -49,6 +49,5 @@ for _py_file in sorted(_sites_dir.rglob("*.py")):
 
 # ======================== 本地 PDF 扫描目录 ========================
 LOCAL_PDF_SCAN_DIRS = [
-    r"D:\智库\数据库底座建设\爬虫test\ZK_Data-Fabric-test\data\pdf_cache"
-    # 例如: r"D:\历史文献\药学期刊",
+    
 ]

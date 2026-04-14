@@ -30,6 +30,8 @@ from core_engine.api_router import iter_api_results
 from core_engine.quality_checker import check_quality, quarantine_data
 from core_engine.storage_writer import write_three_in_one
 from core_engine.review_exporter import export_review_csv
+from db.session import check_connection
+from migration.migrate import run_migrations
 
 
 # ======================== 日志配置 ========================
@@ -268,6 +270,15 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None):
     """
     _ensure_dirs()
     logger.info(f"ZK_Data Fabric ETL 启动 | 模式: {mode}" + (f" | 站点: {site}" if site else ""))
+
+    # ── 数据库检查 ──
+    if not APP.DB_HOST:
+        logger.info("[DB] 未配置 DB_HOST，数据仅落本地文件，不写入数据库")
+    elif not check_connection():
+        logger.warning("[DB] 数据库连接失败，数据仅落本地文件，不写入数据库")
+    else:
+        logger.info(f"[DB] 连接正常: {APP.DB_HOST}:{APP.DB_PORT}/{APP.DB_NAME}，执行迁移检查")
+        run_migrations()
 
     if mode in ("all", "crawl"):
         crawl_websites_flow(only_site=site)

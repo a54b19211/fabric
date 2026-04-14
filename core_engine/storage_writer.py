@@ -1,6 +1,5 @@
 """
-三位一体落盘引擎 —— 原始文件 + Markdown + JSON 元数据信封。
-同时生成 MinIO 船票（二期预留字段）。
+三位一体落盘引擎 —— 原始文件 + Markdown + JSON 元数据信封 + 远程数据库推送。
 """
 
 import json
@@ -12,6 +11,7 @@ from loguru import logger
 from prefect import task
 
 from config.settings import APP
+from config.crawler_settings import SITE_PROFILES
 from biz_rules.schemas import (
     MetadataEnvelope,
     ProvenanceInfo,
@@ -19,6 +19,7 @@ from biz_rules.schemas import (
     AttachmentInfo,
 )
 from biz_rules.source_mapper import calculate_confidence
+from db.repository import upsert_document
 
 
 def _minio_object_key(doc_uuid: str, file_type: str) -> str:
@@ -99,12 +100,6 @@ def write_three_in_one(parsed_result: dict) -> dict:
         approval_number=structured.get("approval_number", ""),
         manufacturer=structured.get("manufacturer", ""),
         keywords=structured.get("keywords", []),
-
-        # 港股字段
-        stock_code=parsed_result.get("stock_code", "") or structured.get("stock_code", ""),
-        stock_name=parsed_result.get("stock_name", "") or structured.get("stock_name", ""),
-        stock_id=parsed_result.get("stock_id", 0) or structured.get("stock_id", 0),
-
         provenance=ProvenanceInfo(
             source_url=parsed_result.get("source_url", ""),
             source_site=site,
@@ -116,8 +111,6 @@ def write_three_in_one(parsed_result: dict) -> dict:
             level=confidence_result["level"],
             score=confidence_result["score"],
             reason=confidence_result["reason"],
-            doi=sniffed.get("doi", ""),
-            journal_name=sniffed.get("journal_name", ""),
         ),
         attachments=attachments,
         parse_method=parsed_result.get("parse_method", ""),
@@ -138,6 +131,14 @@ def write_three_in_one(parsed_result: dict) -> dict:
     )
     logger.info(f"[Storage] JSON 信封落盘: {json_path}")
 
+    # ---- 4. 推送到远程数据库 ----
+    upsert_document(envelope)
+
+    # 站点自定义 DB 写入（如 hkex_meta、pubmed_meta 等）
+    db_writer = SITE_PROFILES.get(site, {}).get("db_writer")
+    if db_writer:
+        db_writer(doc_uuid, parsed_result)
+
     return {
         "uuid": doc_uuid,
         "md_path": str(md_path),
@@ -146,3 +147,5 @@ def write_three_in_one(parsed_result: dict) -> dict:
         "status": status,
         "confidence_level": confidence_result["level"],
     }
+
+

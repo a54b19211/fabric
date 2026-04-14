@@ -21,7 +21,8 @@ def _identify_site(url: str) -> str:
     """根据 URL 匹配站点标识符，未匹配返回空字符串。"""
     url_lower = url.lower()
     for site_key, profile in SITE_PROFILES.items():
-        if profile["url_pattern"] in url_lower:
+        pattern = profile.get("url_pattern", "")
+        if pattern and pattern in url_lower:
             return site_key
     return ""
 
@@ -66,6 +67,8 @@ def route_webpage(page_data: dict) -> dict:
                 "category": "通告",
                 "summary": body_text[:200],
             }
+            if extracted.get("extra"):
+                result["extra"] = extracted["extra"]
             return result
         logger.warning(f"[特解] 结果为空，降级通解: {url}")
 

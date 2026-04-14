@@ -38,14 +38,9 @@ class ProvenanceInfo(BaseModel):
 class ConfidenceInfo(BaseModel):
     """三级置信度评估结果"""
 
-    level: str = Field(
-        default="C",
-        description="置信度等级：A=高(0.8~1.0) / B=中(0.5~0.7) / C=低(0.3)",
-    )
+    level: str = Field(default="C", description="置信度等级：A=高(0.8~1.0) / B=中(0.5~0.7) / C=低(0.3)")
     score: float = Field(default=0.3, description="置信度分数 0~1")
     reason: str = Field(default="", description="打分依据说明")
-    doi: str = Field(default="", description="从文献中提取到的 DOI")
-    journal_name: str = Field(default="", description="从文献中提取到的期刊名")
 
 
 # ======================== JSON 元数据信封（核心！）========================
@@ -69,14 +64,6 @@ class MetadataEnvelope(BaseModel):
     approval_number: str = Field(default="", description="批准文号")
     manufacturer: str = Field(default="", description="生产企业")
     keywords: List[str] = Field(default_factory=list, description="关键词列表")
-
-    # --- 港股特定字段 ---
-    stock_code: str = Field(default="", description="港股股票代码（如 00241）")
-    stock_name: str = Field(default="", description="港股股票名称（如 阿里健康）")
-    stock_id: int = Field(default=0, description="港交所内部 stockId")
-
-    # --- 来源追溯 ---
-    provenance: ProvenanceInfo = Field(description="来源信息")
 
     # --- 血缘信息 ---
     provenance: ProvenanceInfo = Field(default_factory=ProvenanceInfo)
