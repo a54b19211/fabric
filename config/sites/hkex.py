@@ -26,7 +26,7 @@ CONFIG = {
         "companies": PHARMA_COMPANIES,
     },
 
-    "uid_field": "stock_code",
+    "uid_field": "pdf_url",
     "field_map": {
         "title": "headline",
         "publish_date": "release_time",
