@@ -64,8 +64,8 @@ def route_webpage(page_data: dict) -> dict:
             result["structured_data"] = {
                 "title": result["title"],
                 "publish_date": result["publish_date"],
-                "category": "通告",
-                "summary": body_text[:200],
+                "category": extracted.get("category", ""),
+                "summary": extracted.get("summary", "") or body_text[:200],
             }
             if extracted.get("extra"):
                 result["extra"] = extracted["extra"]

@@ -1,5 +1,6 @@
 from biz_rules.extractors.chictr.chictr import extract_chictr_detail
 from db.sites.chictr import db_writer as chictr_db_writer
+from biz_rules.cleaners.clinical_trial import clean_clinical_trial
 
 SITE_KEY = "chictr"
 
@@ -37,4 +38,5 @@ CONFIG = {
     "use_simple_fetch": False,
     "disable_resources": True,
     "solve_cloudflare": False,
+    "content_cleaner": clean_clinical_trial,
 }

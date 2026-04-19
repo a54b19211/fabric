@@ -4,6 +4,7 @@
 """
 
 import uuid
+import re
 import time
 from urllib.parse import urlparse, unquote
 from pathlib import Path
@@ -44,6 +45,27 @@ def _guess_attachment_ext(file_url: str) -> str:
     suffix = Path(raw_path).suffix.lower()
     if suffix in {".pdf", ".doc", ".docx"}:
         return suffix
+    return ""   # 空字符串表示需要从响应头推断
+
+
+def _ext_from_response(resp) -> str:
+    """从 HTTP 响应头推断文件扩展名。"""
+    # Content-Disposition: attachment; filename="xxx.docx"
+    cd = resp.headers.get("content-disposition", "")
+    if cd:
+        m = re.search(r'filename[^;=\n]*=[\s"\']*([^\s;"\']+)', cd, re.I)
+        if m:
+            suffix = Path(m.group(1)).suffix.lower()
+            if suffix in {".pdf", ".doc", ".docx"}:
+                return suffix
+
+    # Content-Type
+    ct = resp.headers.get("content-type", "").lower()
+    if "pdf" in ct:
+        return ".pdf"
+    if "wordprocessingml" in ct or "msword" in ct:
+        return ".docx"
+
     return ".bin"
 
 
@@ -121,29 +143,50 @@ def download_pdf(
     import httpx
 
     file_uuid = make_uuid(pdf_url)
-    file_ext = _guess_attachment_ext(pdf_url)
+    file_ext = _guess_attachment_ext(pdf_url)  # 可能为空，需下载后从响应头确认
     save_dir = APP.RAW_DIR / source_site
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_path = save_dir / f"{file_uuid}{file_ext}"
 
-    # 幂等：如果文件已存在则跳过下载
-    if save_path.exists():
-        logger.info(f"附件已存在，跳过下载: {save_path}")
-        return {
-            "uuid": file_uuid,
-            "local_path": str(save_path),
-            "source_url": pdf_url,
-            "parent_uuid": parent_uuid,
-            "source_site": source_site,
-            "file_ext": file_ext,
-            "timestamp": _now_iso(),
-            "skipped": True,
-        }
+    # 如果 URL 能推断扩展名，先检查幂等
+    if file_ext:
+        save_path = save_dir / f"{file_uuid}{file_ext}"
+        if save_path.exists():
+            logger.info(f"附件已存在，跳过下载: {save_path}")
+            return {
+                "uuid": file_uuid,
+                "local_path": str(save_path),
+                "source_url": pdf_url,
+                "parent_uuid": parent_uuid,
+                "source_site": source_site,
+                "file_ext": file_ext,
+                "timestamp": _now_iso(),
+                "skipped": True,
+            }
 
-    # 附件下载通常不需要浏览器渲染，用 httpx 更快更稳定
+    # 下载文件
     with httpx.Client(headers=DEFAULT_HEADERS, follow_redirects=True, timeout=120) as client:
         resp = client.get(pdf_url)
         resp.raise_for_status()
+
+        # URL 没有扩展名时，从响应头推断
+        if not file_ext:
+            file_ext = _ext_from_response(resp)
+            save_path = save_dir / f"{file_uuid}{file_ext}"
+            if save_path.exists():
+                logger.info(f"附件已存在，跳过下载: {save_path}")
+                return {
+                    "uuid": file_uuid,
+                    "local_path": str(save_path),
+                    "source_url": pdf_url,
+                    "parent_uuid": parent_uuid,
+                    "source_site": source_site,
+                    "file_ext": file_ext,
+                    "timestamp": _now_iso(),
+                    "skipped": True,
+                }
+        else:
+            save_path = save_dir / f"{file_uuid}{file_ext}"
+
         save_path.write_bytes(resp.content)
 
     logger.info(f"附件下载完成: {pdf_url} → {save_path}")

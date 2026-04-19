@@ -1,10 +1,8 @@
 """
-云端 API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）的请求逻辑。
-所有云端调用都集中在这个文件，方便统一管理密钥和错误处理。
+API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）的请求逻辑。
 """
 
 import json
-import time
 
 import httpx
 from openai import OpenAI
@@ -15,7 +13,7 @@ from config.settings import APP
 
 
 # ===================================================================
-#  MinerU 云端 API —— PDF → Markdown
+#  MinerU 自部署 API —— PDF → Markdown
 # ===================================================================
 
 @task(
@@ -25,63 +23,50 @@ from config.settings import APP
 )
 def mineru_pdf_to_markdown(pdf_path: str) -> dict:
     """
-    调用 MinerU 商业 API 将 PDF 解析为 Markdown。
-
-    流程：
-    1. 上传 PDF 文件 → 获得 task_id
-    2. 轮询任务状态直到完成
-    3. 下载解析结果（Markdown 文本）
+    调用自部署 MinerU 同步接口将 PDF 解析为 Markdown。
+        POST /file_parse → 直接返回结果
 
     参数:
         pdf_path: 本地 PDF 文件路径
 
     返回:
-        dict: {"markdown": "解析后的md文本", "success": True/False, "error": ""}
+        dict: {"markdown": "...", "success": True/False, "error": ""}
     """
-    if not APP.MINERU_API_KEY:
-        logger.error("MinerU API Key 未配置，跳过 PDF 解析")
-        return {"markdown": "", "success": False, "error": "MINERU_API_KEY 未配置"}
-
     base = APP.MINERU_API_BASE.rstrip("/")
-    headers = {"Authorization": f"Bearer {APP.MINERU_API_KEY}"}
-
+    fname = pdf_path.replace("\\", "/").split("/")[-1]
+    logger.info(f"[MinerU] 同步解析: {pdf_path}")
     try:
-        with httpx.Client(headers=headers, timeout=300) as client:
-            # ---- 步骤 1：上传 PDF ----
-            with open(pdf_path, "rb") as f:
-                upload_resp = client.post(
-                    f"{base}/file/upload",
-                    files={"file": (pdf_path.split("/")[-1].split("\\")[-1], f, "application/pdf")},
-                )
-            upload_resp.raise_for_status()
-            task_id = upload_resp.json().get("task_id", "")
+        with open(pdf_path, "rb") as f:
+            resp = httpx.post(
+                f"{base}/file_parse",
+                files=[("files", (fname, f, "application/pdf"))],
+                data={"return_md": "true", "backend": "pipeline"},
+                timeout=300,
+            )
+        resp.raise_for_status()
 
-            if not task_id:
-                return {"markdown": "", "success": False, "error": "未获取到 task_id"}
+        data = resp.json()
+        # 响应结构: {"results": {"<file_uuid>": {"md_content": "..."}}}
+        markdown = ""
+        if isinstance(data, dict):
+            results = data.get("results", {})
+            if isinstance(results, dict) and results:
+                first = next(iter(results.values()))
+                markdown = first.get("md_content") or first.get("md") or first.get("markdown") or ""
+            if not markdown:
+                # 兼容直接返回字符串或其他格式
+                markdown = data.get("md_content") or data.get("md") or data.get("markdown") or ""
+        elif isinstance(data, list) and data:
+            markdown = data[0].get("md_content") or data[0].get("md") or data[0].get("markdown") or ""
+        elif isinstance(data, str):
+            markdown = data
 
-            logger.info(f"MinerU 上传成功，task_id: {task_id}")
-
-            # ---- 步骤 2：轮询任务状态 ----
-            for attempt in range(60):
-                time.sleep(5)
-                status_resp = client.get(f"{base}/task/{task_id}")
-                status_resp.raise_for_status()
-                status_data = status_resp.json()
-
-                if status_data.get("status") == "completed":
-                    markdown_text = status_data.get("result", {}).get("markdown", "")
-                    logger.info(f"MinerU 解析完成，Markdown 长度: {len(markdown_text)}")
-                    return {"markdown": markdown_text, "success": True, "error": ""}
-
-                if status_data.get("status") == "failed":
-                    err = status_data.get("error", "未知错误")
-                    logger.error(f"MinerU 解析失败: {err}")
-                    return {"markdown": "", "success": False, "error": err}
-
-            return {"markdown": "", "success": False, "error": "轮询超时（5分钟）"}
-
+        if not markdown:
+            return {"markdown": "", "success": False, "error": f"响应中未找到 markdown 内容，原始响应: {resp.text[:300]}"}
+        logger.info(f"[MinerU] 解析完成，Markdown 长度: {len(markdown)}")
+        return {"markdown": markdown, "success": True, "error": ""}
     except Exception as e:
-        logger.error(f"MinerU API 调用异常: {e}")
+        logger.error(f"[MinerU] 调用异常: {e}")
         return {"markdown": "", "success": False, "error": str(e)}
 
 

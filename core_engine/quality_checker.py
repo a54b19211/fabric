@@ -49,15 +49,6 @@ def check_quality(parsed_result: dict) -> dict:
     markdown = parsed_result.get("markdown", "")
     structured = parsed_result.get("structured_data", {})
 
-    # 调试：质检前打印关键字段
-    print(f"\n[质检前数据]")
-    print(f"  title      : {parsed_result.get('title', '')!r}")
-    print(f"  publish_date: {parsed_result.get('publish_date', '')!r}")
-    print(f"  parse_method: {parsed_result.get('parse_method', '')!r}")
-    print(f"  markdown_len: {len(markdown)}")
-    print(f"  markdown前200: {markdown[:200]!r}")
-    print(f"  structured : {structured}\n")
-
     # ---- 检查 1: Markdown 长度 ----
     if len(markdown) < APP.MIN_MARKDOWN_LENGTH:
         issues.append(
@@ -66,7 +57,11 @@ def check_quality(parsed_result: dict) -> dict:
 
     # ---- 检查 2: 结构化字段填充率 ----
     fill_ratio = _count_filled_fields(parsed_result)
-    if fill_ratio < APP.MIN_JSON_FILLED_RATIO:
+    # PDF 解析时 Qwen 可能未配置，structured_data 为空属正常情况，只要 markdown 有内容即可
+    parse_method = parsed_result.get("parse_method", "")
+    is_pdf_parse = "mineru" in parse_method or "win32com" in parse_method
+    effective_threshold = 0.0 if is_pdf_parse else APP.MIN_JSON_FILLED_RATIO
+    if fill_ratio < effective_threshold:
         issues.append(
             f"结构化字段填充率过低({fill_ratio:.0%} < {APP.MIN_JSON_FILLED_RATIO:.0%})"
         )

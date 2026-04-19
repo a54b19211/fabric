@@ -6,10 +6,11 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 ==========================================================
 
   运行方式:
-    python main_etl.py                        # 运行完整流水线
+    python main_etl.py                        # 运行完整流水线（全量续爬）
     python main_etl.py --mode crawl           # 仅采集（网页 + API）
     python main_etl.py --mode local           # 仅处理本地 PDF
     python main_etl.py --mode export_review   # 仅导出待审核 CSV
+    python main_etl.py --crawl_mode incremental  # 增量爬取：遇到第一个重复即停止
 """
 
 import sys
@@ -27,7 +28,9 @@ from core_engine.scrapling_client import fetch_page, download_pdf, scan_local_pd
 from core_engine.pagination_driver import make_driver
 from core_engine.router import route_webpage, route_pdf
 from core_engine.api_router import iter_api_results
+from core_engine.content_cleaner import clean_content
 from core_engine.quality_checker import check_quality, quarantine_data
+from core_engine.docx_parser import route_docx
 from core_engine.storage_writer import write_three_in_one
 from core_engine.review_exporter import export_review_csv
 from db.session import check_connection
@@ -65,9 +68,20 @@ def _ensure_dirs():
 #  公共处理逻辑：质检 → 落盘 / 隔离
 # ===================================================================
 
+class StopIncremental(Exception):
+    """增量模式下遇到已处理记录时抛出，用于中断翻页循环。"""
+
+
+def _already_processed(doc_uuid: str, site: str) -> bool:
+    """检查该 UUID 的 JSON 信封是否已落盘，用于断点续爬跳过。"""
+    json_path = APP.JSON_DIR / site / f"{doc_uuid}.json"
+    return json_path.exists()
+
+
 def _process_single_result(parsed: dict, stats: dict):
-    """对单条解析结果执行质检和落盘。"""
-    checked = check_quality.fn(parsed)
+    """对单条解析结果执行清洗、质检和落盘。"""
+    cleaned = clean_content.fn(parsed)
+    checked = check_quality.fn(cleaned)
     if checked["quality_passed"]:
         write_three_in_one.fn(checked)
         stats["passed"] += 1
@@ -85,10 +99,20 @@ def _process_single_result(parsed: dict, stats: dict):
     retries=APP.TASK_RETRIES,
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
-def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
+def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode: str = "full") -> dict:
     """爬取单条详情页并完成解析 → 质检 → 落盘。"""
     stats = {"total": 0, "passed": 0, "quarantined": 0}
     site_cfg = SITE_PROFILES.get(site_key, {})
+
+    # ── 断点续爬：全量=跳过已处理，增量=遇到重复立即停止 ──
+    from core_engine.scrapling_client import make_uuid as _make_uuid
+    doc_uuid = _make_uuid(detail_url)
+    if _already_processed(doc_uuid, site_key):
+        if crawl_mode == "incremental":
+            logger.info(f"[增量] 遇到已处理记录，停止: {detail_url}")
+            raise StopIncremental(detail_url)
+        logger.debug(f"[跳过] 已处理: {detail_url}")
+        return {"detail_url": detail_url, "stats": stats}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         page_data = executor.submit(
@@ -104,7 +128,7 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
     parsed = route_webpage.fn(page_data)
     stats["total"] += 1
 
-    for att_parsed in route_pdf_attachments(parsed.get("attachment_links", []), parsed["uuid"], site_key):
+    for att_parsed in route_pdf_attachments(parsed.get("attachment_links", []), parsed["uuid"], site_key, parent_parsed=parsed):
         _process_single_result(att_parsed, stats)
         stats["total"] += 1
 
@@ -112,20 +136,59 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str) -> dict:
     return {"detail_url": detail_url, "stats": stats}
 
 
-def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: str) -> list[dict]:
-    """下载并解析详情页的 PDF 附件。doc/docx 只下载不解析。"""
+
+def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: str, parent_parsed: dict | None = None) -> list[dict]:
+    """下载并解析详情页的附件。PDF 走 MinerU，doc/docx 走 python-docx，继承父文档元数据。"""
     results = []
+    logger.info(f"[Attachments] 共 {len(attachment_links)} 个附件链接，parent_uuid={parent_uuid}")
     for att in attachment_links:
         att_url = att.get("url", "")
         if not att_url:
             continue
+        logger.info(f"[Attachments] 下载附件: {att_url}")
         att_info = download_pdf.fn(pdf_url=att_url, parent_uuid=parent_uuid, source_site=site_key)
         file_ext = (att_info.get("file_ext") or "").lower()
+        local_path = att_info.get("local_path", "")
+        logger.info(f"[Attachments] 下载完成: local_path={local_path}, file_ext={file_ext}")
+
+        # .bin 文件尝试嗅探真实类型
+        if file_ext == ".bin" and local_path:
+            sniffed = _sniff_file_type(local_path)
+            logger.info(f"[Attachments] .bin 嗅探结果: {sniffed}")
+            file_ext = sniffed
+
         if file_ext == ".pdf":
-            results.append(route_pdf.fn(att_info))
+            logger.info(f"[Attachments] → route_pdf")
+            pdf_result = route_pdf.fn(att_info)
+            logger.info(f"[Attachments] route_pdf 完成: markdown_len={len(pdf_result.get('markdown',''))}, title={pdf_result.get('title','')[:40]}")
+            results.append(pdf_result)
         elif file_ext in {".doc", ".docx"}:
-            logger.info(f"附件已下载但暂不解析: {att_info.get('local_path', '')}")
+            logger.info(f"[Attachments] → route_docx")
+            att_info["file_ext"] = file_ext
+            results.append(route_docx(att_info, parent_parsed=parent_parsed))
+        else:
+            logger.warning(f"[Attachments] 未知类型 {file_ext}，跳过解析: {local_path}")
     return results
+
+
+def _sniff_file_type(local_path: str) -> str:
+    """通过文件头魔数判断真实类型，返回 .pdf / .docx / .bin。"""
+    import pathlib
+    try:
+        with open(local_path, "rb") as f:
+            header = f.read(8)
+        # PDF: %PDF
+        if header[:4] == b"%PDF":
+            return ".pdf"
+        # DOCX/XLSX/ZIP: PK\x03\x04
+        if header[:4] == b"PK\x03\x04":
+            return ".docx"
+        # DOC: D0 CF 11 E0 (OLE2)
+        if header[:4] == b"\xd0\xcf\x11\xe0":
+            return ".doc"
+    except Exception:
+        pass
+    return ".bin"
 
 
 @task(
@@ -133,29 +196,40 @@ def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: st
     retries=APP.TASK_RETRIES,
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
-def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict:
+def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_mode: str = "full") -> dict:
     """单个站点入口的完整爬取任务：翻页驱动 → 详情页处理。"""
     from core_engine.pagination_driver import JsClickDriver
 
     stats = {"total": 0, "passed": 0, "quarantined": 0}
+    stop_flag = {"stop": False}
 
     def _process_urls(urls: list[str]):
         for detail_url in urls:
             try:
-                result = crawl_detail_page.fn(site_key, profile, detail_url)
+                result = crawl_detail_page.fn(site_key, profile, detail_url, crawl_mode=crawl_mode)
                 s = result["stats"]
                 stats["total"] += s["total"]
                 stats["passed"] += s["passed"]
                 stats["quarantined"] += s["quarantined"]
+            except StopIncremental:
+                stop_flag["stop"] = True
+                return  # 停止当前页剩余 URL 的处理
             except Exception as e:
                 logger.error(f"详情页处理失败: {detail_url} | {e}")
 
     driver = make_driver(site_key, profile, start_url)
     if isinstance(driver, JsClickDriver):
-        driver.run_with_callback(_process_urls)
+        for page_urls in driver._playwright_crawl():
+            _process_urls(page_urls)
+            if stop_flag["stop"]:
+                logger.info(f"[增量] 站点 {site_key} 翻页已停止")
+                break
     else:
         for detail_url in driver.iter_detail_urls():
             _process_urls([detail_url])
+            if stop_flag["stop"]:
+                logger.info(f"[增量] 站点 {site_key} 翻页已停止")
+                break
 
     return {"site_key": site_key, "site_name": profile.get("name", site_key), "start_url": start_url, "stats": stats}
 
@@ -164,13 +238,13 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str) -> dict
     name="crawl_websites",
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
-def crawl_websites_flow(only_site: Optional[str] = None):
+def crawl_websites_flow(only_site: Optional[str] = None, crawl_mode: str = "full"):
     """
     统一数据采集入口。根据站点 source_type 自动分发：
     - source_type='api'：API 拉取
     - 其他（默认）：网页爬取
     """
-    logger.info("========== 开始数据采集流水线 ==========")
+    logger.info(f"========== 开始数据采集流水线（{crawl_mode}模式）==========")
     stats = {"total": 0, "passed": 0, "quarantined": 0}
 
     profiles = SITE_PROFILES
@@ -200,7 +274,7 @@ def crawl_websites_flow(only_site: Optional[str] = None):
             continue
         logger.info(f"[Web] 站点已入队: {profile['name']} ({site_key})")
         for start_url in profile["start_urls"]:
-            future = crawl_single_start_url.submit(site_key, profile, start_url)
+            future = crawl_single_start_url.submit(site_key, profile, start_url, crawl_mode)
             jobs.append({"site_key": site_key, "site_name": profile["name"], "start_url": start_url, "future": future})
 
     failed_sites = {}
@@ -245,6 +319,9 @@ def process_local_pdfs_flow():
 
     for scan_dir in LOCAL_PDF_SCAN_DIRS:
         for pdf_info in scan_local_pdfs(scan_dir):
+            if _already_processed(pdf_info["uuid"], pdf_info["source_site"]):
+                logger.warning(f"[跳过] 已处理: {pdf_info['local_path']}")
+                continue
             parsed = route_pdf(pdf_info)
             stats["total"] += 1
             _process_single_result(parsed, stats)
@@ -260,16 +337,20 @@ def process_local_pdfs_flow():
 # ===================================================================
 
 @flow(name="zk_data_fabric_main")
-def main_pipeline(mode: str = "all", site: Optional[str] = None):
+def main_pipeline(mode: str = "all", site: Optional[str] = None, crawl_mode: str = "full"):
     """
     总调度入口。
 
     参数:
-        mode: "all" | "crawl" | "local" | "export_review"
-        site: 调试用，指定只跑某个站点，None 则跑所有站点
+        mode:       "all" | "crawl" | "local" | "export_review"
+        site:       调试用，指定只跑某个站点，None 则跑所有站点
+        crawl_mode: "full"（全量续爬）| "incremental"（增量，遇到重复即停）
     """
     _ensure_dirs()
-    logger.info(f"ZK_Data Fabric ETL 启动 | 模式: {mode}" + (f" | 站点: {site}" if site else ""))
+    logger.info(
+        f"ZK_Data Fabric ETL 启动 | 模式: {mode} | 续爬策略: {crawl_mode}"
+        + (f" | 站点: {site}" if site else "")
+    )
 
     # ── 数据库检查 ──
     if not APP.DB_HOST:
@@ -281,7 +362,7 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None):
         run_migrations()
 
     if mode in ("all", "crawl"):
-        crawl_websites_flow(only_site=site)
+        crawl_websites_flow(only_site=site, crawl_mode=crawl_mode)
 
     if mode in ("all", "local"):
         if LOCAL_PDF_SCAN_DIRS:
@@ -314,5 +395,11 @@ if __name__ == "__main__":
         default=None,
         help="调试用：只跑指定站点，如 --site fda_api_enforcement。不传则跑所有站点",
     )
+    parser.add_argument(
+        "--crawl_mode",
+        choices=["full", "incremental"],
+        default="full",
+        help="续爬策略: full=全量续爬（跳过已处理，继续爬剩余）, incremental=增量（遇到第一个重复即停止）",
+    )
     args = parser.parse_args()
-    main_pipeline(mode=args.mode, site=args.site)
+    main_pipeline(mode=args.mode, site=args.site, crawl_mode=args.crawl_mode)

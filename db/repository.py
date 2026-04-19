@@ -54,6 +54,8 @@ def upsert_document(envelope: MetadataEnvelope) -> None:
             reviewer_note=envelope.reviewer_note,
             minio_bucket=envelope.future_minio_bucket,
             minio_object_key=envelope.future_minio_object_key,
+            doc_type=envelope.doc_type,
+            language=envelope.language,
         )
 
 

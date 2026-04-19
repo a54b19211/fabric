@@ -4,6 +4,7 @@ ClinicalTrials.gov 站点配置
 """
 
 from biz_rules.extractors.clinicaltrials_fetcher import fetch_clinicaltrials
+from biz_rules.cleaners.clinical_trial import clean_clinical_trial
 
 SITE_KEY = "clinicaltrials"
 
@@ -45,4 +46,5 @@ CONFIG = {
     # 爬取控制
     "request_delay_seconds": 0.5,
     "timeout": 30,
+    "content_cleaner": clean_clinical_trial,
 }

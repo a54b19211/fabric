@@ -20,8 +20,7 @@ class _AppSettings(BaseSettings):
     )
 
     # ======================== 云端 API 密钥 ========================
-    MINERU_API_KEY: str = ""
-    MINERU_API_BASE: str = "https://mineru.net/api/v4"
+    MINERU_API_BASE: str = "http://100.121.201.73:8000"
 
     QWEN_API_KEY: str = ""
     QWEN_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

@@ -14,6 +14,8 @@ CONFIG = {
         "max_records": 200,   # 调试用，正式跑可改大或设 0 拉全量
         "db": "pubmed",
         # "api_key": "",      # 填入 NCBI API Key 可提升速率至 10 req/s
+        "fetch_fulltext": True,          # 是否尝试获取全文（PMC + Unpaywall）
+        "unpaywall_email": "xli85042@gmail.com",           # 填入邮箱，Unpaywall 要求提供联系方式
     },
     "api_fetcher": iter_pubmed,
     "uid_field": "pmid",

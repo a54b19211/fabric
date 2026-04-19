@@ -57,6 +57,11 @@ class Document(Base):
     minio_bucket: Mapped[str] = mapped_column(Text, default="zk-data-fabric")
     minio_object_key: Mapped[str] = mapped_column(Text, default="")
 
+    # RAG 字段
+    doc_type: Mapped[str] = mapped_column(Text, default="")
+    language: Mapped[str] = mapped_column(Text, default="")
+    weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")
+
     # 系统字段
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

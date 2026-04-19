@@ -119,6 +119,8 @@ def write_three_in_one(parsed_result: dict) -> dict:
         status=status,
         future_minio_bucket=APP.FUTURE_MINIO_BUCKET,
         future_minio_object_key=_minio_object_key(doc_uuid, "json_envelopes"),
+        doc_type=parsed_result.get("doc_type", ""),
+        language=parsed_result.get("language", ""),
     )
 
     # ---- 3. JSON 落盘 ----

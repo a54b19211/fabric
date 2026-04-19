@@ -95,3 +95,7 @@ class MetadataEnvelope(BaseModel):
     # --- MinIO 船票（二期预留）---
     future_minio_bucket: str = Field(default="zk-data-fabric", description="预留 MinIO 桶名")
     future_minio_object_key: str = Field(default="", description="预留 MinIO 对象键")
+
+    # --- RAG 字段 ---
+    doc_type: str = Field(default="", description="文档类型：regulatory_notice / drug_recall / drug_label / clinical_trial / literature / industry_news / company_announcement")
+    language: str = Field(default="", description="语言：zh / en")

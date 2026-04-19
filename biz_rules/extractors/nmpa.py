@@ -2,12 +2,37 @@
 import re
 
 
+def _extract_summary(body_text: str, max_len: int = 200) -> str:
+    """
+    从正文中提取有效摘要，跳过页面结构噪音行（索引号、主题分类、标题重复等）。
+    取第一段实质性内容。
+    """
+    noise_prefixes = ("索引号", "主题分类", "标题", "发布日期", "发布时间", "JGXX-")
+    lines = body_text.splitlines()
+    content_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(stripped.startswith(p) for p in noise_prefixes):
+            continue
+        # 跳过纯日期行
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", stripped):
+            continue
+        content_lines.append(stripped)
+        if sum(len(l) for l in content_lines) >= max_len:
+            break
+    summary = " ".join(content_lines)
+    return summary[:max_len]
+
+
 def extract_nmpa_detail(page) -> dict:
     result = {
         "title": "",
         "publish_date": "",
         "body_html": "",
         "body_text": "",
+        "summary": "",
         "attachment_links": [],
     }
 
@@ -34,6 +59,7 @@ def extract_nmpa_detail(page) -> dict:
     if body_el:
         result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
+        result["summary"] = _extract_summary(result["body_text"])
 
     # 附件：正文区域内的文件链接
     if body_el:

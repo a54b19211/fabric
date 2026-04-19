@@ -9,7 +9,7 @@ CONFIG = {
     "start_urls": [
         "https://www.nmpa.gov.cn/xxgk/ggtg/index.html",
     ],
-    "request_delay_seconds": 2.0,
+    "request_delay_seconds": 1.0,   # 降低延迟，nmpa 反爬不强
     "max_pages": 50,
 
     # ── 列表页解析 ──
@@ -26,4 +26,6 @@ CONFIG = {
     # ── 详情页解析 ──
     "detail_extractor": extract_nmpa_detail,
     "detail_wait_selector": None,
+    # "use_simple_fetch": True,    # nmpa 服务端渲染，不需要 Playwright
+    # "disable_resources": True,
 }

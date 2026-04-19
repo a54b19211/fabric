@@ -69,6 +69,10 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
         # fetcher 已经返回标准格式（含 uuid/markdown/structured_data）时直接透传，跳过字段映射
         if "uuid" in record and "markdown" in record and "structured_data" in record:
             if record.get("source_site") or record.get("parse_method"):
+                # 防止 uuid 为空导致文件名异常
+                if not record.get("uuid"):
+                    src = record.get("source_url", json.dumps(record, sort_keys=True))
+                    record["uuid"] = _make_uuid(f"{site_key}:{src}")
                 yield record
                 continue
 
