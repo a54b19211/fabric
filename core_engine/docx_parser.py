@@ -1,13 +1,17 @@
 """
 Word 文档解析器（.doc / .docx → Markdown）
 
-当前解析方式：MinerU（.doc 和 .docx 统一走同一套接口）
+当前解析方式：
+  1. .doc/.docx → PDF（Windows: win32com / Linux: LibreOffice）
+  2. PDF → MinerU → Markdown
 
 已注释的旧方案：
   1. win32com (Word COM) — 最准确，支持 .doc/.docx，需要 Windows + Word 已安装
   2. mammoth              — 纯 Python，仅支持 .docx (Open XML)
 """
 
+import platform
+import subprocess
 import uuid as _uuid
 from pathlib import Path
 from datetime import datetime, timezone
@@ -128,11 +132,11 @@ def _now_iso() -> str:
 #     raise RuntimeError("win32com 不可用且文件为 .doc 格式，无法解析")
 
 
-# ── win32com 转 PDF ───────────────────────────────────────────────────────────
+# ── win32com 转 PDF（Windows）─────────────────────────────────────────────────
 
-def _doc_to_pdf(file_path: str) -> str:
+def _doc_to_pdf_win32com(file_path: str) -> str:
     """
-    用 win32com 将 .doc/.docx 转为 PDF，返回 PDF 路径。
+    Windows: 用 win32com 将 .doc/.docx 转为 PDF，返回 PDF 路径。
     PDF 保存在同目录，文件名与原文件相同（扩展名改为 .pdf）。
     """
     import win32com.client
@@ -155,11 +159,64 @@ def _doc_to_pdf(file_path: str) -> str:
     return str(pdf_path)
 
 
+# ── LibreOffice 转 PDF（Linux）────────────────────────────────────────────────
+
+def _doc_to_pdf_libreoffice(file_path: str) -> str:
+    """
+    Linux: 用 LibreOffice headless 将 .doc/.docx 转为 PDF，返回 PDF 路径。
+    需要安装 libreoffice-headless。
+    """
+    src = Path(file_path).resolve()
+    out_dir = src.parent
+    pdf_path = src.with_suffix(".pdf")
+
+    # 如果 PDF 已存在，先删除避免冲突
+    if pdf_path.exists():
+        pdf_path.unlink()
+
+    cmd = [
+        "soffice",
+        "--headless",
+        "--convert-to", "pdf",
+        "--outdir", str(out_dir),
+        str(src)
+    ]
+
+    logger.info(f"[DOCX] LibreOffice 转换命令: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    if result.returncode != 0:
+        error_msg = result.stderr or result.stdout or "未知错误"
+        raise RuntimeError(f"LibreOffice 转换失败 (code={result.returncode}): {error_msg}")
+
+    if not pdf_path.exists():
+        raise RuntimeError(f"LibreOffice 转换失败: PDF 文件未生成 {pdf_path}")
+
+    return str(pdf_path)
+
+
+# ── 跨平台转 PDF 统一入口 ─────────────────────────────────────────────────────
+
+def _doc_to_pdf(file_path: str) -> str:
+    """
+    跨平台将 .doc/.docx 转为 PDF。
+    Windows: win32com
+    Linux: LibreOffice headless
+    """
+    system = platform.system()
+    logger.info(f"[DOCX] 当前平台: {system}，转换文件: {file_path}")
+
+    if system == "Windows":
+        return _doc_to_pdf_win32com(file_path)
+    else:
+        return _doc_to_pdf_libreoffice(file_path)
+
+
 # ── MinerU 解析（当前方案：doc/docx → PDF → MinerU）─────────────────────────
 
 def _parse_doc(file_path: str) -> str:
-    """win32com 将 .doc/.docx 转 PDF，再交给 MinerU 解析。"""
-    logger.info(f"[DOCX] win32com 转 PDF: {file_path}")
+    """.doc/.docx 转 PDF，再交给 MinerU 解析（跨平台）。"""
+    logger.info(f"[DOCX] 开始转换: {file_path}")
     pdf_path = _doc_to_pdf(file_path)
     logger.info(f"[DOCX] 转换完成，PDF: {pdf_path}")
 
