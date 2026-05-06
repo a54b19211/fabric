@@ -1,10 +1,11 @@
 """
 Word 文档解析器（.doc / .docx → Markdown）
 
-优先级：
+当前解析方式：MinerU（.doc 和 .docx 统一走同一套接口）
+
+已注释的旧方案：
   1. win32com (Word COM) — 最准确，支持 .doc/.docx，需要 Windows + Word 已安装
   2. mammoth              — 纯 Python，仅支持 .docx (Open XML)
-  3. 失败则返回空
 """
 
 import uuid as _uuid
@@ -12,6 +13,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from loguru import logger
+
+from core_engine.cloud_api_client import mineru_pdf_to_markdown
 
 
 def _make_uuid(seed: str) -> str:
@@ -22,122 +25,148 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── win32com 解析（支持 .doc 和 .docx）────────────────────────────────────────
+# ── [旧方案已注释] win32com 解析 ─────────────────────────────────────────────
 
-def _cell_text(cell) -> str:
-    return cell.Range.Text.strip().rstrip("\r\x07")
+# def _cell_text(cell) -> str:
+#     return cell.Range.Text.strip().rstrip("\r\x07")
+#
+#
+# def _table_to_md(table) -> str:
+#     num_rows = table.Rows.Count
+#     num_cols = table.Columns.Count
+#     rows = []
+#     for r in range(1, num_rows + 1):
+#         cells = []
+#         for c in range(1, num_cols + 1):
+#             try:
+#                 cells.append(_cell_text(table.Cell(r, c)))
+#             except Exception:
+#                 cells.append("")
+#         rows.append("| " + " | ".join(cells) + " |")
+#         if r == 1:
+#             rows.append("| " + " | ".join(["---"] * num_cols) + " |")
+#     return "\n".join(rows)
+#
+#
+# def _para_to_md(para) -> str:
+#     style = para.Style.NameLocal
+#     text = para.Range.Text.strip().rstrip("\r\x07")
+#     if not text:
+#         return ""
+#     if "标题 1" in style or style in ("Heading 1",):
+#         return f"# {text}"
+#     elif "标题 2" in style or style in ("Heading 2",):
+#         return f"## {text}"
+#     elif "标题 3" in style or style in ("Heading 3",):
+#         return f"### {text}"
+#     elif "标题 4" in style or style in ("Heading 4",):
+#         return f"#### {text}"
+#     return text
+#
+#
+# def _win32com_to_markdown(file_path: str) -> str:
+#     import win32com.client
+#     word = win32com.client.Dispatch("Word.Application")
+#     word.Visible = False
+#     try:
+#         doc_path = str(Path(file_path).resolve())
+#         doc = word.Documents.Open(doc_path)
+#         table_ranges = []
+#         table_mds = {}
+#         for tbl in doc.Tables:
+#             start = tbl.Range.Start
+#             end = tbl.Range.End
+#             table_ranges.append((start, end))
+#             table_mds[(start, end)] = _table_to_md(tbl)
+#         lines = []
+#         emitted_tables = set()
+#         for para in doc.Paragraphs:
+#             s = para.Range.Start
+#             matched = None
+#             for (ts, te) in table_ranges:
+#                 if ts <= s < te:
+#                     matched = (ts, te)
+#                     break
+#             if matched:
+#                 if matched not in emitted_tables:
+#                     lines.append("")
+#                     lines.append(table_mds[matched])
+#                     lines.append("")
+#                     emitted_tables.add(matched)
+#             else:
+#                 lines.append(_para_to_md(para))
+#         doc.Close(False)
+#         return "\n".join(lines).strip()
+#     finally:
+#         word.Quit()
 
 
-def _table_to_md(table) -> str:
-    num_rows = table.Rows.Count
-    num_cols = table.Columns.Count
-    rows = []
-    for r in range(1, num_rows + 1):
-        cells = []
-        for c in range(1, num_cols + 1):
-            try:
-                cells.append(_cell_text(table.Cell(r, c)))
-            except Exception:
-                cells.append("")  # merged cell
-        rows.append("| " + " | ".join(cells) + " |")
-        if r == 1:
-            rows.append("| " + " | ".join(["---"] * num_cols) + " |")
-    return "\n".join(rows)
+# ── [旧方案已注释] mammoth 解析（仅 .docx）──────────────────────────────────
+
+# def _mammoth_to_markdown(file_path: str) -> str:
+#     import mammoth
+#     with open(file_path, "rb") as f:
+#         result = mammoth.extract_raw_text(f)
+#     return result.value.strip()
 
 
-def _para_to_md(para) -> str:
-    style = para.Style.NameLocal
-    text = para.Range.Text.strip().rstrip("\r\x07")
-    if not text:
-        return ""
-    if "标题 1" in style or style in ("Heading 1",):
-        return f"# {text}"
-    elif "标题 2" in style or style in ("Heading 2",):
-        return f"## {text}"
-    elif "标题 3" in style or style in ("Heading 3",):
-        return f"### {text}"
-    elif "标题 4" in style or style in ("Heading 4",):
-        return f"#### {text}"
-    return text
+# ── [旧方案已注释] win32com → mammoth 降级链 ─────────────────────────────────
+
+# def _parse_doc_legacy(file_path: str) -> str:
+#     try:
+#         return _win32com_to_markdown(file_path)
+#     except ImportError:
+#         pass
+#     except Exception as e:
+#         logger.warning(f"[DOCX] win32com 失败，尝试降级: {e}")
+#     ext = Path(file_path).suffix.lower()
+#     if ext == ".docx":
+#         try:
+#             return _mammoth_to_markdown(file_path)
+#         except Exception as e:
+#             raise RuntimeError(f"mammoth 解析失败: {e}")
+#     raise RuntimeError("win32com 不可用且文件为 .doc 格式，无法解析")
 
 
-def _win32com_to_markdown(file_path: str) -> str:
-    """用 Word COM 接口解析 .doc/.docx，返回 Markdown 字符串。"""
+# ── win32com 转 PDF ───────────────────────────────────────────────────────────
+
+def _doc_to_pdf(file_path: str) -> str:
+    """
+    用 win32com 将 .doc/.docx 转为 PDF，返回 PDF 路径。
+    PDF 保存在同目录，文件名与原文件相同（扩展名改为 .pdf）。
+    """
     import win32com.client
+
+    src = Path(file_path).resolve()
+    pdf_path = src.with_suffix(".pdf")
 
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
     try:
-        doc_path = str(Path(file_path).resolve())
-        doc = word.Documents.Open(doc_path)
-
-        # 建立表格范围映射
-        table_ranges = []
-        table_mds = {}
-        for tbl in doc.Tables:
-            start = tbl.Range.Start
-            end = tbl.Range.End
-            table_ranges.append((start, end))
-            table_mds[(start, end)] = _table_to_md(tbl)
-
-        lines = []
-        emitted_tables = set()
-        for para in doc.Paragraphs:
-            s = para.Range.Start
-            matched = None
-            for (ts, te) in table_ranges:
-                if ts <= s < te:
-                    matched = (ts, te)
-                    break
-            if matched:
-                if matched not in emitted_tables:
-                    lines.append("")
-                    lines.append(table_mds[matched])
-                    lines.append("")
-                    emitted_tables.add(matched)
-            else:
-                md = _para_to_md(para)
-                lines.append(md)
-
+        doc = word.Documents.Open(str(src))
+        try:
+            doc.SaveAs2(str(pdf_path), FileFormat=17)  # Word 2013+
+        except AttributeError:
+            doc.SaveAs(str(pdf_path), FileFormat=17)   # 旧版 Word 降级
         doc.Close(False)
-        return "\n".join(lines).strip()
     finally:
         word.Quit()
 
-
-# ── mammoth 解析（仅 .docx）──────────────────────────────────────────────────
-
-def _mammoth_to_markdown(file_path: str) -> str:
-    import mammoth
-    with open(file_path, "rb") as f:
-        result = mammoth.extract_raw_text(f)
-    return result.value.strip()
+    return str(pdf_path)
 
 
-# ── 主解析函数 ────────────────────────────────────────────────────────────────
+# ── MinerU 解析（当前方案：doc/docx → PDF → MinerU）─────────────────────────
 
 def _parse_doc(file_path: str) -> str:
-    """
-    尝试解析 .doc/.docx，返回 Markdown 文本。
-    优先 win32com，失败则降级 mammoth（仅 .docx）。
-    """
-    # 优先 win32com
-    try:
-        return _win32com_to_markdown(file_path)
-    except ImportError:
-        pass  # win32com 不可用，降级
-    except Exception as e:
-        logger.warning(f"[DOCX] win32com 失败，尝试降级: {e}")
+    """win32com 将 .doc/.docx 转 PDF，再交给 MinerU 解析。"""
+    logger.info(f"[DOCX] win32com 转 PDF: {file_path}")
+    pdf_path = _doc_to_pdf(file_path)
+    logger.info(f"[DOCX] 转换完成，PDF: {pdf_path}")
 
-    # 降级：mammoth（仅支持 .docx）
-    ext = Path(file_path).suffix.lower()
-    if ext == ".docx":
-        try:
-            return _mammoth_to_markdown(file_path)
-        except Exception as e:
-            raise RuntimeError(f"mammoth 解析失败: {e}")
-
-    raise RuntimeError("win32com 不可用且文件为 .doc 格式，无法解析")
+    result = mineru_pdf_to_markdown(pdf_path)
+    if not result["success"]:
+        raise RuntimeError(f"MinerU 解析失败: {result['error']}")
+    return result["markdown"]
 
 
 # ── 对外接口 ──────────────────────────────────────────────────────────────────
@@ -173,7 +202,7 @@ def route_docx(att_info: dict, parent_parsed: dict | None = None) -> dict:
         "publish_date": parent_publish_date,
         "markdown": "",
         "structured_data": {},
-        "parse_method": "win32com_doc",
+        "parse_method": "mineru_doc",
         "attachment_links": [],
         "source_url": source_url,
         "source_site": source_site,

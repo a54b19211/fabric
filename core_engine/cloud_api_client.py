@@ -3,6 +3,7 @@ API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）�
 """
 
 import json
+from pathlib import Path
 
 import httpx
 from openai import OpenAI
@@ -16,37 +17,34 @@ from config.settings import APP
 #  MinerU 自部署 API —— PDF → Markdown
 # ===================================================================
 
-@task(
-    name="mineru_pdf_to_markdown",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
-def mineru_pdf_to_markdown(pdf_path: str) -> dict:
+_MIME_MAP = {
+    ".pdf":  "application/pdf",
+    ".doc":  "application/pdf",   # MinerU 服务端只认 application/pdf，强制覆盖
+    ".docx": "application/pdf",   # 同上
+}
+
+
+def _mineru_parse(file_path: str) -> dict:
     """
-    调用自部署 MinerU 同步接口将 PDF 解析为 Markdown。
-        POST /file_parse → 直接返回结果
-
-    参数:
-        pdf_path: 本地 PDF 文件路径
-
-    返回:
-        dict: {"markdown": "...", "success": True/False, "error": ""}
+    通用 MinerU 解析内核，根据文件扩展名自动选择 MIME type。
+    支持 .pdf / .doc / .docx。
     """
     base = APP.MINERU_API_BASE.rstrip("/")
-    fname = pdf_path.replace("\\", "/").split("/")[-1]
-    logger.info(f"[MinerU] 同步解析: {pdf_path}")
+    path_obj = Path(file_path)
+    fname = path_obj.name
+    mime = _MIME_MAP.get(path_obj.suffix.lower(), "application/octet-stream")
+    logger.info(f"[MinerU] 同步解析: {file_path} (mime={mime})")
     try:
-        with open(pdf_path, "rb") as f:
+        with open(file_path, "rb") as f:
             resp = httpx.post(
                 f"{base}/file_parse",
-                files=[("files", (fname, f, "application/pdf"))],
+                files=[("files", (fname, f, mime))],
                 data={"return_md": "true", "backend": "pipeline"},
                 timeout=300,
             )
         resp.raise_for_status()
 
         data = resp.json()
-        # 响应结构: {"results": {"<file_uuid>": {"md_content": "..."}}}
         markdown = ""
         if isinstance(data, dict):
             results = data.get("results", {})
@@ -54,7 +52,6 @@ def mineru_pdf_to_markdown(pdf_path: str) -> dict:
                 first = next(iter(results.values()))
                 markdown = first.get("md_content") or first.get("md") or first.get("markdown") or ""
             if not markdown:
-                # 兼容直接返回字符串或其他格式
                 markdown = data.get("md_content") or data.get("md") or data.get("markdown") or ""
         elif isinstance(data, list) and data:
             markdown = data[0].get("md_content") or data[0].get("md") or data[0].get("markdown") or ""
@@ -68,6 +65,25 @@ def mineru_pdf_to_markdown(pdf_path: str) -> dict:
     except Exception as e:
         logger.error(f"[MinerU] 调用异常: {e}")
         return {"markdown": "", "success": False, "error": str(e)}
+
+
+@task(
+    name="mineru_pdf_to_markdown",
+    retries=APP.TASK_RETRIES,
+    retry_delay_seconds=APP.TASK_RETRY_DELAY,
+)
+def mineru_pdf_to_markdown(pdf_path: str) -> dict:
+    """
+    调用自部署 MinerU 同步接口将 PDF / DOC / DOCX 解析为 Markdown。
+        POST /file_parse → 直接返回结果
+
+    参数:
+        pdf_path: 本地文件路径（.pdf / .doc / .docx）
+
+    返回:
+        dict: {"markdown": "...", "success": True/False, "error": ""}
+    """
+    return _mineru_parse(pdf_path)
 
 
 # ===================================================================

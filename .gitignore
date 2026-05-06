@@ -32,3 +32,8 @@ Thumbs.db
 /WeKnora-main
 /scripts
 _*
+
+# WeKnora 同步状态记录
+data/weknora_synced.txt
+data/weknora_reparse_queue.txt
+data/weknora_reparse_done.txt
