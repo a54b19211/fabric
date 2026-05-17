@@ -96,7 +96,12 @@ def run_migrations():
                 # 按分号拆分，逐条执行（跳过空语句）
                 from sqlalchemy import text
                 for statement in sql.split(";"):
-                    stmt = statement.strip()
+                    # 去掉注释行后检查是否还有实际 SQL
+                    lines = [
+                        line for line in statement.splitlines()
+                        if line.strip() and not line.strip().startswith("--")
+                    ]
+                    stmt = "\n".join(lines).strip()
                     if stmt:
                         conn.execute(text(stmt))
 

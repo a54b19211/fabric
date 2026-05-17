@@ -146,15 +146,33 @@ def _doc_to_pdf_win32com(file_path: str) -> str:
 
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
+    doc = None
     try:
         doc = word.Documents.Open(str(src))
+        # FileFormat=17 = wdFormatPDF
+        # 优先用 SaveAs2（Word 2013+），降级到 SaveAs（旧版 Word）
+        # 两者都用关键字参数，避免位置参数顺序差异导致的 COM 错误
         try:
-            doc.SaveAs2(str(pdf_path), FileFormat=17)  # Word 2013+
-        except AttributeError:
-            doc.SaveAs(str(pdf_path), FileFormat=17)   # 旧版 Word 降级
+            doc.SaveAs2(FileName=str(pdf_path), FileFormat=17)
+        except (AttributeError, Exception):
+            doc.SaveAs(FileName=str(pdf_path), FileFormat=17)
         doc.Close(False)
+        doc = None
+    except Exception as e:
+        if doc is not None:
+            try:
+                doc.Close(False)
+            except Exception:
+                pass
+        raise RuntimeError(f"win32com 转 PDF 失败: {e}") from e
     finally:
-        word.Quit()
+        try:
+            word.Quit()
+        except Exception:
+            pass
+
+    if not pdf_path.exists():
+        raise RuntimeError(f"win32com 转换后 PDF 文件未生成: {pdf_path}")
 
     return str(pdf_path)
 

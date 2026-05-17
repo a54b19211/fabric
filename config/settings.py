@@ -83,6 +83,10 @@ class _AppSettings(BaseSettings):
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
+    # ======================== 本地存储开关 ========================
+    # 开发/调试时可启用本地文件存储，生产环境建议关闭（只保留数据库）
+    ENABLE_LOCAL_STORAGE: bool = False
+
     # ======================== MinIO 船票预留（二期使用）========================
     FUTURE_MINIO_BUCKET: str = "zk-data-fabric"
 

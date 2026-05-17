@@ -31,7 +31,7 @@ from core_engine.api_router import iter_api_results
 from core_engine.content_cleaner import clean_content
 from core_engine.quality_checker import check_quality, quarantine_data
 from core_engine.docx_parser import route_docx
-from core_engine.storage_writer import write_three_in_one
+from core_engine.storage_writer import write_to_database
 from core_engine.review_exporter import export_review_csv
 from db.session import check_connection
 from migration.migrate import run_migrations
@@ -73,7 +73,20 @@ class StopIncremental(Exception):
 
 
 def _already_processed(doc_uuid: str, site: str) -> bool:
-    """检查该 UUID 的 JSON 信封是否已落盘，用于断点续爬跳过。"""
+    """
+    检查该 UUID 是否已处理，用于断点续爬跳过。
+    优先查数据库（DB 可用时），降级查本地 JSON 文件（本地存储模式）。
+    """
+    # 优先查数据库
+    if APP.DB_HOST:
+        try:
+            from db.repository import get_document_by_uuid
+            doc = get_document_by_uuid(doc_uuid)
+            if doc is not None:
+                return True
+        except Exception:
+            pass  # DB 查询失败，降级到本地文件
+    # 降级：查本地 JSON 文件
     json_path = APP.JSON_DIR / site / f"{doc_uuid}.json"
     return json_path.exists()
 
@@ -83,7 +96,7 @@ def _process_single_result(parsed: dict, stats: dict):
     cleaned = clean_content.fn(parsed)
     checked = check_quality.fn(cleaned)
     if checked["quality_passed"]:
-        write_three_in_one.fn(checked)
+        write_to_database.fn(checked)
         stats["passed"] += 1
     else:
         quarantine_data.fn(checked)
@@ -128,11 +141,36 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode:
     parsed = route_webpage.fn(page_data)
     stats["total"] += 1
 
-    for att_parsed in route_pdf_attachments(parsed.get("attachment_links", []), parsed["uuid"], site_key, parent_parsed=parsed):
-        _process_single_result(att_parsed, stats)
-        stats["total"] += 1
+    attachment_links = parsed.get("attachment_links", [])
+    merge_attachments = site_cfg.get("merge_attachments", False)
 
-    _process_single_result(parsed, stats)
+    if attachment_links:
+        att_results = route_pdf_attachments(
+            attachment_links, parsed["uuid"], site_key, parent_parsed=parsed
+        )
+
+        if merge_attachments:
+            # ── 合并模式：附件内容拼接进父文档 raw_content，附件不单独入库 ──
+            merged_md = parsed.get("markdown", "")
+            for att_parsed in att_results:
+                att_md = att_parsed.get("markdown", "")
+                att_title = att_parsed.get("title", "")
+                if att_md:
+                    separator = f"\n\n---\n\n## 附件：{att_title}\n\n" if att_title else "\n\n---\n\n"
+                    # 去掉附件 markdown 里的 frontmatter（---...--- 块），避免重复
+                    att_body = _strip_frontmatter(att_md)
+                    merged_md = merged_md + separator + att_body
+            parsed["markdown"] = merged_md
+            _process_single_result(parsed, stats)
+        else:
+            # ── 独立模式：附件作为独立 document 入库，parent_uuid 已在 route_pdf 里设好 ──
+            for att_parsed in att_results:
+                _process_single_result(att_parsed, stats)
+                stats["total"] += 1
+            _process_single_result(parsed, stats)
+    else:
+        _process_single_result(parsed, stats)
+
     return {"detail_url": detail_url, "stats": stats}
 
 
@@ -191,6 +229,16 @@ def _sniff_file_type(local_path: str) -> str:
     return ".bin"
 
 
+def _strip_frontmatter(markdown: str) -> str:
+    """去掉 Markdown 头部的 YAML frontmatter（--- ... --- 块），返回正文部分。"""
+    if not markdown.startswith("---"):
+        return markdown
+    end = markdown.find("\n---", 3)
+    if end == -1:
+        return markdown
+    return markdown[end + 4:].lstrip("\n")
+
+
 @task(
     name="crawl_single_start_url",
     retries=APP.TASK_RETRIES,
@@ -199,9 +247,17 @@ def _sniff_file_type(local_path: str) -> str:
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_mode: str = "full") -> dict:
     """单个站点入口的完整爬取任务：翻页驱动 → 详情页处理。"""
     from core_engine.pagination_driver import JsClickDriver
+    from db.repository import log_crawl_task, update_crawl_log
 
     stats = {"total": 0, "passed": 0, "quarantined": 0}
     stop_flag = {"stop": False}
+
+    # ── 爬取日志：任务开始 ──
+    log_id = log_crawl_task(
+        site_key=site_key,
+        task_type=crawl_mode,
+        config_snapshot={"start_url": start_url, "max_pages": profile.get("max_pages", 0)},
+    )
 
     def _process_urls(urls: list[str]):
         for detail_url in urls:
@@ -216,20 +272,44 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_m
                 return  # 停止当前页剩余 URL 的处理
             except Exception as e:
                 logger.error(f"详情页处理失败: {detail_url} | {e}")
+                stats["total"] += 1
 
-    driver = make_driver(site_key, profile, start_url)
-    if isinstance(driver, JsClickDriver):
-        for page_urls in driver._playwright_crawl():
-            _process_urls(page_urls)
-            if stop_flag["stop"]:
-                logger.info(f"[增量] 站点 {site_key} 翻页已停止")
-                break
-    else:
-        for detail_url in driver.iter_detail_urls():
-            _process_urls([detail_url])
-            if stop_flag["stop"]:
-                logger.info(f"[增量] 站点 {site_key} 翻页已停止")
-                break
+    try:
+        driver = make_driver(site_key, profile, start_url)
+        if isinstance(driver, JsClickDriver):
+            for page_urls in driver._playwright_crawl():
+                _process_urls(page_urls)
+                if stop_flag["stop"]:
+                    logger.info(f"[增量] 站点 {site_key} 翻页已停止")
+                    break
+        else:
+            for detail_url in driver.iter_detail_urls():
+                _process_urls([detail_url])
+                if stop_flag["stop"]:
+                    logger.info(f"[增量] 站点 {site_key} 翻页已停止")
+                    break
+
+        # ── 爬取日志：任务成功 ──
+        if log_id:
+            update_crawl_log(
+                log_id=log_id,
+                status="success",
+                total=stats["total"],
+                passed=stats["passed"],
+                failed=stats["total"] - stats["passed"] - stats["quarantined"],
+            )
+    except Exception as e:
+        # ── 爬取日志：任务失败 ──
+        if log_id:
+            update_crawl_log(
+                log_id=log_id,
+                status="failed",
+                total=stats["total"],
+                passed=stats["passed"],
+                failed=stats["total"] - stats["passed"] - stats["quarantined"],
+                error=str(e),
+            )
+        raise
 
     return {"site_key": site_key, "site_name": profile.get("name", site_key), "start_url": start_url, "stats": stats}
 

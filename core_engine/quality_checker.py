@@ -18,7 +18,7 @@ def _count_filled_fields(data: dict) -> float:
     if not data:
         return 0.0
     # 从顶层字段取值，兼容特解（css_extract）和通解（trafilatura+qwen）两种路径
-    key_fields = ["title", "publish_date", "category", "summary", "drug_name"]
+    key_fields = ["title", "publish_date", "summary"]
     # 顶层有 title/publish_date，structured_data 里有 category/summary/drug_name
     structured = data.get("structured_data", {}) or {}
     merged = {**structured, "title": data.get("title", ""), "publish_date": data.get("publish_date", "")}

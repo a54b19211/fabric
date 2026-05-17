@@ -1,9 +1,9 @@
 """
-三位一体落盘引擎 —— 原始文件 + Markdown + JSON 元数据信封 + 远程数据库推送。
+数据落盘引擎 —— 数据必须落库。
+本地文件存储仅作为调试/开发辅助（ENABLE_LOCAL_STORAGE=True 时启用）。
 """
 
 import json
-import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -17,48 +17,29 @@ from biz_rules.schemas import (
     ProvenanceInfo,
     ConfidenceInfo,
     AttachmentInfo,
+    validate_extra,
 )
 from biz_rules.source_mapper import calculate_confidence
 from db.repository import upsert_document
 
 
-def _minio_object_key(doc_uuid: str, file_type: str) -> str:
-    """生成 MinIO 对象键（二期直接用）。"""
-    today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
-    return f"{file_type}/{today}/{doc_uuid}"
-
-
-@task(name="write_three_in_one")
-def write_three_in_one(parsed_result: dict) -> dict:
+@task(name="write_to_database")
+def write_to_database(parsed_result: dict) -> dict:
     """
-    三位一体落盘：将解析结果写入三个目录。
-
-    1. /data/raw/{site}/{uuid}.* → 原始文件（如已由下载步骤保存，此处跳过）
-    2. /data/markdown/{site}/{uuid}.md → Markdown 全文
-    3. /data/json_envelopes/{site}/{uuid}.json → 元数据信封
+    数据落库：将解析结果写入数据库。
 
     参数:
         parsed_result: 经 quality_checker 检验通过的解析结果
 
     返回:
-        dict: {"uuid": ..., "md_path": ..., "json_path": ..., "raw_path": ...}
+        dict: {"uuid": ..., "status": ..., "confidence_score": ..., "success": bool}
     """
     doc_uuid = parsed_result["uuid"]
     site = parsed_result.get("source_site", "unknown") or "unknown"
 
-    # ---- 1. Markdown 落盘 ----
-    md_dir = APP.MARKDOWN_DIR / site
-    md_dir.mkdir(parents=True, exist_ok=True)
-    md_path = md_dir / f"{doc_uuid}.md"
-    md_path.write_text(
-        parsed_result.get("markdown", ""),
-        encoding="utf-8",
-    )
-    logger.info(f"[Storage] Markdown 落盘: {md_path}")
-
-    # ---- 2. 组装元数据信封 ----
-    structured = parsed_result.get("structured_data", {})
-    sniffed = parsed_result.get("sniffed_meta", {})
+    # 组装元数据信封
+    structured = parsed_result.get("structured_data", {}) or {}
+    sniffed = parsed_result.get("sniffed_meta", {}) or {}
 
     # 计算置信度
     confidence_result = calculate_confidence(
@@ -68,11 +49,9 @@ def write_three_in_one(parsed_result: dict) -> dict:
     )
 
     # 判定审核状态
-    status = "AUTO_PROCESSED"
-    if confidence_result["level"] == "C":
-        status = "PENDING_MANUAL_REVIEW"
+    status = "AUTO_PROCESSED" if confidence_result["score"] >= 0.8 else "PENDING_REVIEW"
 
-    # 组装附件列表
+    # 组装附件列表（同时保留 local_path）
     attachments = []
     for att in parsed_result.get("attachment_links", []):
         from core_engine.scrapling_client import make_uuid
@@ -81,49 +60,82 @@ def write_three_in_one(parsed_result: dict) -> dict:
                 file_name=att.get("name", ""),
                 file_url=att.get("url", ""),
                 file_uuid=make_uuid(att.get("url", "")),
+                local_path=att.get("local_path", ""),
             )
         )
 
-    # 确定原始文件相对路径
-    raw_rel_path = ""
-    local_path = parsed_result.get("local_path", "")
-    if local_path:
-        raw_rel_path = f"raw/{site}/{doc_uuid}.pdf"
+    # 来源特有字段：从 parsed_result.extra 或 structured_data 中取
+    raw_extra = parsed_result.get("extra") or structured.get("extra") or {}
+    validated_extra = validate_extra(site, raw_extra)
 
     envelope = MetadataEnvelope(
         uuid=doc_uuid,
-        title=parsed_result.get("title", structured.get("title", "")),
-        publish_date=parsed_result.get("publish_date", structured.get("publish_date", "")),
+        title=parsed_result.get("title") or structured.get("title", ""),
+        publish_date=parsed_result.get("publish_date") or structured.get("publish_date", ""),
         category=structured.get("category", ""),
         summary=structured.get("summary", ""),
-        drug_name=structured.get("drug_name", ""),
-        approval_number=structured.get("approval_number", ""),
-        manufacturer=structured.get("manufacturer", ""),
-        keywords=structured.get("keywords", []),
+        raw_content=parsed_result.get("markdown", ""),
         provenance=ProvenanceInfo(
             source_url=parsed_result.get("source_url", ""),
             source_site=site,
-            local_file_path=local_path,
+            local_file_path=parsed_result.get("local_path", ""),
             parent_uuid=parsed_result.get("parent_uuid", ""),
             crawl_timestamp=parsed_result.get("timestamp", ""),
         ),
         confidence=ConfidenceInfo(
-            level=confidence_result["level"],
             score=confidence_result["score"],
             reason=confidence_result["reason"],
         ),
         attachments=attachments,
+        extra=validated_extra,
         parse_method=parsed_result.get("parse_method", ""),
-        markdown_path=f"markdown/{site}/{doc_uuid}.md",
-        raw_file_path=raw_rel_path,
         status=status,
-        future_minio_bucket=APP.FUTURE_MINIO_BUCKET,
-        future_minio_object_key=_minio_object_key(doc_uuid, "json_envelopes"),
         doc_type=parsed_result.get("doc_type", ""),
         language=parsed_result.get("language", ""),
     )
 
-    # ---- 3. JSON 落盘 ----
+    # ── 核心：写入数据库 ──
+    success = True
+    try:
+        upsert_document(envelope)
+        logger.info(f"[Storage] 数据落库成功: {doc_uuid}")
+    except Exception as e:
+        logger.error(f"[Storage] 数据落库失败: {doc_uuid} | {e}")
+        success = False
+
+    # ── 可选：本地文件存储（开发/调试用）──
+    if APP.ENABLE_LOCAL_STORAGE:
+        try:
+            _write_to_local_storage(parsed_result, envelope, doc_uuid, site)
+        except Exception as e:
+            logger.warning(f"[Storage] 本地文件写入失败（不影响主流程）: {doc_uuid} | {e}")
+
+    return {
+        "uuid": doc_uuid,
+        "status": status,
+        "confidence_score": confidence_result["score"],
+        "success": success,
+    }
+
+
+def _write_to_local_storage(
+    parsed_result: dict,
+    envelope: MetadataEnvelope,
+    doc_uuid: str,
+    site: str,
+) -> None:
+    """
+    可选：本地文件存储（仅用于开发/调试）。
+    当 APP.ENABLE_LOCAL_STORAGE = True 时启用。
+    """
+    # Markdown 落盘
+    md_dir = APP.MARKDOWN_DIR / site
+    md_dir.mkdir(parents=True, exist_ok=True)
+    md_path = md_dir / f"{doc_uuid}.md"
+    md_path.write_text(parsed_result.get("markdown", ""), encoding="utf-8")
+    logger.debug(f"[Storage] Markdown 本地存储: {md_path}")
+
+    # JSON 信封落盘
     json_dir = APP.JSON_DIR / site
     json_dir.mkdir(parents=True, exist_ok=True)
     json_path = json_dir / f"{doc_uuid}.json"
@@ -131,23 +143,4 @@ def write_three_in_one(parsed_result: dict) -> dict:
         envelope.model_dump_json(indent=2, by_alias=True),
         encoding="utf-8",
     )
-    logger.info(f"[Storage] JSON 信封落盘: {json_path}")
-
-    # ---- 4. 推送到远程数据库 ----
-    upsert_document(envelope)
-
-    # 站点自定义 DB 写入（如 hkex_meta、pubmed_meta 等）
-    db_writer = SITE_PROFILES.get(site, {}).get("db_writer")
-    if db_writer:
-        db_writer(doc_uuid, parsed_result)
-
-    return {
-        "uuid": doc_uuid,
-        "md_path": str(md_path),
-        "json_path": str(json_path),
-        "raw_path": raw_rel_path,
-        "status": status,
-        "confidence_level": confidence_result["level"],
-    }
-
-
+    logger.debug(f"[Storage] JSON 本地存储: {json_path}")

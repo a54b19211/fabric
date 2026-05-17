@@ -37,7 +37,7 @@ def export_review_csv() -> str:
     for json_file in sorted(json_root.rglob("*.json")):
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
-            if data.get("status") == "PENDING_MANUAL_REVIEW":
+            if data.get("status") == "PENDING_REVIEW":
                 confidence = data.get("confidence", {})
                 provenance = data.get("provenance", {})
                 pending_records.append({
@@ -45,11 +45,8 @@ def export_review_csv() -> str:
                     "title": data.get("title", ""),
                     "source_url": provenance.get("source_url", ""),
                     "local_file_path": provenance.get("local_file_path", ""),
-                    "confidence_level": confidence.get("level", ""),
                     "confidence_score": confidence.get("score", ""),
                     "confidence_reason": confidence.get("reason", ""),
-                    "doi": confidence.get("doi", ""),
-                    "journal_name": confidence.get("journal_name", ""),
                     "json_file_path": str(json_file),
                     # 以下两列留空，供人工填写
                     "manual_score": "",

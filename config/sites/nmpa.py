@@ -26,6 +26,9 @@ CONFIG = {
     # ── 详情页解析 ──
     "detail_extractor": extract_nmpa_detail,
     "detail_wait_selector": None,
-    # "use_simple_fetch": True,    # nmpa 服务端渲染，不需要 Playwright
-    # "disable_resources": True,
+
+    # ── 附件策略 ──
+    # True：附件内容合并进父文档 raw_content，不单独入库
+    # False（默认）：附件作为独立 document 入库，parent_uuid 指向父文档
+    "merge_attachments": True,
 }
