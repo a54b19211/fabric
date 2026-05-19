@@ -22,9 +22,42 @@ class _AppSettings(BaseSettings):
     # ======================== 云端 API 密钥 ========================
     MINERU_API_BASE: str = "http://100.121.201.73:8000"
 
-    QWEN_API_KEY: str = ""
-    QWEN_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL_NAME: str = "qwen-plus"
+    # ── LLM（OpenAI 兼容协议，支持 Qwen / DeepSeek / GPT / 本地 Ollama 等）──
+    # 实体抽取阶段使用（图谱节点/关系抽取）
+    # 爬虫阶段不调用 LLM，只用 Trafilatura + MinerU
+    LLM_API_KEY: str = ""
+    LLM_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    LLM_MODEL_NAME: str = "qwen-plus"
+
+    # 实体抽取专用模型（可选，留空则复用 LLM_* 配置）
+    EXTRACTION_LLM_API_KEY: str = ""
+    EXTRACTION_LLM_API_BASE: str = ""
+    EXTRACTION_LLM_MODEL_NAME: str = ""
+
+    # 兼容旧变量名（已有代码用 QWEN_* 的不需要改）
+    @property
+    def QWEN_API_KEY(self) -> str:
+        return self.LLM_API_KEY
+
+    @property
+    def QWEN_API_BASE(self) -> str:
+        return self.LLM_API_BASE
+
+    @property
+    def QWEN_MODEL_NAME(self) -> str:
+        return self.LLM_MODEL_NAME
+
+    @property
+    def EXTRACTION_API_KEY(self) -> str:
+        return self.EXTRACTION_LLM_API_KEY or self.LLM_API_KEY
+
+    @property
+    def EXTRACTION_API_BASE(self) -> str:
+        return self.EXTRACTION_LLM_API_BASE or self.LLM_API_BASE
+
+    @property
+    def EXTRACTION_MODEL_NAME(self) -> str:
+        return self.EXTRACTION_LLM_MODEL_NAME or self.LLM_MODEL_NAME
 
     # ======================== 本地数据根目录 ========================
     DATA_ROOT: Path = Path("data")

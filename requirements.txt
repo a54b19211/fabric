@@ -27,3 +27,7 @@ psycopg2-binary>=2.9         # PostgreSQL 驱动
 
 # --- 工具 ---
 python-dotenv>=1.0           # .env 文件加载
+
+# --- 后端 API ---
+fastapi>=0.111.0             # Web 框架
+uvicorn[standard]>=0.29.0    # ASGI 服务器

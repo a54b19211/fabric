@@ -2,8 +2,15 @@
 路由分发器。
 
 解析优先级：
-  1. crawler_settings.SITE_PROFILES 中配置了 detail_extractor → CSS 特解（不调大模型）
-  2. 未配置 / 特解结果为空 → Trafilatura + Qwen 通解兜底
+  1. crawler_settings.SITE_PROFILES 中配置了 detail_extractor → CSS 特解
+  2. 未配置 / 特解结果为空 → Trafilatura 通解兜底
+
+爬虫阶段只负责：
+  - 提取正文 Markdown
+  - 提取 title / publish_date（从 CSS 特解或 Trafilatura metadata）
+  - 不调用 LLM，不做结构化提取
+
+LLM 实体抽取在后续阶段（flows/extraction_flow.py）单独处理。
 """
 
 from loguru import logger
@@ -11,9 +18,8 @@ from prefect import task
 import trafilatura
 
 from config.crawler_settings import SITE_PROFILES
-from biz_rules.prompts import get_structured_extraction_prompt
-from biz_rules.cleaners import remove_extra_whitespace, clean_title, truncate_text
-from core_engine.cloud_api_client import mineru_pdf_to_markdown, qwen_extract_structured
+from biz_rules.cleaners import remove_extra_whitespace, clean_title
+from core_engine.cloud_api_client import mineru_pdf_to_markdown
 from core_engine.pdf_meta_sniffer import sniff_pdf_metadata
 
 
@@ -31,6 +37,7 @@ def _identify_site(url: str) -> str:
 def route_webpage(page_data: dict) -> dict:
     """
     网页解析路由：先尝试特解，特解为空则走通解。
+    只提取正文和基本元数据（title/publish_date），不调 LLM。
     """
     url = page_data["url"]
     page = page_data["page"]
@@ -49,7 +56,7 @@ def route_webpage(page_data: dict) -> dict:
         "source_site": site_key,
     }
 
-    # ---------- 特解 ----------
+    # ---------- 特解（CSS 选择器，无需 LLM）----------
     extractor = SITE_PROFILES.get(site_key, {}).get("detail_extractor")
     if extractor:
         logger.info(f"[特解] {site_key}: {url}")
@@ -65,16 +72,19 @@ def route_webpage(page_data: dict) -> dict:
                 "title": result["title"],
                 "publish_date": result["publish_date"],
                 "category": extracted.get("category", ""),
-                "summary": extracted.get("summary", "") or body_text[:200],
+                "summary": "",
             }
             if extracted.get("extra"):
                 result["extra"] = extracted["extra"]
             return result
         logger.warning(f"[特解] 结果为空，降级通解: {url}")
 
-    # ---------- 通解：Trafilatura + Qwen ----------
+    # ---------- 通解：Trafilatura（纯规则，无 LLM）----------
     logger.info(f"[通解] {url}")
     html_content = page.html_content if hasattr(page, "html_content") else str(page)
+
+    # 用 trafilatura 同时提取正文和元数据
+    meta = trafilatura.extract_metadata(html_content)
     extracted_text = trafilatura.extract(
         html_content,
         include_comments=False,
@@ -85,22 +95,33 @@ def route_webpage(page_data: dict) -> dict:
         logger.warning(f"[通解] Trafilatura 提取失败: {url}")
         extracted_text = ""
 
-    result["markdown"] = f"# 网页内容\n\n{remove_extra_whitespace(extracted_text)}"
-    result["parse_method"] = "trafilatura+qwen"
+    # 从 trafilatura metadata 取 title / date（不调 LLM）
+    title = ""
+    publish_date = ""
+    if meta:
+        title = clean_title(meta.title or "")
+        publish_date = str(meta.date or "")
 
-    if extracted_text:
-        prompt = get_structured_extraction_prompt(truncate_text(extracted_text))
-        structured = qwen_extract_structured(prompt)
-        result["structured_data"] = structured
-        result["title"] = clean_title(structured.get("title", ""))
-        result["publish_date"] = structured.get("publish_date", "")
+    result["title"] = title
+    result["publish_date"] = publish_date
+    result["markdown"] = f"# {title}\n\n{remove_extra_whitespace(extracted_text)}" if title else remove_extra_whitespace(extracted_text)
+    result["parse_method"] = "trafilatura"
+    result["structured_data"] = {
+        "title": title,
+        "publish_date": publish_date,
+        "category": "",
+        "summary": "",
+    }
 
     return result
 
 
 @task(name="route_pdf")
 def route_pdf(pdf_info: dict) -> dict:
-    """PDF 解析：MinerU 转 Markdown → 嗅探元信息 → Qwen 结构化。"""
+    """
+    PDF 解析：MinerU 转 Markdown → 嗅探元信息。
+    不调 LLM，title 从 MinerU 输出或文件名嗅探。
+    """
     doc_uuid = pdf_info["uuid"]
     pdf_path = pdf_info["local_path"]
     source_url = pdf_info.get("source_url", "")
@@ -113,7 +134,7 @@ def route_pdf(pdf_info: dict) -> dict:
         "publish_date": "",
         "markdown": "",
         "structured_data": {},
-        "parse_method": "mineru+qwen",
+        "parse_method": "mineru",
         "attachment_links": [],
         "source_url": source_url,
         "source_site": source_site,
@@ -130,17 +151,17 @@ def route_pdf(pdf_info: dict) -> dict:
     markdown = mineru_result["markdown"]
     result["markdown"] = markdown
 
+    # 从 Markdown 内容嗅探标题（规则匹配，无 LLM）
     sniffed = sniff_pdf_metadata(markdown)
     result["sniffed_meta"] = sniffed
     if sniffed.get("sniffed_title"):
         result["title"] = sniffed["sniffed_title"]
 
-    if markdown:
-        prompt = get_structured_extraction_prompt(truncate_text(markdown))
-        structured = qwen_extract_structured(prompt)
-        result["structured_data"] = structured
-        if not result["title"] and structured.get("title"):
-            result["title"] = clean_title(structured["title"])
-        result["publish_date"] = structured.get("publish_date", "")
+    result["structured_data"] = {
+        "title": result["title"],
+        "publish_date": "",
+        "category": "",
+        "summary": "",
+    }
 
     return result

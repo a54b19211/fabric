@@ -91,10 +91,18 @@ def mineru_pdf_to_markdown(pdf_path: str) -> dict:
 # ===================================================================
 
 def _build_qwen_client() -> OpenAI:
-    """构建兼容 OpenAI 协议的 Qwen 客户端。"""
+    """构建兼容 OpenAI 协议的 LLM 客户端（爬虫阶段元数据提取用）。"""
     return OpenAI(
-        api_key=APP.QWEN_API_KEY,
-        base_url=APP.QWEN_API_BASE,
+        api_key=APP.LLM_API_KEY,
+        base_url=APP.LLM_API_BASE,
+    )
+
+
+def _build_extraction_client() -> OpenAI:
+    """构建实体抽取专用 LLM 客户端（可配置独立模型）。"""
+    return OpenAI(
+        api_key=APP.EXTRACTION_API_KEY,
+        base_url=APP.EXTRACTION_API_BASE,
     )
 
 
@@ -103,40 +111,104 @@ def _build_qwen_client() -> OpenAI:
     retries=APP.TASK_RETRIES,
     retry_delay_seconds=APP.TASK_RETRY_DELAY,
 )
-def qwen_extract_structured(prompt: str) -> dict:
+def qwen_extract_structured(
+    prompt: str,
+    system_prompt: str = "",
+    use_extraction_model: bool = False,
+    stream: bool = False,
+) -> dict:
     """
-    调用 Qwen（通义千问）进行结构化信息提取。
+    调用 LLM 进行结构化信息提取（OpenAI 兼容协议）。
 
     参数:
-        prompt: 拼好的完整 prompt（由 biz_rules/prompts.py 生成）
+        prompt:               完整 user prompt
+        system_prompt:        自定义 system prompt，为空时使用默认值
+        use_extraction_model: True 时使用 EXTRACTION_* 配置的模型
+        stream:               True 时开启流式输出，token 实时打印到终端
 
     返回:
-        dict: Qwen 返回的解析后 JSON，失败时返回空 dict
+        dict: 解析后的 JSON，失败时返回空 dict
     """
-    if not APP.QWEN_API_KEY:
-        logger.error("Qwen API Key 未配置，跳过结构化提取")
+    api_key = APP.EXTRACTION_API_KEY if use_extraction_model else APP.LLM_API_KEY
+    model_name = APP.EXTRACTION_MODEL_NAME if use_extraction_model else APP.LLM_MODEL_NAME
+
+    if not api_key:
+        logger.error("LLM API Key 未配置（LLM_API_KEY），跳过结构化提取")
         return {}
 
+    default_system = "你是专业的医药文档信息提取助手，请严格按 JSON 格式返回，不要添加任何额外文字。"
+    messages = [
+        {"role": "system", "content": system_prompt or default_system},
+        {"role": "user", "content": prompt},
+    ]
+
     try:
-        client = _build_qwen_client()
+        client = _build_extraction_client() if use_extraction_model else _build_qwen_client()
+
+        if stream:
+            return _stream_extract(client, model_name, messages)
+        else:
+            return _batch_extract(client, model_name, messages)
+
+    except Exception as e:
+        logger.error(f"LLM API 调用异常: {e}")
+        return {}
+
+
+def _batch_extract(client: OpenAI, model_name: str, messages: list) -> dict:
+    """非流式调用，等待完整响应后返回。"""
+    try:
         response = client.chat.completions.create(
-            model=APP.QWEN_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "你是专业的医药文档信息提取助手，请严格按 JSON 格式返回。"},
-                {"role": "user", "content": prompt},
-            ],
+            model=model_name,
+            messages=messages,
             temperature=0.1,
             response_format={"type": "json_object"},
         )
-
         raw_content = response.choices[0].message.content
         result = json.loads(raw_content)
-        logger.info(f"Qwen 结构化提取成功，字段数: {len(result)}")
+        logger.info(f"LLM 提取成功，模型={model_name}，字段数={len(result)}")
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"LLM 返回内容非合法 JSON: {e}")
+        return {}
+
+
+def _stream_extract(client: OpenAI, model_name: str, messages: list) -> dict:
+    """
+    流式调用，token 实时打印到终端，完成后解析完整 JSON 返回。
+    适合命令行调试时观察 LLM 实时输出。
+    """
+    import sys
+    print(f"\n[LLM 流式输出] 模型={model_name}", flush=True)
+    print("-" * 60, flush=True)
+
+    full_content = ""
+    try:
+        stream = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=0.1,
+            stream=True,
+            # 注意：部分模型流式模式不支持 response_format，去掉该参数
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            token = getattr(delta, "content", "") or ""
+            if token:
+                print(token, end="", flush=True)
+                full_content += token
+
+        print("\n" + "-" * 60, flush=True)
+        logger.info(f"[LLM] 流式输出完成，总长度={len(full_content)}")
+
+        # 解析完整 JSON
+        result = json.loads(full_content)
+        logger.info(f"LLM 提取成功，模型={model_name}，字段数={len(result)}")
         return result
 
     except json.JSONDecodeError as e:
-        logger.error(f"Qwen 返回内容非合法 JSON: {e}")
+        logger.error(f"LLM 流式输出非合法 JSON: {e}\n原始内容: {full_content[:500]}")
         return {}
     except Exception as e:
-        logger.error(f"Qwen API 调用异常: {e}")
+        logger.error(f"LLM 流式调用异常: {e}")
         return {}
