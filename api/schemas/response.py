@@ -116,6 +116,7 @@ class RelationListResponse(BaseModel):
 
 class ReviewActionResponse(BaseModel):
     success: bool
+    message: str = ""
 
 
 # ── Neo4j ──────────────────────────────────────────────────────────────

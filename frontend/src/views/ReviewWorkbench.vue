@@ -10,8 +10,10 @@
           <el-input v-model="batchNote" placeholder="批量审核备注（可选）" style="width:240px;margin-left:8px" />
         </el-col>
         <el-col :span="12" style="text-align:right">
-          <el-button type="success" @click="approveAll">一键通过高置信度（≥0.8）</el-button>
-          <el-button type="danger" @click="rejectAll">一键全部拒绝</el-button>
+          <el-button type="success" @click="approveAllCurrentPage">通过本页高置信度（≥0.8）</el-button>
+          <el-button type="danger" @click="rejectAllCurrentPage">拒绝本页全部</el-button>
+          <el-button type="success" @click="approveAllEntities" style="margin-left: 8px">通过所有实体</el-button>
+          <el-button type="danger" @click="rejectAllEntities">拒绝所有实体</el-button>
         </el-col>
       </el-row>
     </el-card>
@@ -37,6 +39,12 @@
               <el-tab-pane :label="`实体（${entities.length}）`" name="entities" />
               <el-tab-pane :label="`关系（${relations.length}）`" name="relations" />
             </el-tabs>
+            <div v-if="activeTab === 'relations'" style="position: absolute; right: 20px; top: 20px;">
+              <el-button size="small" type="success" @click="approveAllRelationsCurrentPage">通过本页高置信度</el-button>
+              <el-button size="small" type="danger" @click="rejectAllRelationsCurrentPage">拒绝本页全部</el-button>
+              <el-button size="small" type="success" @click="approveAllRelations" style="margin-left: 8px">通过所有关系</el-button>
+              <el-button size="small" type="danger" @click="rejectAllRelations">拒绝所有关系</el-button>
+            </div>
           </template>
 
           <!-- 实体列表 -->
@@ -76,6 +84,19 @@
               </el-tag>
             </div>
             <el-empty v-if="!entities.length" description="暂无待审核实体" />
+            
+            <!-- 实体分页 -->
+            <div v-if="entities.length > 0" class="pagination-container">
+              <el-pagination
+                v-model:current-page="entityPagination.page"
+                v-model:page-size="entityPagination.pageSize"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="entityPagination.total"
+                layout="total, sizes, prev, pager, next, jumper"
+                @current-change="handleEntityPageChange"
+                @size-change="handleEntityPageSizeChange"
+              />
+            </div>
           </div>
 
           <!-- 关系列表 -->
@@ -109,6 +130,19 @@
               </el-tag>
             </div>
             <el-empty v-if="!relations.length" description="暂无待审核关系" />
+            
+            <!-- 关系分页 -->
+            <div v-if="relations.length > 0" class="pagination-container">
+              <el-pagination
+                v-model:current-page="relationPagination.page"
+                v-model:page-size="relationPagination.pageSize"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="relationPagination.total"
+                layout="total, sizes, prev, pager, next, jumper"
+                @current-change="handleRelationPageChange"
+                @size-change="handleRelationPageSizeChange"
+              />
+            </div>
           </div>
         </el-card>
       </el-col>
@@ -126,6 +160,8 @@ import {
   getEntities, getRelations,
   approveEntity, rejectEntity,
   approveRelation, rejectRelation,
+  batchApproveEntities, batchRejectEntities,
+  batchApproveRelations, batchRejectRelations,
   type EntityItem, type RelationItem,
 } from '@/api/review'
 
@@ -141,6 +177,18 @@ const reviewer = ref('审核员')
 const batchNote = ref('')
 const contentRef = ref<HTMLElement | null>(null)
 
+// 分页相关
+const entityPagination = ref({
+  page: 1,
+  pageSize: 20,
+  total: 0
+})
+const relationPagination = ref({
+  page: 1,
+  pageSize: 20,
+  total: 0
+})
+
 const renderedContent = computed(() => {
   if (!rawContent.value) return '<p style="color:#999">暂无内容</p>'
   return marked(rawContent.value) as string
@@ -151,15 +199,50 @@ async function load() {
   try {
     const [doc, entRes, relRes] = await Promise.all([
       getDocument(uuid),
-      getEntities({ source_doc_uuid: uuid, page_size: 200 } as any),
-      getRelations({ source_doc_uuid: uuid, page_size: 200 } as any),
+      getEntities({ 
+        source_doc_uuid: uuid, 
+        page: entityPagination.value.page,
+        page_size: entityPagination.value.pageSize 
+      }),
+      getRelations({ 
+        source_doc_uuid: uuid, 
+        page: relationPagination.value.page,
+        page_size: relationPagination.value.pageSize 
+      }),
     ])
     rawContent.value = doc.raw_content
     entities.value = entRes.items
+    entityPagination.value.total = entRes.total
     relations.value = relRes.items
+    relationPagination.value.total = relRes.total
   } finally {
     loading.value = false
   }
+}
+
+// 实体分页变化
+function handleEntityPageChange(page: number) {
+  entityPagination.value.page = page
+  load()
+}
+
+// 关系分页变化
+function handleRelationPageChange(page: number) {
+  relationPagination.value.page = page
+  load()
+}
+
+// 每页显示数量变化
+function handleEntityPageSizeChange(size: number) {
+  entityPagination.value.pageSize = size
+  entityPagination.value.page = 1
+  load()
+}
+
+function handleRelationPageSizeChange(size: number) {
+  relationPagination.value.pageSize = size
+  relationPagination.value.page = 1
+  load()
 }
 
 function highlightText(text: string) {
@@ -202,18 +285,118 @@ async function doRejectRelation(id: number) {
   if (rel) rel.review_status = 'rejected'
 }
 
-async function approveAll() {
+async function approveAllCurrentPage() {
   const pending = entities.value.filter(e => e.review_status === 'pending' && e.confidence_score >= 0.8)
+  if (pending.length === 0) {
+    ElMessage.info('当前页没有高置信度待审核实体')
+    return
+  }
   await Promise.all(pending.map(e => approveEntity(e.id, reviewer.value, batchNote.value)))
   pending.forEach(e => { e.review_status = 'approved' })
-  ElMessage.success(`已通过 ${pending.length} 个高置信度实体`)
+  ElMessage.success(`已通过本页 ${pending.length} 个高置信度实体`)
 }
 
-async function rejectAll() {
+async function rejectAllCurrentPage() {
   const pending = entities.value.filter(e => e.review_status === 'pending')
+  if (pending.length === 0) {
+    ElMessage.info('当前页没有待审核实体')
+    return
+  }
   await Promise.all(pending.map(e => rejectEntity(e.id, reviewer.value, batchNote.value)))
   pending.forEach(e => { e.review_status = 'rejected' })
-  ElMessage.warning(`已拒绝 ${pending.length} 个实体`)
+  ElMessage.warning(`已拒绝本页 ${pending.length} 个实体`)
+}
+
+async function approveAllEntities() {
+  try {
+    const result = await batchApproveEntities({
+      source_doc_uuid: uuid,
+      min_confidence: 0.8,
+      reviewer: reviewer.value,
+      note: batchNote.value
+    })
+    if (result.success) {
+      ElMessage.success(result.message || '已通过所有高置信度实体')
+      // 重新加载数据
+      load()
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '批量通过失败')
+  }
+}
+
+async function rejectAllEntities() {
+  try {
+    const result = await batchRejectEntities({
+      source_doc_uuid: uuid,
+      reviewer: reviewer.value,
+      note: batchNote.value
+    })
+    if (result.success) {
+      ElMessage.warning(result.message || '已拒绝所有实体')
+      // 重新加载数据
+      load()
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '批量拒绝失败')
+  }
+}
+
+async function approveAllRelationsCurrentPage() {
+  const pending = relations.value.filter(r => r.review_status === 'pending' && r.confidence_score >= 0.8)
+  if (pending.length === 0) {
+    ElMessage.info('当前页没有高置信度待审核关系')
+    return
+  }
+  await Promise.all(pending.map(r => approveRelation(r.id, reviewer.value, batchNote.value)))
+  pending.forEach(r => { r.review_status = 'approved' })
+  ElMessage.success(`已通过本页 ${pending.length} 个高置信度关系`)
+}
+
+async function rejectAllRelationsCurrentPage() {
+  const pending = relations.value.filter(r => r.review_status === 'pending')
+  if (pending.length === 0) {
+    ElMessage.info('当前页没有待审核关系')
+    return
+  }
+  await Promise.all(pending.map(r => rejectRelation(r.id, reviewer.value, batchNote.value)))
+  pending.forEach(r => { r.review_status = 'rejected' })
+  ElMessage.warning(`已拒绝本页 ${pending.length} 个关系`)
+}
+
+async function approveAllRelations() {
+  try {
+    const result = await batchApproveRelations({
+      source_doc_uuid: uuid,
+      min_confidence: 0.8,
+      reviewer: reviewer.value,
+      note: batchNote.value
+    })
+    if (result.success) {
+      ElMessage.success(result.message || '已通过所有高置信度关系')
+      // 重新加载数据
+      load()
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '批量通过关系失败')
+  }
+}
+
+async function rejectAllRelations() {
+  try {
+    const result = await batchRejectRelations({
+      source_doc_uuid: uuid,
+      reviewer: reviewer.value,
+      note: batchNote.value
+    })
+    if (result.success) {
+      ElMessage.warning(result.message || '已拒绝所有关系')
+      // 重新加载数据
+      load()
+    }
+  } catch (error: any) {
+    ElMessage.error(error.message || '批量拒绝关系失败')
+  }
 }
 
 const confidenceType = (s: number) => s >= 0.8 ? 'success' : s >= 0.5 ? 'warning' : 'danger'
@@ -251,4 +434,12 @@ onMounted(load)
 .source-text { font-size: 12px; color: #909399; margin: 6px 0; font-style: italic; }
 .entity-data { font-size: 11px; background: #f5f7fa; padding: 8px; border-radius: 4px; overflow-x: auto; }
 .card-actions { margin-top: 8px; display: flex; gap: 8px; }
+.pagination-container {
+  margin-top: 16px;
+  padding: 12px;
+  border-top: 1px solid #e4e7ed;
+  background: #fafafa;
+  display: flex;
+  justify-content: center;
+}
 </style>

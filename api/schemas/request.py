@@ -13,6 +13,38 @@ class ReviewActionRequest(BaseModel):
     note: str = ""
 
 
+class BatchApproveEntitiesRequest(BaseModel):
+    reviewer: str
+    note: str = ""
+    source_doc_uuid: str = ""
+    entity_type: str = ""
+    source_site: str = ""
+    min_confidence: float = 0.0
+
+
+class BatchRejectEntitiesRequest(BaseModel):
+    reviewer: str
+    note: str = ""
+    source_doc_uuid: str = ""
+    entity_type: str = ""
+    source_site: str = ""
+
+
+class BatchApproveRelationsRequest(BaseModel):
+    reviewer: str
+    note: str = ""
+    source_doc_uuid: str = ""
+    source_site: str = ""
+    min_confidence: float = 0.0
+
+
+class BatchRejectRelationsRequest(BaseModel):
+    reviewer: str
+    note: str = ""
+    source_doc_uuid: str = ""
+    source_site: str = ""
+
+
 class Neo4jSyncRequest(BaseModel):
     limit: int = 100
 

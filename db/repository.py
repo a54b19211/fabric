@@ -642,6 +642,104 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
                           {"review_status": before}, {"review_status": "rejected"})
 
 
+def batch_approve_entities(
+    source_doc_uuid: str = "",
+    entity_type: str = "",
+    source_site: str = "",
+    reviewer: str = "",
+    note: str = "",
+    min_confidence: float = 0.0
+) -> dict:
+    """批量审核通过实体，支持按条件筛选。"""
+    from db.session import get_session
+    
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "message": "数据库未连接", "count": 0}
+        
+        # 构建查询条件
+        q = session.query(ExtractedEntity).filter(
+            ExtractedEntity.review_status == "pending",
+            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.confidence_score >= min_confidence
+        )
+        
+        if source_doc_uuid:
+            q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
+        if entity_type:
+            q = q.filter(ExtractedEntity.entity_type == entity_type)
+        if source_site:
+            q = q.filter(ExtractedEntity.source_site == source_site)
+        
+        # 获取所有符合条件的实体
+        entities = q.all()
+        count = len(entities)
+        
+        if count == 0:
+            return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
+        
+        # 批量更新
+        for ent in entities:
+            before = ent.review_status
+            ent.review_status = "approved"
+            ent.reviewer_note = note
+            ent.reviewed_by = reviewer
+            ent.reviewed_at = datetime.now(timezone.utc)
+            _write_review_log(session, "entity", ent.id, "approve", reviewer, note,
+                            {"review_status": before}, {"review_status": "approved"})
+        
+        session.commit()
+        return {"success": True, "message": f"成功批量通过 {count} 个实体", "count": count}
+
+
+def batch_reject_entities(
+    source_doc_uuid: str = "",
+    entity_type: str = "",
+    source_site: str = "",
+    reviewer: str = "",
+    note: str = ""
+) -> dict:
+    """批量审核拒绝实体，支持按条件筛选。"""
+    from db.session import get_session
+    
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "message": "数据库未连接", "count": 0}
+        
+        # 构建查询条件
+        q = session.query(ExtractedEntity).filter(
+            ExtractedEntity.review_status == "pending",
+            ExtractedEntity.is_deleted == False
+        )
+        
+        if source_doc_uuid:
+            q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
+        if entity_type:
+            q = q.filter(ExtractedEntity.entity_type == entity_type)
+        if source_site:
+            q = q.filter(ExtractedEntity.source_site == source_site)
+        
+        # 获取所有符合条件的实体
+        entities = q.all()
+        count = len(entities)
+        
+        if count == 0:
+            return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
+        
+        # 批量更新
+        for ent in entities:
+            before = ent.review_status
+            ent.review_status = "rejected"
+            ent.reviewer_note = note
+            ent.reviewed_by = reviewer
+            ent.reviewed_at = datetime.now(timezone.utc)
+            _write_review_log(session, "entity", ent.id, "reject", reviewer, note,
+                            {"review_status": before}, {"review_status": "rejected"})
+        
+        session.commit()
+        return {"success": True, "message": f"成功批量拒绝 {count} 个实体", "count": count}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 7. 审核队列接口（关系）
 # ═══════════════════════════════════════════════════════════════════════
@@ -705,6 +803,98 @@ def reject_relation(id: int, reviewer: str, note: str = "") -> None:
         session.flush()
         _write_review_log(session, "relation", id, "reject", reviewer, note,
                           {"review_status": before}, {"review_status": "rejected"})
+
+
+def batch_approve_relations(
+    source_doc_uuid: str = "",
+    source_site: str = "",
+    reviewer: str = "",
+    note: str = "",
+    min_confidence: float = 0.0
+) -> dict:
+    """批量审核通过关系，支持按条件筛选。"""
+    from db.session import get_session
+    
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "message": "数据库未连接", "count": 0}
+        
+        # 构建查询条件
+        q = session.query(EntityRelation).filter(
+            EntityRelation.review_status == "pending",
+            EntityRelation.is_deleted == False,
+            EntityRelation.confidence_score >= min_confidence
+        )
+        
+        if source_doc_uuid:
+            q = q.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+        if source_site:
+            q = q.filter(EntityRelation.source_site == source_site)
+        
+        # 获取所有符合条件的实体
+        relations = q.all()
+        count = len(relations)
+        
+        if count == 0:
+            return {"success": True, "message": "没有符合条件的待审核关系", "count": 0}
+        
+        # 批量更新
+        for rel in relations:
+            before = rel.review_status
+            rel.review_status = "approved"
+            rel.reviewer_note = note
+            rel.reviewed_by = reviewer
+            rel.reviewed_at = datetime.now(timezone.utc)
+            _write_review_log(session, "relation", rel.id, "approve", reviewer, note,
+                            {"review_status": before}, {"review_status": "approved"})
+        
+        session.commit()
+        return {"success": True, "message": f"成功批量通过 {count} 个关系", "count": count}
+
+
+def batch_reject_relations(
+    source_doc_uuid: str = "",
+    source_site: str = "",
+    reviewer: str = "",
+    note: str = ""
+) -> dict:
+    """批量审核拒绝关系，支持按条件筛选。"""
+    from db.session import get_session
+    
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "message": "数据库未连接", "count": 0}
+        
+        # 构建查询条件
+        q = session.query(EntityRelation).filter(
+            EntityRelation.review_status == "pending",
+            EntityRelation.is_deleted == False
+        )
+        
+        if source_doc_uuid:
+            q = q.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+        if source_site:
+            q = q.filter(EntityRelation.source_site == source_site)
+        
+        # 获取所有符合条件的实体
+        relations = q.all()
+        count = len(relations)
+        
+        if count == 0:
+            return {"success": True, "message": "没有符合条件的待审核关系", "count": 0}
+        
+        # 批量更新
+        for rel in relations:
+            before = rel.review_status
+            rel.review_status = "rejected"
+            rel.reviewer_note = note
+            rel.reviewed_by = reviewer
+            rel.reviewed_at = datetime.now(timezone.utc)
+            _write_review_log(session, "relation", rel.id, "reject", reviewer, note,
+                            {"review_status": before}, {"review_status": "rejected"})
+        
+        session.commit()
+        return {"success": True, "message": f"成功批量拒绝 {count} 个关系", "count": count}
 
 
 # ═══════════════════════════════════════════════════════════════════════

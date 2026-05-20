@@ -54,3 +54,36 @@ export const approveRelation = (id: number, reviewer: string, note = '') =>
 
 export const rejectRelation = (id: number, reviewer: string, note = '') =>
   http.post<any, { success: boolean }>(`/review/relations/${id}/reject`, { reviewer, note })
+
+// 批量审核接口
+export const batchApproveEntities = (params: {
+  source_doc_uuid?: string
+  entity_type?: string
+  source_site?: string
+  min_confidence?: number
+  reviewer: string
+  note?: string
+}) => http.post<any, { success: boolean; message?: string }>('/review/entities/batch/approve', params)
+
+export const batchRejectEntities = (params: {
+  source_doc_uuid?: string
+  entity_type?: string
+  source_site?: string
+  reviewer: string
+  note?: string
+}) => http.post<any, { success: boolean; message?: string }>('/review/entities/batch/reject', params)
+
+export const batchApproveRelations = (params: {
+  source_doc_uuid?: string
+  source_site?: string
+  min_confidence?: number
+  reviewer: string
+  note?: string
+}) => http.post<any, { success: boolean; message?: string }>('/review/relations/batch/approve', params)
+
+export const batchRejectRelations = (params: {
+  source_doc_uuid?: string
+  source_site?: string
+  reviewer: string
+  note?: string
+}) => http.post<any, { success: boolean; message?: string }>('/review/relations/batch/reject', params)

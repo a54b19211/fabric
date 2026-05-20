@@ -1,7 +1,13 @@
 """审核操作接口"""
 from fastapi import APIRouter, HTTPException, Query
 
-from api.schemas.request import ReviewActionRequest
+from api.schemas.request import (
+    ReviewActionRequest,
+    BatchApproveEntitiesRequest,
+    BatchRejectEntitiesRequest,
+    BatchApproveRelationsRequest,
+    BatchRejectRelationsRequest
+)
 from api.schemas.response import (
     EntityListResponse, EntityItem,
     RelationListResponse, RelationItem,
@@ -10,6 +16,8 @@ from api.schemas.response import (
 from db.repository import (
     approve_entity, reject_entity,
     approve_relation, reject_relation,
+    batch_approve_entities, batch_reject_entities,
+    batch_approve_relations, batch_reject_relations,
     log_review_action,
 )
 from db.session import get_session
@@ -90,6 +98,35 @@ def get_entity(entity_id: int):
         )
 
 
+@router.post("/entities/batch/approve", response_model=ReviewActionResponse)
+def batch_approve_entities_api(body: BatchApproveEntitiesRequest):
+    result = batch_approve_entities(
+        source_doc_uuid=body.source_doc_uuid,
+        entity_type=body.entity_type,
+        source_site=body.source_site,
+        reviewer=body.reviewer,
+        note=body.note,
+        min_confidence=body.min_confidence
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+    return ReviewActionResponse(success=True, message=result["message"])
+
+
+@router.post("/entities/batch/reject", response_model=ReviewActionResponse)
+def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
+    result = batch_reject_entities(
+        source_doc_uuid=body.source_doc_uuid,
+        entity_type=body.entity_type,
+        source_site=body.source_site,
+        reviewer=body.reviewer,
+        note=body.note
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+    return ReviewActionResponse(success=True, message=result["message"])
+
+
 @router.post("/entities/{entity_id}/approve", response_model=ReviewActionResponse)
 def approve_entity_api(entity_id: int, body: ReviewActionRequest):
     approve_entity(entity_id, reviewer=body.reviewer, note=body.note)
@@ -143,6 +180,33 @@ def list_relations(
             for r in rows
         ]
         return RelationListResponse(total=total, items=items)
+
+
+@router.post("/relations/batch/approve", response_model=ReviewActionResponse)
+def batch_approve_relations_api(body: BatchApproveRelationsRequest):
+    result = batch_approve_relations(
+        source_doc_uuid=body.source_doc_uuid,
+        source_site=body.source_site,
+        reviewer=body.reviewer,
+        note=body.note,
+        min_confidence=body.min_confidence
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+    return ReviewActionResponse(success=True, message=result["message"])
+
+
+@router.post("/relations/batch/reject", response_model=ReviewActionResponse)
+def batch_reject_relations_api(body: BatchRejectRelationsRequest):
+    result = batch_reject_relations(
+        source_doc_uuid=body.source_doc_uuid,
+        source_site=body.source_site,
+        reviewer=body.reviewer,
+        note=body.note
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+    return ReviewActionResponse(success=True, message=result["message"])
 
 
 @router.post("/relations/{relation_id}/approve", response_model=ReviewActionResponse)
