@@ -41,3 +41,8 @@ export const getDocuments = (params: DocumentListParams) =>
 
 export const getDocument = (uuid: string) =>
   http.get<any, DocumentDetail>(`/documents/${uuid}`)
+
+export const recrawlDocument = (uuid: string) =>
+  http.post<any, { success: boolean; uuid: string; message: string }>(
+    `/documents/${uuid}/recrawl`, {}
+  )

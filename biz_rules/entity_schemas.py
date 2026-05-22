@@ -143,19 +143,49 @@ class PathwayEntity(BaseModel):
     pathway_type: str = Field(default="", description="信号通路/代谢通路/免疫通路")
 
 
+class DealItemEntity(BaseModel):
+    """交易条款明细，挂在 DealEvent 下，通过 HAS_ITEM 关联"""
+    id: str = Field(default="", description="内部ID")
+    item_type: str = Field(default="", description="条款类型：药物权益 / 技术平台权益")
+    rights_regions: list[str] = Field(default_factory=list, description="该条款对应的权益地区（如[\"美国\",\"欧洲\",\"日本\"]）")
+
+
+class DevelopmentProjectEntity(BaseModel):
+    """合作开发项目，多家公司共同研发某药物的项目实体"""
+    id: str = Field(default="", description="内部ID")
+    name: str = Field(default="", description='项目名称（如"A公司与B公司SYSA1801联合开发项目"）')
+    start_date: str = Field(default="", description="合作开始日期")
+    end_date: str = Field(default="", description="合作终止日期（可选）")
+    status: str = Field(default="", description="进行中 / 完成 / 终止")
+
+
+class TrialIndicationEntity(BaseModel):
+    """临床试验中的具体适应症条目，挂在 ClinicalTrial 下"""
+    id: str = Field(default="", description="内部ID")
+    phase: str = Field(default="", description="该适应症对应的试验阶段：I / II / III")
+    status: str = Field(default="", description="该适应症的试验状态：进行中 / 完成 / 终止")
+    orr: Optional[float] = Field(default=None, description="客观缓解率（可选，有结果时填写）")
+    pfs_months: Optional[float] = Field(default=None, description="无进展生存期（月，可选）")
+    os_months: Optional[float] = Field(default=None, description="总生存期（月，可选）")
+    result_summary: str = Field(default="", description="结果摘要文本（可选）")
+
+
 # ── 实体类型 → Pydantic 模型映射 ──────────────────────────────────────────
 ENTITY_SCHEMA_MAP: dict[str, type[BaseModel]] = {
-    "Company":       CompanyEntity,
-    "Drug":          DrugEntity,
-    "Target":        TargetEntity,
-    "Indication":    IndicationEntity,
-    "ClinicalTrial": ClinicalTrialEntity,
-    "DealEvent":     DealEventEntity,
-    "ApprovalEvent": ApprovalEventEntity,
-    "Policy":        PolicyEntity,
-    "TCMFormula":    TCMFormulaEntity,
-    "Compound":      CompoundEntity,
-    "Pathway":       PathwayEntity,
+    "Company":            CompanyEntity,
+    "Drug":               DrugEntity,
+    "Target":             TargetEntity,
+    "Indication":         IndicationEntity,
+    "ClinicalTrial":      ClinicalTrialEntity,
+    "DealEvent":          DealEventEntity,
+    "DealItem":           DealItemEntity,
+    "ApprovalEvent":      ApprovalEventEntity,
+    "Policy":             PolicyEntity,
+    "TCMFormula":         TCMFormulaEntity,
+    "Compound":           CompoundEntity,
+    "Pathway":            PathwayEntity,
+    "DevelopmentProject": DevelopmentProjectEntity,
+    "TrialIndication":    TrialIndicationEntity,
 }
 
 VALID_ENTITY_TYPES = set(ENTITY_SCHEMA_MAP.keys())

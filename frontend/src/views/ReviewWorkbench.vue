@@ -5,11 +5,17 @@
     <!-- 顶部操作栏 -->
     <el-card shadow="never" style="margin-bottom:12px">
       <el-row align="middle" :gutter="12">
-        <el-col :span="12">
+        <el-col :span="16">
           <el-input v-model="reviewer" placeholder="审核人姓名" style="width:200px" />
           <el-input v-model="batchNote" placeholder="批量审核备注（可选）" style="width:240px;margin-left:8px" />
+          <el-select v-model="reviewStatusFilter" style="width:140px;margin-left:8px" @change="load">
+            <el-option label="待审核" value="pending" />
+            <el-option label="自动通过" value="auto_approved" />
+            <el-option label="已通过" value="approved" />
+            <el-option label="已拒绝" value="rejected" />
+          </el-select>
         </el-col>
-        <el-col :span="12" style="text-align:right">
+        <el-col :span="8" style="text-align:right">
           <el-button type="success" @click="approveAllCurrentPage">通过本页高置信度（≥0.8）</el-button>
           <el-button type="danger" @click="rejectAllCurrentPage">拒绝本页全部</el-button>
           <el-button type="success" @click="approveAllEntities" style="margin-left: 8px">通过所有实体</el-button>
@@ -175,6 +181,7 @@ const relations = ref<RelationItem[]>([])
 const activeTab = ref('entities')
 const reviewer = ref('审核员')
 const batchNote = ref('')
+const reviewStatusFilter = ref('pending')
 const contentRef = ref<HTMLElement | null>(null)
 
 // 分页相关
@@ -202,12 +209,14 @@ async function load() {
       getEntities({ 
         source_doc_uuid: uuid, 
         page: entityPagination.value.page,
-        page_size: entityPagination.value.pageSize 
+        page_size: entityPagination.value.pageSize,
+        review_status: reviewStatusFilter.value,
       }),
       getRelations({ 
         source_doc_uuid: uuid, 
         page: relationPagination.value.page,
-        page_size: relationPagination.value.pageSize 
+        page_size: relationPagination.value.pageSize,
+        review_status: reviewStatusFilter.value,
       }),
     ])
     rawContent.value = doc.raw_content

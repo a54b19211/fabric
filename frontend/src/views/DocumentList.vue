@@ -87,7 +87,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click="$router.push(`/documents/${row.uuid}`)">查看</el-button>
             <el-button
@@ -102,6 +102,12 @@
               type="success"
               @click="$router.push(`/review/${row.uuid}`)"
             >审核</el-button>
+            <el-button
+              size="small"
+              type="warning"
+              :loading="recrawlingUuids.has(row.uuid)"
+              @click="recrawlOne(row.uuid)"
+            >重爬</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -122,7 +128,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getDocuments, type DocumentItem } from '@/api/documents'
+import { getDocuments, recrawlDocument, type DocumentItem } from '@/api/documents'
 import { triggerExtraction, getExtractionStats, type ExtractionStats } from '@/api/extraction'
 
 const SITES = ['nmpa','cde','fda_press','fda_drug_safety','fda_drug_recalls',
@@ -136,6 +142,7 @@ const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
 const triggering = ref(false)
+const recrawlingUuids = ref<Set<string>>(new Set())
 const dateRange = ref<[string, string] | null>(null)
 const stats = ref<ExtractionStats>({ pending: 0, processing: 0, done: 0, failed: 0 })
 
@@ -189,6 +196,18 @@ async function batchTrigger() {
     loadStats()
   } finally {
     triggering.value = false
+  }
+}
+
+async function recrawlOne(uuid: string) {
+  recrawlingUuids.value = new Set([...recrawlingUuids.value, uuid])
+  try {
+    const res = await recrawlDocument(uuid)
+    ElMessage.success(res.message || '重爬任务已提交')
+    // 延迟 1s 刷新，让后台有时间更新状态
+    setTimeout(() => { loadData(); loadStats() }, 1000)
+  } finally {
+    recrawlingUuids.value = new Set([...recrawlingUuids.value].filter(id => id !== uuid))
   }
 }
 

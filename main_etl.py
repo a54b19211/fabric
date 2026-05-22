@@ -24,15 +24,16 @@ from prefect.task_runners import ConcurrentTaskRunner
 
 from config.settings import APP
 from config.crawler_settings import SITE_PROFILES, LOCAL_PDF_SCAN_DIRS
-from core_engine.scrapling_client import fetch_page, download_pdf, scan_local_pdfs
+from core_engine.scrapling_client import download_pdf, scan_local_pdfs
 from core_engine.pagination_driver import make_driver
-from core_engine.router import route_webpage, route_pdf
+from core_engine.router import route_pdf
 from core_engine.api_router import iter_api_results
-from core_engine.content_cleaner import clean_content
-from core_engine.quality_checker import check_quality, quarantine_data
-from core_engine.docx_parser import route_docx
 from core_engine.storage_writer import write_to_database
 from core_engine.review_exporter import export_review_csv
+from flows.crawl_flow import (
+    fetch_and_parse_url,
+    process_and_store,
+)
 from db.session import check_connection
 from migration.migrate import run_migrations
 
@@ -93,13 +94,10 @@ def _already_processed(doc_uuid: str, site: str) -> bool:
 
 def _process_single_result(parsed: dict, stats: dict):
     """对单条解析结果执行清洗、质检和落盘。"""
-    cleaned = clean_content.fn(parsed)
-    checked = check_quality.fn(cleaned)
-    if checked["quality_passed"]:
-        write_to_database.fn(checked)
+    result = process_and_store.fn(parsed)
+    if result.get("success", True) and result.get("status") != "quarantined":
         stats["passed"] += 1
     else:
-        quarantine_data.fn(checked)
         stats["quarantined"] += 1
 
 
@@ -115,7 +113,6 @@ def _process_single_result(parsed: dict, stats: dict):
 def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode: str = "full") -> dict:
     """爬取单条详情页并完成解析 → 质检 → 落盘。"""
     stats = {"total": 0, "passed": 0, "quarantined": 0}
-    site_cfg = SITE_PROFILES.get(site_key, {})
 
     # ── 断点续爬：全量=跳过已处理，增量=遇到重复立即停止 ──
     from core_engine.scrapling_client import make_uuid as _make_uuid
@@ -127,116 +124,20 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode:
         logger.debug(f"[跳过] 已处理: {detail_url}")
         return {"detail_url": detail_url, "stats": stats}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        page_data = executor.submit(
-            fetch_page.fn,
-            url=detail_url,
-            delay=profile.get("request_delay_seconds", 2.0),
-            wait_selector=site_cfg.get("detail_wait_selector"),
-            disable_resources=site_cfg.get("disable_resources", True),
-            solve_cloudflare=site_cfg.get("solve_cloudflare", False),
-            use_simple_fetch=site_cfg.get("use_simple_fetch", False),
-        ).result()
+    try:
+        parsed_list = fetch_and_parse_url.fn(detail_url, site_key, profile)
+    except Exception as e:
+        logger.error(f"详情页处理失败: {detail_url} | {e}")
+        stats["total"] += 1
+        return {"detail_url": detail_url, "stats": stats}
 
-    parsed = route_webpage.fn(page_data)
-    stats["total"] += 1
-
-    attachment_links = parsed.get("attachment_links", [])
-    merge_attachments = site_cfg.get("merge_attachments", False)
-
-    if attachment_links:
-        att_results = route_pdf_attachments(
-            attachment_links, parsed["uuid"], site_key, parent_parsed=parsed
-        )
-
-        if merge_attachments:
-            # ── 合并模式：附件内容拼接进父文档 raw_content，附件不单独入库 ──
-            merged_md = parsed.get("markdown", "")
-            for att_parsed in att_results:
-                att_md = att_parsed.get("markdown", "")
-                att_title = att_parsed.get("title", "")
-                if att_md:
-                    separator = f"\n\n---\n\n## 附件：{att_title}\n\n" if att_title else "\n\n---\n\n"
-                    # 去掉附件 markdown 里的 frontmatter（---...--- 块），避免重复
-                    att_body = _strip_frontmatter(att_md)
-                    merged_md = merged_md + separator + att_body
-            parsed["markdown"] = merged_md
-            _process_single_result(parsed, stats)
-        else:
-            # ── 独立模式：附件作为独立 document 入库，parent_uuid 已在 route_pdf 里设好 ──
-            for att_parsed in att_results:
-                _process_single_result(att_parsed, stats)
-                stats["total"] += 1
-            _process_single_result(parsed, stats)
-    else:
+    for parsed in parsed_list:
+        stats["total"] += 1
         _process_single_result(parsed, stats)
 
     return {"detail_url": detail_url, "stats": stats}
 
 
-
-def route_pdf_attachments(attachment_links: list, parent_uuid: str, site_key: str, parent_parsed: dict | None = None) -> list[dict]:
-    """下载并解析详情页的附件。PDF 走 MinerU，doc/docx 走 python-docx，继承父文档元数据。"""
-    results = []
-    logger.info(f"[Attachments] 共 {len(attachment_links)} 个附件链接，parent_uuid={parent_uuid}")
-    for att in attachment_links:
-        att_url = att.get("url", "")
-        if not att_url:
-            continue
-        logger.info(f"[Attachments] 下载附件: {att_url}")
-        att_info = download_pdf.fn(pdf_url=att_url, parent_uuid=parent_uuid, source_site=site_key)
-        file_ext = (att_info.get("file_ext") or "").lower()
-        local_path = att_info.get("local_path", "")
-        logger.info(f"[Attachments] 下载完成: local_path={local_path}, file_ext={file_ext}")
-
-        # .bin 文件尝试嗅探真实类型
-        if file_ext == ".bin" and local_path:
-            sniffed = _sniff_file_type(local_path)
-            logger.info(f"[Attachments] .bin 嗅探结果: {sniffed}")
-            file_ext = sniffed
-
-        if file_ext == ".pdf":
-            logger.info(f"[Attachments] → route_pdf")
-            pdf_result = route_pdf.fn(att_info)
-            logger.info(f"[Attachments] route_pdf 完成: markdown_len={len(pdf_result.get('markdown',''))}, title={pdf_result.get('title','')[:40]}")
-            results.append(pdf_result)
-        elif file_ext in {".doc", ".docx"}:
-            logger.info(f"[Attachments] → route_docx")
-            att_info["file_ext"] = file_ext
-            results.append(route_docx(att_info, parent_parsed=parent_parsed))
-        else:
-            logger.warning(f"[Attachments] 未知类型 {file_ext}，跳过解析: {local_path}")
-    return results
-
-
-def _sniff_file_type(local_path: str) -> str:
-    """通过文件头魔数判断真实类型，返回 .pdf / .docx / .bin。"""
-    import pathlib
-    try:
-        with open(local_path, "rb") as f:
-            header = f.read(8)
-        # PDF: %PDF
-        if header[:4] == b"%PDF":
-            return ".pdf"
-        # DOCX/XLSX/ZIP: PK\x03\x04
-        if header[:4] == b"PK\x03\x04":
-            return ".docx"
-        # DOC: D0 CF 11 E0 (OLE2)
-        if header[:4] == b"\xd0\xcf\x11\xe0":
-            return ".doc"
-    except Exception:
-        pass
-    return ".bin"
-
-
-def _strip_frontmatter(markdown: str) -> str:
-    """去掉 Markdown 头部的 YAML frontmatter（--- ... --- 块），返回正文部分。"""
-    if not markdown.startswith("---"):
-        return markdown
-    end = markdown.find("\n---", 3)
-    if end == -1:
-        return markdown
-    return markdown[end + 4:].lstrip("\n")
 
 
 @task(
@@ -402,7 +303,7 @@ def process_local_pdfs_flow():
             if _already_processed(pdf_info["uuid"], pdf_info["source_site"]):
                 logger.warning(f"[跳过] 已处理: {pdf_info['local_path']}")
                 continue
-            parsed = route_pdf(pdf_info)
+            parsed = route_pdf.fn(pdf_info)
             stats["total"] += 1
             _process_single_result(parsed, stats)
 

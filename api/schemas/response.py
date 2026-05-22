@@ -192,3 +192,22 @@ class WeknoraStatsResponse(BaseModel):
     pending: int
     synced: int
     failed: int
+
+
+class RecrawlResponse(BaseModel):
+    success: bool
+    uuid: str
+    message: str = ""
+
+
+# ── Worker ─────────────────────────────────────────────────────────────
+
+class WorkerItem(BaseModel):
+    worker_id: int
+    queue_size: int
+
+
+class WorkerStatsResponse(BaseModel):
+    num_workers: int
+    total_pending: int
+    workers: list[WorkerItem]

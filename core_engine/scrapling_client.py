@@ -38,12 +38,12 @@ def _now_iso() -> str:
 def _guess_attachment_ext(file_url: str) -> str:
     """
     从下载 URL 猜测文件扩展名。
-    仅允许 pdf/doc/docx 三种，其他统一落为 .bin（保底不丢文件）。
+    仅允许已知类型，其他返回空字符串（表示需要从响应头推断）。
     """
     parsed = urlparse(file_url)
     raw_path = unquote(parsed.path or "")
     suffix = Path(raw_path).suffix.lower()
-    if suffix in {".pdf", ".doc", ".docx"}:
+    if suffix in {".pdf", ".doc", ".docx", ".xls", ".xlsx"}:
         return suffix
     return ""   # 空字符串表示需要从响应头推断
 
@@ -56,7 +56,7 @@ def _ext_from_response(resp) -> str:
         m = re.search(r'filename[^;=\n]*=[\s"\']*([^\s;"\']+)', cd, re.I)
         if m:
             suffix = Path(m.group(1)).suffix.lower()
-            if suffix in {".pdf", ".doc", ".docx"}:
+            if suffix in {".pdf", ".doc", ".docx", ".xls", ".xlsx"}:
                 return suffix
 
     # Content-Type
@@ -65,6 +65,10 @@ def _ext_from_response(resp) -> str:
         return ".pdf"
     if "wordprocessingml" in ct or "msword" in ct:
         return ".docx"
+    if "spreadsheetml" in ct:
+        return ".xlsx"
+    if "ms-excel" in ct or "xls" in ct:
+        return ".xls"
 
     return ".bin"
 
@@ -136,9 +140,13 @@ def download_pdf(
     pdf_url: str,
     parent_uuid: str = "",
     source_site: str = "",
+    force: bool = False,
 ) -> dict:
     """
-    下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx）。
+    下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx/xls/xlsx）。
+
+    参数:
+        force: True 时跳过幂等检查，强制重新下载（重爬场景使用）
     """
     import httpx
 
@@ -147,8 +155,8 @@ def download_pdf(
     save_dir = APP.RAW_DIR / source_site
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # 如果 URL 能推断扩展名，先检查幂等
-    if file_ext:
+    # 如果 URL 能推断扩展名，先检查幂等（force=True 时跳过）
+    if file_ext and not force:
         save_path = save_dir / f"{file_uuid}{file_ext}"
         if save_path.exists():
             logger.info(f"附件已存在，跳过下载: {save_path}")
@@ -172,7 +180,7 @@ def download_pdf(
         if not file_ext:
             file_ext = _ext_from_response(resp)
             save_path = save_dir / f"{file_uuid}{file_ext}"
-            if save_path.exists():
+            if save_path.exists() and not force:
                 logger.info(f"附件已存在，跳过下载: {save_path}")
                 return {
                     "uuid": file_uuid,

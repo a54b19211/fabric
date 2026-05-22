@@ -143,7 +143,7 @@ def route_pdf(pdf_info: dict) -> dict:
     }
 
     logger.info(f"[PDF] MinerU 解析: {pdf_path}")
-    mineru_result = mineru_pdf_to_markdown(pdf_path)
+    mineru_result = mineru_pdf_to_markdown.fn(pdf_path)
     if not mineru_result["success"]:
         logger.error(f"[PDF] MinerU 失败: {mineru_result['error']}")
         return result

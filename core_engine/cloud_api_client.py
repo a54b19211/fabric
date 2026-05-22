@@ -21,13 +21,15 @@ _MIME_MAP = {
     ".pdf":  "application/pdf",
     ".doc":  "application/pdf",   # MinerU 服务端只认 application/pdf，强制覆盖
     ".docx": "application/pdf",   # 同上
+    ".xls":  "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 
 def _mineru_parse(file_path: str) -> dict:
     """
     通用 MinerU 解析内核，根据文件扩展名自动选择 MIME type。
-    支持 .pdf / .doc / .docx。
+    支持 .pdf / .doc / .docx / .xls / .xlsx。
     """
     base = APP.MINERU_API_BASE.rstrip("/")
     path_obj = Path(file_path)
@@ -74,11 +76,11 @@ def _mineru_parse(file_path: str) -> dict:
 )
 def mineru_pdf_to_markdown(pdf_path: str) -> dict:
     """
-    调用自部署 MinerU 同步接口将 PDF / DOC / DOCX 解析为 Markdown。
+    调用自部署 MinerU 同步接口将 PDF / DOC / DOCX / XLS / XLSX 解析为 Markdown。
         POST /file_parse → 直接返回结果
 
     参数:
-        pdf_path: 本地文件路径（.pdf / .doc / .docx）
+        pdf_path: 本地文件路径（.pdf / .doc / .docx / .xls / .xlsx）
 
     返回:
         dict: {"markdown": "...", "success": True/False, "error": ""}

@@ -2,9 +2,10 @@
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
+from api.schemas.request import RecrawlRequest
 from api.schemas.response import (
     DocumentListResponse, DocumentDetailResponse,
-    DocumentItem, AttachmentItem,
+    DocumentItem, AttachmentItem, RecrawlResponse,
 )
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
@@ -110,3 +111,47 @@ def get_document(uuid: str):
             extraction_error=doc.extraction_error or "",
             extracted_at=doc.extracted_at.isoformat() if doc.extracted_at else None,
         )
+
+
+@router.post("/{uuid}/recrawl", response_model=RecrawlResponse)
+def recrawl_document(uuid: str, body: RecrawlRequest = RecrawlRequest()):
+    """
+    重爬指定文档。
+
+    流程：
+      1. 校验文档存在且有 source_url
+      2. 在后台线程提交 recrawl_document_flow（Prefect flow run，UI 可见）
+      3. 立即返回，不等待完成
+
+    重爬会：
+      - 软删除旧的 extracted_entities / entity_relations
+      - 重置 extraction_status / weknora_sync_status 为 pending
+      - 重新抓取页面并 upsert 写库
+    """
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        doc = session.query(Document).filter(
+            Document.uuid == uuid, Document.is_deleted == False
+        ).first()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        if not doc.source_url:
+            raise HTTPException(status_code=422, detail="文档无 source_url，无法重爬")
+
+    import threading
+    from flows.crawl_flow import recrawl_document_fn
+
+    t = threading.Thread(
+        target=recrawl_document_fn,
+        args=(uuid,),
+        daemon=True,
+    )
+    t.start()
+
+    logger.info(f"[API] 重爬已触发: {uuid}")
+    return RecrawlResponse(
+        success=True,
+        uuid=uuid,
+        message="重爬任务已提交，请稍后刷新查看状态",
+    )

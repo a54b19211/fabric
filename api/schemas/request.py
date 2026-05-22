@@ -56,3 +56,8 @@ class Neo4jRetryRequest(BaseModel):
 
 class WeknoraBatchRequest(BaseModel):
     limit: int = 100
+
+
+class RecrawlRequest(BaseModel):
+    """重爬请求体（目前无额外参数，预留扩展）"""
+    pass

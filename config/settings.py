@@ -95,6 +95,7 @@ class _AppSettings(BaseSettings):
     MAX_CONCURRENCY: int = 3                # Prefect 并发任务数，防封 IP
     TASK_RETRIES: int = 3
     TASK_RETRY_DELAY: int = 10              # 秒
+    EXTRACTION_CONCURRENCY: int = 3         # LLM 抽取 Worker 数量（并行文档数）
 
     # ======================== 远程数据库 ========================
     # 支持 PostgreSQL / MySQL，留空则不推送

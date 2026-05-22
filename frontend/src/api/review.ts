@@ -30,6 +30,7 @@ export const getEntities = (params: {
   page_size?: number
   entity_type?: string
   source_site?: string
+  source_doc_uuid?: string
   review_status?: string
 }) => http.get<any, { total: number; items: EntityItem[] }>('/review/entities', { params })
 
@@ -46,6 +47,7 @@ export const getRelations = (params: {
   page?: number
   page_size?: number
   source_site?: string
+  source_doc_uuid?: string
   review_status?: string
 }) => http.get<any, { total: number; items: RelationItem[] }>('/review/relations', { params })
 

@@ -323,17 +323,25 @@ def extract_single_document(
 # ═══════════════════════════════════════════════════════════════════════
 
 def run_extraction_for_uuids(uuids: list[str]) -> dict:
-    """对指定 UUID 列表执行抽取，被 API 触发时调用。"""
-    success, failed = 0, 0
+    """
+    对指定 UUID 列表提交抽取任务到 WorkerManager。
+    任务异步执行，立即返回提交数量。
+    被 API 触发时调用。
+    """
+    from flows.extraction_worker import ExtractionTask, get_extraction_manager
 
     with get_session() as session:
         if session is None:
-            return {"success": 0, "failed": len(uuids), "error": "DB未连接"}
+            return {"submitted": 0, "failed": len(uuids), "error": "DB未连接"}
         docs = session.query(Document).filter(
             Document.uuid.in_(uuids),
             Document.is_deleted == False,
         ).all()
         doc_map = {d.uuid: d for d in docs}
+
+    manager = get_extraction_manager()
+    submitted = 0
+    failed = 0
 
     for uuid in uuids:
         doc = doc_map.get(uuid)
@@ -341,25 +349,39 @@ def run_extraction_for_uuids(uuids: list[str]) -> dict:
             logger.warning(f"[Extraction] 文档不存在: {uuid}")
             failed += 1
             continue
-        ok = extract_single_document(
-            doc_uuid=doc.uuid,
+
+        def _on_done(doc_uuid: str, success: bool, error_msg: str) -> None:
+            if not success and error_msg:
+                logger.error(f"[Extraction] 任务失败回调: {doc_uuid} | {error_msg}")
+                update_extraction_status(doc_uuid, "failed", error=error_msg)
+
+        task = ExtractionTask(
+            uuid=doc.uuid,
             raw_content=doc.raw_content,
             source_site=doc.source_site,
             doc_type=doc.doc_type,
+            on_done=_on_done,
         )
-        if ok:
-            success += 1
-        else:
-            failed += 1
+        manager.submit(task)
+        submitted += 1
 
-    return {"success": success, "failed": failed}
+    logger.info(
+        f"[Extraction] 已提交 {submitted} 篇到 WorkerManager "
+        f"(workers={manager.num_workers}, pending={manager.total_pending()})"
+    )
+    return {"submitted": submitted, "failed": failed}
 
 
 def run_extraction_batch(limit: int = 10) -> dict:
-    """批量处理 extraction_status=processing 的文档，被定时任务调用。"""
+    """
+    批量处理 extraction_status=processing 的文档，提交到 WorkerManager。
+    被定时任务调用。
+    """
+    from flows.extraction_worker import ExtractionTask, get_extraction_manager
+
     with get_session() as session:
         if session is None:
-            return {"success": 0, "failed": 0}
+            return {"submitted": 0, "failed": 0}
         from sqlalchemy import text as sa_text
         rows = session.execute(
             sa_text(
@@ -369,23 +391,32 @@ def run_extraction_batch(limit: int = 10) -> dict:
             ),
             {"limit": limit},
         ).fetchall()
-        # 转成普通 list，避免 session 关闭后访问
         docs = [(r.uuid, r.raw_content, r.source_site, r.doc_type) for r in rows]
 
-    success, failed = 0, 0
+    manager = get_extraction_manager()
+    submitted = 0
+
     for uuid, raw_content, source_site, doc_type in docs:
-        ok = extract_single_document(
-            doc_uuid=uuid,
+        def _on_done(doc_uuid: str, success: bool, error_msg: str) -> None:
+            if not success and error_msg:
+                logger.error(f"[Extraction] 任务失败回调: {doc_uuid} | {error_msg}")
+                update_extraction_status(doc_uuid, "failed", error=error_msg)
+
+        task = ExtractionTask(
+            uuid=uuid,
             raw_content=raw_content,
             source_site=source_site,
             doc_type=doc_type,
+            on_done=_on_done,
         )
-        if ok:
-            success += 1
-        else:
-            failed += 1
+        manager.submit(task)
+        submitted += 1
 
-    return {"success": success, "failed": failed}
+    logger.info(
+        f"[Extraction] 批量提交 {submitted} 篇到 WorkerManager "
+        f"(workers={manager.num_workers}, pending={manager.total_pending()})"
+    )
+    return {"submitted": submitted}
 
 
 if __name__ == "__main__":

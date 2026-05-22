@@ -120,9 +120,23 @@ def chunk_table(text: str) -> list[tuple[str, str]]:
         return [("", text)]
 
     batches = []
-    for i in range(0, len(data_lines), TABLE_BATCH_ROWS):
-        batch = data_lines[i:i + TABLE_BATCH_ROWS]
-        batches.append((header, "\n".join(batch)))
+    current_rows: list[str] = []
+    current_chars = len(header) + 1  # 表头字符数作为基准
+
+    for line in data_lines:
+        line_chars = len(line) + 1  # +1 for newline
+        # 超过行数限制 或 加上这行会超过字符限制（且当前批次非空）
+        if (len(current_rows) >= TABLE_BATCH_ROWS or
+                (current_rows and current_chars + line_chars > CHUNK_MAX_CHARS)):
+            batches.append((header, "\n".join(current_rows)))
+            current_rows = []
+            current_chars = len(header) + 1
+        current_rows.append(line)
+        current_chars += line_chars
+
+    if current_rows:
+        batches.append((header, "\n".join(current_rows)))
+
     return batches
 
 

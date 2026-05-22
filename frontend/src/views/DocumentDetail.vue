@@ -49,6 +49,11 @@
               type="success"
               @click="$router.push(`/review/${doc.uuid}`)"
             >查看抽取结果 →</el-button>
+            <el-button
+              type="warning"
+              @click="triggerRecrawl"
+              :loading="recrawling"
+            >重新爬取</el-button>
           </div>
         </el-card>
       </el-col>
@@ -83,7 +88,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
-import { getDocument, type DocumentDetail } from '@/api/documents'
+import { getDocument, recrawlDocument, type DocumentDetail } from '@/api/documents'
 import { triggerExtraction } from '@/api/extraction'
 
 const route = useRoute()
@@ -92,6 +97,7 @@ const uuid = route.params.uuid as string
 const doc = ref<DocumentDetail | null>(null)
 const loading = ref(false)
 const triggering = ref(false)
+const recrawling = ref(false)
 
 const renderedContent = computed(() => {
   if (!doc.value?.raw_content) return '<p style="color:#999">暂无内容</p>'
@@ -115,6 +121,17 @@ async function triggerExtract() {
     await load()
   } finally {
     triggering.value = false
+  }
+}
+
+async function triggerRecrawl() {
+  recrawling.value = true
+  try {
+    const res = await recrawlDocument(uuid)
+    ElMessage.success(res.message || '重爬任务已提交，请稍后刷新查看状态')
+    setTimeout(load, 1500)
+  } finally {
+    recrawling.value = false
   }
 }
 

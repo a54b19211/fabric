@@ -238,7 +238,7 @@ def _parse_doc(file_path: str) -> str:
     pdf_path = _doc_to_pdf(file_path)
     logger.info(f"[DOCX] 转换完成，PDF: {pdf_path}")
 
-    result = mineru_pdf_to_markdown(pdf_path)
+    result = mineru_pdf_to_markdown.fn(pdf_path)
     if not result["success"]:
         raise RuntimeError(f"MinerU 解析失败: {result['error']}")
     return result["markdown"]

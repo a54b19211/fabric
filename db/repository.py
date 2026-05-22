@@ -505,11 +505,8 @@ def insert_extraction_result(
             dict_id = rec.get("dict_id")
             confidence = rec.get("confidence_score", 0.0)
 
-            # 消歧命中 + 高置信度 → 自动通过
-            if dict_id is not None and confidence >= 0.8:
-                review_status = "auto_approved"
-            else:
-                review_status = "pending"
+            # 全部进入人工审核队列
+            review_status = "pending"
 
             ent = ExtractedEntity(
                 source_doc_uuid=source_doc_uuid,
@@ -544,7 +541,7 @@ def insert_extraction_result(
                 continue
 
             confidence = rel.get("confidence_score", 0.0)
-            review_status = "auto_approved" if confidence >= 0.8 else "pending"
+            review_status = "pending"
 
             session.add(EntityRelation(
                 source_doc_uuid=source_doc_uuid,
@@ -1192,3 +1189,57 @@ def _relation_to_dict(r: EntityRelation) -> dict:
         "review_status": r.review_status,
         "neo4j_status": r.neo4j_status,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 10. 重爬支持
+# ═══════════════════════════════════════════════════════════════════════
+
+def reset_document_for_recrawl(uuid: str) -> None:
+    """
+    重爬前重置文档状态：
+      - 软删除该文档的所有 extracted_entities 和 entity_relations
+      - 重置 extraction_status → pending
+      - 重置 weknora_sync_status → pending
+      - 清空 extraction_error / extraction_model / extracted_at
+
+    不删除 documents 主记录本身，upsert_document 会覆盖写回新内容。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            logger.warning(f"[DB] reset_document_for_recrawl: Session 未初始化，跳过 {uuid}")
+            return
+
+        # 软删除旧抽取结果
+        deleted_ents = (
+            session.query(ExtractedEntity)
+            .filter(
+                ExtractedEntity.source_doc_uuid == uuid,
+                ExtractedEntity.is_deleted == False,
+            )
+            .update({"is_deleted": True}, synchronize_session=False)
+        )
+        deleted_rels = (
+            session.query(EntityRelation)
+            .filter(
+                EntityRelation.source_doc_uuid == uuid,
+                EntityRelation.is_deleted == False,
+            )
+            .update({"is_deleted": True}, synchronize_session=False)
+        )
+
+        # 重置文档流水线状态
+        doc = session.query(Document).filter(Document.uuid == uuid).first()
+        if doc:
+            doc.extraction_status = "pending"
+            doc.weknora_sync_status = "pending"
+            doc.extraction_error = ""
+            doc.extraction_model = ""
+            doc.extracted_at = None
+
+        logger.info(
+            f"[DB] reset_document_for_recrawl: {uuid} "
+            f"软删实体={deleted_ents} 软删关系={deleted_rels}"
+        )

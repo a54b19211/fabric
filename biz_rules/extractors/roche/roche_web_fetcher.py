@@ -46,7 +46,8 @@ def _extract_date(text: str) -> str:
 
 
 def _is_non_html(url: str) -> bool:
-    skip = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.jpg', '.jpeg', '.png', '.gif')
+    # .xls/.xlsx 已支持 MinerU 解析，不再跳过
+    skip = ('.pdf', '.doc', '.docx', '.zip', '.jpg', '.jpeg', '.png', '.gif')
     return url.lower().endswith(skip)
 
 

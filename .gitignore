@@ -58,3 +58,4 @@ frontend/*.tsbuildinfo
 frontend/.env
 frontend/.env.local
 frontend/.env.*.local
+.kiro/

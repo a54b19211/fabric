@@ -28,6 +28,10 @@ psycopg2-binary>=2.9         # PostgreSQL 驱动
 # --- 工具 ---
 python-dotenv>=1.0           # .env 文件加载
 
+# --- 文档解析 ---
+openpyxl==3.1.5              # 读取 .xlsx（纯 Python，跨平台）
+xlrd==2.0.1                  # 读取 .xls 旧版二进制格式（纯 Python，跨平台）
+
 # --- 后端 API ---
 fastapi>=0.111.0             # Web 框架
 uvicorn[standard]>=0.29.0    # ASGI 服务器
