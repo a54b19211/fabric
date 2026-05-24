@@ -65,9 +65,9 @@ class ExtractionTriggerResponse(BaseModel):
 class ExtractionStatusResponse(BaseModel):
     uuid: str
     extraction_status: str
-    extraction_model: str
-    extracted_at: Optional[str]
-    extraction_error: str
+    extraction_model: str = ""
+    extracted_at: Optional[str] = None
+    extraction_error: str = ""
 
 
 class ExtractionStatsResponse(BaseModel):

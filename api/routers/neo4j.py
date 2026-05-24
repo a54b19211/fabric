@@ -22,56 +22,96 @@ router = APIRouter(prefix="/api/neo4j", tags=["neo4j"])
 @router.post("/sync/entities", response_model=Neo4jSyncResponse)
 def sync_entities(body: Neo4jSyncRequest):
     """批量推送审核通过的实体到 Neo4j。"""
-    entities = get_approved_for_neo4j(limit=body.limit)
-    pushed, failed = 0, 0
+    if body.limit < 1 or body.limit > 500:
+        raise HTTPException(status_code=400, detail="limit 必须在 1-500 之间")
+    
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
 
-    for ent in entities:
-        try:
-            # TODO: 接入实际 Neo4j 推送逻辑（成员1交付后对接）
-            # neo4j_node_id = neo4j_client.push_entity(ent)
-            # mark_entity_pushed(ent["id"], neo4j_node_id)
-            logger.info(f"[Neo4j] 推送实体（占位）: id={ent['id']}")
-            pushed += 1
-        except Exception as e:
-            mark_entity_failed(ent["id"], str(e))
-            failed += 1
+    try:
+        entities = get_approved_for_neo4j(limit=body.limit)
+        pushed, failed = 0, 0
 
-    return Neo4jSyncResponse(pushed=pushed, failed=failed, message=f"实体推送完成")
+        for ent in entities:
+            try:
+                # TODO: 接入实际 Neo4j 推送逻辑（成员1交付后对接）
+                # neo4j_node_id = neo4j_client.push_entity(ent)
+                # mark_entity_pushed(ent["id"], neo4j_node_id)
+                logger.info(f"[Neo4j] 推送实体（占位）: id={ent['id']}")
+                pushed += 1
+            except Exception as e:
+                mark_entity_failed(ent["id"], str(e))
+                failed += 1
+
+        logger.info(f"[API] Neo4j 实体推送完成: pushed={pushed}, failed={failed}")
+        return Neo4jSyncResponse(pushed=pushed, failed=failed, message=f"实体推送完成")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Neo4j 实体推送失败: {e}")
+        raise HTTPException(status_code=500, detail=f"推送失败: {str(e)}")
 
 
 @router.post("/sync/relations", response_model=Neo4jSyncResponse)
 def sync_relations(body: Neo4jSyncRequest):
     """批量推送审核通过的关系到 Neo4j。"""
-    relations = get_approved_relations_for_neo4j(limit=body.limit)
-    pushed, failed = 0, 0
+    if body.limit < 1 or body.limit > 500:
+        raise HTTPException(status_code=400, detail="limit 必须在 1-500 之间")
+    
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
 
-    for rel in relations:
-        try:
-            # TODO: 接入实际 Neo4j 推送逻辑
-            logger.info(f"[Neo4j] 推送关系（占位）: id={rel['id']}")
-            pushed += 1
-        except Exception as e:
-            mark_relation_failed(rel["id"], str(e))
-            failed += 1
+    try:
+        relations = get_approved_relations_for_neo4j(limit=body.limit)
+        pushed, failed = 0, 0
 
-    return Neo4jSyncResponse(pushed=pushed, failed=failed, message=f"关系推送完成")
+        for rel in relations:
+            try:
+                # TODO: 接入实际 Neo4j 推送逻辑
+                logger.info(f"[Neo4j] 推送关系（占位）: id={rel['id']}")
+                pushed += 1
+            except Exception as e:
+                mark_relation_failed(rel["id"], str(e))
+                failed += 1
+
+        logger.info(f"[API] Neo4j 关系推送完成: pushed={pushed}, failed={failed}")
+        return Neo4jSyncResponse(pushed=pushed, failed=failed, message=f"关系推送完成")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Neo4j 关系推送失败: {e}")
+        raise HTTPException(status_code=500, detail=f"推送失败: {str(e)}")
 
 
 @router.post("/retry", response_model=Neo4jRetryResponse)
 def retry_push(body: Neo4jRetryRequest):
     """重试单条推送失败的实体或关系。"""
+    # 参数校验
+    if body.object_type not in ("entity", "relation"):
+        raise HTTPException(status_code=400, detail="object_type 必须是 entity 或 relation")
+    if body.object_id < 1:
+        raise HTTPException(status_code=400, detail="object_id 必须大于 0")
+    
     try:
         if body.object_type == "entity":
             # TODO: 接入实际推送逻辑
             logger.info(f"[Neo4j] 重试实体: id={body.object_id}")
         elif body.object_type == "relation":
             logger.info(f"[Neo4j] 重试关系: id={body.object_id}")
-        else:
-            raise HTTPException(status_code=400, detail="object_type 必须是 entity 或 relation")
+        
+        logger.info(f"[API] Neo4j 重试推送: type={body.object_type}, id={body.object_id}")
         return Neo4jRetryResponse(success=True)
+        
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"[API] Neo4j 重试推送失败: {e}")
         return Neo4jRetryResponse(success=False, error=str(e))
 
 
