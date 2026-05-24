@@ -68,7 +68,7 @@
         <el-table-column prop="publish_date" label="发布日期" width="110" />
         <el-table-column label="置信度" width="90">
           <template #default="{ row }">
-            <span :style="{ color: row.confidence_score < 0.8 ? '#f56c6c' : '#67c23a' }">
+            <span :style="{ color: row.confidence_score < 0.8 ? '#c0392b' : '#0e9e8e' }">
               {{ row.confidence_score.toFixed(2) }}
             </span>
           </template>
@@ -87,27 +87,29 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click="$router.push(`/documents/${row.uuid}`)">查看</el-button>
-            <el-button
-              v-if="row.extraction_status === 'pending'"
-              size="small"
-              type="primary"
-              @click="triggerOne(row.uuid)"
-            >触发抽取</el-button>
-            <el-button
-              v-if="row.extraction_status === 'done'"
-              size="small"
-              type="success"
-              @click="$router.push(`/review/${row.uuid}`)"
-            >审核</el-button>
-            <el-button
-              size="small"
-              type="warning"
-              :loading="recrawlingUuids.has(row.uuid)"
-              @click="recrawlOne(row.uuid)"
-            >重爬</el-button>
+            <div class="action-btns">
+              <el-button size="small" @click="$router.push(`/documents/${row.uuid}`)">查看</el-button>
+              <el-button
+                v-if="row.extraction_status === 'pending'"
+                size="small"
+                type="primary"
+                @click="triggerOne(row.uuid)"
+              >触发抽取</el-button>
+              <el-button
+                v-if="row.extraction_status === 'done'"
+                size="small"
+                type="success"
+                @click="$router.push(`/review/${row.uuid}`)"
+              >审核</el-button>
+              <el-button
+                size="small"
+                type="warning"
+                :loading="recrawlingUuids.has(row.uuid)"
+                @click="recrawlOne(row.uuid)"
+              >重爬</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -153,10 +155,10 @@ const filters = ref({
 })
 
 const statCards = computed(() => [
-  { label: '待抽取', value: stats.value.pending, color: '#909399' },
-  { label: '抽取中', value: stats.value.processing, color: '#e6a23c' },
-  { label: '已完成', value: stats.value.done, color: '#67c23a' },
-  { label: '失败', value: stats.value.failed, color: '#f56c6c' },
+  { label: '待抽取', value: stats.value.pending, color: '#6b7fa3' },
+  { label: '抽取中', value: stats.value.processing, color: '#2b7eb0' },
+  { label: '已完成', value: stats.value.done, color: '#0e9e8e' },
+  { label: '失败', value: stats.value.failed, color: '#c0392b' },
 ])
 
 async function loadData() {
@@ -244,7 +246,20 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .stat-num { font-size: 28px; font-weight: 700; }
 .stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
 .filter-card { margin-bottom: 16px; }
-.title-link { color: #409eff; text-decoration: none; }
+.title-link { color: #1d6fa4; text-decoration: none; }
 .title-link:hover { text-decoration: underline; }
 .pagination { margin-top: 16px; justify-content: flex-end; }
+
+/* 操作列：强制一行，按钮紧凑排列 */
+.action-btns {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  align-items: center;
+}
+.action-btns .el-button {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+}
 </style>

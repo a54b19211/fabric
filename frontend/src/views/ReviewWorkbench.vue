@@ -436,8 +436,8 @@ onMounted(load)
   transition: border-color 0.2s;
 }
 .review-card:hover { border-color: #409eff; }
-.card-approved { border-color: #67c23a; background: #f0f9eb; }
-.card-rejected { border-color: #f56c6c; background: #fef0f0; opacity: 0.7; }
+.card-approved { border-color: #0e9e8e; background: #e8f8f6; }
+.card-rejected { border-color: #c0392b; background: #fdf0ee; opacity: 0.7; }
 .card-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .entity-name { font-weight: 600; font-size: 14px; }
 .source-text { font-size: 12px; color: #909399; margin: 6px 0; font-style: italic; }

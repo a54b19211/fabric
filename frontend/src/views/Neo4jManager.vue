@@ -71,12 +71,12 @@ const stats = ref({ entities: { pending: 0, pushed: 0, failed: 0 }, relations: {
 const failed = ref<{ entities: any[]; relations: any[] }>({ entities: [], relations: [] })
 
 const statCards = computed(() => [
-  { label: '实体待推送', value: stats.value.entities.pending, color: '#909399' },
-  { label: '实体已推送', value: stats.value.entities.pushed, color: '#67c23a' },
-  { label: '实体失败', value: stats.value.entities.failed, color: '#f56c6c' },
-  { label: '关系待推送', value: stats.value.relations.pending, color: '#909399' },
-  { label: '关系已推送', value: stats.value.relations.pushed, color: '#67c23a' },
-  { label: '关系失败', value: stats.value.relations.failed, color: '#f56c6c' },
+  { label: '实体待推送', value: stats.value.entities.pending, color: '#4a7fa5' },
+  { label: '实体已推送', value: stats.value.entities.pushed, color: '#0e9e8e' },
+  { label: '实体失败',   value: stats.value.entities.failed, color: '#c0392b' },
+  { label: '关系待推送', value: stats.value.relations.pending, color: '#4a7fa5' },
+  { label: '关系已推送', value: stats.value.relations.pushed, color: '#0e9e8e' },
+  { label: '关系失败',   value: stats.value.relations.failed, color: '#c0392b' },
 ])
 
 async function loadAll() {

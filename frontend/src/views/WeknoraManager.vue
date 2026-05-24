@@ -48,9 +48,9 @@ const stats = ref({ pending: 0, synced: 0, failed: 0 })
 const pending = ref<any[]>([])
 
 const statCards = computed(() => [
-  { label: '待同步', value: stats.value.pending, color: '#909399' },
-  { label: '已同步', value: stats.value.synced, color: '#67c23a' },
-  { label: '失败', value: stats.value.failed, color: '#f56c6c' },
+  { label: '待同步', value: stats.value.pending, color: '#4a7fa5' },
+  { label: '已同步', value: stats.value.synced,  color: '#0e9e8e' },
+  { label: '失败',   value: stats.value.failed,  color: '#c0392b' },
 ])
 
 async function loadAll() {
