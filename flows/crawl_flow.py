@@ -20,15 +20,13 @@
   recrawl_document_flow(uuid)
 """
 
-import zipfile
-import pathlib
 import concurrent.futures
 from loguru import logger
 from prefect import task, flow
 
 from config.settings import APP
 from config.crawler_settings import SITE_PROFILES
-from core_engine.scrapling_client import fetch_page, download_pdf, make_uuid
+from core_engine.scrapling_client import fetch_page, download_pdf, make_uuid, _sniff_bytes
 from core_engine.router import route_webpage, route_pdf
 from core_engine.docx_parser import route_docx
 from core_engine.excel_parser import route_excel
@@ -49,29 +47,10 @@ def _sniff_file_type(local_path: str) -> str:
     """通过文件头魔数判断真实类型，返回 .pdf / .xlsx / .docx / .doc / .xls / .bin。"""
     try:
         with open(local_path, "rb") as f:
-            header = f.read(8)
-        if header[:4] == b"%PDF":
-            return ".pdf"
-        if header[:4] == b"\xd0\xcf\x11\xe0":
-            ext = pathlib.Path(local_path).suffix.lower()
-            return ".xls" if ext == ".xls" else ".doc"
-        if header[:4] == b"PK\x03\x04":
-            try:
-                with zipfile.ZipFile(local_path, "r") as zf:
-                    names = zf.namelist()
-                if any(n.startswith("xl/") for n in names):
-                    return ".xlsx"
-                if any(n.startswith("word/") for n in names):
-                    return ".docx"
-            except Exception:
-                pass
-            ext = pathlib.Path(local_path).suffix.lower()
-            if ext in {".xlsx", ".xls"}:
-                return ".xlsx"
-            return ".docx"
+            ext = _sniff_bytes(f.read())
+        return ext
     except Exception:
-        pass
-    return ".bin"
+        return ".bin"
 
 
 def _strip_frontmatter(markdown: str) -> str:
@@ -111,6 +90,7 @@ def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = Fa
         ).result()
 
     parsed = route_webpage.fn(page_data)
+    cookies = page_data.get("cookies", [])
     attachment_links = parsed.get("attachment_links", [])
     merge_attachments = site_cfg.get("merge_attachments", False)
 
@@ -120,6 +100,7 @@ def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = Fa
         att_results = fetch_and_parse_attachments.fn(
             attachment_links, parsed["uuid"], site_key,
             parent_parsed=parsed, force=force,
+            cookies=cookies,
         )
         if merge_attachments:
             merged_md = parsed.get("markdown", "")
@@ -151,6 +132,7 @@ def fetch_and_parse_attachments(
     site_key: str,
     parent_parsed: dict | None = None,
     force: bool = False,
+    cookies: list[dict] | None = None,
 ) -> list[dict]:
     """下载并解析附件列表。PDF/XLS/XLSX 走 MinerU，doc/docx 走 python-docx。"""
     results = []
@@ -162,7 +144,8 @@ def fetch_and_parse_attachments(
             continue
 
         att_info = download_pdf.fn(pdf_url=att_url, parent_uuid=parent_uuid,
-                                   source_site=site_key, force=force)
+                                   source_site=site_key, force=force,
+                                   cookies=cookies)
         file_ext = (att_info.get("file_ext") or "").lower()
         local_path = att_info.get("local_path", "")
 
