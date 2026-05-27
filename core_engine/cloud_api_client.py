@@ -214,3 +214,69 @@ def _stream_extract(client: OpenAI, model_name: str, messages: list) -> dict:
     except Exception as e:
         logger.error(f"LLM 流式调用异常: {e}")
         return {}
+
+
+# ===================================================================
+#  Embedding API —— 文本 → 向量（消歧向量检索用）
+# ===================================================================
+
+def generate_embedding(text: str) -> list[float] | None:
+    """
+    调用 DashScope text-embedding-v3 API（OpenAI 兼容 /embeddings 端点）。
+    返回维度 = APP.EMBEDDING_DIMENSIONS 的 float 列表，失败返回 None。
+    """
+    api_key = APP.EMBEDDING_KEY
+    if not api_key:
+        logger.error("Embedding API Key 未配置，跳过 embedding 生成")
+        return None
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=APP.EMBEDDING_API_BASE)
+        response = client.embeddings.create(
+            model=APP.EMBEDDING_MODEL_NAME,
+            input=text,
+            dimensions=APP.EMBEDDING_DIMENSIONS,
+        )
+        embedding = response.data[0].embedding
+        logger.debug(f"[Embedding] 生成成功, dims={len(embedding)}")
+        return embedding
+    except Exception as e:
+        logger.error(f"[Embedding] 生成失败: {e}")
+        return None
+
+
+def build_embedding_text(
+    entity_name: str,
+    entity_type: str,
+    entity_data: dict | None = None,
+) -> str:
+    """
+    构造用于 embedding 的文本，组合实体类型、名称、别名和关键 ID 字段。
+    不只用名称，避免 PD-1 和 PD-L1 向量相近但非同实体的误判。
+    """
+    parts = [f"实体类型: {entity_type}", f"名称: {entity_name}"]
+
+    if entity_data:
+        name_en = entity_data.get("name_en") or entity_data.get("name")
+        if name_en and name_en != entity_name:
+            parts.append(f"英文名: {name_en}")
+
+        aliases = entity_data.get("aliases", [])
+        if aliases:
+            parts.append(f"别名: {', '.join(str(a) for a in aliases[:5])}")
+
+        key_fields_map = {
+            "Company":       ["stock_code"],
+            "Drug":          ["cas_number"],
+            "Target":        ["gene_symbol"],
+            "ClinicalTrial": ["trial_id"],
+            "Compound":      ["cas_number"],
+            "Policy":        ["doc_number"],
+            "Pathway":       [],
+        }
+        for f in key_fields_map.get(entity_type, []):
+            val = entity_data.get(f)
+            if val:
+                parts.append(f"{f}={val}")
+
+    return "\n".join(parts)

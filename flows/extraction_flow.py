@@ -6,7 +6,7 @@ LLM 实体抽取流程
   2. 智能分块（文章型按标题/表格型按行），带记忆上下文
   3. 逐块调 LLM → 解析 JSON → Pydantic 校验
   4. 跨块实体去重合并，关系下标重映射
-  5. 消歧（精确匹配 entity_aliases）
+  5. 消歧（6 阶段流水线：规范化→强ID→别名→规则→向量→LLM精排）
   6. insert_extraction_result 写库
   7. 更新 extraction_status = done / failed
 
@@ -23,7 +23,6 @@ from flows.chunking import split_document, build_memory_context
 from db.repository import (
     update_extraction_status,
     insert_extraction_result,
-    lookup_alias,
 )
 from db.session import get_session
 from db.models import Document
@@ -217,15 +216,9 @@ def _merge_chunks(
 # ═══════════════════════════════════════════════════════════════════════
 
 def _disambiguate(entities: list[dict]) -> list[dict]:
-    for ent in entities:
-        name = ent.get("entity_name", "")
-        entity_type = ent.get("entity_type", "")
-        if name and entity_type:
-            dict_id = lookup_alias(name, entity_type)
-            if dict_id:
-                ent["dict_id"] = dict_id
-                logger.debug(f"[Disambiguation] 命中: {name} → dict_id={dict_id}")
-    return entities
+    """完整 6 阶段消歧流水线（替换旧的仅精确别名匹配）。"""
+    from disambiguation import disambiguate_entities
+    return disambiguate_entities(entities)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -297,8 +290,17 @@ def extract_single_document(
         update_extraction_status(doc_uuid, "done", model=APP.EXTRACTION_MODEL_NAME)
         return True  # 不算失败，文档可能确实没有可抽取的实体
 
-    # 4. 消歧
+    # 4. 消歧（注入 source_site 上下文）
+    for ent in entities:
+        ent["source_site"] = source_site
     entities = _disambiguate(entities)
+
+    # 将消歧元数据合并到 entity_data，并清理临时字段
+    for ent in entities:
+        disambig = ent.pop("_disambig", None)
+        if disambig:
+            ent.setdefault("entity_data", {})["_disambig"] = disambig
+        ent.pop("source_site", None)
 
     # 5. 写库
     try:

@@ -236,3 +236,24 @@ class ReviewLog(Base):
     after_data: Mapped[dict] = mapped_column(JSONB, default=dict)    # 操作后快照
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── 11. entity_merge_queue ──────────────────────────────────────
+
+class EntityMergeQueue(Base):
+    """实体数据合并队列：auto 规则自动合并，同优先级冲突进人工审核。"""
+    __tablename__ = "entity_merge_queue"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source_entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_dict_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    existing_value: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    source_site: Mapped[str] = mapped_column(Text, default="")
+    resolution: Mapped[str] = mapped_column(Text, default="pending")
+    resolved_value: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    reviewer_note: Mapped[str] = mapped_column(Text, default="")
+    reviewed_by: Mapped[str] = mapped_column(Text, default="")
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

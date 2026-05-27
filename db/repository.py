@@ -17,6 +17,7 @@ from db.models import (
     Document, DocExtra, Attachment,
     EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
     Neo4jSyncLog, CrawlLog, ReviewLog,
+    EntityMergeQueue,
 )
 
 # ── 来源优先级（canonical_data 合并用）──────────────────────────────────
@@ -363,6 +364,199 @@ def get_entity_dict_by_id(dict_id: int) -> Optional[EntityDict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 3b. 实体数据合并队列
+# ═══════════════════════════════════════════════════════════════════════
+
+# 这些字段合并风险低，差异直接跳过不排队
+_SKIP_MERGE_FIELDS = frozenset({"name", "name_en", "aliases", "source_text"})
+
+
+def process_entity_merge(
+    session,
+    dict_id: int,
+    source_entity_id: int,
+    entity_data: dict,
+    source_site: str,
+) -> tuple[int, int]:
+    """
+    将 entity_data 合并到 entity_dict.canonical_data。
+    返回 (auto_merged_count, conflict_count)。
+
+    合并策略：
+      - entity_dict 字段为空，新值不为空 → auto merge
+      - 数组字段 → 追加去重（auto merge）
+      - 快照字段 → 时间新的胜出（auto merge）
+      - 新来源优先级 >= 当前来源 → auto merge
+      - 同优先级不同源 → 进 entity_merge_queue 人工审核
+
+    跳过的字段（_SKIP_MERGE_FIELDS）：name / name_en / aliases（由 alias 回写处理）
+    """
+    entity = session.query(EntityDict).filter(EntityDict.id == dict_id).first()
+    if entity is None:
+        logger.warning(f"[DB] process_entity_merge: entity_dict {dict_id} 不存在")
+        return 0, 0
+
+    current = dict(entity.canonical_data or {})
+    current_priority = _SOURCE_PRIORITY.get(entity.canonical_source or "", 0)
+    new_priority = _SOURCE_PRIORITY.get(source_site, 1)
+
+    auto_count = 0
+    conflict_count = 0
+
+    for key, new_val in entity_data.items():
+        if key in _SKIP_MERGE_FIELDS or new_val is None:
+            continue
+
+        existing_val = current.get(key)
+
+        # 1) entity_dict 无此字段 → 直接补充
+        if existing_val is None:
+            current[key] = new_val
+            auto_count += 1
+            continue
+
+        # 2) 数组字段：追加去重
+        if key in _ARRAY_FIELDS:
+            if isinstance(existing_val, list) and isinstance(new_val, list):
+                merged = list(dict.fromkeys(existing_val + new_val))
+                if merged != existing_val:
+                    current[key] = merged
+                    auto_count += 1
+            continue
+
+        # 3) 快照字段：时间新的覆盖旧的
+        if key in _SNAPSHOT_FIELDS:
+            if (
+                isinstance(new_val, dict)
+                and isinstance(existing_val, dict)
+                and new_val.get("timestamp", 0) > existing_val.get("timestamp", 0)
+            ):
+                current[key] = new_val
+                auto_count += 1
+            continue
+
+        # 4) 值相同 → 跳过
+        if existing_val == new_val:
+            continue
+
+        # 5) 新来源优先级 >= 当前来源 → auto merge
+        if new_priority >= current_priority:
+            current[key] = new_val
+            auto_count += 1
+            continue
+
+        # 6) 同优先级不同源 → 人工审核
+        if new_priority == current_priority:
+            existing_record = session.query(EntityMergeQueue).filter(
+                EntityMergeQueue.source_entity_id == source_entity_id,
+                EntityMergeQueue.field_name == key,
+                EntityMergeQueue.resolution == "pending",
+            ).first()
+            if existing_record is None:
+                session.add(EntityMergeQueue(
+                    source_entity_id=source_entity_id,
+                    target_dict_id=dict_id,
+                    field_name=key,
+                    existing_value=existing_val if isinstance(existing_val, (dict, list)) else {"_val": existing_val},
+                    new_value=new_val if isinstance(new_val, (dict, list)) else {"_val": new_val},
+                    source_site=source_site,
+                    resolution="pending",
+                ))
+                conflict_count += 1
+            continue
+
+        # 7) 低优来源 → 跳过，不覆盖
+        pass
+
+    if auto_count > 0:
+        entity.canonical_data = current
+        entity.canonical_updated_at = datetime.now(timezone.utc)
+
+    if auto_count or conflict_count:
+        logger.info(
+            f"[DB] process_entity_merge: dict_id={dict_id} "
+            f"auto_merged={auto_count} conflicts={conflict_count}"
+        )
+
+    return auto_count, conflict_count
+
+
+def get_pending_merges(limit: int = 50) -> list[dict]:
+    """查询 resolution=pending 的合并队列条目。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return []
+        rows = (
+            session.query(EntityMergeQueue)
+            .filter(EntityMergeQueue.resolution == "pending")
+            .order_by(EntityMergeQueue.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "source_entity_id": r.source_entity_id,
+                "target_dict_id": r.target_dict_id,
+                "field_name": r.field_name,
+                "existing_value": r.existing_value,
+                "new_value": r.new_value,
+                "source_site": r.source_site,
+                "resolution": r.resolution,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+
+def resolve_merge(
+    merge_id: int,
+    resolution: str,
+    reviewer: str = "",
+    resolved_value: dict | None = None,
+) -> None:
+    """
+    解决合并冲突。
+    resolution: accept_new | keep_existing | custom
+    custom 时需要传 resolved_value。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+
+        merge = session.query(EntityMergeQueue).filter(EntityMergeQueue.id == merge_id).first()
+        if merge is None:
+            logger.warning(f"[DB] resolve_merge: merge_id={merge_id} 不存在")
+            return
+
+        merge.resolution = resolution
+        merge.reviewed_by = reviewer
+        merge.reviewed_at = datetime.now(timezone.utc)
+
+        if resolution == "accept_new":
+            entity = session.query(EntityDict).filter(EntityDict.id == merge.target_dict_id).first()
+            if entity:
+                canonical = dict(entity.canonical_data or {})
+                canonical[merge.field_name] = merge.new_value
+                entity.canonical_data = canonical
+                entity.canonical_updated_at = datetime.now(timezone.utc)
+        elif resolution == "custom" and resolved_value is not None:
+            merge.resolved_value = resolved_value
+            entity = session.query(EntityDict).filter(EntityDict.id == merge.target_dict_id).first()
+            if entity:
+                canonical = dict(entity.canonical_data or {})
+                canonical[merge.field_name] = resolved_value
+                entity.canonical_data = canonical
+                entity.canonical_updated_at = datetime.now(timezone.utc)
+
+        logger.info(f"[DB] resolve_merge: merge_id={merge_id} resolution={resolution}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 4. EntityAlias Repository（消歧核心）
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -465,6 +659,102 @@ def add_aliases(dict_id: int, aliases: list[tuple[str, str, bool]]) -> None:
                     lang=lang or "",
                     is_canonical=bool(is_canonical),
                 ))
+
+
+def lookup_external_id(
+    entity_type: str,
+    external_key: str,
+    external_value: str,
+) -> dict | None:
+    """
+    在 entity_dict.external_ids JSONB 中查找匹配的外部 ID。
+    external_ids 的结构如 {"stock_code": "000001", "cas_number": "50-78-2"}。
+    命中返回 {"dict_id": int, "canonical_name": str}，未命中返回 None。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return None
+        row = session.query(
+            EntityDict.id,
+            EntityDict.canonical_data,
+        ).filter(
+            EntityDict.entity_type == entity_type,
+            EntityDict.is_deleted == False,
+            text(f"entity_dict.external_ids->>'{external_key}' = :val"),
+        ).params(val=str(external_value).strip()).first()
+
+        if row:
+            canonical = row.canonical_data or {}
+            return {
+                "dict_id": row.id,
+                "canonical_name": canonical.get("name", ""),
+            }
+        return None
+
+
+def get_entity_with_aliases(dict_id: int) -> dict | None:
+    """获取 entity_dict 记录及所有 alias 名称，供 LLM 精排使用。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return None
+        entity = session.query(EntityDict).filter(
+            EntityDict.id == dict_id, EntityDict.is_deleted == False
+        ).first()
+        if not entity:
+            return None
+        aliases = session.query(EntityAlias.name).filter(
+            EntityAlias.dict_id == dict_id,
+            EntityAlias.is_deleted == False,
+        ).all()
+        return {
+            "dict_id": entity.id,
+            "entity_type": entity.entity_type,
+            "canonical_data": entity.canonical_data or {},
+            "aliases": [a.name for a in aliases],
+        }
+
+
+def add_alias_with_embedding(
+    dict_id: int,
+    name: str,
+    lang: str = "",
+    is_canonical: bool = False,
+    embedding: list[float] | None = None,
+) -> None:
+    """
+    添加别名并附带 embedding 向量。
+    别名已存在则跳过；embedding 通过 raw SQL 写入（ORM 未映射该列）。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        exists = session.query(EntityAlias).filter(
+            EntityAlias.dict_id == dict_id, EntityAlias.name == name
+        ).first()
+        if exists is not None:
+            return
+
+        alias = EntityAlias(
+            dict_id=dict_id,
+            name=name,
+            lang=lang or "",
+            is_canonical=bool(is_canonical),
+        )
+        session.add(alias)
+        session.flush()
+
+        if embedding:
+            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
+            session.execute(
+                text("UPDATE entity_aliases SET name_embedding = CAST(:vec AS vector) WHERE id = :id"),
+                {"vec": vec_str, "id": alias.id},
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -618,6 +908,214 @@ def approve_entity(id: int, reviewer: str, note: str = "") -> None:
                           {"review_status": before}, {"review_status": "approved"})
 
 
+def _extract_external_ids(entity_type: str, entity_data: dict) -> dict:
+    """从 entity_data 中提取 key → value 映射，供 entity_dict.external_ids 使用。"""
+    FIELD_MAP: dict[str, list[str]] = {
+        "Company":       ["id", "stock_code"],
+        "Drug":          ["id", "cas_number"],
+        "Target":        ["id", "gene_symbol"],
+        "ClinicalTrial": ["trial_id"],
+        "ApprovalEvent": ["approval_number"],
+        "Compound":      ["cas_number"],
+        "Policy":        ["doc_number"],
+        "Pathway":       ["id"],
+        "Indication":    ["id", "icd_code"],
+    }
+    result: dict[str, str] = {}
+    for f in FIELD_MAP.get(entity_type, []):
+        val = entity_data.get(f)
+        if val and str(val).strip():
+            result[f] = str(val).strip()
+    return result
+
+
+def _create_entity_dict_from_extraction(
+    session,
+    entity_name: str,
+    entity_type: str,
+    entity_data: dict,
+    source_site: str = "",
+) -> int | None:
+    """
+    从抽取实体创建 entity_dict 记录，返回 dict_id。
+    已存在同 entity_type + 同 canonical_name 则跳过（返回已有 id）。
+    """
+    existing = (
+        session.query(EntityDict.id)
+        .join(EntityAlias, EntityAlias.dict_id == EntityDict.id)
+        .filter(
+            EntityAlias.name == entity_name,
+            EntityDict.entity_type == entity_type,
+            EntityDict.is_deleted == False,
+            EntityAlias.is_deleted == False,
+        )
+        .first()
+    )
+    if existing:
+        logger.info(f"[DB] entity_dict 已存在: name='{entity_name}' type={entity_type} dict_id={existing.id}，跳过创建")
+        return existing.id
+
+    external_ids = _extract_external_ids(entity_type, entity_data)
+    canonical_data = dict(entity_data)
+    canonical_data.setdefault("name", entity_name)
+
+    logger.info(
+        f"[DB] 创建 entity_dict: name='{entity_name}' type={entity_type} "
+        f"external_ids={external_ids} source={source_site}"
+    )
+
+    entity = EntityDict(
+        entity_type=entity_type,
+        external_ids=external_ids,
+        canonical_data=canonical_data,
+        canonical_source=source_site,
+        is_verified=True,
+    )
+    session.add(entity)
+    session.flush()
+    logger.info(f"[DB] entity_dict 创建成功: dict_id={entity.id}")
+    return entity.id
+
+
+def _write_aliases_with_embedding(
+    session,
+    dict_id: int,
+    entity_type: str,
+    entity_name: str,
+    entity_data: dict,
+) -> int:
+    """将 entity_name + entity_data 中的名称写为 entity_aliases，附带 embedding。返回新增条数。"""
+    from core_engine.cloud_api_client import generate_embedding, build_embedding_text
+
+    names_to_add: set[str] = set()
+    names_to_add.add(entity_name.strip())
+
+    data_name = entity_data.get("name", "").strip()
+    if data_name:
+        names_to_add.add(data_name)
+    data_name_en = entity_data.get("name_en", "").strip()
+    if data_name_en:
+        names_to_add.add(data_name_en)
+    for alias in entity_data.get("aliases", []):
+        alias_str = str(alias).strip()
+        if alias_str:
+            names_to_add.add(alias_str)
+
+    logger.info(f"[DB] alias write-back: dict_id={dict_id} names={list(names_to_add)}")
+
+    added = 0
+    for name in names_to_add:
+        if not name:
+            continue
+        exists = (
+            session.query(EntityAlias)
+            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name)
+            .first()
+        )
+        if exists is not None:
+            logger.debug(f"[DB] alias 已存在: '{name}' dict_id={dict_id}，跳过")
+            continue
+
+        embed_text = build_embedding_text(name, entity_type, entity_data)
+        embedding = generate_embedding(embed_text)
+
+        alias = EntityAlias(
+            dict_id=dict_id,
+            name=name,
+            lang="zh" if any('一' <= c <= '鿟' for c in name) else "en",
+            is_canonical=(name == entity_data.get("name", "")),
+        )
+        session.add(alias)
+        session.flush()
+
+        if embedding:
+            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
+            session.execute(
+                text("UPDATE entity_aliases SET name_embedding = CAST(:vec AS vector) WHERE id = :id"),
+                {"vec": vec_str, "id": alias.id},
+            )
+            logger.debug(f"[DB] alias '{name}' written with embedding dims={len(embedding)}")
+        else:
+            logger.warning(f"[DB] alias '{name}' embedding 生成失败")
+        added += 1
+    return added
+
+
+def approve_entity_with_alias_writeback(
+    entity_id: int,
+    reviewer: str,
+    note: str = "",
+) -> None:
+    """
+    审核通过实体。
+    - 已有 dict_id → 回写新别名到 entity_aliases
+    - 无 dict_id → 先创建 entity_dict → 回填 extracted_entities.dict_id → 回写别名
+    所有别名附带 embedding 写入。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+
+        ent = session.query(ExtractedEntity).filter(ExtractedEntity.id == entity_id).first()
+        if ent is None:
+            logger.warning(f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} 不存在")
+            return
+
+        before = ent.review_status
+        ent.review_status = "approved"
+        ent.reviewer_note = note
+        ent.reviewed_by = reviewer
+        ent.reviewed_at = datetime.now(timezone.utc)
+        session.flush()
+        _write_review_log(session, "entity", entity_id, "approve", reviewer, note,
+                          {"review_status": before}, {"review_status": "approved"})
+
+        logger.info(
+            f"[DB] approve_entity_with_alias_writeback: entity_id={entity_id} "
+            f"name='{ent.entity_name}' type={ent.entity_type} dict_id={ent.dict_id} "
+            f"source_site={ent.source_site}"
+        )
+
+        entity_data = ent.entity_data or {}
+
+        # 无 dict_id → 先建 entity_dict
+        dict_id = ent.dict_id
+        if not dict_id:
+            logger.info(f"[DB] dict_id=None，需要创建 entity_dict for '{ent.entity_name}'")
+            dict_id = _create_entity_dict_from_extraction(
+                session,
+                entity_name=ent.entity_name,
+                entity_type=ent.entity_type,
+                entity_data=entity_data,
+                source_site=ent.source_site or "",
+            )
+            if dict_id:
+                ent.dict_id = dict_id
+                session.flush()
+            else:
+                logger.warning(f"[DB] 无法创建 entity_dict，跳过 alias 回写: entity_id={entity_id}")
+                return
+
+        # 回写别名
+        added = _write_aliases_with_embedding(
+            session, dict_id, ent.entity_type, ent.entity_name, entity_data,
+        )
+        if added:
+            logger.info(f"[DB] alias write-back: entity_id={entity_id} dict_id={dict_id} added {added} aliases")
+
+        # 合并 entity_data 到 canonical_data
+        merge_auto, merge_conflict = process_entity_merge(
+            session, dict_id, entity_id, entity_data, ent.source_site or "",
+        )
+        if merge_auto or merge_conflict:
+            logger.info(
+                f"[DB] merge: entity_id={entity_id} dict_id={dict_id} "
+                f"auto_merged={merge_auto} conflicts={merge_conflict}"
+            )
+
+
 def reject_entity(id: int, reviewer: str, note: str = "") -> None:
     """审核拒绝实体，同时写 review_log。"""
     from db.session import get_session
@@ -675,7 +1173,8 @@ def batch_approve_entities(
         if count == 0:
             return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
         
-        # 批量更新
+        # 批量更新（含 writeback）
+        alias_count = 0
         for ent in entities:
             before = ent.review_status
             ent.review_status = "approved"
@@ -684,8 +1183,32 @@ def batch_approve_entities(
             ent.reviewed_at = datetime.now(timezone.utc)
             _write_review_log(session, "entity", ent.id, "approve", reviewer, note,
                             {"review_status": before}, {"review_status": "approved"})
-        
+
+            entity_data = ent.entity_data or {}
+            dict_id = ent.dict_id
+            if not dict_id:
+                dict_id = _create_entity_dict_from_extraction(
+                    session,
+                    entity_name=ent.entity_name,
+                    entity_type=ent.entity_type,
+                    entity_data=entity_data,
+                    source_site=ent.source_site or "",
+                )
+                if dict_id:
+                    ent.dict_id = dict_id
+                    session.flush()
+
+            if dict_id:
+                added = _write_aliases_with_embedding(
+                    session, dict_id, ent.entity_type, ent.entity_name, entity_data,
+                )
+                alias_count += added
+                process_entity_merge(
+                    session, dict_id, ent.id, entity_data, ent.source_site or "",
+                )
+
         session.commit()
+        logger.info(f"[DB] batch_approve_entities: {count} entities approved, {alias_count} aliases written")
         return {"success": True, "message": f"成功批量通过 {count} 个实体", "count": count}
 
 

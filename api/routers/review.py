@@ -8,24 +8,46 @@ from api.schemas.request import (
     BatchApproveEntitiesRequest,
     BatchRejectEntitiesRequest,
     BatchApproveRelationsRequest,
-    BatchRejectRelationsRequest
+    BatchRejectRelationsRequest,
+    ResolveMergeRequest,
 )
 from api.schemas.response import (
     EntityListResponse, EntityItem,
     RelationListResponse, RelationItem,
     ReviewActionResponse,
+    DisambigInfo, DisambigCandidate,
+    MergeQueueItem, MergeQueueListResponse,
 )
 from db.repository import (
+    approve_entity_with_alias_writeback,
     approve_entity, reject_entity,
     approve_relation, reject_relation,
     batch_approve_entities, batch_reject_entities,
     batch_approve_relations, batch_reject_relations,
     log_review_action,
+    get_pending_merges, resolve_merge,
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation
 
 router = APIRouter(prefix="/api/review", tags=["review"])
+
+
+def _extract_disambig(entity_data: dict | None) -> DisambigInfo | None:
+    """从 entity_data JSONB 中提取 _disambig 消歧元数据。"""
+    if not entity_data:
+        return None
+    raw = entity_data.get("_disambig")
+    if not raw:
+        return None
+    try:
+        return DisambigInfo(
+            status=raw.get("status", ""),
+            candidates=[DisambigCandidate(**c) for c in raw.get("candidates", [])],
+            match_step=raw.get("match_step", ""),
+        )
+    except Exception:
+        return None
 
 
 # ── 实体 ───────────────────────────────────────────────────────────────
@@ -69,6 +91,7 @@ def list_entities(
                 source_text=r.source_text,
                 review_status=r.review_status,
                 dict_id=r.dict_id,
+                disambig=_extract_disambig(r.entity_data),
             )
             for r in rows
         ]
@@ -104,6 +127,7 @@ def get_entity(entity_id: int):
                 source_text=row.source_text or "",
                 review_status=row.review_status or "",
                 dict_id=row.dict_id,
+                disambig=_extract_disambig(row.entity_data),
             )
             
         except HTTPException:
@@ -168,9 +192,9 @@ def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
 
 @router.post("/entities/{entity_id}/approve", response_model=ReviewActionResponse)
 def approve_entity_api(entity_id: int, body: ReviewActionRequest):
-    """审核通过单个实体"""
+    """审核通过单个实体（含 alias 回写 + embedding 生成）。"""
     try:
-        approve_entity(entity_id, reviewer=body.reviewer, note=body.note or "")
+        approve_entity_with_alias_writeback(entity_id, reviewer=body.reviewer, note=body.note or "")
         logger.info(f"[API] 审核实体通过: id={entity_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
     except Exception as e:
@@ -317,3 +341,29 @@ def reject_relation_api(relation_id: int, body: ReviewActionRequest):
     except Exception as e:
         logger.error(f"[API] 审核关系失败: id={relation_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
+
+
+# ── 合并队列 ───────────────────────────────────────────────────────────────
+
+@router.get("/merge-queue", response_model=MergeQueueListResponse)
+def list_merge_queue(limit: int = Query(50, ge=1, le=200)):
+    """查询待处理的合并冲突列表。"""
+    try:
+        rows = get_pending_merges(limit)
+        items = [MergeQueueItem(**r) for r in rows]
+        return MergeQueueListResponse(total=len(items), items=items)
+    except Exception as e:
+        logger.error(f"[API] 合并队列查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.post("/merge-queue/{merge_id}/resolve", response_model=ReviewActionResponse)
+def resolve_merge_api(merge_id: int, body: ResolveMergeRequest):
+    """解决合并冲突。resolution: accept_new | keep_existing | custom"""
+    try:
+        resolve_merge(merge_id, body.resolution, body.reviewer, body.resolved_value)
+        logger.info(f"[API] 合并冲突解决: merge_id={merge_id} resolution={body.resolution}")
+        return ReviewActionResponse(success=True)
+    except Exception as e:
+        logger.error(f"[API] 合并冲突解决失败: merge_id={merge_id} | {e}")
+        raise HTTPException(status_code=500, detail=f"解决失败: {str(e)}")

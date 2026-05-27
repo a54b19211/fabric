@@ -79,6 +79,19 @@ class ExtractionStatsResponse(BaseModel):
 
 # ── Review ─────────────────────────────────────────────────────────────
 
+class DisambigCandidate(BaseModel):
+    dict_id: int
+    name: str
+    similarity_score: float = 0.0
+    match_type: str = ""
+
+
+class DisambigInfo(BaseModel):
+    status: str = ""
+    candidates: list[DisambigCandidate] = []
+    match_step: str = ""
+
+
 class EntityItem(BaseModel):
     id: int
     source_doc_uuid: str
@@ -90,6 +103,7 @@ class EntityItem(BaseModel):
     source_text: str
     review_status: str
     dict_id: Optional[int] = None
+    disambig: Optional[DisambigInfo] = None
 
 
 class EntityListResponse(BaseModel):
@@ -211,3 +225,22 @@ class WorkerStatsResponse(BaseModel):
     num_workers: int
     total_pending: int
     workers: list[WorkerItem]
+
+
+# ── Merge Queue ─────────────────────────────────────────────────────────
+
+class MergeQueueItem(BaseModel):
+    id: int
+    source_entity_id: int
+    target_dict_id: int
+    field_name: str
+    existing_value: Any = None
+    new_value: Any = None
+    source_site: str = ""
+    resolution: str = ""
+    created_at: Optional[str] = None
+
+
+class MergeQueueListResponse(BaseModel):
+    total: int
+    items: list[MergeQueueItem]

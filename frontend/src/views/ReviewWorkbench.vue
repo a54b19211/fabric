@@ -44,6 +44,7 @@
             <el-tabs v-model="activeTab">
               <el-tab-pane :label="`实体（${entities.length}）`" name="entities" />
               <el-tab-pane :label="`关系（${relations.length}）`" name="relations" />
+              <el-tab-pane :label="`合并队列（${mergeQueue.length}）`" name="merges" />
             </el-tabs>
             <div v-if="activeTab === 'relations'" style="position: absolute; right: 20px; top: 20px;">
               <el-button size="small" type="success" @click="approveAllRelationsCurrentPage">通过本页高置信度</el-button>
@@ -69,12 +70,23 @@
                 <el-tag size="small" :type="confidenceType(ent.confidence_score)">
                   {{ (ent.confidence_score * 100).toFixed(0) }}%
                 </el-tag>
-                <el-tag size="small" :type="disambigType(ent.dict_id)">
-                  {{ disambigLabel(ent.dict_id) }}
+                <el-tag size="small" :type="disambigType(ent)">
+                  {{ disambigLabel(ent) }}
                 </el-tag>
               </div>
               <div class="source-text" v-if="ent.source_text">
                 "{{ ent.source_text.slice(0, 80) }}{{ ent.source_text.length > 80 ? '...' : '' }}"
+              </div>
+              <div class="reason-text" v-if="ent.confidence_reason">
+                匹配原因：{{ ent.confidence_reason }}
+              </div>
+              <div v-if="ent.disambig?.candidates?.length" class="candidates-section">
+                <div class="candidates-label">候选匹配：</div>
+                <div v-for="c in ent.disambig.candidates.slice(0, 3)" :key="c.dict_id" class="candidate-item">
+                  <span>{{ c.name }}</span>
+                  <el-tag size="small" type="warning">{{ (c.similarity_score * 100).toFixed(0) }}%</el-tag>
+                  <el-tag size="small" type="info">{{ c.match_type }}</el-tag>
+                </div>
               </div>
               <el-collapse>
                 <el-collapse-item title="字段详情">
@@ -136,7 +148,7 @@
               </el-tag>
             </div>
             <el-empty v-if="!relations.length" description="暂无待审核关系" />
-            
+
             <!-- 关系分页 -->
             <div v-if="relations.length > 0" class="pagination-container">
               <el-pagination
@@ -150,6 +162,36 @@
               />
             </div>
           </div>
+
+          <!-- 合并队列 -->
+          <div v-if="activeTab === 'merges'" class="card-list">
+            <div
+              v-for="m in mergeQueue"
+              :key="m.id"
+              class="review-card"
+            >
+              <div class="card-header">
+                <el-tag size="small" type="danger">冲突字段</el-tag>
+                <span class="entity-name">{{ m.field_name }}</span>
+                <el-tag size="small" type="info">{{ m.source_site }}</el-tag>
+              </div>
+              <div class="merge-row">
+                <div class="merge-col">
+                  <div class="merge-label">现有值（entity_dict #{{ m.target_dict_id }}）</div>
+                  <pre class="merge-value">{{ JSON.stringify(m.existing_value, null, 2) }}</pre>
+                </div>
+                <div class="merge-col">
+                  <div class="merge-label">新值（entity #{{ m.source_entity_id }}）</div>
+                  <pre class="merge-value">{{ JSON.stringify(m.new_value, null, 2) }}</pre>
+                </div>
+              </div>
+              <div class="card-actions">
+                <el-button size="small" type="success" @click="doResolveMerge(m.id, 'accept_new')">采用新值</el-button>
+                <el-button size="small" type="warning" @click="doResolveMerge(m.id, 'keep_existing')">保留现有</el-button>
+              </div>
+            </div>
+            <el-empty v-if="!mergeQueue.length" description="暂无待处理的合并冲突" />
+          </div>
         </el-card>
       </el-col>
     </el-row>
@@ -157,7 +199,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
@@ -168,7 +210,8 @@ import {
   approveRelation, rejectRelation,
   batchApproveEntities, batchRejectEntities,
   batchApproveRelations, batchRejectRelations,
-  type EntityItem, type RelationItem,
+  getMergeQueue, resolveMerge,
+  type EntityItem, type RelationItem, type MergeQueueItem,
 } from '@/api/review'
 
 const route = useRoute()
@@ -195,6 +238,8 @@ const relationPagination = ref({
   pageSize: 20,
   total: 0
 })
+
+const mergeQueue = ref<MergeQueueItem[]>([])
 
 const renderedContent = computed(() => {
   if (!rawContent.value) return '<p style="color:#999">暂无内容</p>'
@@ -408,12 +453,54 @@ async function rejectAllRelations() {
   }
 }
 
+async function loadMergeQueue() {
+  try {
+    const res = await getMergeQueue(50)
+    mergeQueue.value = res.items
+  } catch (e: any) {
+    ElMessage.error('加载合并队列失败')
+  }
+}
+
+async function doResolveMerge(mergeId: number, resolution: string) {
+  try {
+    await resolveMerge(mergeId, reviewer.value, resolution)
+    ElMessage.success('冲突已解决')
+    loadMergeQueue()
+  } catch (e: any) {
+    ElMessage.error('解决冲突失败')
+  }
+}
+
 const confidenceType = (s: number) => s >= 0.8 ? 'success' : s >= 0.5 ? 'warning' : 'danger'
-const disambigLabel = (dictId: number | null) =>
-  dictId !== null ? '🟢 精确匹配' : '🔵 新实体'
-const disambigType = (dictId: number | null) => dictId !== null ? 'success' : 'info'
+
+const disambigLabel = (ent: EntityItem) => {
+  const status = ent.disambig?.status || (ent.dict_id !== null ? 'auto_matched' : 'new_entity')
+  const map: Record<string, string> = {
+    auto_matched: '🟢 自动匹配',
+    candidate_matched: '🟡 候选匹配',
+    new_entity: '🔵 新实体',
+    ambiguous: '🟠 模糊待确认',
+  }
+  return map[status] || '⚪ 未知'
+}
+
+const disambigType = (ent: EntityItem) => {
+  const status = ent.disambig?.status || (ent.dict_id !== null ? 'auto_matched' : 'new_entity')
+  const map: Record<string, string> = {
+    auto_matched: 'success',
+    candidate_matched: 'warning',
+    new_entity: 'info',
+    ambiguous: 'danger',
+  }
+  return map[status] || 'info'
+}
 
 onMounted(load)
+
+watch(activeTab, (tab) => {
+  if (tab === 'merges') loadMergeQueue()
+})
 </script>
 
 <style scoped>
@@ -441,6 +528,10 @@ onMounted(load)
 .card-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .entity-name { font-weight: 600; font-size: 14px; }
 .source-text { font-size: 12px; color: #909399; margin: 6px 0; font-style: italic; }
+.reason-text { font-size: 12px; color: #606266; margin: 4px 0; padding: 4px 8px; background: #f0f9eb; border-radius: 4px; }
+.candidates-section { margin-top: 6px; padding: 8px; background: #fdf6ec; border-radius: 4px; }
+.candidates-label { font-size: 12px; color: #909399; margin-bottom: 4px; }
+.candidate-item { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 13px; }
 .entity-data { font-size: 11px; background: #f5f7fa; padding: 8px; border-radius: 4px; overflow-x: auto; }
 .card-actions { margin-top: 8px; display: flex; gap: 8px; }
 .pagination-container {
@@ -451,4 +542,8 @@ onMounted(load)
   display: flex;
   justify-content: center;
 }
+.merge-row { display: flex; gap: 12px; margin-top: 8px; }
+.merge-col { flex: 1; min-width: 0; }
+.merge-label { font-size: 12px; color: #909399; margin-bottom: 4px; }
+.merge-value { font-size: 11px; background: #f5f7fa; padding: 6px; border-radius: 4px; overflow-x: auto; max-height: 120px; }
 </style>

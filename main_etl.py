@@ -121,7 +121,7 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode:
         if crawl_mode == "incremental":
             logger.info(f"[增量] 遇到已处理记录，停止: {detail_url}")
             raise StopIncremental(detail_url)
-        logger.debug(f"[跳过] 已处理: {detail_url}")
+        logger.info(f"[跳过] 已处理: {detail_url}")
         return {"detail_url": detail_url, "stats": stats}
 
     try:

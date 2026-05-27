@@ -61,3 +61,9 @@ class WeknoraBatchRequest(BaseModel):
 class RecrawlRequest(BaseModel):
     """重爬请求体（目前无额外参数，预留扩展）"""
     pass
+
+
+class ResolveMergeRequest(BaseModel):
+    reviewer: str
+    resolution: str  # accept_new / keep_existing / custom
+    resolved_value: Optional[dict] = None  # custom 时必填

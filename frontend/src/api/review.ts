@@ -1,5 +1,18 @@
 import http from './http'
 
+export interface DisambigCandidate {
+  dict_id: number
+  name: string
+  similarity_score: number
+  match_type: string
+}
+
+export interface DisambigInfo {
+  status: string
+  candidates: DisambigCandidate[]
+  match_step: string
+}
+
 export interface EntityItem {
   id: number
   source_doc_uuid: string
@@ -11,6 +24,7 @@ export interface EntityItem {
   source_text: string
   review_status: string
   dict_id: number | null
+  disambig: DisambigInfo | null
 }
 
 export interface RelationItem {
@@ -89,3 +103,24 @@ export const batchRejectRelations = (params: {
   reviewer: string
   note?: string
 }) => http.post<any, { success: boolean; message?: string }>('/review/relations/batch/reject', params)
+
+// 合并队列
+export interface MergeQueueItem {
+  id: number
+  source_entity_id: number
+  target_dict_id: number
+  field_name: string
+  existing_value: any
+  new_value: any
+  source_site: string
+  resolution: string
+  created_at: string | null
+}
+
+export const getMergeQueue = (limit = 50) =>
+  http.get<any, { total: number; items: MergeQueueItem[] }>('/review/merge-queue', { params: { limit } })
+
+export const resolveMerge = (mergeId: number, reviewer: string, resolution: string, resolvedValue?: any) =>
+  http.post<any, { success: boolean }>(`/review/merge-queue/${mergeId}/resolve`, {
+    reviewer, resolution, resolved_value: resolvedValue,
+  })

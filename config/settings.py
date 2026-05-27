@@ -34,6 +34,33 @@ class _AppSettings(BaseSettings):
     EXTRACTION_LLM_API_BASE: str = ""
     EXTRACTION_LLM_MODEL_NAME: str = ""
 
+    # 消歧精排专用模型（可选，留空则复用 LLM_* 配置）
+    RERANK_LLM_API_KEY: str = ""
+    RERANK_LLM_API_BASE: str = ""
+    RERANK_LLM_MODEL_NAME: str = ""
+
+    # ── Embedding（DashScope text-embedding-v3，消歧向量检索用）──
+    EMBEDDING_API_KEY: str = ""          # 留空则复用 LLM_API_KEY
+    EMBEDDING_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    EMBEDDING_MODEL_NAME: str = "text-embedding-v3"
+    EMBEDDING_DIMENSIONS: int = 1024     # text-embedding-v3 输出维度
+
+    @property
+    def EMBEDDING_KEY(self) -> str:
+        return self.EMBEDDING_API_KEY or self.LLM_API_KEY
+
+    @property
+    def RERANK_API_KEY(self) -> str:
+        return self.RERANK_LLM_API_KEY or self.LLM_API_KEY
+
+    @property
+    def RERANK_API_BASE(self) -> str:
+        return self.RERANK_LLM_API_BASE or self.LLM_API_BASE
+
+    @property
+    def RERANK_MODEL_NAME(self) -> str:
+        return self.RERANK_LLM_MODEL_NAME or self.LLM_MODEL_NAME
+
     # 兼容旧变量名（已有代码用 QWEN_* 的不需要改）
     @property
     def QWEN_API_KEY(self) -> str:
