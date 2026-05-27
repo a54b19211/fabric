@@ -13,18 +13,6 @@ from prefect import task
 from config.settings import APP
 
 
-def _count_filled_fields(data: dict) -> float:
-    """计算顶层解析结果中关键字段的填充率。"""
-    if not data:
-        return 0.0
-    # 从顶层字段取值，兼容特解（css_extract）和通解（trafilatura+qwen）两种路径
-    key_fields = ["title", "publish_date", "summary"]
-    # 顶层有 title/publish_date，structured_data 里有 category/summary/drug_name
-    structured = data.get("structured_data", {}) or {}
-    merged = {**structured, "title": data.get("title", ""), "publish_date": data.get("publish_date", "")}
-    filled = sum(1 for k in key_fields if merged.get(k))
-    return filled / len(key_fields)
-
 
 @task(name="check_quality")
 def check_quality(parsed_result: dict) -> dict:
@@ -33,7 +21,6 @@ def check_quality(parsed_result: dict) -> dict:
 
     检查项:
     1. Markdown 文本长度 ≥ MIN_MARKDOWN_LENGTH
-    2. 结构化字段填充率 ≥ MIN_JSON_FILLED_RATIO
 
     参数:
         parsed_result: router.route_webpage() 或 route_pdf() 的返回值
@@ -55,16 +42,6 @@ def check_quality(parsed_result: dict) -> dict:
             f"Markdown 过短({len(markdown)}字符 < {APP.MIN_MARKDOWN_LENGTH})"
         )
 
-    # ---- 检查 2: 结构化字段填充率 ----
-    fill_ratio = _count_filled_fields(parsed_result)
-    # PDF 解析时 Qwen 可能未配置，structured_data 为空属正常情况，只要 markdown 有内容即可
-    parse_method = parsed_result.get("parse_method", "")
-    is_pdf_parse = "mineru" in parse_method or "win32com" in parse_method
-    effective_threshold = 0.0 if is_pdf_parse else APP.MIN_JSON_FILLED_RATIO
-    if fill_ratio < effective_threshold:
-        issues.append(
-            f"结构化字段填充率过低({fill_ratio:.0%} < {APP.MIN_JSON_FILLED_RATIO:.0%})"
-        )
 
     passed = len(issues) == 0
     parsed_result["quality_passed"] = passed

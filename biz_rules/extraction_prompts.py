@@ -410,6 +410,7 @@ def get_general_extraction_prompt(text: str) -> str:
 _PROMPT_MAP: dict[str, callable] = {
     "nmpa":                     get_nmpa_extraction_prompt,
     "cde":                      get_nmpa_extraction_prompt,
+    "cde_zdyz":                 get_nmpa_extraction_prompt,
     "fda_press":                get_nmpa_extraction_prompt,
     "fda_drug_safety":          get_nmpa_extraction_prompt,
     "fda_drug_recalls":         get_nmpa_extraction_prompt,

@@ -19,6 +19,7 @@ from config.crawler_settings import SITE_PROFILES
 # ── doc_type 映射 ──────────────────────────────────────────────────────────
 _DOC_TYPE_MAP = {
     "cde":                   "regulatory_notice",
+    "cde_zdyz":              "guideline",
     "nmpa":                  "regulatory_notice",
     "fda_press":             "regulatory_notice",
     "fda_drug_safety":       "regulatory_notice",
@@ -39,7 +40,7 @@ _DOC_TYPE_MAP = {
 
 # ── 语言推断（按站点默认值，正文检测作为兜底）─────────────────────────────
 _LANG_MAP = {
-    "cde": "zh", "nmpa": "zh", "chictr": "zh",
+    "cde": "zh", "cde_zdyz": "zh", "nmpa": "zh", "chictr": "zh",
     "phirda_rd": "zh", "phirda_policy": "zh",
     "phirda_healthcare_reform": "zh", "phirda_industry": "zh",
     "hkex": "zh",

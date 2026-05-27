@@ -12,6 +12,7 @@ Word 文档解析器（.doc / .docx → Markdown）
 
 import platform
 import subprocess
+import time
 import uuid as _uuid
 from pathlib import Path
 from datetime import datetime, timezone
@@ -139,37 +140,55 @@ def _doc_to_pdf_win32com(file_path: str) -> str:
     Windows: 用 win32com 将 .doc/.docx 转为 PDF，返回 PDF 路径。
     PDF 保存在同目录，文件名与原文件相同（扩展名改为 .pdf）。
     """
+    import pythoncom
     import win32com.client
 
     src = Path(file_path).resolve()
     pdf_path = src.with_suffix(".pdf")
 
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False
-    doc = None
-    try:
-        doc = word.Documents.Open(str(src))
-        # FileFormat=17 = wdFormatPDF
-        # 优先用 SaveAs2（Word 2013+），降级到 SaveAs（旧版 Word）
-        # 两者都用关键字参数，避免位置参数顺序差异导致的 COM 错误
+    last_error = None
+    for attempt in range(3):
+        pythoncom.CoInitialize()
+        word = None
         try:
-            doc.SaveAs2(FileName=str(pdf_path), FileFormat=17)
-        except (AttributeError, Exception):
-            doc.SaveAs(FileName=str(pdf_path), FileFormat=17)
-        doc.Close(False)
-        doc = None
-    except Exception as e:
-        if doc is not None:
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            doc = None
             try:
+                doc = word.Documents.Open(str(src))
+                try:
+                    doc.SaveAs2(FileName=str(pdf_path), FileFormat=17)
+                except (AttributeError, Exception):
+                    doc.SaveAs(FileName=str(pdf_path), FileFormat=17)
                 doc.Close(False)
+                doc = None
+            except Exception as e:
+                if doc is not None:
+                    try:
+                        doc.Close(False)
+                    except Exception:
+                        pass
+                raise RuntimeError(f"win32com 转 PDF 失败: {e}") from e
+            finally:
+                if word is not None:
+                    try:
+                        word.Quit()
+                    except Exception:
+                        pass
+                word = None
+            break  # success
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[DOCX] win32com 第 {attempt + 1}/3 次尝试失败: {e}")
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+        finally:
+            try:
+                pythoncom.CoUninitialize()
             except Exception:
                 pass
-        raise RuntimeError(f"win32com 转 PDF 失败: {e}") from e
-    finally:
-        try:
-            word.Quit()
-        except Exception:
-            pass
+    else:
+        raise RuntimeError(f"win32com 转 PDF 失败（重试 3 次后）: {last_error}") from last_error
 
     if not pdf_path.exists():
         raise RuntimeError(f"win32com 转换后 PDF 文件未生成: {pdf_path}")

@@ -7,14 +7,15 @@ CONFIG = {
     "name": "国家药品审评中心",
     "url_pattern": "cde.org.cn",
     "start_urls": [
-        "https://www.cde.org.cn/main/news/listpage/545cf855a50574699b46b26bcb165f32",
+        "https://www.cde.org.cn/main/news/listpage/545cf855a50574699b46b26bcb165f32",     # 新闻中心
+        "https://www.cde.org.cn/main/policy/listpage/9f9c74c73e0f8f56a8bfbc646055026d",   # 政策法规
     ],
     "request_delay_seconds": 2.0,
-    "max_pages": 365,
+    "max_pages": 200,
 
     # ── 列表页解析 ──
     "wait_selector": "div.news_item",
-    "list_item_selector": "div.news_item a[href*='/main/news/viewInfoCommon/']",
+    "list_item_selector": "div.news_item a[href*='viewInfoCommon']",
 
     # ── 翻页配置 ──
     "pagination": {
@@ -23,6 +24,7 @@ CONFIG = {
     },
 
     # ── 详情页解析 ──
+    "merge_attachments": True,
     "detail_extractor": extract_cde_detail,
     "detail_wait_selector": "div.news_detail_box",
 }

@@ -176,19 +176,27 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_m
                 stats["total"] += 1
 
     try:
-        driver = make_driver(site_key, profile, start_url)
-        if isinstance(driver, JsClickDriver):
-            for page_urls in driver._playwright_crawl():
-                _process_urls(page_urls)
-                if stop_flag["stop"]:
-                    logger.info(f"[增量] 站点 {site_key} 翻页已停止")
-                    break
+        # ── 表格直提模式：直接从列表页提取表格内容，不经过详情页 ──
+        if profile.get("source_type") == "table_page":
+            driver = make_driver(site_key, profile, start_url)
+            for page_batch in driver.iter_table_data():
+                for parsed in page_batch:
+                    stats["total"] += 1
+                    _process_single_result(parsed, stats)
         else:
-            for detail_url in driver.iter_detail_urls():
-                _process_urls([detail_url])
-                if stop_flag["stop"]:
-                    logger.info(f"[增量] 站点 {site_key} 翻页已停止")
-                    break
+            driver = make_driver(site_key, profile, start_url)
+            if isinstance(driver, JsClickDriver):
+                for page_urls in driver._playwright_crawl():
+                    _process_urls(page_urls)
+                    if stop_flag["stop"]:
+                        logger.info(f"[增量] 站点 {site_key} 翻页已停止")
+                        break
+            else:
+                for detail_url in driver.iter_detail_urls():
+                    _process_urls([detail_url])
+                    if stop_flag["stop"]:
+                        logger.info(f"[增量] 站点 {site_key} 翻页已停止")
+                        break
 
         # ── 爬取日志：任务成功 ──
         if log_id:

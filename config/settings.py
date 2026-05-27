@@ -116,7 +116,7 @@ class _AppSettings(BaseSettings):
 
     # ======================== 质量门控阈值 ========================
     MIN_MARKDOWN_LENGTH: int = 100          # Markdown 字符数低于此值判定为解析失败
-    MIN_JSON_FILLED_RATIO: float = 0.4      # JSON 关键字段填充率低于此值进隔离区
+
 
     # ======================== 并发与重试 ========================
     MAX_CONCURRENCY: int = 3                # Prefect 并发任务数，防封 IP

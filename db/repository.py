@@ -27,7 +27,7 @@ _SOURCE_PRIORITY: dict[str, int] = {
     "drugbank": 10,
     "chictr": 8, "clinicaltrials": 8,
     "hkex": 6,
-    "cde": 5,
+    "cde": 5, "cde_zdyz": 5,
     "pubmed": 4,
     "fiercepharma": 3, "phirda_policy": 3, "phirda_industry": 3,
     "phirda_rd": 3, "phirda_healthcare_reform": 3, "roche": 3,

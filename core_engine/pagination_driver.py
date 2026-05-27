@@ -9,6 +9,7 @@
 新增翻页方式：继承 BasePaginationDriver，在 make_driver() 里注册即可。
 """
 
+import json
 import time
 import concurrent.futures
 from abc import ABC, abstractmethod
@@ -17,7 +18,8 @@ from urllib.parse import urlparse, urljoin
 from loguru import logger
 
 from config.crawler_settings import SITE_PROFILES, DEFAULT_HEADERS
-from core_engine.scrapling_client import fetch_page
+from core_engine.scrapling_client import fetch_page, make_uuid
+from core_engine.excel_parser import _rows_to_markdown
 
 
 # ===================================================================
@@ -267,6 +269,143 @@ class JsClickDriver(BasePaginationDriver):
 
             browser.close()
         return batches
+
+    # ── 表格直提模式 ────────────────────────────────────────────────
+
+    def iter_table_data(self):
+        """在独立线程中运行 Playwright 表格提取，返回按页分组的 parsed dict 批次。"""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            batches = executor.submit(self._playwright_crawl_tables).result()
+        for page_parsed_list in batches:
+            yield page_parsed_list
+
+    def _playwright_crawl_tables(self) -> list[list[dict]]:
+        """在独立线程里运行 Playwright，提取表格数据并构建 parsed dict。"""
+        from playwright.sync_api import sync_playwright
+
+        pagination = self.site_cfg.get("pagination", {})
+        next_btn_selector = pagination.get("next_btn_selector", "")
+        table_container_selector = self.site_cfg.get("table_container_selector", "")
+        ua = DEFAULT_HEADERS["User-Agent"]
+        batches: list[list[dict]] = []
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            ctx = browser.new_context(user_agent=ua, locale="zh-CN")
+            pw_page = ctx.new_page()
+            pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
+            if self.wait_sel:
+                pw_page.wait_for_selector(self.wait_sel, timeout=30000)
+
+            page_count = 0
+            while page_count < self.max_pages:
+                logger.info(f"[表格页 {page_count + 1}] 当前URL: {pw_page.url}")
+
+                page_title = pw_page.title() or ""
+                active_tab = pw_page.query_selector("li.is_active")
+                tab_title = active_tab.inner_text().strip() if active_tab else ""
+
+                # 遍历页面上所有 table，取有数据的（排除 detail_table 等非数据表）
+                all_tables = pw_page.query_selector_all("table")
+                page_parsed = []
+
+                for table_el in all_tables:
+                    # 跳过明确不是数据表的 table
+                    cls = (table_el.get_attribute("class") or "").lower()
+                    if "detail_table" in cls:
+                        continue
+
+                    rows_data = self._extract_table_rows(table_el)
+                    if not rows_data or len(rows_data) < 2:
+                        continue
+
+                    md_table = _rows_to_markdown(rows_data)
+                    if not md_table:
+                        continue
+
+                    doc_title = tab_title or page_title or self.profile.get("name", "")
+                    if page_count > 0:
+                        doc_title = f"{doc_title} - 第{page_count + 1}页"
+
+                    parsed = {
+                        "uuid": make_uuid(f"{self.start_url}#page{page_count + 1}"),
+                        "title": doc_title,
+                        "publish_date": "",
+                        "markdown": f"# {doc_title}\n\n{md_table}",
+                        "structured_data": {
+                            "title": doc_title,
+                            "publish_date": "",
+                            "category": "",
+                            "summary": "",
+                        },
+                        "parse_method": "table_extract",
+                        "attachment_links": [],
+                        "source_url": self.start_url,
+                        "source_site": self.site_key,
+                    }
+                    page_parsed.append(parsed)
+
+                if page_parsed:
+                    batches.append(page_parsed)
+                    logger.info(f"  提取到 {len(page_parsed)} 张表格")
+                else:
+                    logger.warning("  未找到有数据的表格")
+                    break
+
+                next_btn = pw_page.query_selector(next_btn_selector)
+                if not next_btn:
+                    logger.info("没有下一页，翻页结束")
+                    break
+
+                # 翻页等待：记录第一条数据行文本，点击后等待变化
+                first_row = pw_page.query_selector("table:not(.detail_table) tbody tr:first-child")
+                old_text = first_row.inner_text() if first_row else ""
+                next_btn.click()
+
+                if old_text:
+                    try:
+                        safe_old = json.dumps(old_text)
+                        pw_page.wait_for_function(
+                            f"""() => {{
+                                const rows = document.querySelectorAll('table:not(.detail_table) tbody tr');
+                                return rows.length === 0 || rows[0].innerText !== {safe_old};
+                            }}""",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        pw_page.wait_for_timeout(5000)
+                else:
+                    pw_page.wait_for_timeout(3000)
+
+                page_count += 1
+                time.sleep(self.delay)
+
+            browser.close()
+        return batches
+
+    @staticmethod
+    def _extract_table_rows(table_el) -> list[list[str]]:
+        """从 HTML table 元素提取表头和数据行为 list[list[str]]。"""
+        rows = []
+
+        thead = table_el.query_selector("thead")
+        if thead:
+            for tr in thead.query_selector_all("tr"):
+                cells = [td.inner_text().strip() for td in tr.query_selector_all("td, th")]
+                if cells:
+                    rows.append(cells)
+
+        tbody = table_el.query_selector("tbody")
+        if tbody:
+            for tr in tbody.query_selector_all("tr"):
+                cells = [td.inner_text().strip() for td in tr.query_selector_all("td")]
+                if cells and any(c for c in cells):
+                    rows.append(cells)
+
+        return rows
 
 
 # ===================================================================
