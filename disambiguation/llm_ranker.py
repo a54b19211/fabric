@@ -1,11 +1,10 @@
 """
-LLM 精排（Step 5）——仅用于模糊场景（ambiguous / 低置信候选）。
-LLM 结果只给审核建议，绝不产生 auto_matched。
+交叉编码器精排（Step 5）——用于模糊场景（向量召回低置信 / 多候选接近）。
+通过 BGE-Reranker 对每个候选做 query-candidate 打分，不依赖 LLM 聊天。
 """
 
-import json
+import requests
 from loguru import logger
-from openai import OpenAI
 
 from config.settings import APP
 from disambiguation.models import (
@@ -13,27 +12,20 @@ from disambiguation.models import (
     STATUS_CANDIDATE_MATCHED, STATUS_NEW_ENTITY, STATUS_AMBIGUOUS,
 )
 
-
-RANKING_PROMPT = """你是医药知识图谱实体消歧专家。
-判断一个从文档中抽取的实体，是否与候选列表中的某个实体是同一个真实世界实体。
-
-原则：
-1. 仅基于提供的字段信息判断，不要引入外部知识。
-2. 如果证据不足，选择 "unsure"。
-3. 同一实体的不同名称（全称/简称/英文名/别名）应判为 same_entity。
-4. 语义相似但不是同一实体（如 PD-1 vs PD-L1）应判为 different_entity。
-
-输出 JSON：
-{
-  "decision": "same_entity | different_entity | unsure",
-  "matched_dict_id": 123,
-  "confidence": 0.85,
-  "reason": "简短中文理由，不超过50字"
-}
-"""
+SCORE_HIGH = 0.7       # 高于此阈值 → candidate_matched
+SCORE_MID = 0.5        # 高于此阈值 → ambiguous（不确定，需人工审核）
+SCORE_GAP = 0.15       # top1 - top2 需大于此差值才直接命中
 
 
-def rank_with_llm(
+def _build_rerank_url() -> str:
+    base = APP.RERANK_API_BASE.rstrip("/")
+    # 去掉 /v1 后缀（TEI rerank 端点直接在根路径）
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base + "/rerank"
+
+
+def rank_with_reranker(
     entity_name: str,
     entity_type: str,
     entity_data: dict | None,
@@ -41,92 +33,98 @@ def rank_with_llm(
     candidates: list[CandidateEntity],
 ) -> DisambiguationResult:
     """
-    Step 5: LLM 精排候选实体。仅用于模糊场景，LLM 绝不产生 auto_matched。
+    Step 5: 交叉编码器精排。
+
+    用 BGE-Reranker 对 (query=实体名, text=候选名) 逐对打分，
+    高分命中 → candidate_matched，中分 → ambiguous，低分 → new_entity。
     """
     if not candidates:
         return DisambiguationResult(
             status=STATUS_NEW_ENTITY,
             confidence=0.0,
-            reason="LLM: no candidates to rank",
-            match_step="step5_llm",
+            reason="Reranker: no candidates to rank",
+            match_step="step5_reranker",
         )
 
-    extracted_info = {
-        "entity_type": entity_type,
-        "name": entity_name,
-        "entity_data": entity_data or {},
-        "source_text": source_text[:300],
-    }
-    candidates_info = []
-    for c in candidates[:5]:
-        candidates_info.append({
-            "dict_id": c.dict_id,
-            "name": c.name,
-            "aliases": c.aliases[:10],
-            "canonical_data_snippet": {
-                k: v for k, v in c.canonical_data.items()
-                if k in ("name", "name_en", "cas_number", "stock_code",
-                         "gene_symbol", "trial_id", "approval_number",
-                         "doc_number", "entity_type")
-            },
-        })
+    # 构造 query：优先带上 source_text 上下文
+    query_parts = [f"[{entity_type}] {entity_name}"]
+    if source_text:
+        query_parts.append(source_text[:200])
+    query = " ".join(query_parts)
 
-    prompt = json.dumps({
-        "extracted_entity": extracted_info,
-        "candidates": candidates_info,
-    }, ensure_ascii=False, indent=2)
+    texts = [c.name for c in candidates]
 
     try:
-        client = OpenAI(api_key=APP.RERANK_API_KEY, base_url=APP.RERANK_API_BASE)
-        response = client.chat.completions.create(
-            model=APP.RERANK_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": RANKING_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
+        resp = requests.post(
+            _build_rerank_url(),
+            json={"query": query, "texts": texts},
+            timeout=30,
         )
-        result = json.loads(response.choices[0].message.content)
-
-        decision = result.get("decision", "unsure")
-        matched_id = result.get("matched_dict_id")
-        confidence = float(result.get("confidence", 0.5))
-        reason = result.get("reason", "")
-
-        # LLM 绝不产生 auto_matched — 最高 candidate_matched
-        if decision == "same_entity" and matched_id and confidence >= 0.9:
-            return DisambiguationResult(
-                status=STATUS_CANDIDATE_MATCHED,
-                dict_id=matched_id,
-                confidence=confidence,
-                reason=f"LLM: {reason}",
-                candidates=candidates,
-                match_step="step5_llm",
-            )
-        elif decision == "unsure":
-            return DisambiguationResult(
-                status=STATUS_AMBIGUOUS,
-                confidence=confidence,
-                reason=f"LLM unsure: {reason}",
-                candidates=candidates,
-                match_step="step5_llm",
-            )
-        else:
-            return DisambiguationResult(
-                status=STATUS_NEW_ENTITY,
-                confidence=0.0,
-                reason=f"LLM: {reason}",
-                candidates=candidates,
-                match_step="step5_llm",
-            )
-
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
     except Exception as e:
-        logger.error(f"[LLM Ranker] 调用失败: {e}")
+        logger.error(f"[Reranker] 调用失败: {e}")
         return DisambiguationResult(
             status=STATUS_AMBIGUOUS,
             confidence=0.0,
-            reason=f"LLM call failed: {e}",
+            reason=f"Reranker call failed: {e}",
             candidates=candidates,
-            match_step="step5_llm_error",
+            match_step="step5_reranker_error",
         )
+
+    if not results:
+        return DisambiguationResult(
+            status=STATUS_NEW_ENTITY,
+            confidence=0.0,
+            reason="Reranker: empty results",
+            match_step="step5_reranker",
+        )
+
+    # 按 index 给 candidates 附加分数
+    for r in results:
+        idx = r["index"]
+        if idx < len(candidates):
+            candidates[idx].similarity_score = r["relevance_score"]
+
+    # 按分数降序排
+    candidates.sort(key=lambda c: c.similarity_score, reverse=True)
+
+    top1_score = candidates[0].similarity_score
+    top2_score = candidates[1].similarity_score if len(candidates) > 1 else 0.0
+    gap = top1_score - top2_score
+
+    logger.info(
+        f"[Reranker] '{entity_name}' top1={candidates[0].name} score={top1_score:.3f} "
+        f"top2={candidates[1].name if len(candidates)>1 else 'N/A'} score={top2_score:.3f} gap={gap:.3f}"
+    )
+
+    if top1_score >= SCORE_HIGH and gap >= SCORE_GAP:
+        return DisambiguationResult(
+            status=STATUS_CANDIDATE_MATCHED,
+            dict_id=candidates[0].dict_id,
+            confidence=top1_score,
+            matched_name=candidates[0].name,
+            reason=f"Reranker: top1={top1_score:.3f} top2={top2_score:.3f}",
+            candidates=candidates,
+            match_step="step5_reranker",
+        )
+    elif top1_score >= SCORE_MID:
+        return DisambiguationResult(
+            status=STATUS_AMBIGUOUS,
+            confidence=top1_score,
+            reason=f"Reranker: top1={top1_score:.3f} below high threshold",
+            candidates=candidates,
+            match_step="step5_reranker",
+        )
+    else:
+        return DisambiguationResult(
+            status=STATUS_NEW_ENTITY,
+            confidence=0.0,
+            reason=f"Reranker: top1={top1_score:.3f} below mid threshold",
+            candidates=candidates,
+            match_step="step5_reranker",
+        )
+
+
+# 保持原函数名兼容 engine.py 的调用
+rank_with_llm = rank_with_reranker
