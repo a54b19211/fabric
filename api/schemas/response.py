@@ -214,6 +214,13 @@ class RecrawlResponse(BaseModel):
     message: str = ""
 
 
+class BatchRecrawlResponse(BaseModel):
+    success: bool
+    triggered: int
+    skipped: int = 0
+    message: str = ""
+
+
 # ── Worker ─────────────────────────────────────────────────────────────
 
 class WorkerItem(BaseModel):

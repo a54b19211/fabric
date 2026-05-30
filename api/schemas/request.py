@@ -63,6 +63,11 @@ class RecrawlRequest(BaseModel):
     pass
 
 
+class BatchRecrawlRequest(BaseModel):
+    """批量重爬请求体"""
+    uuids: list[str] = Field(..., min_length=1, description="需要重爬的文档 UUID 列表")
+
+
 class ResolveMergeRequest(BaseModel):
     reviewer: str
     resolution: str  # accept_new / keep_existing / custom

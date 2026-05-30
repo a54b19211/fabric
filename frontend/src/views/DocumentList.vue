@@ -3,7 +3,7 @@
     <!-- 抽取状态统计卡片 -->
     <el-row :gutter="16" class="stats-row">
       <el-col :span="6" v-for="s in statCards" :key="s.label">
-        <el-card shadow="never" class="stat-card">
+        <el-card shadow="never" class="stat-card clickable-card" @click="filterByCard(s.filterValue)">
           <div class="stat-num" :style="{ color: s.color }">{{ s.value }}</div>
           <div class="stat-label">{{ s.label }}</div>
         </el-card>
@@ -45,10 +45,20 @@
           />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="loadData">查询</el-button>
-          <el-button @click="resetFilters">重置</el-button>
-          <el-button type="warning" @click="batchTrigger" :loading="triggering">
-            批量触发抽取
+          <el-button type="primary" @click="loadData">
+            <el-icon><Search /></el-icon>查询
+          </el-button>
+          <el-button @click="resetFilters">
+            <el-icon><Refresh /></el-icon>重置
+          </el-button>
+          <el-button type="warning" @click="batchTrigger" :loading="triggering" :disabled="pendingSelectedCount === 0">
+            批量触发抽取 ({{ pendingSelectedCount }})
+          </el-button>
+          <el-button type="warning" @click="batchRecrawl" :loading="batchRecrawling" :disabled="selectedUuids.length === 0">
+            批量重爬 ({{ selectedUuids.length }})
+          </el-button>
+          <el-button type="success" @click="batchReview" :disabled="doneSelectedCount === 0">
+            批量审核 ({{ doneSelectedCount }})
           </el-button>
         </el-form-item>
       </el-form>
@@ -56,10 +66,11 @@
 
     <!-- 数据表格 -->
     <el-card shadow="never">
-      <el-table :data="rows" v-loading="loading" stripe>
+      <el-table ref="tableRef" :data="rows" v-loading="loading" stripe @selection-change="handleSelectionChange" row-key="uuid">
+        <el-table-column type="selection" width="45" reserve-selection />
         <el-table-column prop="title" label="标题" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">
-            <router-link :to="`/documents/${row.uuid}`" class="title-link">
+            <router-link :to="{ path: `/documents/${row.uuid}`, query: $route.query }" class="title-link">
               {{ row.title || '（无标题）' }}
             </router-link>
           </template>
@@ -90,7 +101,7 @@
         <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <div class="action-btns">
-              <el-button size="small" @click="$router.push(`/documents/${row.uuid}`)">查看</el-button>
+              <el-button size="small" @click="$router.push({ path: `/documents/${row.uuid}`, query: $route.query })">查看</el-button>
               <el-button
                 v-if="row.extraction_status === 'pending'"
                 size="small"
@@ -101,7 +112,7 @@
                 v-if="row.extraction_status === 'done'"
                 size="small"
                 type="success"
-                @click="$router.push(`/review/${row.uuid}`)"
+                @click="$router.push({ path: `/review/${row.uuid}`, query: $route.query })"
               >审核</el-button>
               <el-button
                 size="small"
@@ -129,9 +140,14 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getDocuments, recrawlDocument, type DocumentItem } from '@/api/documents'
+import { useRouter, useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search, Refresh } from '@element-plus/icons-vue'
+import { getDocuments, recrawlDocument, batchRecrawlDocuments, type DocumentItem } from '@/api/documents'
 import { triggerExtraction, getExtractionStats, type ExtractionStats } from '@/api/extraction'
+
+const router = useRouter()
+const route = useRoute()
 
 const SITES = ['nmpa','cde','fda_press','fda_drug_safety','fda_drug_recalls',
   'fda_api_drug_label','fda_api_enforcement','chictr','clinicaltrials',
@@ -140,28 +156,70 @@ const SITES = ['nmpa','cde','fda_press','fda_drug_safety','fda_drug_recalls',
 
 const rows = ref<DocumentItem[]>([])
 const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
+const page = ref(Number(route.query.page) || 1)
+const pageSize = ref(Number(route.query.pageSize) || 20)
 const loading = ref(false)
 const triggering = ref(false)
 const recrawlingUuids = ref<Set<string>>(new Set())
-const dateRange = ref<[string, string] | null>(null)
+const dateRange = ref<[string, string] | null>(
+  route.query.date_from && route.query.date_to
+    ? [route.query.date_from as string, route.query.date_to as string]
+    : null
+)
 const stats = ref<ExtractionStats>({ pending: 0, processing: 0, done: 0, failed: 0 })
 
+const selectedUuids = ref<string[]>([])
+const batchRecrawling = ref(false)
+const tableRef = ref<any>(null)
+
 const filters = ref({
-  source_site: '',
-  doc_status: '',
-  extraction_status: '',
+  source_site: (route.query.source_site as string) || '',
+  doc_status: (route.query.doc_status as string) || '',
+  extraction_status: (route.query.extraction_status as string) || '',
+})
+
+const pendingSelectedCount = computed(() =>
+  rows.value.filter(r => selectedUuids.value.includes(r.uuid) && r.extraction_status === 'pending').length
+)
+
+const doneSelectedCount = computed(() => {
+  const doneUuids = new Set(
+    rows.value.filter(r => r.extraction_status === 'done').map(r => r.uuid)
+  )
+  return selectedUuids.value.filter(u => doneUuids.has(u)).length
 })
 
 const statCards = computed(() => [
-  { label: '待抽取', value: stats.value.pending, color: '#6b7fa3' },
-  { label: '抽取中', value: stats.value.processing, color: '#2b7eb0' },
-  { label: '已完成', value: stats.value.done, color: '#0e9e8e' },
-  { label: '失败', value: stats.value.failed, color: '#c0392b' },
+  { label: '待抽取', value: stats.value.pending, color: '#4bc5a8', filterValue: 'pending' },
+  { label: '抽取中', value: stats.value.processing, color: '#f08a3f', filterValue: 'processing' },
+  { label: '已完成', value: stats.value.done, color: '#28aa86', filterValue: 'done' },
+  { label: '失败', value: stats.value.failed, color: '#ff5a3d', filterValue: 'failed' },
 ])
 
-async function loadData() {
+function syncToUrl() {
+  const query: Record<string, string> = {}
+  if (filters.value.source_site) query.source_site = filters.value.source_site
+  if (filters.value.doc_status) query.doc_status = filters.value.doc_status
+  if (filters.value.extraction_status) query.extraction_status = filters.value.extraction_status
+  if (dateRange.value?.[0]) query.date_from = dateRange.value[0]
+  if (dateRange.value?.[1]) query.date_to = dateRange.value[1]
+  if (page.value > 1) query.page = String(page.value)
+  if (pageSize.value !== 20) query.pageSize = String(pageSize.value)
+  router.replace({ query })
+}
+
+function filterByCard(status: string) {
+  filters.value.extraction_status = status
+  page.value = 1
+  syncToUrl()
+  loadData()
+}
+
+let isRefreshing = false  // 标记是否为轮询刷新（非用户操作）
+
+async function loadData(refresh = false) {
+  if (!refresh) syncToUrl()
+  if (refresh) isRefreshing = true
   loading.value = true
   try {
     const res = await getDocuments({
@@ -175,6 +233,7 @@ async function loadData() {
     total.value = res.total
   } finally {
     loading.value = false
+    if (refresh) isRefreshing = false
   }
 }
 
@@ -189,11 +248,27 @@ async function triggerOne(uuid: string) {
   loadStats()
 }
 
+function clearSelection() {
+  tableRef.value?.clearSelection()
+  selectedUuids.value = []
+}
+
+function handleSelectionChange(selection: DocumentItem[]) {
+  // 轮询刷新时不更新选中状态，避免 reserve-selection 的时序问题
+  if (isRefreshing) return
+  selectedUuids.value = selection.map(row => row.uuid)
+}
+
 async function batchTrigger() {
+  if (selectedUuids.value.length === 0) {
+    ElMessage.warning('请先选择需要触发抽取的文档')
+    return
+  }
   triggering.value = true
   try {
-    const res = await triggerExtraction([], 100)
+    const res = await triggerExtraction(selectedUuids.value)
     ElMessage.success(res.message)
+    clearSelection()
     loadData()
     loadStats()
   } finally {
@@ -201,7 +276,49 @@ async function batchTrigger() {
   }
 }
 
+async function batchRecrawl() {
+  if (selectedUuids.value.length === 0) {
+    ElMessage.warning('请先选择需要重爬的文档')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认批量重爬选中的 ${selectedUuids.value.length} 个文档？`,
+      '确认批量重爬',
+      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return // 用户点击取消
+  }
+  batchRecrawling.value = true
+  try {
+    const res = await batchRecrawlDocuments(selectedUuids.value)
+    ElMessage.success(res.message)
+    clearSelection()
+    setTimeout(() => { loadData(); loadStats() }, 1000)
+  } finally {
+    batchRecrawling.value = false
+  }
+}
+
+function batchReview() {
+  if (selectedUuids.value.length === 0) {
+    ElMessage.warning('请先选择需要审核的文档')
+    return
+  }
+  router.push({ path: '/batch-review', query: { uuids: selectedUuids.value.join(',') } })
+}
+
 async function recrawlOne(uuid: string) {
+  try {
+    await ElMessageBox.confirm(
+      '确认重新爬取该文档？',
+      '确认重爬',
+      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return // 用户点击取消
+  }
   recrawlingUuids.value = new Set([...recrawlingUuids.value, uuid])
   try {
     const res = await recrawlDocument(uuid)
@@ -217,6 +334,7 @@ function resetFilters() {
   filters.value = { source_site: '', doc_status: '', extraction_status: '' }
   dateRange.value = null
   page.value = 1
+  syncToUrl()
   loadData()
 }
 
@@ -230,7 +348,7 @@ const extractionStatusType = (s: string) =>
 let timer: ReturnType<typeof setInterval> | null = null
 watch(() => stats.value.processing, (v) => {
   if (v > 0 && !timer) {
-    timer = setInterval(() => { loadData(); loadStats() }, 5000)
+    timer = setInterval(() => { loadData(true); loadStats() }, 5000)
   } else if (v === 0 && timer) {
     clearInterval(timer); timer = null
   }
@@ -242,13 +360,33 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <style scoped>
 .stats-row { margin-bottom: 16px; }
-.stat-card { text-align: center; padding: 8px 0; }
+.stat-card {
+  text-align: center;
+  padding: 8px 0;
+  border-radius: 12px;
+}
+.clickable-card {
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.clickable-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
 .stat-num { font-size: 28px; font-weight: 700; }
 .stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
-.filter-card { margin-bottom: 16px; }
+.filter-card {
+  margin-bottom: 16px;
+  border-radius: 12px;
+}
 .title-link { color: #1d6fa4; text-decoration: none; }
 .title-link:hover { text-decoration: underline; }
 .pagination { margin-top: 16px; justify-content: flex-end; }
+
+/* 表格卡片圆角 */
+:deep(.el-card) {
+  border-radius: 12px;
+}
 
 /* 操作列：强制一行，按钮紧凑排列 */
 .action-btns {

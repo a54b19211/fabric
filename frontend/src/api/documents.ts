@@ -46,3 +46,8 @@ export const recrawlDocument = (uuid: string) =>
   http.post<any, { success: boolean; uuid: string; message: string }>(
     `/documents/${uuid}/recrawl`, {}
   )
+
+export const batchRecrawlDocuments = (uuids: string[]) =>
+  http.post<any, { success: boolean; triggered: number; skipped: number; message: string }>(
+    '/documents/batch-recrawl', { uuids }
+  )
