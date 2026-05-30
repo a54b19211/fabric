@@ -13,6 +13,7 @@ from db.repository import (
     mark_entity_pushed, mark_entity_failed,
     mark_relation_pushed, mark_relation_failed,
 )
+from core_engine.neo4j_client import get_neo4j_client
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation
 
@@ -33,13 +34,12 @@ def sync_entities(body: Neo4jSyncRequest):
     try:
         entities = get_approved_for_neo4j(limit=body.limit)
         pushed, failed = 0, 0
+        client = get_neo4j_client()
 
         for ent in entities:
             try:
-                # TODO: 接入实际 Neo4j 推送逻辑（成员1交付后对接）
-                # neo4j_node_id = neo4j_client.push_entity(ent)
-                # mark_entity_pushed(ent["id"], neo4j_node_id)
-                logger.info(f"[Neo4j] 推送实体（占位）: id={ent['id']}")
+                node_id = client.push_entity(ent)
+                mark_entity_pushed(ent["id"], node_id)
                 pushed += 1
             except Exception as e:
                 mark_entity_failed(ent["id"], str(e))
@@ -69,11 +69,12 @@ def sync_relations(body: Neo4jSyncRequest):
     try:
         relations = get_approved_relations_for_neo4j(limit=body.limit)
         pushed, failed = 0, 0
+        client = get_neo4j_client()
 
         for rel in relations:
             try:
-                # TODO: 接入实际 Neo4j 推送逻辑
-                logger.info(f"[Neo4j] 推送关系（占位）: id={rel['id']}")
+                rel_id, edge = client.push_relation(rel)
+                mark_relation_pushed(rel["id"], edge.split("->")[0], edge.split("->")[1])
                 pushed += 1
             except Exception as e:
                 mark_relation_failed(rel["id"], str(e))
@@ -92,22 +93,25 @@ def sync_relations(body: Neo4jSyncRequest):
 @router.post("/retry", response_model=Neo4jRetryResponse)
 def retry_push(body: Neo4jRetryRequest):
     """重试单条推送失败的实体或关系。"""
-    # 参数校验
     if body.object_type not in ("entity", "relation"):
         raise HTTPException(status_code=400, detail="object_type 必须是 entity 或 relation")
     if body.object_id < 1:
         raise HTTPException(status_code=400, detail="object_id 必须大于 0")
-    
+
+    client = get_neo4j_client()
     try:
         if body.object_type == "entity":
-            # TODO: 接入实际推送逻辑
-            logger.info(f"[Neo4j] 重试实体: id={body.object_id}")
+            client.retry_push_entity(body.object_id)
         elif body.object_type == "relation":
-            logger.info(f"[Neo4j] 重试关系: id={body.object_id}")
-        
-        logger.info(f"[API] Neo4j 重试推送: type={body.object_type}, id={body.object_id}")
+            client.retry_push_relation(body.object_id)
+
+        logger.info(f"[API] Neo4j 重试推送成功: type={body.object_type}, id={body.object_id}")
         return Neo4jRetryResponse(success=True)
-        
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

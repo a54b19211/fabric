@@ -35,3 +35,6 @@ xlrd==2.0.1                  # 读取 .xls 旧版二进制格式（纯 Python，
 # --- 后端 API ---
 fastapi>=0.111.0             # Web 框架
 uvicorn[standard]>=0.29.0    # ASGI 服务器
+
+# --- 图数据库 ---
+neo4j>=5.0                   # Neo4j 图谱投影

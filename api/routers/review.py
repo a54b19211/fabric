@@ -193,10 +193,22 @@ def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
 @router.post("/entities/{entity_id}/approve", response_model=ReviewActionResponse)
 def approve_entity_api(entity_id: int, body: ReviewActionRequest):
     """审核通过单个实体（含 alias 回写 + embedding 生成）。"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
+
     try:
         approve_entity_with_alias_writeback(entity_id, reviewer=body.reviewer, note=body.note or "")
         logger.info(f"[API] 审核实体通过: id={entity_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[API] 审核实体失败: id={entity_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
@@ -205,10 +217,22 @@ def approve_entity_api(entity_id: int, body: ReviewActionRequest):
 @router.post("/entities/{entity_id}/reject", response_model=ReviewActionResponse)
 def reject_entity_api(entity_id: int, body: ReviewActionRequest):
     """审核拒绝单个实体"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
+
     try:
         reject_entity(entity_id, reviewer=body.reviewer, note=body.note or "")
         logger.info(f"[API] 审核实体拒绝: id={entity_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[API] 审核实体失败: id={entity_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
@@ -322,10 +346,22 @@ def batch_reject_relations_api(body: BatchRejectRelationsRequest):
 @router.post("/relations/{relation_id}/approve", response_model=ReviewActionResponse)
 def approve_relation_api(relation_id: int, body: ReviewActionRequest):
     """审核通过单个关系"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(EntityRelation).filter(
+            EntityRelation.id == relation_id,
+            EntityRelation.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="关系不存在")
+
     try:
         approve_relation(relation_id, reviewer=body.reviewer, note=body.note or "")
         logger.info(f"[API] 审核关系通过: id={relation_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[API] 审核关系失败: id={relation_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
@@ -334,10 +370,22 @@ def approve_relation_api(relation_id: int, body: ReviewActionRequest):
 @router.post("/relations/{relation_id}/reject", response_model=ReviewActionResponse)
 def reject_relation_api(relation_id: int, body: ReviewActionRequest):
     """审核拒绝单个关系"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(EntityRelation).filter(
+            EntityRelation.id == relation_id,
+            EntityRelation.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="关系不存在")
+
     try:
         reject_relation(relation_id, reviewer=body.reviewer, note=body.note or "")
         logger.info(f"[API] 审核关系拒绝: id={relation_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[API] 审核关系失败: id={relation_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
