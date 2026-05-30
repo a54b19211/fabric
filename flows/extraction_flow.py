@@ -237,6 +237,11 @@ def extract_single_document(
     """
     logger.info(f"[Extraction] 开始抽取: {doc_uuid} site={source_site}")
 
+    if not raw_content or not raw_content.strip():
+        logger.warning(f"[Extraction] 文档内容为空，跳过: {doc_uuid}")
+        update_extraction_status(doc_uuid, "failed", error="文档raw_content为空，无法抽取")
+        return False
+
     # 1. 智能分块
     chunks = split_document(raw_content)
     if not chunks:

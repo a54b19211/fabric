@@ -62,41 +62,41 @@ const navItems = [
 </script>
 
 <style>
-/* ── 全局主题色覆盖（深蓝 + 青色系） ── */
+/* ── 全局主题色覆盖（绿 + 橙红系） ── */
 :root {
-  --el-color-primary:           #1d6fa4;
-  --el-color-primary-light-3:   #4a9bc7;
-  --el-color-primary-light-5:   #6eb3d8;
-  --el-color-primary-light-7:   #9dcce8;
-  --el-color-primary-light-8:   #b8ddf0;
-  --el-color-primary-light-9:   #d4edf8;
-  --el-color-primary-dark-2:    #165a87;
+  --el-color-primary:           #28aa86;
+  --el-color-primary-light-3:   #4dc7a4;
+  --el-color-primary-light-5:   #78ddb9;
+  --el-color-primary-light-7:   #a6f3d0;
+  --el-color-primary-light-8:   #c5fae3;
+  --el-color-primary-light-9:   #e2fdf2;
+  --el-color-primary-dark-2:    #1e8c6f;
 
-  --el-color-success:           #0e9e8e;
-  --el-color-success-light-3:   #3db8aa;
-  --el-color-success-light-5:   #62ccc0;
-  --el-color-success-light-7:   #93ddd7;
-  --el-color-success-light-8:   #ade8e3;
-  --el-color-success-light-9:   #d0f3f0;
-  --el-color-success-dark-2:    #0b7f71;
+  --el-color-success:           #28aa86;
+  --el-color-success-light-3:   #4dc7a4;
+  --el-color-success-light-5:   #78ddb9;
+  --el-color-success-light-7:   #a6f3d0;
+  --el-color-success-light-8:   #c5fae3;
+  --el-color-success-light-9:   #e2fdf2;
+  --el-color-success-dark-2:    #1e8c6f;
 
-  --el-color-warning:           #2b7eb0;
-  --el-color-warning-light-3:   #5599c4;
-  --el-color-warning-light-5:   #74afd3;
-  --el-color-warning-light-7:   #9dc8e2;
-  --el-color-warning-light-8:   #b5d6eb;
-  --el-color-warning-light-9:   #d5eaf5;
-  --el-color-warning-dark-2:    #22658e;
+  --el-color-warning:           #f08a3f;
+  --el-color-warning-light-3:   #f6a96e;
+  --el-color-warning-light-5:   #fac59c;
+  --el-color-warning-light-7:   #fde1c7;
+  --el-color-warning-light-8:   #fef0dc;
+  --el-color-warning-light-9:   #fff7ed;
+  --el-color-warning-dark-2:    #cc7130;
 
-  --el-color-danger:            #c0392b;
-  --el-color-danger-light-3:    #d4614f;
-  --el-color-danger-light-5:    #e08070;
-  --el-color-danger-light-7:    #eca89f;
-  --el-color-danger-light-8:    #f2c0ba;
-  --el-color-danger-light-9:    #f9ddd9;
-  --el-color-danger-dark-2:     #9a2e22;
+  --el-color-danger:            #ff5a3d;
+  --el-color-danger-light-3:    #ff8064;
+  --el-color-danger-light-5:    #ffaa91;
+  --el-color-danger-light-7:    #ffd1c6;
+  --el-color-danger-light-8:    #ffe7da;
+  --el-color-danger-light-9:    #fff1ee;
+  --el-color-danger-dark-2:     #d3432e;
 
-  --el-color-info:              #4a7fa5;
+  --el-color-info:              #4bc5a8;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -113,7 +113,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .sidebar {
   width: 200px;
   min-width: 200px;
-  background: #1e2235;
+  background: #178582;
   display: flex;
   flex-direction: column;
   transition: width 0.22s ease, min-width 0.22s ease;
@@ -132,22 +132,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   height: 64px;
   display: flex;
   align-items: center;
-  padding: 0 18px;
+  padding: 0 14px 0 20px;
   border-bottom: 1px solid rgba(255,255,255,0.07);
   flex-shrink: 0;
 }
 .logo-text {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   white-space: nowrap;
   overflow: hidden;
 }
 .logo-icon {
-  font-size: 22px;
-  color: #4fc3c3;
+  font-size: 20px;
+  color: #c5f9e7;
   flex-shrink: 0;
   line-height: 1;
+  width: 20px;
+  text-align: center;
 }
 .logo-name {
   color: #fff;
@@ -185,7 +187,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   color: rgba(255,255,255,0.9);
 }
 .nav-item.active {
-  background: #1d6fa4;
+  background: #1a9e93;
   color: #fff;
 }
 
@@ -206,7 +208,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   left: calc(100% + 10px);
   top: 50%;
   transform: translateY(-50%);
-  background: #2c3354;
+  background: #28aa86;
   color: #fff;
   font-size: 13px;
   padding: 6px 12px;
@@ -223,7 +225,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   top: 50%;
   transform: translateY(-50%);
   border: 5px solid transparent;
-  border-right-color: #2c3354;
+  border-right-color: #178582;
 }
 .sidebar.collapsed .nav-item:hover .nav-tooltip {
   display: block;

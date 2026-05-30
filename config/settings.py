@@ -131,8 +131,8 @@ class _AppSettings(BaseSettings):
     DB_NAME: str = ""
     DB_USER: str = ""
     DB_PASSWORD: str = ""
-    # 连接池大小
-    DB_POOL_SIZE: int = 5
+    # 连接池大小（需容纳前端查询 + 抽取 worker 并发）
+    DB_POOL_SIZE: int = 20
 
     @property
     def DB_URL(self) -> str:

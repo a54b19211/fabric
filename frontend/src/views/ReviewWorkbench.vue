@@ -4,29 +4,29 @@
 
     <!-- 顶部操作栏 -->
     <el-card shadow="never" style="margin-bottom:12px">
-      <el-row align="middle" :gutter="12">
-        <el-col :span="16">
-          <el-input v-model="reviewer" placeholder="审核人姓名" style="width:200px" />
-          <el-input v-model="batchNote" placeholder="批量审核备注（可选）" style="width:240px;margin-left:8px" />
-          <el-select v-model="reviewStatusFilter" style="width:140px;margin-left:8px" @change="load">
+      <div class="toolbar">
+        <div class="toolbar-filters">
+          <el-input v-model="reviewer" placeholder="审核人姓名" style="width:160px" />
+          <el-input v-model="batchNote" placeholder="审核备注（可选）" style="width:200px" />
+          <el-select v-model="reviewStatusFilter" style="width:130px" @change="load">
             <el-option label="待审核" value="pending" />
             <el-option label="自动通过" value="auto_approved" />
             <el-option label="已通过" value="approved" />
             <el-option label="已拒绝" value="rejected" />
           </el-select>
-        </el-col>
-        <el-col :span="8" style="text-align:right">
-          <el-button type="success" @click="approveAllCurrentPage">通过本页高置信度（≥0.8）</el-button>
-          <el-button type="danger" @click="rejectAllCurrentPage">拒绝本页全部</el-button>
-          <el-button type="success" @click="approveAllEntities" style="margin-left: 8px">通过所有实体</el-button>
-          <el-button type="danger" @click="rejectAllEntities">拒绝所有实体</el-button>
-        </el-col>
-      </el-row>
+        </div>
+        <div class="toolbar-actions">
+          <el-button size="small" type="success" @click="approveAllCurrentPage">&#x2713; 通过高置信度(≥0.8)</el-button>
+          <el-button size="small" type="danger" @click="rejectAllCurrentPage">&#x2717; 拒绝本页全部</el-button>
+          <el-button size="small" type="success" @click="approveAllEntities">&#x2713; 通过所有实体</el-button>
+          <el-button size="small" type="danger" @click="rejectAllEntities">&#x2717; 拒绝所有实体</el-button>
+        </div>
+      </div>
     </el-card>
 
     <el-row :gutter="16">
-      <!-- 左侧：原文 -->
-      <el-col :span="12">
+      <!-- 左侧：原文（60%） -->
+      <el-col :span="14">
         <el-card shadow="never" class="content-card">
           <template #header>原文全文</template>
           <div
@@ -37,8 +37,8 @@
         </el-card>
       </el-col>
 
-      <!-- 右侧：实体 + 关系 -->
-      <el-col :span="12">
+      <!-- 右侧：实体 + 关系（40%） -->
+      <el-col :span="10">
         <el-card shadow="never" class="content-card">
           <template #header>
             <el-tabs v-model="activeTab">
@@ -46,11 +46,11 @@
               <el-tab-pane :label="`关系（${relations.length}）`" name="relations" />
               <el-tab-pane :label="`合并队列（${mergeQueue.length}）`" name="merges" />
             </el-tabs>
-            <div v-if="activeTab === 'relations'" style="position: absolute; right: 20px; top: 20px;">
-              <el-button size="small" type="success" @click="approveAllRelationsCurrentPage">通过本页高置信度</el-button>
-              <el-button size="small" type="danger" @click="rejectAllRelationsCurrentPage">拒绝本页全部</el-button>
-              <el-button size="small" type="success" @click="approveAllRelations" style="margin-left: 8px">通过所有关系</el-button>
-              <el-button size="small" type="danger" @click="rejectAllRelations">拒绝所有关系</el-button>
+            <div v-if="activeTab === 'relations'" class="relation-header-actions">
+              <el-button size="small" type="success" @click="approveAllRelationsCurrentPage">&#x2713; 通过高置信度</el-button>
+              <el-button size="small" type="danger" @click="rejectAllRelationsCurrentPage">&#x2717; 拒绝本页</el-button>
+              <el-button size="small" type="success" @click="approveAllRelations">&#x2713; 通过所有</el-button>
+              <el-button size="small" type="danger" @click="rejectAllRelations">&#x2717; 拒绝所有</el-button>
             </div>
           </template>
 
@@ -94,8 +94,8 @@
                 </el-collapse-item>
               </el-collapse>
               <div class="card-actions" v-if="ent.review_status === 'pending'">
-                <el-button size="small" type="success" @click="doApproveEntity(ent.id)">✅ 通过</el-button>
-                <el-button size="small" type="danger" @click="doRejectEntity(ent.id)">❌ 拒绝</el-button>
+                <el-button size="small" type="success" @click="doApproveEntity(ent.id)">&#x2713; 通过</el-button>
+                <el-button size="small" type="danger" @click="doRejectEntity(ent.id)">&#x2717; 拒绝</el-button>
               </div>
               <el-tag v-else size="small" :type="ent.review_status === 'approved' ? 'success' : 'danger'">
                 {{ ent.review_status === 'approved' ? '已通过' : '已拒绝' }}
@@ -140,8 +140,8 @@
                 "{{ rel.source_text.slice(0, 80) }}{{ rel.source_text.length > 80 ? '...' : '' }}"
               </div>
               <div class="card-actions" v-if="rel.review_status === 'pending'">
-                <el-button size="small" type="success" @click="doApproveRelation(rel.id)">✅ 通过</el-button>
-                <el-button size="small" type="danger" @click="doRejectRelation(rel.id)">❌ 拒绝</el-button>
+                <el-button size="small" type="success" @click="doApproveRelation(rel.id)">&#x2713; 通过</el-button>
+                <el-button size="small" type="danger" @click="doRejectRelation(rel.id)">&#x2717; 拒绝</el-button>
               </div>
               <el-tag v-else size="small" :type="rel.review_status === 'approved' ? 'success' : 'danger'">
                 {{ rel.review_status === 'approved' ? '已通过' : '已拒绝' }}
@@ -299,20 +299,64 @@ function handleRelationPageSizeChange(size: number) {
   load()
 }
 
+let originalHtml = ''
+
 function highlightText(text: string) {
   if (!text || !contentRef.value) return
-  const el = contentRef.value
-  const html = el.innerHTML
+  // 保存原始 HTML（仅首次）
+  if (!originalHtml) {
+    originalHtml = contentRef.value.innerHTML
+  }
+  // 先恢复原始内容
+  contentRef.value.innerHTML = originalHtml
+
   const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  el.innerHTML = html.replace(
-    new RegExp(escaped, 'g'),
-    `<mark style="background:#ffe58f">${text}</mark>`
+  const walker = document.createTreeWalker(
+    contentRef.value,
+    NodeFilter.SHOW_TEXT,
+    null,
   )
+  const textNodes: Text[] = []
+  let node: Text | null
+  while ((node = walker.nextNode() as Text | null)) {
+    textNodes.push(node)
+  }
+
+  for (const tNode of textNodes) {
+    const idx = tNode.data.indexOf(text)
+    if (idx === -1) continue
+    // 分割：前缀 + 匹配 + 后缀
+    const before = tNode.data.slice(0, idx)
+    const match = tNode.data.slice(idx, idx + text.length)
+    const after = tNode.data.slice(idx + text.length)
+
+    const mark = document.createElement('mark')
+    mark.style.background = '#ffe58f'
+    mark.style.padding = '1px 2px'
+    mark.style.borderRadius = '2px'
+    mark.textContent = match
+
+    const parent = tNode.parentNode!
+    if (before) parent.insertBefore(document.createTextNode(before), tNode)
+    parent.insertBefore(mark, tNode)
+    if (after) parent.insertBefore(document.createTextNode(after), tNode)
+    parent.removeChild(tNode)
+
+    // 只替换第一个匹配
+    break
+  }
+
+  // 滚动到高亮位置
+  const firstMark = contentRef.value.querySelector('mark')
+  if (firstMark) {
+    firstMark.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
 }
 
 function clearHighlight() {
-  if (!contentRef.value) return
-  contentRef.value.innerHTML = renderedContent.value
+  if (!contentRef.value || !originalHtml) return
+  contentRef.value.innerHTML = originalHtml
+  originalHtml = ''
 }
 
 async function doApproveEntity(id: number) {
@@ -505,6 +549,53 @@ watch(activeTab, (tab) => {
 
 <style scoped>
 .workbench { height: 100%; }
+
+/* ── 顶部工具栏自适应 ── */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.toolbar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* ── 关系 tab 头部按钮自适应 ── */
+.relation-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* ── 小屏幕适配 ── */
+@media (max-width: 1200px) {
+  .toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .toolbar-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+  .relation-header-actions {
+    position: static;
+    margin-top: 8px;
+    margin-left: 0;
+  }
+}
 .content-card { height: calc(100vh - 200px); display: flex; flex-direction: column; }
 .content-card :deep(.el-card__body) { flex: 1; overflow: hidden; padding: 0; }
 .markdown-body {

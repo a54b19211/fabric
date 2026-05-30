@@ -50,13 +50,22 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                 docs = session.query(Document).filter(
                     Document.extraction_status == "pending",
                     Document.is_deleted == False,
+                    Document.raw_content != "",
                 ).limit(body.limit).all()
 
-            # 标记为 processing
             count = 0
+            skipped_empty = 0
             for doc in docs:
+                if not doc.raw_content or not doc.raw_content.strip():
+                    doc.extraction_status = "failed"
+                    doc.extraction_error = "文档raw_content为空，无法抽取"
+                    skipped_empty += 1
+                    continue
                 doc.extraction_status = "processing"
                 count += 1
+
+            if skipped_empty:
+                logger.warning(f"[Extraction] 跳过 {skipped_empty} 篇 raw_content 为空的文档")
 
             logger.info(f"[Extraction] 标记 processing: {count} 篇")
 

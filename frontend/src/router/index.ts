@@ -26,6 +26,12 @@ const router = createRouter({
       meta: { title: '审核工作台' },
     },
     {
+      path: '/batch-review',
+      name: 'BatchReviewWorkbench',
+      component: () => import('@/views/BatchReviewWorkbench.vue'),
+      meta: { title: '批量审核工作台' },
+    },
+    {
       path: '/neo4j',
       name: 'Neo4j',
       component: () => import('@/views/Neo4jManager.vue'),

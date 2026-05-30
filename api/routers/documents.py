@@ -3,10 +3,10 @@
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
-from api.schemas.request import RecrawlRequest
+from api.schemas.request import RecrawlRequest, BatchRecrawlRequest
 from api.schemas.response import (
     DocumentListResponse, DocumentDetailResponse,
-    DocumentItem, AttachmentItem, RecrawlResponse,
+    DocumentItem, AttachmentItem, RecrawlResponse, BatchRecrawlResponse,
 )
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
@@ -208,3 +208,69 @@ def recrawl_document(uuid: str, body: RecrawlRequest = RecrawlRequest()):
     except Exception as e:
         logger.error(f"[API] 重爬文档失败: {uuid} | {e}")
         raise HTTPException(status_code=500, detail=f"重爬失败: {str(e)}")
+
+
+@router.post("/batch-recrawl", response_model=BatchRecrawlResponse)
+def batch_recrawl_documents(body: BatchRecrawlRequest):
+    """
+    批量重爬指定文档列表。
+
+    流程：
+      1. 校验每个 uuid 存在且有 source_url
+      2. 在后台线程逐个提交 recrawl_document_fn
+      3. 立即返回，不等待完成
+    """
+    if not body.uuids:
+        raise HTTPException(status_code=400, detail="uuids 列表不能为空")
+
+    import threading
+    from flows.crawl_flow import recrawl_document_fn
+
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        try:
+            docs = session.query(Document).filter(
+                Document.uuid.in_(body.uuids),
+                Document.is_deleted == False,
+            ).all()
+
+            found_uuids = {d.uuid for d in docs}
+            missing = [u for u in body.uuids if u not in found_uuids]
+            no_url = [d.uuid for d in docs if not d.source_url]
+            valid = [d.uuid for d in docs if d.source_url]
+
+            skipped = missing + no_url
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"[API] 批量重爬校验失败: {e}")
+            raise HTTPException(status_code=500, detail=f"校验失败: {str(e)}")
+
+    # 在后台线程中逐个触发重爬
+    for uid in valid:
+        try:
+            t = threading.Thread(
+                target=recrawl_document_fn,
+                args=(uid,),
+                daemon=True,
+            )
+            t.start()
+        except Exception as e:
+            logger.error(f"[API] 重爬触发失败: {uid} | {e}")
+
+    msg = f"已触发 {len(valid)} 个文档的重爬任务"
+    if missing:
+        msg += f"，{len(missing)} 个文档不存在"
+    if no_url:
+        msg += f"，{len(no_url)} 个文档无 source_url 跳过"
+
+    logger.info(f"[API] 批量重爬: triggered={len(valid)}, skipped={len(skipped)}")
+    return BatchRecrawlResponse(
+        success=True,
+        triggered=len(valid),
+        skipped=len(skipped),
+        message=msg,
+    )
