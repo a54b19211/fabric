@@ -100,8 +100,8 @@ class EntityDict(Base):
     #   快照字段（market_cap）：时间新的覆盖旧的
     canonical_source: Mapped[str] = mapped_column(Text, default="")
     canonical_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    neo4j_node_id: Mapped[str] = mapped_column(Text, default="")
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -142,11 +142,8 @@ class ExtractedEntity(Base):
     reviewer_note: Mapped[str] = mapped_column(Text, default="")
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[str] = mapped_column(Text, default="")
-    neo4j_status: Mapped[str] = mapped_column(Text, default="pending")
-    # pending / pushed / failed
-    neo4j_node_id: Mapped[str] = mapped_column(Text, default="")      # Neo4j节点ID
-    neo4j_pushed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    neo4j_error: Mapped[str] = mapped_column(Text, default="")
+    weknora_graph_status: Mapped[str] = mapped_column(Text, default="pending")
+    # pending / pushed / failed — WeKnora 图同步状态
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -155,7 +152,7 @@ class ExtractedEntity(Base):
 # ── 7. entity_relations ───────────────────────────────────────
 
 class EntityRelation(Base):
-    """LLM从文档中抽取的图边，审核通过后推Neo4j。"""
+    """LLM从文档中抽取的图边，审核通过后通过WeKnora推Neo4j。"""
     __tablename__ = "entity_relations"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -163,8 +160,6 @@ class EntityRelation(Base):
     source_site: Mapped[str] = mapped_column(Text, default="")
     from_entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     to_entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    from_neo4j_id: Mapped[str] = mapped_column(Text, default="")
-    to_neo4j_id: Mapped[str] = mapped_column(Text, default="")
     relation_type: Mapped[str] = mapped_column(Text, nullable=False)
     relation_props: Mapped[dict] = mapped_column(JSONB, default=dict)
     source_text: Mapped[str] = mapped_column(Text, default="")        # LLM抽取时的原文片段
@@ -174,31 +169,14 @@ class EntityRelation(Base):
     reviewer_note: Mapped[str] = mapped_column(Text, default="")
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[str] = mapped_column(Text, default="")
-    neo4j_status: Mapped[str] = mapped_column(Text, default="pending")
-    neo4j_pushed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    neo4j_error: Mapped[str] = mapped_column(Text, default="")
+    weknora_graph_status: Mapped[str] = mapped_column(Text, default="pending")
+    # pending / pushed / failed — WeKnora 图同步状态
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-# ── 8. neo4j_sync_log ─────────────────────────────────────────
-
-class Neo4jSyncLog(Base):
-    __tablename__ = "neo4j_sync_log"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    object_type: Mapped[str] = mapped_column(Text, nullable=False)    # 'entity' / 'relation'
-    object_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    neo4j_node_id: Mapped[str] = mapped_column(Text, default="")
-    operation: Mapped[str] = mapped_column(Text, default="")          # create/merge/update
-    status: Mapped[str] = mapped_column(Text, default="")             # success/failed
-    error_message: Mapped[str] = mapped_column(Text, default="")
-    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    pushed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-# ── 9. crawl_log ──────────────────────────────────────────────
+# ── 8. crawl_log ──────────────────────────────────────────────
 
 class CrawlLog(Base):
     """爬取任务日志，记录每次爬取的执行情况。"""
@@ -220,7 +198,7 @@ class CrawlLog(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-# ── 10. review_log ────────────────────────────────────────────
+# ── 9. review_log ────────────────────────────────────────────
 
 class ReviewLog(Base):
     """审核操作日志，记录每次人工审核的操作详情。"""
@@ -238,7 +216,7 @@ class ReviewLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-# ── 11. entity_merge_queue ──────────────────────────────────────
+# ── 10. entity_merge_queue ──────────────────────────────────────
 
 class EntityMergeQueue(Base):
     """实体数据合并队列：auto 规则自动合并，同优先级冲突进人工审核。"""

@@ -1,6 +1,6 @@
 -- ============================================================
 -- ZK_Data Fabric -- PostgreSQL Schema v1
--- 10张表，从零开始
+-- 9张表，从零开始
 -- 设计原则：
 --   - 每张表都有显式自增 id 作为内部主键
 --   - uuid 作为业务去重键（UNIQUE NOT NULL）
@@ -100,17 +100,17 @@ CREATE TABLE IF NOT EXISTS entity_dict (
     canonical_data       JSONB       NOT NULL DEFAULT '{}',
     canonical_source     TEXT        DEFAULT '',
     canonical_updated_at TIMESTAMPTZ DEFAULT NULL,
-    neo4j_node_id        TEXT        DEFAULT '',
     is_verified          BOOLEAN     DEFAULT FALSE,
+    weknora_sync_status  TEXT        DEFAULT 'pending',  -- pending/synced/failed
     is_deleted           BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at           TIMESTAMPTZ DEFAULT NOW(),
     updated_at           TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_dict_entity_type   ON entity_dict(entity_type);
-CREATE INDEX IF NOT EXISTS idx_dict_neo4j_node_id ON entity_dict(neo4j_node_id);
 CREATE INDEX IF NOT EXISTS idx_dict_external_ids  ON entity_dict USING GIN (external_ids);
 CREATE INDEX IF NOT EXISTS idx_dict_is_deleted    ON entity_dict(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_dict_weknora_sync ON entity_dict(weknora_sync_status);
 
 
 -- ============================================================
@@ -154,9 +154,7 @@ CREATE TABLE IF NOT EXISTS extracted_entities (
     reviewer_note     TEXT        DEFAULT '',
     reviewed_at       TIMESTAMPTZ DEFAULT NULL,
     reviewed_by       TEXT        DEFAULT '',
-    neo4j_status      TEXT        DEFAULT 'pending',  -- pending/pushed/failed
-    neo4j_pushed_at   TIMESTAMPTZ DEFAULT NULL,
-    neo4j_error       TEXT        DEFAULT '',
+    weknora_graph_status TEXT     DEFAULT 'pending',  -- pending/pushed/failed
     is_deleted        BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ DEFAULT NOW(),
     updated_at        TIMESTAMPTZ DEFAULT NOW()
@@ -166,9 +164,9 @@ CREATE INDEX IF NOT EXISTS idx_ent_source_doc    ON extracted_entities(source_do
 CREATE INDEX IF NOT EXISTS idx_ent_entity_type   ON extracted_entities(entity_type);
 CREATE INDEX IF NOT EXISTS idx_ent_dict_id       ON extracted_entities(dict_id);
 CREATE INDEX IF NOT EXISTS idx_ent_review_status ON extracted_entities(review_status);
-CREATE INDEX IF NOT EXISTS idx_ent_neo4j_status  ON extracted_entities(neo4j_status);
 CREATE INDEX IF NOT EXISTS idx_ent_data_jsonb    ON extracted_entities USING GIN (entity_data);
 CREATE INDEX IF NOT EXISTS idx_ent_is_deleted    ON extracted_entities(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_ent_weknora_graph ON extracted_entities(weknora_graph_status);
 
 
 -- ============================================================
@@ -180,8 +178,6 @@ CREATE TABLE IF NOT EXISTS entity_relations (
     source_site       TEXT        DEFAULT '',
     from_entity_id    BIGINT      DEFAULT NULL,
     to_entity_id      BIGINT      DEFAULT NULL,
-    from_neo4j_id     TEXT        DEFAULT '',
-    to_neo4j_id       TEXT        DEFAULT '',
     relation_type     TEXT        NOT NULL,
     relation_props    JSONB       NOT NULL DEFAULT '{}',
     source_text       TEXT        DEFAULT '',   -- LLM抽取时引用的原文片段，前端高亮用
@@ -191,9 +187,7 @@ CREATE TABLE IF NOT EXISTS entity_relations (
     reviewer_note     TEXT        DEFAULT '',
     reviewed_at       TIMESTAMPTZ DEFAULT NULL,
     reviewed_by       TEXT        DEFAULT '',
-    neo4j_status      TEXT        DEFAULT 'pending',
-    neo4j_pushed_at   TIMESTAMPTZ DEFAULT NULL,
-    neo4j_error       TEXT        DEFAULT '',
+    weknora_graph_status TEXT     DEFAULT 'pending',  -- pending/pushed/failed
     is_deleted        BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ DEFAULT NOW(),
     updated_at        TIMESTAMPTZ DEFAULT NOW()
@@ -204,32 +198,12 @@ CREATE INDEX IF NOT EXISTS idx_rel_from_entity   ON entity_relations(from_entity
 CREATE INDEX IF NOT EXISTS idx_rel_to_entity     ON entity_relations(to_entity_id);
 CREATE INDEX IF NOT EXISTS idx_rel_relation_type ON entity_relations(relation_type);
 CREATE INDEX IF NOT EXISTS idx_rel_review_status ON entity_relations(review_status);
-CREATE INDEX IF NOT EXISTS idx_rel_neo4j_status  ON entity_relations(neo4j_status);
 CREATE INDEX IF NOT EXISTS idx_rel_is_deleted    ON entity_relations(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_rel_weknora_graph ON entity_relations(weknora_graph_status);
 
 
 -- ============================================================
--- 8. neo4j_sync_log — Neo4j推送操作日志
--- ============================================================
-CREATE TABLE IF NOT EXISTS neo4j_sync_log (
-    id            BIGSERIAL   PRIMARY KEY,
-    object_type   TEXT        NOT NULL,   -- 'entity' / 'relation'
-    object_id     BIGINT      NOT NULL,
-    neo4j_node_id TEXT        DEFAULT '',
-    operation     TEXT        DEFAULT '', -- create/merge/update
-    status        TEXT        DEFAULT '', -- success/failed
-    error_message TEXT        DEFAULT '',
-    is_deleted    BOOLEAN     NOT NULL DEFAULT FALSE,
-    pushed_at     TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_object     ON neo4j_sync_log(object_type, object_id);
-CREATE INDEX IF NOT EXISTS idx_sync_status     ON neo4j_sync_log(status);
-CREATE INDEX IF NOT EXISTS idx_sync_is_deleted ON neo4j_sync_log(is_deleted);
-
-
--- ============================================================
--- 9. crawl_log — 爬取任务日志
+-- 8. crawl_log — 爬取任务日志
 -- ============================================================
 CREATE TABLE IF NOT EXISTS crawl_log (
     id                    BIGSERIAL   PRIMARY KEY,
@@ -254,7 +228,7 @@ CREATE INDEX IF NOT EXISTS idx_crawl_is_deleted ON crawl_log(is_deleted);
 
 
 -- ============================================================
--- 10. review_log — 审核操作日志
+-- 9. review_log — 审核操作日志
 -- ============================================================
 CREATE TABLE IF NOT EXISTS review_log (
     id          BIGSERIAL   PRIMARY KEY,

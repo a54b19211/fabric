@@ -133,52 +133,6 @@ class ReviewActionResponse(BaseModel):
     message: str = ""
 
 
-# ── Neo4j ──────────────────────────────────────────────────────────────
-
-class Neo4jSyncResponse(BaseModel):
-    pushed: int
-    failed: int
-    message: str
-
-
-class Neo4jRetryResponse(BaseModel):
-    success: bool
-    error: str = ""
-
-
-class Neo4jStatusCount(BaseModel):
-    pending: int
-    pushed: int
-    failed: int
-
-
-class Neo4jStatsResponse(BaseModel):
-    entities: Neo4jStatusCount
-    relations: Neo4jStatusCount
-
-
-class FailedEntityItem(BaseModel):
-    id: int
-    entity_name: str
-    entity_type: str
-    neo4j_error: str
-    neo4j_pushed_at: Optional[str]
-
-
-class FailedRelationItem(BaseModel):
-    id: int
-    relation_type: str
-    from_entity_id: Optional[int]
-    to_entity_id: Optional[int]
-    neo4j_error: str
-    neo4j_pushed_at: Optional[str]
-
-
-class Neo4jFailedResponse(BaseModel):
-    entities: list[FailedEntityItem]
-    relations: list[FailedRelationItem]
-
-
 # ── WeKnora ────────────────────────────────────────────────────────────
 
 class WeknoraPendingItem(BaseModel):
@@ -251,3 +205,27 @@ class MergeQueueItem(BaseModel):
 class MergeQueueListResponse(BaseModel):
     total: int
     items: list[MergeQueueItem]
+
+
+# ── WeKnora Graph Sync ──────────────────────────────────────────────────
+
+class GraphSyncResponse(BaseModel):
+    success: bool
+    pushed: int = 0
+    failed: int = 0
+    message: str = ""
+
+
+class GraphSyncStatusCount(BaseModel):
+    pending: int = 0
+    pushed: int = 0
+    failed: int = 0
+
+    # entity_dict uses synced instead of pushed
+    synced: int = 0
+
+
+class GraphSyncStatsResponse(BaseModel):
+    entity_dict: GraphSyncStatusCount
+    entities: GraphSyncStatusCount
+    relations: GraphSyncStatusCount

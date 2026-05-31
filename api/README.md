@@ -1,6 +1,6 @@
 # ZK Data Fabric 审核后台 API
 
-FastAPI 后端，提供文档查询、LLM 抽取触发、审核操作、Neo4j 推送、WeKnora 同步等接口。
+FastAPI 后端，提供文档查询、LLM 抽取触发、审核操作、WeKnora 同步（文档 + 图数据）等接口。
 
 ## 启动
 
@@ -39,18 +39,16 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 - `POST /api/review/relations/{id}/approve` - 审核通过
 - `POST /api/review/relations/{id}/reject` - 审核拒绝
 
-### Neo4j 推送模块
-- `POST /api/neo4j/sync/entities` - 批量推送实体
-- `POST /api/neo4j/sync/relations` - 批量推送关系
-- `POST /api/neo4j/retry` - 重试失败记录
-- `GET /api/neo4j/stats` - 推送状态统计
-- `GET /api/neo4j/failed` - 失败记录列表
-
 ### WeKnora 同步模块
 - `GET /api/weknora/pending` - 待同步文档列表
 - `POST /api/weknora/sync/{uuid}` - 单篇同步
-- `POST /api/weknora/sync-batch` - 批量同步
-- `GET /api/weknora/stats` - 同步状态统计
+- `POST /api/weknora/sync-batch` - 批量同步文档
+- `POST /api/weknora/graph/sync-entity-dict` - 同步实体字典
+- `POST /api/weknora/graph/init-copies` - 初始化 PrimeKG 副本
+- `POST /api/weknora/graph/sync-entities` - 同步图实体
+- `POST /api/weknora/graph/sync-relations` - 同步图关系
+- `GET /api/weknora/graph/stats` - 图同步状态统计
+- `GET /api/weknora/stats` - 文档同步状态统计
 
 ## 依赖
 
@@ -63,5 +61,4 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ## TODO
 
 - [ ] 接入成员3的 `extraction_flow`（LLM 抽取）
-- [ ] 接入成员1的 Neo4j 推送逻辑
 - [ ] 接入 `sync_to_weknora.py` 的同步逻辑

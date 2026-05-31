@@ -45,15 +45,6 @@ class BatchRejectRelationsRequest(BaseModel):
     source_site: str = ""
 
 
-class Neo4jSyncRequest(BaseModel):
-    limit: int = Field(default=100, ge=1, le=500, description="最多处理 500 条记录")
-
-
-class Neo4jRetryRequest(BaseModel):
-    object_type: str   # "entity" or "relation"
-    object_id: int = Field(ge=1, description="ID 必须大于 0")
-
-
 class WeknoraBatchRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=500, description="最多处理 500 篇文档")
 
@@ -66,6 +57,10 @@ class RecrawlRequest(BaseModel):
 class BatchRecrawlRequest(BaseModel):
     """批量重爬请求体"""
     uuids: list[str] = Field(..., min_length=1, description="需要重爬的文档 UUID 列表")
+
+
+class GraphSyncRequest(BaseModel):
+    limit: int = Field(default=500, ge=1, le=500, description="单次最多处理 500 条")
 
 
 class ResolveMergeRequest(BaseModel):

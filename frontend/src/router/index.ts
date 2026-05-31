@@ -35,13 +35,13 @@ const router = createRouter({
       path: '/neo4j',
       name: 'Neo4j',
       component: () => import('@/views/Neo4jManager.vue'),
-      meta: { title: 'Neo4j 推送管理' },
+      meta: { title: 'Neo4j 图数据推送' },
     },
     {
       path: '/weknora',
       name: 'Weknora',
       component: () => import('@/views/WeknoraManager.vue'),
-      meta: { title: 'WeKnora 同步管理' },
+      meta: { title: 'WeKnora 知识库同步' },
     },
   ],
 })

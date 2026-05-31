@@ -1,22 +1,27 @@
 import http from './http'
 
-export const syncEntities = (limit = 100) =>
-  http.post<any, { pushed: number; failed: number; message: string }>('/neo4j/sync/entities', { limit })
+// ── 图数据同步 → WeKnora 的 Neo4j 拷贝库 ──────────────────────────────
+// 后端路由统一在 /api/weknora/graph/ 下，前端按职责拆分为 Neo4j 页面调用
 
-export const syncRelations = (limit = 100) =>
-  http.post<any, { pushed: number; failed: number; message: string }>('/neo4j/sync/relations', { limit })
+export const syncEntityDict = (limit = 500) =>
+  http.post<any, { success: boolean; pushed: number; failed: number; message: string }>(
+    '/weknora/graph/sync-entity-dict', { limit })
 
-export const retryNeo4j = (object_type: 'entity' | 'relation', object_id: number) =>
-  http.post<any, { success: boolean; error: string }>('/neo4j/retry', { object_type, object_id })
+export const initPrimeKGCopies = (kbId = '') =>
+  http.post<any, { success: boolean; pushed: number; message: string }>(
+    '/weknora/graph/init-copies', null, { params: { kb_id: kbId } })
 
-export const getNeo4jStats = () =>
+export const syncGraphEntities = (limit = 500) =>
+  http.post<any, { success: boolean; pushed: number; failed: number; message: string }>(
+    '/weknora/graph/sync-entities', { limit })
+
+export const syncGraphRelations = (limit = 500) =>
+  http.post<any, { success: boolean; pushed: number; failed: number; message: string }>(
+    '/weknora/graph/sync-relations', { limit })
+
+export const getGraphSyncStats = () =>
   http.get<any, {
+    entity_dict: { pending: number; synced: number; failed: number }
     entities: { pending: number; pushed: number; failed: number }
     relations: { pending: number; pushed: number; failed: number }
-  }>('/neo4j/stats')
-
-export const getNeo4jFailed = (object_type = '', limit = 50) =>
-  http.get<any, {
-    entities: any[]
-    relations: any[]
-  }>('/neo4j/failed', { params: { object_type, limit } })
+  }>('/weknora/graph/stats')

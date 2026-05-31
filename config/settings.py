@@ -144,15 +144,14 @@ class _AppSettings(BaseSettings):
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
-    # ======================== Neo4j 图数据库 ========================
-    # 用于图谱投影（实体 + 关系同步），留空则不推送
-    NEO4J_URI: str = ""
-    NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = ""
-
     # ======================== 本地存储开关 ========================
     # 开发/调试时可启用本地文件存储，生产环境建议关闭（只保留数据库）
     ENABLE_LOCAL_STORAGE: bool = False
+
+    # ======================== WeKnora 同步配置 ========================
+    WEKNORA_BASE_URL: str = "http://localhost:8080"
+    WEKNORA_API_KEY: str = ""
+    WEKNORA_KB_ID: str = ""
 
     # ======================== MinIO 船票预留（二期使用）========================
     FUTURE_MINIO_BUCKET: str = "zk-data-fabric"

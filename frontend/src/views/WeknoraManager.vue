@@ -37,6 +37,7 @@
         </el-table-column>
       </el-table>
     </el-card>
+
   </div>
 </template>
 
@@ -44,7 +45,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { getWeknoraPending, getWeknoraStats, syncWeknora, syncWeknoraBatch } from '@/api/weknora'
+import {
+  getWeknoraPending, getWeknoraStats, syncWeknora, syncWeknoraBatch,
+} from '@/api/weknora'
 
 const loading = ref(false)
 const batching = ref(false)
@@ -111,7 +114,9 @@ async function batchSync() {
   }
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  loadAll()
+})
 </script>
 
 <style scoped>

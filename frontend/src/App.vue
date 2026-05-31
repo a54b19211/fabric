@@ -49,14 +49,14 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Document, Share, Connection } from '@element-plus/icons-vue'
+import { Document, Connection } from '@element-plus/icons-vue'
 
 // 默认收起，鼠标移入侧边栏展开
 const collapsed = ref(true)
 
 const navItems = [
   { path: '/documents', label: '文档列表', icon: Document },
-  { path: '/neo4j',     label: 'Neo4j 推送', icon: Share },
+  { path: '/neo4j',     label: 'Neo4j 图推送', icon: Connection },
   { path: '/weknora',   label: 'WeKnora 同步', icon: Connection },
 ]
 </script>

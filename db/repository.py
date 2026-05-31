@@ -16,7 +16,7 @@ from sqlalchemy import text
 from db.models import (
     Document, DocExtra, Attachment,
     EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
-    Neo4jSyncLog, CrawlLog, ReviewLog,
+    CrawlLog, ReviewLog,
     EntityMergeQueue,
 )
 
@@ -789,15 +789,10 @@ def insert_extraction_result(
         if session is None:
             return []
 
-        # ── 写实体 ────────────────────────────────────────────────────
+        # ── 写实体（批量 add，单次 flush）─────────────────────────────
         entity_ids: list[int] = []
+        ent_objs = []
         for rec in entities:
-            dict_id = rec.get("dict_id")
-            confidence = rec.get("confidence_score", 0.0)
-
-            # 全部进入人工审核队列
-            review_status = "pending"
-
             ent = ExtractedEntity(
                 source_doc_uuid=source_doc_uuid,
                 source_site=source_site,
@@ -805,22 +800,22 @@ def insert_extraction_result(
                 entity_name=rec.get("entity_name", ""),
                 entity_data=rec.get("entity_data", {}),
                 source_text=rec.get("source_text", ""),
-                dict_id=dict_id,
-                confidence_score=confidence,
+                dict_id=rec.get("dict_id"),
+                confidence_score=rec.get("confidence_score", 0.0),
                 confidence_reason=rec.get("confidence_reason", ""),
-                review_status=review_status,
-                neo4j_status="pending",
+                review_status="pending",
             )
-            session.add(ent)
-            session.flush()  # 获取自增 id
-            entity_ids.append(ent.id)
+            ent_objs.append(ent)
+        session.add_all(ent_objs)
+        session.flush()  # 单次 flush 获取全部自增 id
+        entity_ids = [ent.id for ent in ent_objs]
 
-        # ── 写关系（from/to 下标 → 刚插入的 id）─────────────────────
+        # ── 写关系（批量 add，from/to 下标 → 刚插入的 id）───────────
+        rel_objs = []
         for rel in relations:
             from_idx = rel.get("from_entity_idx")
             to_idx = rel.get("to_entity_idx")
 
-            # 下标越界则跳过，不阻断整批
             if from_idx is None or to_idx is None:
                 continue
             if from_idx >= len(entity_ids) or to_idx >= len(entity_ids):
@@ -830,10 +825,7 @@ def insert_extraction_result(
                 )
                 continue
 
-            confidence = rel.get("confidence_score", 0.0)
-            review_status = "pending"
-
-            session.add(EntityRelation(
+            rel_objs.append(EntityRelation(
                 source_doc_uuid=source_doc_uuid,
                 source_site=source_site,
                 from_entity_id=entity_ids[from_idx],
@@ -841,11 +833,12 @@ def insert_extraction_result(
                 relation_type=rel["relation_type"],
                 relation_props=rel.get("relation_props", {}),
                 source_text=rel.get("source_text", ""),
-                confidence_score=confidence,
+                confidence_score=rel.get("confidence_score", 0.0),
                 confidence_reason=rel.get("confidence_reason", ""),
-                review_status=review_status,
-                neo4j_status="pending",
+                review_status="pending",
             ))
+        if rel_objs:
+            session.add_all(rel_objs)
 
         # ── 更新文档抽取状态 ──────────────────────────────────────────
         doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
@@ -1418,13 +1411,90 @@ def batch_reject_relations(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8. Neo4j 推送状态接口
+# 8. WeKnora 图同步状态接口
 # ═══════════════════════════════════════════════════════════════════════
 
-def get_approved_for_neo4j(limit: int = 100) -> list[dict]:
+def get_entity_dict_for_weknora(limit: int = 500) -> list[dict]:
     """
-    查询 review_status=approved 且 neo4j_status=pending 且 is_deleted=False 的实体。
-    返回字段：id, entity_type, entity_name, entity_data, dict_id
+    查询 weknora_sync_status='pending' 且 is_deleted=False 的 entity_dict 行。
+    返回字段：id, entity_type, external_ids, canonical_data, canonical_source, is_deleted
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return []
+        q = (
+            session.query(EntityDict)
+            .filter(
+                EntityDict.weknora_sync_status == "pending",
+                EntityDict.is_deleted == False,
+            )
+        )
+        if limit:
+            q = q.limit(limit)
+        rows = q.all()
+        return [
+            {
+                "id": r.id,
+                "entity_type": r.entity_type,
+                "external_ids": r.external_ids or {},
+                "canonical_data": r.canonical_data or {},
+                "canonical_source": r.canonical_source or "",
+                "is_deleted": r.is_deleted,
+            }
+            for r in rows
+        ]
+
+
+def mark_entity_dict_synced(dict_id: int) -> None:
+    """标记 entity_dict 行已同步到 WeKnora。"""
+    batch_mark_entity_dict_synced([dict_id])
+
+
+def mark_entity_dict_failed(dict_id: int, error: str = "") -> None:
+    """标记 entity_dict 行同步失败。"""
+    batch_mark_entity_dict_failed([dict_id], error)
+
+
+def batch_mark_entity_dict_synced(ids: list[int]) -> None:
+    """批量标记 entity_dict 行已同步到 WeKnora（单条 UPDATE）。"""
+    if not ids:
+        return
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        session.query(EntityDict).filter(
+            EntityDict.id.in_(ids)
+        ).update({"weknora_sync_status": "synced"}, synchronize_session=False)
+        logger.info(f"[DB] 批量标记 entity_dict synced: {len(ids)} 条")
+
+
+def batch_mark_entity_dict_failed(ids: list[int], error: str = "") -> None:
+    """批量标记 entity_dict 行同步失败（单条 UPDATE）。"""
+    if not ids:
+        return
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        session.query(EntityDict).filter(
+            EntityDict.id.in_(ids)
+        ).update({"weknora_sync_status": "failed"}, synchronize_session=False)
+        if error:
+            logger.warning(f"[DB] 批量标记 entity_dict failed: {len(ids)} 条, error={error[:200]}")
+        else:
+            logger.warning(f"[DB] 批量标记 entity_dict failed: {len(ids)} 条")
+
+
+def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
+    """
+    查询审核通过且 weknora_graph_status='pending' 的实体。
+    返回字段：id, entity_type, entity_name, entity_data, source_site,
+             confidence_score, review_status, is_deleted
     """
     from db.session import get_session
 
@@ -1435,7 +1505,7 @@ def get_approved_for_neo4j(limit: int = 100) -> list[dict]:
             session.query(ExtractedEntity)
             .filter(
                 ExtractedEntity.review_status.in_(["approved", "auto_approved"]),
-                ExtractedEntity.neo4j_status == "pending",
+                ExtractedEntity.weknora_graph_status == "pending",
                 ExtractedEntity.is_deleted == False,
             )
             .limit(limit)
@@ -1446,15 +1516,65 @@ def get_approved_for_neo4j(limit: int = 100) -> list[dict]:
                 "id": r.id,
                 "entity_type": r.entity_type,
                 "entity_name": r.entity_name,
-                "entity_data": r.entity_data,
-                "dict_id": r.dict_id,
+                "entity_data": r.entity_data or {},
+                "source_site": r.source_site or "",
+                "confidence_score": r.confidence_score or 0.0,
+                "review_status": r.review_status,
+                "is_deleted": r.is_deleted,
             }
             for r in rows
         ]
 
 
-def get_approved_relations_for_neo4j(limit: int = 100) -> list[dict]:
-    """查询审核通过且待推送的关系。"""
+def mark_entity_weknora_graph_pushed(entity_id: int) -> None:
+    """标记实体已推送到 WeKnora graph_entities。"""
+    batch_mark_entity_weknora_graph_pushed([entity_id])
+
+
+def mark_entity_weknora_graph_failed(entity_id: int, error: str = "") -> None:
+    """标记实体推送 WeKnora graph_entities 失败。"""
+    batch_mark_entity_weknora_graph_failed([entity_id], error)
+
+
+def batch_mark_entity_weknora_graph_pushed(entity_ids: list[int]) -> None:
+    """批量标记实体已推送到 WeKnora graph_entities（单条 UPDATE）。"""
+    if not entity_ids:
+        return
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        session.query(ExtractedEntity).filter(
+            ExtractedEntity.id.in_(entity_ids)
+        ).update({"weknora_graph_status": "pushed"}, synchronize_session=False)
+        logger.info(f"[DB] 批量标记实体 graph pushed: {len(entity_ids)} 条")
+
+
+def batch_mark_entity_weknora_graph_failed(entity_ids: list[int], error: str = "") -> None:
+    """批量标记实体推送 WeKnora graph_entities 失败（单条 UPDATE）。"""
+    if not entity_ids:
+        return
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        session.query(ExtractedEntity).filter(
+            ExtractedEntity.id.in_(entity_ids)
+        ).update({"weknora_graph_status": "failed"}, synchronize_session=False)
+        if error:
+            logger.warning(f"[DB] 批量标记实体 graph failed: {len(entity_ids)} 条, error={error[:200]}")
+        else:
+            logger.warning(f"[DB] 批量标记实体 graph failed: {len(entity_ids)} 条")
+
+
+def get_relations_for_weknora_graph(limit: int = 500) -> list[dict]:
+    """
+    查询审核通过且 weknora_graph_status='pending' 的关系。
+    同时 JOIN 两端实体的 weknora_graph_status，确保两端实体已推送。
+    返回字段：id, from_entity_id, to_entity_id, relation_type, relation_props, is_deleted
+    """
     from db.session import get_session
 
     with get_session() as session:
@@ -1464,110 +1584,107 @@ def get_approved_relations_for_neo4j(limit: int = 100) -> list[dict]:
             session.query(EntityRelation)
             .filter(
                 EntityRelation.review_status.in_(["approved", "auto_approved"]),
-                EntityRelation.neo4j_status == "pending",
+                EntityRelation.weknora_graph_status == "pending",
                 EntityRelation.is_deleted == False,
             )
             .limit(limit)
             .all()
         )
-        return [_relation_to_dict(r) for r in rows]
+        return [
+            {
+                "id": r.id,
+                "from_entity_id": r.from_entity_id,
+                "to_entity_id": r.to_entity_id,
+                "relation_type": r.relation_type,
+                "relation_props": r.relation_props or {},
+                "is_deleted": r.is_deleted,
+            }
+            for r in rows
+        ]
 
 
-def mark_entity_pushed(id: int, neo4j_node_id: str) -> None:
-    """标记实体推送成功，回填 neo4j_node_id，更新 neo4j_status=pushed。"""
+def mark_relation_weknora_graph_pushed(relation_id: int) -> None:
+    """标记关系已推送到 WeKnora graph_relations。"""
+    batch_mark_relation_weknora_graph_pushed([relation_id])
+
+
+def mark_relation_weknora_graph_failed(relation_id: int, error: str = "") -> None:
+    """标记关系推送 WeKnora graph_relations 失败。"""
+    batch_mark_relation_weknora_graph_failed([relation_id], error)
+
+
+def batch_mark_relation_weknora_graph_pushed(relation_ids: list[int]) -> None:
+    """批量标记关系已推送到 WeKnora graph_relations（单条 UPDATE）。"""
+    if not relation_ids:
+        return
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
             return
-        ent = session.query(ExtractedEntity).filter(ExtractedEntity.id == id).first()
-        if ent is None:
-            return
-        ent.neo4j_status = "pushed"
-        ent.neo4j_node_id = neo4j_node_id
-        ent.neo4j_pushed_at = datetime.now(timezone.utc)
-        ent.neo4j_error = ""
-        session.flush()
-        session.add(Neo4jSyncLog(
-            object_type="entity",
-            object_id=id,
-            neo4j_node_id=neo4j_node_id,
-            operation="create",
-            status="success",
-        ))
+        session.query(EntityRelation).filter(
+            EntityRelation.id.in_(relation_ids)
+        ).update({"weknora_graph_status": "pushed"}, synchronize_session=False)
+        logger.info(f"[DB] 批量标记关系 graph pushed: {len(relation_ids)} 条")
 
 
-def mark_entity_failed(id: int, error: str) -> None:
-    """标记实体推送失败，记录错误原因，更新 neo4j_status=failed。"""
+def batch_mark_relation_weknora_graph_failed(relation_ids: list[int], error: str = "") -> None:
+    """批量标记关系推送 WeKnora graph_relations 失败（单条 UPDATE）。"""
+    if not relation_ids:
+        return
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
             return
-        ent = session.query(ExtractedEntity).filter(ExtractedEntity.id == id).first()
-        if ent is None:
-            return
-        ent.neo4j_status = "failed"
-        ent.neo4j_error = error
-        session.flush()
-        session.add(Neo4jSyncLog(
-            object_type="entity",
-            object_id=id,
-            operation="create",
-            status="failed",
-            error_message=error,
-        ))
+        session.query(EntityRelation).filter(
+            EntityRelation.id.in_(relation_ids)
+        ).update({"weknora_graph_status": "failed"}, synchronize_session=False)
+        if error:
+            logger.warning(f"[DB] 批量标记关系 graph failed: {len(relation_ids)} 条, error={error[:200]}")
+        else:
+            logger.warning(f"[DB] 批量标记关系 graph failed: {len(relation_ids)} 条")
 
 
-def mark_relation_pushed(id: int, from_neo4j_id: str, to_neo4j_id: str) -> None:
-    """标记关系推送成功。"""
+def get_weknora_graph_stats() -> dict:
+    """获取 WeKnora 图同步状态统计。"""
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
-            return
-        rel = session.query(EntityRelation).filter(EntityRelation.id == id).first()
-        if rel is None:
-            return
-        rel.neo4j_status = "pushed"
-        rel.from_neo4j_id = from_neo4j_id
-        rel.to_neo4j_id = to_neo4j_id
-        rel.neo4j_pushed_at = datetime.now(timezone.utc)
-        rel.neo4j_error = ""
-        session.flush()
-        session.add(Neo4jSyncLog(
-            object_type="relation",
-            object_id=id,
-            neo4j_node_id=f"{from_neo4j_id}->{to_neo4j_id}",
-            operation="create",
-            status="success",
-        ))
+            return {
+                "entity_dict": {"pending": 0, "synced": 0, "failed": 0},
+                "entities": {"pending": 0, "pushed": 0, "failed": 0},
+                "relations": {"pending": 0, "pushed": 0, "failed": 0},
+            }
 
+        def _count(model, field: str, val: str) -> int:
+            return session.query(model).filter(
+                getattr(model, field) == val,
+                model.is_deleted == False,
+            ).count()
 
-def mark_relation_failed(id: int, error: str) -> None:
-    """标记关系推送失败。"""
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return
-        rel = session.query(EntityRelation).filter(EntityRelation.id == id).first()
-        if rel is None:
-            return
-        rel.neo4j_status = "failed"
-        rel.neo4j_error = error
-        session.flush()
-        session.add(Neo4jSyncLog(
-            object_type="relation",
-            object_id=id,
-            operation="create",
-            status="failed",
-            error_message=error,
-        ))
+        return {
+            "entity_dict": {
+                "pending": _count(EntityDict, "weknora_sync_status", "pending"),
+                "synced": _count(EntityDict, "weknora_sync_status", "synced"),
+                "failed": _count(EntityDict, "weknora_sync_status", "failed"),
+            },
+            "entities": {
+                "pending": _count(ExtractedEntity, "weknora_graph_status", "pending"),
+                "pushed": _count(ExtractedEntity, "weknora_graph_status", "pushed"),
+                "failed": _count(ExtractedEntity, "weknora_graph_status", "failed"),
+            },
+            "relations": {
+                "pending": _count(EntityRelation, "weknora_graph_status", "pending"),
+                "pushed": _count(EntityRelation, "weknora_graph_status", "pushed"),
+                "failed": _count(EntityRelation, "weknora_graph_status", "failed"),
+            },
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 9. 日志接口
+# 10. 日志接口
 # ═══════════════════════════════════════════════════════════════════════
 
 def log_crawl_task(
@@ -1692,7 +1809,7 @@ def _entity_to_dict(r: ExtractedEntity) -> dict:
         "confidence_score": r.confidence_score,
         "confidence_reason": r.confidence_reason,
         "review_status": r.review_status,
-        "neo4j_status": r.neo4j_status,
+        "weknora_graph_status": r.weknora_graph_status,
     }
 
 
@@ -1702,20 +1819,18 @@ def _relation_to_dict(r: EntityRelation) -> dict:
         "source_doc_uuid": r.source_doc_uuid,
         "from_entity_id": r.from_entity_id,
         "to_entity_id": r.to_entity_id,
-        "from_neo4j_id": r.from_neo4j_id,
-        "to_neo4j_id": r.to_neo4j_id,
         "relation_type": r.relation_type,
         "relation_props": r.relation_props,
         "source_text": r.source_text,
         "confidence_score": r.confidence_score,
         "confidence_reason": r.confidence_reason,
         "review_status": r.review_status,
-        "neo4j_status": r.neo4j_status,
+        "weknora_graph_status": r.weknora_graph_status,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 10. 重爬支持
+# 11. 重爬支持
 # ═══════════════════════════════════════════════════════════════════════
 
 def reset_document_for_recrawl(uuid: str) -> None:
