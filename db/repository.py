@@ -235,7 +235,9 @@ def get_pending_extraction(limit: int = 100) -> list[dict]:
 def get_pending_weknora_sync(limit: int = 100) -> list[dict]:
     """
     查询 weknora_sync_status=pending 且 is_deleted=False 的文档。
-    返回字段：uuid, title, source_site, raw_content, publish_date
+    返回字段：uuid, title, source_site, raw_content, publish_date,
+             source_url, parent_uuid, doc_type, language, confidence_score,
+             parse_method, crawl_timestamp
     """
     from db.session import get_session
 
@@ -249,6 +251,13 @@ def get_pending_weknora_sync(limit: int = 100) -> list[dict]:
                 Document.source_site,
                 Document.raw_content,
                 Document.publish_date,
+                Document.source_url,
+                Document.parent_uuid,
+                Document.doc_type,
+                Document.language,
+                Document.confidence_score,
+                Document.parse_method,
+                Document.crawl_timestamp,
             )
             .filter(
                 Document.weknora_sync_status == "pending",
@@ -262,8 +271,15 @@ def get_pending_weknora_sync(limit: int = 100) -> list[dict]:
                 "uuid": r.uuid,
                 "title": r.title,
                 "source_site": r.source_site,
-                "raw_content": r.raw_content,
-                "publish_date": r.publish_date,
+                "raw_content": r.raw_content or "",
+                "publish_date": r.publish_date or "",
+                "source_url": r.source_url or "",
+                "parent_uuid": r.parent_uuid or "",
+                "doc_type": r.doc_type or "",
+                "language": r.language or "",
+                "confidence_score": r.confidence_score or 0.0,
+                "parse_method": r.parse_method or "",
+                "crawl_timestamp": str(r.crawl_timestamp) if r.crawl_timestamp else "",
             }
             for r in rows
         ]
@@ -1501,19 +1517,21 @@ def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
     with get_session() as session:
         if session is None:
             return []
-        rows = (
+        query = (
             session.query(ExtractedEntity)
             .filter(
                 ExtractedEntity.review_status.in_(["approved", "auto_approved"]),
                 ExtractedEntity.weknora_graph_status == "pending",
                 ExtractedEntity.is_deleted == False,
             )
-            .limit(limit)
-            .all()
         )
+        if limit > 0:
+            query = query.limit(limit)
+        rows = query.all()
         return [
             {
                 "id": r.id,
+                "dict_id": r.dict_id,
                 "entity_type": r.entity_type,
                 "entity_name": r.entity_name,
                 "entity_data": r.entity_data or {},
@@ -1572,29 +1590,42 @@ def batch_mark_entity_weknora_graph_failed(entity_ids: list[int], error: str = "
 def get_relations_for_weknora_graph(limit: int = 500) -> list[dict]:
     """
     查询审核通过且 weknora_graph_status='pending' 的关系。
-    同时 JOIN 两端实体的 weknora_graph_status，确保两端实体已推送。
-    返回字段：id, from_entity_id, to_entity_id, relation_type, relation_props, is_deleted
+    JOIN 两端实体以获取 dict_id。
+    返回字段：id, from_dict_id, to_dict_id, relation_type, relation_props, is_deleted
     """
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
             return []
-        rows = (
-            session.query(EntityRelation)
+        from sqlalchemy.orm import aliased
+        FromEntity = aliased(ExtractedEntity)
+        ToEntity = aliased(ExtractedEntity)
+        query = (
+            session.query(
+                EntityRelation.id,
+                EntityRelation.relation_type,
+                EntityRelation.relation_props,
+                EntityRelation.is_deleted,
+                FromEntity.dict_id.label("from_dict_id"),
+                ToEntity.dict_id.label("to_dict_id"),
+            )
+            .join(FromEntity, EntityRelation.from_entity_id == FromEntity.id)
+            .join(ToEntity, EntityRelation.to_entity_id == ToEntity.id)
             .filter(
                 EntityRelation.review_status.in_(["approved", "auto_approved"]),
                 EntityRelation.weknora_graph_status == "pending",
                 EntityRelation.is_deleted == False,
             )
-            .limit(limit)
-            .all()
         )
+        if limit > 0:
+            query = query.limit(limit)
+        rows = query.all()
         return [
             {
                 "id": r.id,
-                "from_entity_id": r.from_entity_id,
-                "to_entity_id": r.to_entity_id,
+                "from_dict_id": r.from_dict_id,
+                "to_dict_id": r.to_dict_id,
                 "relation_type": r.relation_type,
                 "relation_props": r.relation_props or {},
                 "is_deleted": r.is_deleted,

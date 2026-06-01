@@ -63,6 +63,10 @@ class GraphSyncRequest(BaseModel):
     limit: int = Field(default=500, ge=1, le=500, description="单次最多处理 500 条")
 
 
+class FullGraphSyncRequest(BaseModel):
+    kb_id: str = Field(default="", description="目标知识库 ID，留空则使用 .env 配置")
+
+
 class ResolveMergeRequest(BaseModel):
     reviewer: str
     resolution: str  # accept_new / keep_existing / custom

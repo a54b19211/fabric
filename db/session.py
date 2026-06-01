@@ -35,7 +35,7 @@ def get_engine():
         pool_size=APP.DB_POOL_SIZE,
         max_overflow=10,
         pool_pre_ping=True,
-        echo=False,
+        echo=True,
         connect_args={"client_encoding": "utf8"},
     )
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)

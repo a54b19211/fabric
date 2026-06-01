@@ -31,9 +31,10 @@ class WeKnoraGraphClient:
 
     def _post(self, path: str, body: dict) -> dict:
         url = f"{self._base_url}/api/v1{path}"
-        logger.debug(f"[WeKnoraGraph] POST {url} headers={self._headers}")
+        logger.info(f"[WeKnoraGraph] POST {url}")
         try:
             resp = httpx.post(url, json=body, headers=self._headers, timeout=60.0)
+            logger.info(f"[WeKnoraGraph] 响应 {resp.status_code}: {resp.text[:300]}")
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as e:
@@ -99,7 +100,7 @@ class WeKnoraGraphClient:
         payload = {
             "entities": [
                 {
-                    "source_entity_id": f"ent-{e['id']}",
+                    "source_entity_id": f"dict:{e.get('dict_id') or e['id']}",
                     "entity_type": e["entity_type"],
                     "entity_name": e["entity_name"],
                     "entity_data": e.get("entity_data", {}),
@@ -135,8 +136,8 @@ class WeKnoraGraphClient:
             "relations": [
                 {
                     "source_relation_id": f"rel-{r['id']}",
-                    "from_entity_id": f"ent-{r['from_entity_id']}",
-                    "to_entity_id": f"ent-{r['to_entity_id']}",
+                    "from_entity_id": f"dict:{r.get('from_dict_id') or r.get('from_entity_id')}",
+                    "to_entity_id": f"dict:{r.get('to_dict_id') or r.get('to_entity_id')}",
                     "relation_type": r["relation_type"],
                     "relation_props": r.get("relation_props", {}),
                     "is_deleted": r.get("is_deleted", False),
@@ -150,6 +151,44 @@ class WeKnoraGraphClient:
         )
         logger.info(f"[WeKnoraGraph] 关系同步完成: {result}")
         return result
+
+
+    # ── 5. 文档同步（全文上传） ──────────────────────────────────────────
+
+    def upload_document(self, title: str, content: str, metadata: dict, kb_id: str = "") -> str:
+        """
+        上传文档到 WeKnora 知识库。返回 weknora knowledge_id。
+        调用 POST /api/v1/knowledge-bases/{kb_id}/knowledge/manual
+        """
+        kb = kb_id or self._kb_id
+        url = f"{self._base_url}/api/v1/knowledge-bases/{kb}/knowledge/manual"
+        payload = {
+            "title": title,
+            "content": content,
+            "status": "publish",
+            "channel": "crawler",
+            "source_metadata": metadata,
+        }
+        try:
+            resp = httpx.post(url, json=payload, headers=self._headers, timeout=60.0)
+            logger.info(f"[WeKnoraGraph] upload_document 响应 {resp.status_code}: {resp.text[:200]}")
+            if resp.status_code == 409:
+                logger.info(f"[WeKnoraGraph] 文档已存在（409），视为已同步")
+                return ""
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("success"):
+                raise RuntimeError(f"WeKnora 返回失败: {data}")
+            return data.get("data", {}).get("id", "")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                logger.info(f"[WeKnoraGraph] 文档已存在（409），视为已同步")
+                return ""
+            logger.error(f"[WeKnoraGraph] upload_document HTTP {e.response.status_code}: {e.response.text[:300]}")
+            raise
+        except Exception as e:
+            logger.error(f"[WeKnoraGraph] upload_document 请求失败: {e}")
+            raise
 
 
 # 全局单例
