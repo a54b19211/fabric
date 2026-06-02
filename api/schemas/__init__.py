@@ -10,6 +10,7 @@ from api.schemas.request import (
     RecrawlRequest,
     BatchRecrawlRequest,
     GraphSyncRequest,
+    FullGraphSyncRequest,
     ResolveMergeRequest,
 )
 from api.schemas.response import (
@@ -56,6 +57,7 @@ __all__ = [
     "RecrawlRequest",
     "BatchRecrawlRequest",
     "GraphSyncRequest",
+    "FullGraphSyncRequest",
     "ResolveMergeRequest",
     # Response
     "ErrorResponse",

@@ -11,6 +11,8 @@ class ExtractionTriggerRequest(BaseModel):
 class ReviewActionRequest(BaseModel):
     reviewer: str
     note: str = ""
+    dict_id: Optional[int] = None  # 指定链接到的 entity_dict id，None=保持消歧结果
+    force_new: bool = False  # 以新实体创建，忽略 dict_id
 
 
 class BatchApproveEntitiesRequest(BaseModel):

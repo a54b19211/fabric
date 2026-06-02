@@ -193,8 +193,8 @@ def get_stats():
 BATCH_SIZE = 200
 
 
-def _do_sync_entity_dict() -> tuple[int, int, str]:
-    """将 entity_dict 中待同步的行推送到 WeKnora 镜像表。返回 (pushed, failed, message)。"""
+def _do_sync_entity_dict(kb_id: str = "") -> tuple[int, int, str]:
+    """将 entity_dict 推送到 WeKnora 镜像表，并自动初始化 PrimeKG 副本。"""
     with get_session() as session:
         if session is None:
             return 0, 0, "数据库未连接"
@@ -221,7 +221,16 @@ def _do_sync_entity_dict() -> tuple[int, int, str]:
             logger.error(f"[API] entity_dict 批次 {i // BATCH_SIZE + 1} 失败: {batch_error}")
 
     logger.info(f"[API] entity_dict 同步完成: pushed={total_pushed}, failed={total_failed}")
-    return total_pushed, total_failed, f"同步完成: pushed={total_pushed}, failed={total_failed}"
+
+    # 自动初始化 PrimeKG 副本
+    if kb_id and total_pushed > 0:
+        try:
+            _, _, init_msg = _do_init_copies(kb_id)
+            logger.info(f"[API] auto init_copies: {init_msg}")
+        except Exception as e:
+            logger.error(f"[API] auto init_copies 失败: {e}")
+
+    return total_pushed, total_failed, f"entity_dict={total_pushed}/{total_failed}"
 
 
 def _do_init_copies(kb_id: str) -> tuple[int, int, str]:
@@ -298,13 +307,13 @@ def _do_sync_relations(kb_id: str) -> tuple[int, int, str]:
     return total_pushed, total_failed, f"同步完成: pushed={total_pushed}, failed={total_failed}"
 
 
-# ── 单个同步端点 ────────────────────────────────────────────────────────
+# ── 单独同步端点 ────────────────────────────────────────────────────────
 
 @router.post("/graph/sync-entity-dict", response_model=GraphSyncResponse)
-def sync_entity_dict_to_weknora(body: GraphSyncRequest):
-    """将 entity_dict 中待同步的行推送到 WeKnora 镜像表。"""
+def sync_entity_dict_to_weknora(body: GraphSyncRequest, kb_id: str = Query("", description="目标知识库 ID，留空则跳过 init_copies")):
+    """将 entity_dict 推送到 WeKnora 镜像表，并自动初始化 PrimeKG 副本（若提供 kb_id）。"""
     try:
-        pushed, failed, message = _do_sync_entity_dict()
+        pushed, failed, message = _do_sync_entity_dict(kb_id)
         return GraphSyncResponse(success=True, pushed=pushed, failed=failed, message=message)
     except Exception as e:
         logger.error(f"[API] entity_dict 同步失败: {e}")
@@ -323,10 +332,10 @@ def init_primekg_copies(kb_id: str = Query("", description="目标知识库 ID�
 
 
 @router.post("/graph/sync-entities", response_model=GraphSyncResponse)
-def sync_entities_to_weknora_graph(body: GraphSyncRequest):
+def sync_entities_to_weknora_graph(kb_id: str = Query("", description="目标知识库 ID，留空用 .env 配置")):
     """将审核通过的抽取实体推送到 WeKnora graph_entities。"""
     try:
-        pushed, failed, message = _do_sync_entities(kb_id="")
+        pushed, failed, message = _do_sync_entities(kb_id)
         return GraphSyncResponse(success=True, pushed=pushed, failed=failed, message=message)
     except Exception as e:
         logger.error(f"[API] sync-entities 异常: {e}")
@@ -334,10 +343,10 @@ def sync_entities_to_weknora_graph(body: GraphSyncRequest):
 
 
 @router.post("/graph/sync-relations", response_model=GraphSyncResponse)
-def sync_relations_to_weknora_graph(body: GraphSyncRequest):
+def sync_relations_to_weknora_graph(kb_id: str = Query("", description="目标知识库 ID，留空用 .env 配置")):
     """将审核通过的抽取关系推送到 WeKnora graph_relations。"""
     try:
-        pushed, failed, message = _do_sync_relations(kb_id="")
+        pushed, failed, message = _do_sync_relations(kb_id)
         return GraphSyncResponse(success=True, pushed=pushed, failed=failed, message=message)
     except Exception as e:
         logger.error(f"[API] 关系图同步失败: {e}")
@@ -358,8 +367,7 @@ def sync_all_to_weknora(body: FullGraphSyncRequest):
     """
     kb_id = body.kb_id
     steps = [
-        ("entity_dict", lambda: _do_sync_entity_dict()),
-        ("init_copies", lambda: _do_init_copies(kb_id)),
+        ("entity_dict", lambda: _do_sync_entity_dict(kb_id)),
         ("entities", lambda: _do_sync_entities(kb_id)),
         ("relations", lambda: _do_sync_relations(kb_id)),
     ]

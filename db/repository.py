@@ -607,12 +607,12 @@ def lookup_alias(name: str, entity_type: str) -> Optional[int]:
 def search_similar_entities(
     embedding: list[float],
     entity_type: str,
-    top_k: int = 5,
+    top_k: int = 10,
 ) -> list[dict]:
     """
-    向量相似度检索（pgvector）。
+    向量相似度召回（pgvector，仅做候选召回，分数供参考不直接决策）。
     在 entity_aliases.name_embedding 上做余弦近邻搜索。
-    返回 top_k 条，每条包含：dict_id, name, similarity_score
+    返回 top_k 条，每条包含：dict_id, name, similarity_score, canonical_data, aliases
     """
     from db.session import get_session
 
@@ -625,7 +625,8 @@ def search_similar_entities(
                 SELECT
                     ea.dict_id,
                     ea.name,
-                    1 - (ea.name_embedding <=> CAST(:vec AS vector)) AS similarity_score
+                    1 - (ea.name_embedding <=> CAST(:vec AS vector)) AS similarity_score,
+                    ed.canonical_data
                 FROM entity_aliases ea
                 JOIN entity_dict ed ON ea.dict_id = ed.id
                 WHERE ea.is_deleted = FALSE
@@ -639,14 +640,31 @@ def search_similar_entities(
                 sql,
                 {"vec": vec_str, "entity_type": entity_type, "top_k": top_k},
             ).fetchall()
-            return [
-                {
+            # 一次性查所有候选的 aliases，避免 N+1
+            all_dict_ids = [r.dict_id for r in rows]
+            alias_rows = (
+                session.query(EntityAlias.dict_id, EntityAlias.name)
+                .filter(
+                    EntityAlias.dict_id.in_(all_dict_ids),
+                    EntityAlias.is_deleted == False,
+                )
+                .all()
+            )
+            aliases_by_dict: dict[int, list[str]] = {}
+            for did, name in alias_rows:
+                aliases_by_dict.setdefault(did, []).append(name)
+
+            results = []
+            for r in rows:
+                canonical = r.canonical_data or {}
+                results.append({
                     "dict_id": r.dict_id,
                     "name": r.name,
                     "similarity_score": float(r.similarity_score),
-                }
-                for r in rows
-            ]
+                    "canonical_data": canonical,
+                    "aliases": aliases_by_dict.get(r.dict_id, []),
+                })
+            return results
         except Exception as e:
             logger.error(f"[DB] search_similar_entities 失败: {e}")
             return []
@@ -1054,12 +1072,15 @@ def approve_entity_with_alias_writeback(
     entity_id: int,
     reviewer: str,
     note: str = "",
+    dict_id: int | None = None,
+    force_new: bool = False,
 ) -> None:
     """
-    审核通过实体。
-    - 已有 dict_id → 回写新别名到 entity_aliases
-    - 无 dict_id → 先创建 entity_dict → 回填 extracted_entities.dict_id → 回写别名
-    所有别名附带 embedding 写入。
+    审核通过实体，回写别名 + embedding 到 entity_dict。
+    优先级：force_new > dict_id > ent.dict_id > 创建新 entity_dict
+    - force_new=True → 忽略一切，以新实体创建
+    - dict_id 不为 None → 审核员指定了目标 dict_id
+    - 都不给 → 保留消歧结果（ent.dict_id），无则新建
     """
     from db.session import get_session
 
@@ -1084,15 +1105,22 @@ def approve_entity_with_alias_writeback(
         logger.info(
             f"[DB] approve_entity_with_alias_writeback: entity_id={entity_id} "
             f"name='{ent.entity_name}' type={ent.entity_type} dict_id={ent.dict_id} "
-            f"source_site={ent.source_site}"
+            f"override_dict_id={dict_id} force_new={force_new} source_site={ent.source_site}"
         )
 
         entity_data = ent.entity_data or {}
 
-        # 无 dict_id → 先建 entity_dict
-        dict_id = ent.dict_id
-        if not dict_id:
-            logger.info(f"[DB] dict_id=None，需要创建 entity_dict for '{ent.entity_name}'")
+        # 决定目标 dict_id
+        target_dict_id: int | None = None
+        if force_new:
+            target_dict_id = None  # 强制新建
+        elif dict_id is not None:
+            target_dict_id = dict_id  # 审核员指定
+        else:
+            target_dict_id = ent.dict_id  # 保留消歧结果
+
+        if not target_dict_id:
+            logger.info(f"[DB] 创建 entity_dict for '{ent.entity_name}'")
             dict_id = _create_entity_dict_from_extraction(
                 session,
                 entity_name=ent.entity_name,

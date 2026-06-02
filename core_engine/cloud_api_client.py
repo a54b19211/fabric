@@ -245,6 +245,36 @@ def generate_embedding(text: str) -> list[float] | None:
         return None
 
 
+def qwen_chat(
+    system_prompt: str = "",
+    user_message: str = "",
+    temperature: float = 0.0,
+    max_tokens: int = 500,
+) -> str:
+    """
+    轻量 LLM 对话，用于消歧 LLM 兜底等非结构化场景。
+    返回 LLM 文本回复，失败返回空字符串。
+    """
+    if not APP.LLM_API_KEY:
+        logger.error("LLM API Key 未配置")
+        return ""
+    try:
+        client = OpenAI(api_key=APP.LLM_API_KEY, base_url=APP.LLM_API_BASE)
+        response = client.chat.completions.create(
+            model=APP.LLM_MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt or ""},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as e:
+        logger.error(f"qwen_chat 调用失败: {e}")
+        return ""
+
+
 def build_embedding_text(
     entity_name: str,
     entity_type: str,

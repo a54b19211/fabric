@@ -80,13 +80,17 @@
               <div class="reason-text" v-if="ent.confidence_reason">
                 匹配原因：{{ ent.confidence_reason }}
               </div>
-              <div v-if="ent.disambig?.candidates?.length" class="candidates-section">
-                <div class="candidates-label">候选匹配：</div>
-                <div v-for="c in ent.disambig.candidates.slice(0, 3)" :key="c.dict_id" class="candidate-item">
-                  <span>{{ c.name }}</span>
-                  <el-tag size="small" type="warning">{{ (c.similarity_score * 100).toFixed(0) }}%</el-tag>
-                  <el-tag size="small" type="info">{{ c.match_type }}</el-tag>
-                </div>
+              <div v-if="ent.disambig?.candidates?.length && ent.disambig.status !== 'new_entity'" class="candidates-section">
+                <div class="candidates-label">选择匹配候选：</div>
+                <el-radio-group v-model="selectedCandidate[ent.id]" class="candidates-radio-group">
+                  <div v-for="c in ent.disambig.candidates" :key="c.dict_id" class="candidate-item">
+                    <el-radio :value="c.dict_id">
+                      <span class="candidate-name">{{ c.name }}</span>
+                      <el-tag size="small" type="warning">{{ (c.similarity_score * 100).toFixed(0) }}%</el-tag>
+                      <el-tag size="small" type="info">{{ c.match_type }}</el-tag>
+                    </el-radio>
+                  </div>
+                </el-radio-group>
               </div>
               <el-collapse>
                 <el-collapse-item title="字段详情">
@@ -95,6 +99,7 @@
               </el-collapse>
               <div class="card-actions" v-if="ent.review_status === 'pending'">
                 <el-button size="small" type="success" @click="doApproveEntity(ent.id)">&#x2713; 通过</el-button>
+                <el-button v-if="ent.disambig?.status && ent.disambig.status !== 'new_entity'" size="small" type="primary" @click="doApproveEntityAsNew(ent.id)">新实体</el-button>
                 <el-button size="small" type="danger" @click="doRejectEntity(ent.id)">&#x2717; 拒绝</el-button>
               </div>
               <el-tag v-else size="small" :type="ent.review_status === 'approved' ? 'success' : 'danger'">
@@ -130,7 +135,7 @@
               <div class="card-header">
                 <el-tag size="small" type="warning">{{ rel.relation_type }}</el-tag>
                 <span class="entity-name">
-                  实体 {{ rel.from_entity_id }} → 实体 {{ rel.to_entity_id }}
+                  {{ rel.from_entity_name || rel.from_entity_id || '?' }} → {{ rel.to_entity_name || rel.to_entity_id || '?' }}
                 </span>
                 <el-tag size="small" :type="confidenceType(rel.confidence_score)">
                   {{ (rel.confidence_score * 100).toFixed(0) }}%
@@ -199,7 +204,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
@@ -226,6 +231,7 @@ const reviewer = ref('审核员')
 const batchNote = ref('')
 const reviewStatusFilter = ref('pending')
 const contentRef = ref<HTMLElement | null>(null)
+const selectedCandidate = reactive<Record<number, number>>({})
 
 // 分页相关
 const entityPagination = ref({
@@ -266,6 +272,11 @@ async function load() {
     ])
     rawContent.value = doc.raw_content
     entities.value = entRes.items
+    for (const ent of entRes.items) {
+      if (ent.disambig?.candidates?.length && !(ent.id in selectedCandidate)) {
+        selectedCandidate[ent.id] = ent.disambig.candidates[0].dict_id
+      }
+    }
     entityPagination.value.total = entRes.total
     relations.value = relRes.items
     relationPagination.value.total = relRes.total
@@ -360,9 +371,19 @@ function clearHighlight() {
 }
 
 async function doApproveEntity(id: number) {
-  await approveEntity(id, reviewer.value)
+  const dictId = selectedCandidate[id] ?? null
+  await approveEntity(id, reviewer.value, '', false, dictId)
   const ent = entities.value.find(e => e.id === id)
   if (ent) ent.review_status = 'approved'
+}
+
+async function doApproveEntityAsNew(id: number) {
+  await approveEntity(id, reviewer.value, '', true)
+  const ent = entities.value.find(e => e.id === id)
+  if (ent) {
+    ent.review_status = 'approved'
+    ent.dict_id = null  // 本地更新，下次刷新从 DB 拉
+  }
 }
 
 async function doRejectEntity(id: number) {
@@ -389,7 +410,7 @@ async function approveAllCurrentPage() {
     ElMessage.info('当前页没有高置信度待审核实体')
     return
   }
-  await Promise.all(pending.map(e => approveEntity(e.id, reviewer.value, batchNote.value)))
+  await Promise.all(pending.map(e => approveEntity(e.id, reviewer.value, batchNote.value, false, selectedCandidate[e.id] ?? null)))
   pending.forEach(e => { e.review_status = 'approved' })
   ElMessage.success(`已通过本页 ${pending.length} 个高置信度实体`)
 }
@@ -623,6 +644,9 @@ watch(activeTab, (tab) => {
 .candidates-section { margin-top: 6px; padding: 8px; background: #fdf6ec; border-radius: 4px; }
 .candidates-label { font-size: 12px; color: #909399; margin-bottom: 4px; }
 .candidate-item { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 13px; }
+.candidate-name { margin-right: 6px; font-weight: 500; }
+.candidates-radio-group { width: 100%; }
+.candidates-radio-group :deep(.el-radio) { margin-right: 0; display: flex; align-items: center; }
 .entity-data { font-size: 11px; background: #f5f7fa; padding: 8px; border-radius: 4px; overflow-x: auto; }
 .card-actions { margin-top: 8px; display: flex; gap: 8px; }
 .pagination-container {

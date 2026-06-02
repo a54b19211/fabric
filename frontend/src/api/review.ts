@@ -32,7 +32,9 @@ export interface RelationItem {
   source_doc_uuid: string
   relation_type: string
   from_entity_id: number | null
+  from_entity_name: string
   to_entity_id: number | null
+  to_entity_name: string
   relation_props: Record<string, any>
   confidence_score: number
   source_text: string
@@ -51,8 +53,8 @@ export const getEntities = (params: {
 export const getEntity = (id: number) =>
   http.get<any, EntityItem>(`/review/entities/${id}`)
 
-export const approveEntity = (id: number, reviewer: string, note = '') =>
-  http.post<any, { success: boolean }>(`/review/entities/${id}/approve`, { reviewer, note })
+export const approveEntity = (id: number, reviewer: string, note = '', forceNew = false, dictId: number | null = null) =>
+  http.post<any, { success: boolean }>(`/review/entities/${id}/approve`, { reviewer, note, force_new: forceNew, dict_id: dictId })
 
 export const rejectEntity = (id: number, reviewer: string, note = '') =>
   http.post<any, { success: boolean }>(`/review/entities/${id}/reject`, { reviewer, note })

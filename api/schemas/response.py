@@ -116,7 +116,9 @@ class RelationItem(BaseModel):
     source_doc_uuid: str
     relation_type: str
     from_entity_id: Optional[int]
+    from_entity_name: str = ""
     to_entity_id: Optional[int]
+    to_entity_name: str = ""
     relation_props: dict
     confidence_score: float
     source_text: str

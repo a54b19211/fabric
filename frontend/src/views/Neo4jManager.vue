@@ -31,10 +31,7 @@
     <el-card shadow="never" class="filter-card">
       <el-space wrap>
         <el-button type="primary" @click="doSyncEntityDict" :loading="syncingDict">
-          同步 entity_dict
-        </el-button>
-        <el-button type="warning" @click="doInitCopies" :loading="initCopying">
-          初始化 PrimeKG 副本
+          同步 entity_dict ({{ graphStats.entity_dict.pending }})
         </el-button>
         <el-button type="success" @click="doSyncEntities" :loading="syncingEnt">
           同步抽取实体 ({{ graphStats.entities.pending }})
@@ -69,9 +66,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import {
-  syncEntityDict, initPrimeKGCopies, syncGraphEntities, syncGraphRelations, getGraphSyncStats,
-} from '@/api/neo4j'
+import { syncEntityDict, syncGraphEntities, syncGraphRelations, getGraphSyncStats } from '@/api/neo4j'
 
 const loading = ref(false)
 
@@ -81,7 +76,6 @@ const graphStats = ref({
   relations: { pending: 0, pushed: 0, failed: 0 },
 })
 const syncingDict = ref(false)
-const initCopying = ref(false)
 const syncingEnt = ref(false)
 const syncingRel = ref(false)
 
@@ -136,22 +130,10 @@ async function doSyncEntityDict() {
   }
 }
 
-async function doInitCopies() {
-  initCopying.value = true
-  try {
-    const res = await initPrimeKGCopies()
-    ElMessage.success(`PrimeKG 副本初始化完成：${res.pushed} 条`)
-  } catch {
-    ElMessage.error('PrimeKG 副本初始化失败')
-  } finally {
-    initCopying.value = false
-  }
-}
-
 async function doSyncEntities() {
   syncingEnt.value = true
   try {
-    const res = await syncGraphEntities(500)
+    const res = await syncGraphEntities()
     ElMessage.success(`实体同步完成：推送 ${res.pushed} 条`)
     loadGraphStats()
   } catch {
@@ -164,7 +146,7 @@ async function doSyncEntities() {
 async function doSyncRelations() {
   syncingRel.value = true
   try {
-    const res = await syncGraphRelations(500)
+    const res = await syncGraphRelations()
     ElMessage.success(`关系同步完成：推送 ${res.pushed} 条`)
     loadGraphStats()
   } catch {

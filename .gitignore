@@ -33,6 +33,7 @@ Thumbs.db
 /scripts
 # 临时调试脚本（以单下划线开头的 .py 文件）
 _*.py
+!__init__.py
 
 # WeKnora 同步状态记录
 data/weknora_synced.txt

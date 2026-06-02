@@ -5,8 +5,9 @@ Step 0: 名称规范化 → 候选名称列表
 Step 1: 强 ID 匹配（external_ids）
 Step 2: 别名精确匹配（多候选名称）
 Step 3: 实体类型规则匹配
-Step 4: 向量召回（pgvector）
-Step 5: LLM 精排（仅模糊场景，绝不 auto_matched）
+Step 4: 向量召回（pgvector）—— 仅做候选集，分数不参与决策
+Step 5: Reranker 精排（cross-encoder 语义打分）
+Step 6: LLM 兜底判断（reranker 无法确定时）
 """
 
 from loguru import logger
@@ -20,13 +21,7 @@ from disambiguation.models import (
 )
 from disambiguation.normalizer import generate_candidate_names
 from disambiguation.rules import match_strong_id, match_by_entity_rules
-from disambiguation.llm_ranker import rank_with_llm
-
-
-# ── 向量阈值 ──
-THRESHOLD_HIGH = 0.92    # top1 >= this AND gap >= GAP → candidate_matched
-THRESHOLD_MID = 0.85     # top1 >= this → candidate_matched 或 ambiguous
-GAP_THRESHOLD = 0.05     # top1 - top2 >= this 才是明确领先
+from disambiguation.llm_ranker import rank_with_reranker, rank_with_llm
 
 
 def disambiguate(
@@ -79,78 +74,81 @@ def disambiguate(
         return result
     step3_result = result  # 可能是 candidate_matched，暂存
 
-    # ── Step 4: 向量召回 ──────────────────────────────────────────
+    # ── Step 4: 向量召回（仅做候选集，分数不参与决策）──────────────
     embed_text = build_embedding_text(entity_name, entity_type, entity_data)
     embedding = generate_embedding(embed_text)
 
+    vector_candidates: list[CandidateEntity] = []
+
     if embedding:
-        similar = search_similar_entities(embedding, entity_type, top_k=5)
-
+        similar = search_similar_entities(embedding, entity_type, top_k=10)
         if similar:
-            top1_score = similar[0]["similarity_score"]
-            top2_score = similar[1]["similarity_score"] if len(similar) > 1 else 0.0
-
-            candidates = [
+            vector_candidates = [
                 CandidateEntity(
                     dict_id=s["dict_id"],
                     name=s["name"],
                     similarity_score=s["similarity_score"],
                     match_type="vector",
+                    canonical_data=s.get("canonical_data", {}),
+                    aliases=s.get("aliases", []),
                 )
                 for s in similar
             ]
-
-            # 高置信向量匹配
-            if top1_score >= THRESHOLD_HIGH and (top1_score - top2_score) >= GAP_THRESHOLD:
-                logger.info(f"[Disambiguation] Step4 high-conf: '{entity_name}' top1={top1_score:.3f}")
-                return DisambiguationResult(
-                    status=STATUS_CANDIDATE_MATCHED,
-                    dict_id=candidates[0].dict_id,
-                    confidence=top1_score,
-                    matched_name=candidates[0].name,
-                    reason=f"vector similarity: top1={top1_score:.3f} top2={top2_score:.3f}",
-                    candidates=candidates,
-                    match_step="step4_vector",
-                )
-
-            # 中等置信向量匹配
-            if top1_score >= THRESHOLD_MID:
-                gap_ok = (top1_score - top2_score) >= GAP_THRESHOLD
-                logger.info(f"[Disambiguation] Step4 mid-conf: '{entity_name}' top1={top1_score:.3f} gap_ok={gap_ok}")
-                return DisambiguationResult(
-                    status=STATUS_CANDIDATE_MATCHED if gap_ok else STATUS_AMBIGUOUS,
-                    dict_id=candidates[0].dict_id if gap_ok else None,
-                    confidence=top1_score,
-                    matched_name=candidates[0].name,
-                    reason=f"vector similarity: top1={top1_score:.3f} top2={top2_score:.3f} (mid)",
-                    candidates=candidates,
-                    match_step="step4_vector",
-                )
-
-            # 低置信 → 尝试 LLM 精排
-            logger.info(f"[Disambiguation] Step4 low-conf: '{entity_name}' top1={top1_score:.3f}")
-            if source_text or entity_data:
-                llm_result = rank_with_llm(
-                    entity_name=entity_name,
-                    entity_type=entity_type,
-                    entity_data=entity_data,
-                    source_text=source_text,
-                    candidates=candidates,
-                )
-                logger.info(f"[Disambiguation] Step5 LLM: '{entity_name}' → {llm_result.status} ({llm_result.reason})")
-                return llm_result
-
-            return DisambiguationResult(
-                status=STATUS_NEW_ENTITY,
-                confidence=0.0,
-                reason=f"vector top1={top1_score:.3f} below threshold, no LLM context",
-                match_step="step4_vector",
+            logger.info(
+                f"[Disambiguation] Step4 recall: '{entity_name}' → "
+                f"{len(vector_candidates)} candidates"
             )
     else:
         logger.warning(f"[Disambiguation] Step4: embedding 生成失败 '{entity_name}'")
 
-    # ── 无匹配，返回 step3 的候选结果或 new_entity ─────────────────
+    # ── Step 5: Reranker 精排 ──────────────────────────────────────
+    all_candidates = vector_candidates
+    if step3_result and step3_result.candidates:
+        # 合并 step3 规则匹配的候选（去重 by dict_id）
+        seen_ids = {c.dict_id for c in all_candidates}
+        for c in step3_result.candidates:
+            if c.dict_id not in seen_ids:
+                all_candidates.append(c)
+                seen_ids.add(c.dict_id)
+
+    if all_candidates:
+        reranker_result = rank_with_reranker(
+            entity_name=entity_name,
+            entity_type=entity_type,
+            entity_data=entity_data,
+            source_text=source_text,
+            candidates=all_candidates,
+        )
+        logger.info(
+            f"[Disambiguation] Step5 reranker: '{entity_name}' → "
+            f"{reranker_result.status} ({reranker_result.reason})"
+        )
+
+        # Reranker 明确命中 → 直接返回
+        if reranker_result.status == STATUS_CANDIDATE_MATCHED:
+            return reranker_result
+
+        # Reranker 不确定 → Step 6: LLM 兜底
+        if reranker_result.status == STATUS_AMBIGUOUS:
+            llm_result = rank_with_llm(
+                entity_name=entity_name,
+                entity_type=entity_type,
+                entity_data=entity_data,
+                source_text=source_text,
+                candidates=reranker_result.candidates or all_candidates,
+            )
+            logger.info(
+                f"[Disambiguation] Step6 LLM: '{entity_name}' → "
+                f"{llm_result.status} ({llm_result.reason})"
+            )
+            return llm_result
+
+        # Reranker 返回 new_entity（低分）
+        return reranker_result
+
+    # ── 无召回候选 → 试试 step3 规则结果 → 否则 new_entity ─────────
     if step3_result:
+        logger.info(f"[Disambiguation] Step3 fallback: '{entity_name}' → {step3_result.status}")
         return step3_result
 
     logger.info(f"[Disambiguation] No match: '{entity_name}' → new_entity")

@@ -29,6 +29,7 @@ from db.repository import (
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation
+from sqlalchemy.orm import aliased
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -204,8 +205,12 @@ def approve_entity_api(entity_id: int, body: ReviewActionRequest):
             raise HTTPException(status_code=404, detail="实体不存在")
 
     try:
-        approve_entity_with_alias_writeback(entity_id, reviewer=body.reviewer, note=body.note or "")
-        logger.info(f"[API] 审核实体通过: id={entity_id}, reviewer={body.reviewer}")
+        approve_entity_with_alias_writeback(
+            entity_id, reviewer=body.reviewer, note=body.note or "",
+            dict_id=body.dict_id,
+            force_new=body.force_new,
+        )
+        logger.info(f"[API] 审核实体通过: id={entity_id}, reviewer={body.reviewer}, dict_id={body.dict_id}, force_new={body.force_new}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
@@ -255,11 +260,23 @@ def list_relations(
             raise HTTPException(status_code=503, detail="数据库未连接")
 
         try:
-            q = session.query(EntityRelation).filter(
-                EntityRelation.review_status == review_status,
-                EntityRelation.is_deleted == False,
+            FromEnt = aliased(ExtractedEntity)
+            ToEnt = aliased(ExtractedEntity)
+
+            q = (
+                session.query(
+                    EntityRelation,
+                    FromEnt.entity_name.label("from_name"),
+                    ToEnt.entity_name.label("to_name"),
+                )
+                .outerjoin(FromEnt, EntityRelation.from_entity_id == FromEnt.id)
+                .outerjoin(ToEnt, EntityRelation.to_entity_id == ToEnt.id)
+                .filter(
+                    EntityRelation.review_status == review_status,
+                    EntityRelation.is_deleted == False,
+                )
             )
-            
+
             # 动态筛选条件
             if source_site:
                 q = q.filter(EntityRelation.source_site == source_site)
@@ -271,15 +288,17 @@ def list_relations(
 
             items = [
                 RelationItem(
-                    id=r.id,
-                    source_doc_uuid=r.source_doc_uuid or "",
-                    relation_type=r.relation_type or "",
-                    from_entity_id=r.from_entity_id,
-                    to_entity_id=r.to_entity_id,
-                    relation_props=r.relation_props or {},
-                    confidence_score=r.confidence_score or 0.0,
-                    source_text=r.source_text or "",
-                    review_status=r.review_status or "",
+                    id=r.EntityRelation.id,
+                    source_doc_uuid=r.EntityRelation.source_doc_uuid or "",
+                    relation_type=r.EntityRelation.relation_type or "",
+                    from_entity_id=r.EntityRelation.from_entity_id,
+                    from_entity_name=r.from_name or "",
+                    to_entity_id=r.EntityRelation.to_entity_id,
+                    to_entity_name=r.to_name or "",
+                    relation_props=r.EntityRelation.relation_props or {},
+                    confidence_score=r.EntityRelation.confidence_score or 0.0,
+                    source_text=r.EntityRelation.source_text or "",
+                    review_status=r.EntityRelation.review_status or "",
                 )
                 for r in rows
             ]
