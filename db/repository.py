@@ -791,6 +791,49 @@ def add_alias_with_embedding(
             )
 
 
+def add_aliases_no_embedding(
+    session, dict_id: int, entity_type: str, entity_name: str, entity_data: dict,
+) -> int:
+    """
+    轻量版 alias 写入：只写行，不生成 embedding。
+    extract 阶段 merge 使用，避免在持有 DB session 时调 HTTP API。
+    embedding 可后续批量补全。
+    """
+    names_to_add: set[str] = set()
+    names_to_add.add(entity_name.strip())
+    data_name = (entity_data.get("name") or "").strip()
+    if data_name:
+        names_to_add.add(data_name)
+    data_name_en = (entity_data.get("name_en") or "").strip()
+    if data_name_en:
+        names_to_add.add(data_name_en)
+    for alias in entity_data.get("aliases", []):
+        alias_str = str(alias).strip()
+        if alias_str:
+            names_to_add.add(alias_str)
+
+    added = 0
+    for name in names_to_add:
+        if not name:
+            continue
+        exists = (
+            session.query(EntityAlias)
+            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name)
+            .first()
+        )
+        if exists is not None:
+            continue
+        session.add(EntityAlias(
+            dict_id=dict_id,
+            name=name,
+            lang="zh" if any('一' <= c <= '鿿' for c in name) else "en",
+            is_canonical=(name == (entity_data.get("name") or "")),
+        ))
+        session.flush()
+        added += 1
+    return added
+
+
 # ── 提取结果写入前：实体合并辅助函数 ─────────────────────────────────
 
 def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
@@ -985,12 +1028,12 @@ def insert_extraction_result(
                     + new_source
                 )[:2000]
 
-            # 回写新别名（幂等）
+            # 回写新别名（轻量版，无 HTTP 调用，避免 session 内阻塞）
             dict_id = rec["dict_id"]
             entity_name = rec.get("entity_name", "")
             entity_type = rec.get("entity_type", "")
             if dict_id:
-                added = _write_aliases_with_embedding(
+                added = add_aliases_no_embedding(
                     session, dict_id, entity_type, entity_name, new_entity_data,
                 )
                 alias_count += added
@@ -2088,7 +2131,8 @@ def _relation_to_dict(r: EntityRelation) -> dict:
 def reset_document_for_recrawl(uuid: str) -> None:
     """
     重爬前重置文档状态：
-      - 软删除该文档的所有 extracted_entities 和 entity_relations
+      - 软删除该文档的 pending 实体 + 所有关系
+      - 已审核实体保留，重新抽取后会走 merge 逻辑更新
       - 重置 extraction_status → pending
       - 重置 weknora_sync_status → pending
       - 清空 extraction_error / extraction_model / extracted_at
@@ -2102,15 +2146,17 @@ def reset_document_for_recrawl(uuid: str) -> None:
             logger.warning(f"[DB] reset_document_for_recrawl: Session 未初始化，跳过 {uuid}")
             return
 
-        # 软删除旧抽取结果
+        # 软删除 pending 实体（approved 保留，留给 merge 逻辑更新）
         deleted_ents = (
             session.query(ExtractedEntity)
             .filter(
                 ExtractedEntity.source_doc_uuid == uuid,
+                ExtractedEntity.review_status == "pending",
                 ExtractedEntity.is_deleted == False,
             )
             .update({"is_deleted": True}, synchronize_session=False)
         )
+        # 关系全删（文档级重新生成）
         deleted_rels = (
             session.query(EntityRelation)
             .filter(
