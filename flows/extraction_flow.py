@@ -215,10 +215,10 @@ def _merge_chunks(
 # 消歧
 # ═══════════════════════════════════════════════════════════════════════
 
-def _disambiguate(entities: list[dict]) -> list[dict]:
+def _disambiguate(entities: list[dict], session=None) -> list[dict]:
     """完整 6 阶段消歧流水线（替换旧的仅精确别名匹配）。"""
     from disambiguation import disambiguate_entities
-    return disambiguate_entities(entities)
+    return disambiguate_entities(entities, session=session)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -295,32 +295,37 @@ def extract_single_document(
         update_extraction_status(doc_uuid, "done", model=APP.EXTRACTION_MODEL_NAME)
         return True  # 不算失败，文档可能确实没有可抽取的实体
 
-    # 4. 消歧（注入 source_site 上下文）
+    # 4-5. 消歧 + 入库（同一 DB session，避免连接池耗尽）
     for ent in entities:
         ent["source_site"] = source_site
-    entities = _disambiguate(entities)
 
-    # 将消歧元数据合并到 entity_data，并清理临时字段
-    for ent in entities:
-        disambig = ent.pop("_disambig", None)
-        if disambig:
-            ent.setdefault("entity_data", {})["_disambig"] = disambig
-        ent.pop("source_site", None)
-
-    # 5. 写库
     try:
-        insert_extraction_result(
-            source_doc_uuid=doc_uuid,
-            source_site=source_site,
-            entities=entities,
-            relations=relations,
-        )
+        with get_session() as session:
+            if session is None:
+                logger.error(f"[Extraction] DB 未连接，无法入库: {doc_uuid}")
+                return False
+
+            entities = _disambiguate(entities, session=session)
+
+            # 将消歧元数据合并到 entity_data，并清理临时字段
+            for ent in entities:
+                disambig = ent.pop("_disambig", None)
+                if disambig:
+                    ent.setdefault("entity_data", {})["_disambig"] = disambig
+                ent.pop("source_site", None)
+
+            insert_extraction_result(
+                source_doc_uuid=doc_uuid,
+                source_site=source_site,
+                entities=entities,
+                relations=relations,
+                session=session,
+            )
     except Exception as e:
         logger.error(f"[Extraction] 写库失败: {doc_uuid} | {e}")
         update_extraction_status(doc_uuid, "failed", error=f"写库失败: {e}")
         return False
 
-    update_extraction_status(doc_uuid, "done", model=APP.EXTRACTION_MODEL_NAME)
     logger.info(f"[Extraction] 完成: {doc_uuid}")
     return True
 

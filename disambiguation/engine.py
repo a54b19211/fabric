@@ -30,9 +30,11 @@ def disambiguate(
     entity_data: dict | None = None,
     source_text: str = "",
     source_site: str = "",
+    session=None,
 ) -> DisambiguationResult:
     """
     完整 6 阶段消歧流水线，返回 DisambiguationResult。
+    session 可选：传入则复用，不传则各步自开（向后兼容）。
     """
     entity_data = entity_data or {}
 
@@ -40,14 +42,14 @@ def disambiguate(
     candidate_names = generate_candidate_names(entity_name, entity_type, entity_data)
 
     # ── Step 1: 强 ID 匹配 ────────────────────────────────────────
-    result = match_strong_id(entity_type, entity_data)
+    result = match_strong_id(entity_type, entity_data, session=session)
     if result:
         logger.info(f"[Disambiguation] Step1 hit: '{entity_name}' → dict_id={result.dict_id} ({result.reason})")
         return result
 
     # ── Step 2: 别名精确匹配（遍历候选名称）────────────────────────
     for idx, name in enumerate(candidate_names):
-        dict_id = lookup_alias(name, entity_type)
+        dict_id = lookup_alias(name, entity_type, session=session)
         if dict_id:
             if idx == 0:
                 confidence, match_type = 0.95, "exact_original"
@@ -68,7 +70,7 @@ def disambiguate(
             )
 
     # ── Step 3: 实体类型规则 ──────────────────────────────────────
-    result = match_by_entity_rules(entity_name, entity_type, entity_data)
+    result = match_by_entity_rules(entity_name, entity_type, entity_data, session=session)
     if result and result.status == STATUS_AUTO_MATCHED:
         logger.info(f"[Disambiguation] Step3 hit: '{entity_name}' → dict_id={result.dict_id} ({result.reason})")
         return result
@@ -81,7 +83,7 @@ def disambiguate(
     vector_candidates: list[CandidateEntity] = []
 
     if embedding:
-        similar = search_similar_entities(embedding, entity_type, top_k=10)
+        similar = search_similar_entities(embedding, entity_type, top_k=10, session=session)
         if similar:
             vector_candidates = [
                 CandidateEntity(
@@ -162,11 +164,12 @@ def disambiguate(
 
 # ── 批量入口 ──
 
-def disambiguate_entities(entities: list[dict]) -> list[dict]:
+def disambiguate_entities(entities: list[dict], session=None) -> list[dict]:
     """
     批量消歧入口，供 extraction_flow 调用。
     对每个 entity dict 原地设置 dict_id / confidence_score / confidence_reason，
     并将完整消歧结果存入 entity_data["_disambig"] 供前端展示。
+    session 可选：传入则复用，不传则各步自开（向后兼容）。
     """
     for ent in entities:
         name = ent.get("entity_name", "")
@@ -185,6 +188,7 @@ def disambiguate_entities(entities: list[dict]) -> list[dict]:
                 entity_data=entity_data,
                 source_text=source_text,
                 source_site=source_site,
+                session=session,
             )
 
             if result.status in (STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED):
