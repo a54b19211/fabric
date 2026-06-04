@@ -42,11 +42,8 @@ from config.settings import APP
 
 @dataclass
 class ExtractionTask:
-    """单篇文档的抽取任务"""
+    """单篇文档的抽取任务 — 队列中只存 uuid，worker 执行时按需查 DB"""
     uuid: str
-    raw_content: str
-    source_site: str
-    doc_type: str
     submit_time: float = field(default_factory=time.time)
     on_done: Optional[Callable[[str, bool, str], None]] = None
     # on_done(uuid, success, error_msg)
@@ -78,7 +75,7 @@ class ExtractionWorker:
     # ── 公开接口 ──────────────────────────────────────────────────────
 
     def enqueue(self, task: ExtractionTask) -> None:
-        """将任务放入队列。"""
+        """将任务放入队列（只存 uuid，不预载内容）。"""
         self._queue.put(task)
         logger.debug(
             f"[Worker-{self.worker_id}] 任务入队: {task.uuid} "
@@ -112,22 +109,45 @@ class ExtractionWorker:
             self._queue.task_done()
 
     def _process(self, task: ExtractionTask) -> None:
-        """处理单篇文档，完成后触发回调。"""
+        """按 uuid 查 DB 获取文档内容后处理，完成后触发回调。"""
         from flows.extraction_flow import extract_single_document
+        from db.session import get_session
+        from db.models import Document
 
         logger.info(
             f"[Worker-{self.worker_id}] 开始处理: {task.uuid} "
-            f"site={task.source_site} 等待时间={time.time() - task.submit_time:.1f}s"
+            f"等待时间={time.time() - task.submit_time:.1f}s"
         )
 
+        # 按需从 DB 拉取文档内容，不预载入内存
         success = False
         error_msg = ""
         try:
+            with get_session() as session:
+                if session is None:
+                    error_msg = "DB未连接"
+                    return
+                doc = session.query(Document).filter(
+                    Document.uuid == task.uuid,
+                    Document.is_deleted == False,
+                ).first()
+                if doc is None:
+                    error_msg = f"文档不存在: {task.uuid}"
+                    return
+
+                raw_content = doc.raw_content or ""
+                source_site = doc.source_site or ""
+                doc_type = doc.doc_type or ""
+
+            if not raw_content.strip():
+                error_msg = "文档raw_content为空"
+                return
+
             success = extract_single_document(
                 doc_uuid=task.uuid,
-                raw_content=task.raw_content,
-                source_site=task.source_site,
-                doc_type=task.doc_type,
+                raw_content=raw_content,
+                source_site=source_site,
+                doc_type=doc_type,
             )
         except Exception as e:
             error_msg = str(e)

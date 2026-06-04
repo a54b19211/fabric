@@ -332,7 +332,7 @@ def extract_single_document(
 def run_extraction_for_uuids(uuids: list[str]) -> dict:
     """
     对指定 UUID 列表提交抽取任务到 WorkerManager。
-    任务异步执行，立即返回提交数量。
+    队列只存 uuid，worker 执行时按需查 DB 取内容。
     被 API 触发时调用。
     """
     from flows.extraction_worker import ExtractionTask, get_extraction_manager
@@ -340,35 +340,26 @@ def run_extraction_for_uuids(uuids: list[str]) -> dict:
     with get_session() as session:
         if session is None:
             return {"submitted": 0, "failed": len(uuids), "error": "DB未连接"}
-        docs = session.query(Document).filter(
-            Document.uuid.in_(uuids),
-            Document.is_deleted == False,
-        ).all()
-        doc_map = {d.uuid: d for d in docs}
+        # 校验 uuid 是否存在，不预载内容
+        existing = {
+            r.uuid
+            for r in session.query(Document.uuid).filter(
+                Document.uuid.in_(uuids),
+                Document.is_deleted == False,
+            ).all()
+        }
 
     manager = get_extraction_manager()
     submitted = 0
     failed = 0
 
     for uuid in uuids:
-        doc = doc_map.get(uuid)
-        if doc is None:
+        if uuid not in existing:
             logger.warning(f"[Extraction] 文档不存在: {uuid}")
             failed += 1
             continue
 
-        def _on_done(doc_uuid: str, success: bool, error_msg: str) -> None:
-            if not success and error_msg:
-                logger.error(f"[Extraction] 任务失败回调: {doc_uuid} | {error_msg}")
-                update_extraction_status(doc_uuid, "failed", error=error_msg)
-
-        task = ExtractionTask(
-            uuid=doc.uuid,
-            raw_content=doc.raw_content,
-            source_site=doc.source_site,
-            doc_type=doc.doc_type,
-            on_done=_on_done,
-        )
+        task = ExtractionTask(uuid=uuid)
         manager.submit(task)
         submitted += 1
 
@@ -382,6 +373,7 @@ def run_extraction_for_uuids(uuids: list[str]) -> dict:
 def run_extraction_batch(limit: int = 10) -> dict:
     """
     批量处理 extraction_status=processing 的文档，提交到 WorkerManager。
+    Worker 执行时按需查 DB 取内容，队列只存 uuid。
     被定时任务调用。
     """
     from flows.extraction_worker import ExtractionTask, get_extraction_manager
@@ -389,33 +381,21 @@ def run_extraction_batch(limit: int = 10) -> dict:
     with get_session() as session:
         if session is None:
             return {"submitted": 0, "failed": 0}
-        from sqlalchemy import text as sa_text
-        rows = session.execute(
-            sa_text(
-                "SELECT uuid, raw_content, source_site, doc_type "
-                "FROM documents WHERE extraction_status='processing' "
-                "AND is_deleted=FALSE LIMIT :limit"
-            ),
-            {"limit": limit},
-        ).fetchall()
-        docs = [(r.uuid, r.raw_content, r.source_site, r.doc_type) for r in rows]
+        rows = (
+            session.query(Document.uuid)
+            .filter(
+                Document.extraction_status == "processing",
+                Document.is_deleted == False,
+            )
+            .limit(limit)
+            .all()
+        )
 
     manager = get_extraction_manager()
     submitted = 0
 
-    for uuid, raw_content, source_site, doc_type in docs:
-        def _on_done(doc_uuid: str, success: bool, error_msg: str) -> None:
-            if not success and error_msg:
-                logger.error(f"[Extraction] 任务失败回调: {doc_uuid} | {error_msg}")
-                update_extraction_status(doc_uuid, "failed", error=error_msg)
-
-        task = ExtractionTask(
-            uuid=uuid,
-            raw_content=raw_content,
-            source_site=source_site,
-            doc_type=doc_type,
-            on_done=_on_done,
-        )
+    for (uuid,) in rows:
+        task = ExtractionTask(uuid=uuid)
         manager.submit(task)
         submitted += 1
 
@@ -430,4 +410,4 @@ if __name__ == "__main__":
     import sys
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 5
     result = run_extraction_batch(limit=limit)
-    print(f"抽取完成: 成功={result['success']} 失败={result['failed']}")
+    print(f"抽取提交完成: submitted={result['submitted']}")
