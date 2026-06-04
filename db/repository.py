@@ -791,6 +791,73 @@ def add_alias_with_embedding(
             )
 
 
+# ── 提取结果写入前：实体合并辅助函数 ─────────────────────────────────
+
+def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
+    """查找 dict_id + entity_type 对应的已审核 extracted_entities 行，找不到返回 None。"""
+    from db.models import ExtractedEntity
+
+    return (
+        session.query(ExtractedEntity)
+        .filter(
+            ExtractedEntity.dict_id == dict_id,
+            ExtractedEntity.entity_type == entity_type,
+            ExtractedEntity.review_status == "approved",
+            ExtractedEntity.is_deleted == False,
+        )
+        .order_by(ExtractedEntity.id.asc())
+        .first()
+    )
+
+
+def _merge_jsonb_entity_data(existing: dict, new: dict) -> dict:
+    """
+    合并两个 entity_data JSONB dict。
+    - 数组字段：追加去重
+    - 快照字段：时间戳新的覆盖旧的
+    - 标量字段：已有值保留，空缺值补入新值
+    - _disambig 等临时 key 不合并（从 new 中剔除）
+    """
+    merged = dict(existing)
+
+    for key, new_val in new.items():
+        if key.startswith("_"):
+            continue  # 跳过 _disambig 等元数据字段
+
+        if new_val is None:
+            continue
+
+        existing_val = merged.get(key)
+
+        # 1) 已有字段无值 → 直接补入
+        if existing_val is None:
+            merged[key] = new_val
+            continue
+
+        # 2) 数组字段 → 追加去重
+        if key in _ARRAY_FIELDS:
+            if isinstance(existing_val, list) and isinstance(new_val, list):
+                merged_list = list(dict.fromkeys(existing_val + new_val))
+                if merged_list != existing_val:
+                    merged[key] = merged_list
+            continue
+
+        # 3) 快照字段 → 时间新的覆盖旧的
+        if key in _SNAPSHOT_FIELDS:
+            if (
+                isinstance(new_val, dict)
+                and isinstance(existing_val, dict)
+                and new_val.get("timestamp", 0) > existing_val.get("timestamp", 0)
+            ):
+                merged[key] = new_val
+            continue
+
+        # 4) 标量值相同 → 跳过；值不同 → 保留已有（已有优先）
+        # 不做覆盖，已有数据是经过审核确认的
+
+    return merged
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 5. 抽取结果写入（核心：实体 + 关系 + 状态更新，同一事务）
 # ═══════════════════════════════════════════════════════════════════════
@@ -804,18 +871,20 @@ def insert_extraction_result(
     """
     批量写入 LLM 抽取结果（实体 + 关系），同一事务。
 
+    去重逻辑：消歧结果为 auto_matched 且已有同 dict_id 的已审核实体时，
+    不插入新行，而是更新已有行的 entity_data、追加 alias、重置同步状态。
+
     参数：
         entities:  [ExtractedEntityRecord.model_dump(), ...]
                    必须字段：entity_type, entity_name
                    可选字段：entity_data, source_text, dict_id,
                              confidence_score, confidence_reason
+                   entity_data["_disambig"] 含消歧元数据 status/match_step
         relations: [ExtractedRelationRecord.model_dump(), ...]
                    必须字段：from_entity_idx, to_entity_idx, relation_type
-                   可选字段：relation_props, source_text,
-                             confidence_score, confidence_reason
 
     返回：
-        插入的 extracted_entities.id 列表（按输入顺序），失败返回 []
+        final_id_map 按输入顺序对应的 DB id 列表（merge 实体返回已有 id），失败返回 []
     """
     from db.session import get_session
 
@@ -823,10 +892,40 @@ def insert_extraction_result(
         if session is None:
             return []
 
-        # ── 写实体（批量 add，单次 flush）─────────────────────────────
-        entity_ids: list[int] = []
-        ent_objs = []
-        for rec in entities:
+        n = len(entities)
+
+        # ── Phase 1: 分类实体 ─────────────────────────────────────────
+        # merged_id_map: 输入下标 → 已有 extracted_entities.id
+        # insert_indices: 需要插入的实体下标列表
+        merged_id_map: dict[int, int] = {}
+        insert_indices: list[int] = []
+
+        for i, rec in enumerate(entities):
+            dict_id = rec.get("dict_id")
+            entity_type = rec.get("entity_type", "")
+            entity_data = rec.get("entity_data", {}) or {}
+            disambig = entity_data.get("_disambig", {}) or {}
+            disambig_status = disambig.get("status", "")
+
+            if dict_id and disambig_status == "auto_matched":
+                existing = _find_existing_entity_by_dict_id(session, dict_id, entity_type)
+                if existing is not None:
+                    merged_id_map[i] = existing.id
+                    continue
+
+            insert_indices.append(i)
+
+        logger.info(
+            f"[DB] 实体分类: doc={source_doc_uuid} "
+            f"total={n} merge={len(merged_id_map)} insert={len(insert_indices)}"
+        )
+
+        # ── Phase 2: 插入新实体 ───────────────────────────────────────
+        new_entities: list[ExtractedEntity] = []
+        new_index_to_obj: dict[int, ExtractedEntity] = {}
+
+        for i in insert_indices:
+            rec = entities[i]
             ent = ExtractedEntity(
                 source_doc_uuid=source_doc_uuid,
                 source_site=source_site,
@@ -839,12 +938,77 @@ def insert_extraction_result(
                 confidence_reason=rec.get("confidence_reason", ""),
                 review_status="pending",
             )
-            ent_objs.append(ent)
-        session.add_all(ent_objs)
-        session.flush()  # 单次 flush 获取全部自增 id
-        entity_ids = [ent.id for ent in ent_objs]
+            new_entities.append(ent)
+            new_index_to_obj[i] = ent
 
-        # ── 写关系（批量 add，from/to 下标 → 刚插入的 id）───────────
+        if new_entities:
+            session.add_all(new_entities)
+            session.flush()  # 获取自增 id
+
+        # final_id_map: 输入下标 → DB id
+        final_id_map: dict[int, int] = {}
+        for i in merged_id_map:
+            final_id_map[i] = merged_id_map[i]
+        for i in insert_indices:
+            ent_obj = new_index_to_obj[i]
+            final_id_map[i] = ent_obj.id
+
+        # ── Phase 3: 合并数据到已有实体 ───────────────────────────────
+        merge_count = 0
+        alias_count = 0
+        for i, existing_id in merged_id_map.items():
+            existing_ent = session.query(ExtractedEntity).filter(
+                ExtractedEntity.id == existing_id
+            ).first()
+            if existing_ent is None:
+                logger.warning(f"[DB] merge 目标实体不存在: id={existing_id}")
+                continue
+
+            rec = entities[i]
+            new_entity_data = rec.get("entity_data", {}) or {}
+
+            # 合并 entity_data
+            existing_ent.entity_data = _merge_jsonb_entity_data(
+                existing_ent.entity_data or {}, new_entity_data
+            )
+
+            # 重置图同步状态，让更新推送到 WeKnora/Neo4j
+            if existing_ent.weknora_graph_status == "pushed":
+                existing_ent.weknora_graph_status = "pending"
+
+            # 合并 source_text 用于溯源
+            new_source = rec.get("source_text", "")
+            if new_source and new_source not in (existing_ent.source_text or ""):
+                existing_ent.source_text = (
+                    (existing_ent.source_text or "")
+                    + "\n---\n"
+                    + new_source
+                )[:2000]
+
+            # 回写新别名（幂等）
+            dict_id = rec["dict_id"]
+            entity_name = rec.get("entity_name", "")
+            entity_type = rec.get("entity_type", "")
+            if dict_id:
+                added = _write_aliases_with_embedding(
+                    session, dict_id, entity_type, entity_name, new_entity_data,
+                )
+                alias_count += added
+
+            merge_count += 1
+            logger.info(
+                f"[DB] 实体合并: index={i} name='{entity_name}' "
+                f"→ extracted_entities.id={existing_id} dict_id={dict_id} "
+                f"aliases_added={added}"
+            )
+
+        if merge_count:
+            logger.info(
+                f"[DB] merge 阶段完成: {merge_count} 个实体, "
+                f"{alias_count} 个新别名"
+            )
+
+        # ── Phase 4: 写关系（下标 → final_id_map）─────────────────────
         rel_objs = []
         for rel in relations:
             from_idx = rel.get("from_entity_idx")
@@ -852,18 +1016,27 @@ def insert_extraction_result(
 
             if from_idx is None or to_idx is None:
                 continue
-            if from_idx >= len(entity_ids) or to_idx >= len(entity_ids):
+            if from_idx >= n or to_idx >= n:
                 logger.warning(
                     f"[DB] insert_extraction_result: 关系下标越界 "
-                    f"from={from_idx} to={to_idx} entities_len={len(entity_ids)}"
+                    f"from={from_idx} to={to_idx} n={n}"
+                )
+                continue
+
+            from_db_id = final_id_map.get(from_idx)
+            to_db_id = final_id_map.get(to_idx)
+            if from_db_id is None or to_db_id is None:
+                logger.warning(
+                    f"[DB] insert_extraction_result: 关系下标无对应 DB id "
+                    f"from={from_idx}({from_db_id}) to={to_idx}({to_db_id})"
                 )
                 continue
 
             rel_objs.append(EntityRelation(
                 source_doc_uuid=source_doc_uuid,
                 source_site=source_site,
-                from_entity_id=entity_ids[from_idx],
-                to_entity_id=entity_ids[to_idx],
+                from_entity_id=from_db_id,
+                to_entity_id=to_db_id,
                 relation_type=rel["relation_type"],
                 relation_props=rel.get("relation_props", {}),
                 source_text=rel.get("source_text", ""),
@@ -874,17 +1047,19 @@ def insert_extraction_result(
         if rel_objs:
             session.add_all(rel_objs)
 
-        # ── 更新文档抽取状态 ──────────────────────────────────────────
+        # ── Phase 5: 更新文档抽取状态 ──────────────────────────────────
         doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
         if doc:
             doc.extraction_status = "done"
             doc.extracted_at = datetime.now(timezone.utc)
 
+        final_ids = [final_id_map.get(i) for i in range(n)]
         logger.info(
             f"[DB] 抽取结果入库: doc={source_doc_uuid} "
-            f"entities={len(entity_ids)} relations={len(relations)}"
+            f"entities={n} (new={len(insert_indices)} merged={len(merged_id_map)}) "
+            f"relations={len(relations)}"
         )
-        return entity_ids
+        return final_ids
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1081,6 +1256,9 @@ def approve_entity_with_alias_writeback(
     - force_new=True → 忽略一切，以新实体创建
     - dict_id 不为 None → 审核员指定了目标 dict_id
     - 都不给 → 保留消歧结果（ent.dict_id），无则新建
+
+    约束：已审核实体（review_status='approved'）若已有 dict_id，
+    禁止 force_new 或更换 dict_id，保证实体身份不可变。
     """
     from db.session import get_session
 
@@ -1092,6 +1270,21 @@ def approve_entity_with_alias_writeback(
         if ent is None:
             logger.warning(f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} 不存在")
             return
+
+        # 已审核实体：dict_id 不可变
+        if ent.review_status == "approved" and ent.dict_id is not None:
+            if force_new:
+                logger.warning(
+                    f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} "
+                    f"已审核 dict_id={ent.dict_id}，拒绝 force_new"
+                )
+                return
+            if dict_id is not None and dict_id != ent.dict_id:
+                logger.warning(
+                    f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} "
+                    f"已审核 dict_id={ent.dict_id}，拒绝更换为 {dict_id}"
+                )
+                return
 
         before = ent.review_status
         ent.review_status = "approved"
