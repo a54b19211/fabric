@@ -156,6 +156,60 @@ def get_worker_stats():
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
+@router.get("/db-pool")
+def get_db_pool_status():
+    """
+    查询当前 DB 连接池状态（pg_stat_activity）。
+    使用原生 psycopg2 连接，绕过 SQLAlchemy 连接池，池满时也能访问。
+    """
+    import psycopg2
+    from config.settings import APP
+
+    try:
+        conn = psycopg2.connect(APP.DB_URL, connect_timeout=5)
+        conn.autocommit = True
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE state = 'active') AS active,
+                   count(*) FILTER (WHERE state = 'idle') AS idle,
+                   count(*) FILTER (WHERE wait_event_type = 'Lock') AS waiting_lock
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+        """)
+        row = cur.fetchone()
+        summary = {"total": row[0], "active": row[1], "idle": row[2], "waiting_lock": row[3]}
+
+        cur.execute("""
+            SELECT pid, state, wait_event_type,
+                   age(now(), query_start) AS duration,
+                   left(query, 120) AS query_preview
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+            ORDER BY query_start
+        """)
+        details = [
+            {
+                "pid": r[0],
+                "state": r[1],
+                "wait_event": r[2],
+                "duration": str(r[3]) if r[3] else None,
+                "query": r[4],
+            }
+            for r in cur.fetchall()
+        ]
+
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {e}")
+
+    return {"summary": summary, "connections": details}
+
+
 @router.get("/status/{uuid}", response_model=ExtractionStatusResponse)
 def get_extraction_status(uuid: str):
     """查询单篇文档的抽取状态。"""

@@ -60,6 +60,7 @@ class TargetEntity(BaseModel):
 class IndicationEntity(BaseModel):
     id: str = Field(default="", description="MeSH ID / ICD-11编码")
     name: str = Field(default="", description="适应症名称")
+    aliases: list[str] = Field(default_factory=list, description="别名")
     icd_code: str = Field(default="", description="ICD编码")
     category: str = Field(default="", description="肿瘤/心血管/神经/内分泌/感染/免疫/罕见病/消化")
     is_rare: bool = Field(default=False, description="是否罕见病")

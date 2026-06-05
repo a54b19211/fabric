@@ -17,6 +17,7 @@ from api.schemas.response import (
     ReviewActionResponse,
     DisambigInfo, DisambigCandidate,
     MergeQueueItem, MergeQueueListResponse,
+    DictCandidateItem, DictCandidateListResponse,
 )
 from db.repository import (
     approve_entity_with_alias_writeback,
@@ -26,6 +27,7 @@ from db.repository import (
     batch_approve_relations, batch_reject_relations,
     log_review_action,
     get_pending_merges, resolve_merge,
+    find_candidate_dicts_for_review,
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation
@@ -241,6 +243,47 @@ def reject_entity_api(entity_id: int, body: ReviewActionRequest):
     except Exception as e:
         logger.error(f"[API] 审核实体失败: id={entity_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
+
+
+@router.get("/entities/{entity_id}/candidates", response_model=DictCandidateListResponse)
+def get_entity_candidates(
+    entity_id: int,
+    top_k: int = Query(10, ge=1, le=50),
+):
+    """
+    审核页实时查询 entity_dict 中与该实体相似的候选项。
+    不依赖预计算的 _disambig.candidates，而是动态查 entity_aliases + 向量相似度。
+    返回的候选项包含 is_verified 标记，前端可区分"已审核"和"自动创建"。
+    """
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
+
+        entity_name = row.entity_name or ""
+        entity_type = row.entity_type or ""
+        entity_data = row.entity_data or {}
+
+    if not entity_name or not entity_type:
+        return DictCandidateListResponse(total=0, items=[])
+
+    try:
+        candidates = find_candidate_dicts_for_review(
+            entity_name=entity_name,
+            entity_type=entity_type,
+            entity_data=entity_data,
+            top_k=top_k,
+        )
+        items = [DictCandidateItem(**c) for c in candidates]
+        return DictCandidateListResponse(total=len(items), items=items)
+    except Exception as e:
+        logger.error(f"[API] 实体候选查询失败: entity_id={entity_id} | {e}")
+        raise HTTPException(status_code=500, detail=f"候选查询失败: {str(e)}")
 
 
 # ── 关系 ───────────────────────────────────────────────────────────────

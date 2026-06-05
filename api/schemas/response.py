@@ -130,6 +130,23 @@ class RelationListResponse(BaseModel):
     items: list[RelationItem]
 
 
+class DictCandidateItem(BaseModel):
+    """审核页实时查询的 entity_dict 候选项。"""
+    dict_id: int
+    entity_type: str
+    name: str
+    aliases: list[str] = []
+    canonical_source: str = ""
+    is_verified: bool = False
+    match_type: str = ""   # "exact_alias" | "vector"
+    score: float = 0.0
+
+
+class DictCandidateListResponse(BaseModel):
+    total: int
+    items: list[DictCandidateItem]
+
+
 class ReviewActionResponse(BaseModel):
     success: bool
     message: str = ""

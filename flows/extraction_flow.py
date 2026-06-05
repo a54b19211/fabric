@@ -14,6 +14,7 @@ LLM 实体抽取流程
   - 直接运行：python -m flows.extraction_flow [limit]
   - 被 API 触发：from flows.extraction_flow import run_extraction_for_uuids
 """
+import threading
 from loguru import logger
 
 from biz_rules.extraction_prompts import get_extraction_prompt, VALID_RELATION_TYPES
@@ -225,6 +226,12 @@ def _disambiguate(entities: list[dict], session=None) -> list[dict]:
 # 主流程
 # ═══════════════════════════════════════════════════════════════════════
 
+# 消歧 + entity_dict 创建 + 入库串行锁。
+# 多个 Worker 并行处理不同文档时，消歧可能同时判定同一实体为 new_entity，
+# 各自创建 entity_dict 导致重复。加锁确保同一时刻只有一个 Worker 执行此临界区。
+_disambig_insert_lock = threading.Lock()
+
+
 def extract_single_document(
     doc_uuid: str,
     raw_content: str,
@@ -300,27 +307,28 @@ def extract_single_document(
         ent["source_site"] = source_site
 
     try:
-        with get_session() as session:
-            if session is None:
-                logger.error(f"[Extraction] DB 未连接，无法入库: {doc_uuid}")
-                return False
+        with _disambig_insert_lock:
+            with get_session() as session:
+                if session is None:
+                    logger.error(f"[Extraction] DB 未连接，无法入库: {doc_uuid}")
+                    return False
 
-            entities = _disambiguate(entities, session=session)
+                entities = _disambiguate(entities, session=session)
 
-            # 将消歧元数据合并到 entity_data，并清理临时字段
-            for ent in entities:
-                disambig = ent.pop("_disambig", None)
-                if disambig:
-                    ent.setdefault("entity_data", {})["_disambig"] = disambig
-                ent.pop("source_site", None)
+                # 将消歧元数据合并到 entity_data，并清理临时字段
+                for ent in entities:
+                    disambig = ent.pop("_disambig", None)
+                    if disambig:
+                        ent.setdefault("entity_data", {})["_disambig"] = disambig
+                    ent.pop("source_site", None)
 
-            insert_extraction_result(
-                source_doc_uuid=doc_uuid,
-                source_site=source_site,
-                entities=entities,
-                relations=relations,
-                session=session,
-            )
+                insert_extraction_result(
+                    source_doc_uuid=doc_uuid,
+                    source_site=source_site,
+                    entities=entities,
+                    relations=relations,
+                    session=session,
+                )
     except Exception as e:
         logger.error(f"[Extraction] 写库失败: {doc_uuid} | {e}")
         update_extraction_status(doc_uuid, "failed", error=f"写库失败: {e}")

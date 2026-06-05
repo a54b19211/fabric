@@ -13,7 +13,7 @@ Step 6: LLM 兜底判断（reranker 无法确定时）
 from loguru import logger
 
 from db.repository import lookup_alias, search_similar_entities
-from core_engine.cloud_api_client import generate_embedding, build_embedding_text
+from core_engine.cloud_api_client import generate_embedding
 from disambiguation.models import (
     DisambiguationResult, CandidateEntity,
     STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED,
@@ -77,8 +77,7 @@ def disambiguate(
     step3_result = result  # 可能是 candidate_matched，暂存
 
     # ── Step 4: 向量召回（仅做候选集，分数不参与决策）──────────────
-    embed_text = build_embedding_text(entity_name, entity_type, entity_data)
-    embedding = generate_embedding(embed_text)
+    embedding = generate_embedding(entity_name)
 
     vector_candidates: list[CandidateEntity] = []
 
@@ -130,20 +129,23 @@ def disambiguate(
         if reranker_result.status == STATUS_CANDIDATE_MATCHED:
             return reranker_result
 
-        # Reranker 不确定 → Step 6: LLM 兜底
+        # Reranker 不确定 → 暂跳过 Step 6 LLM 兜底，直接返回 ambiguous
+        # （LLM 调用 ~3-5s 会显著拉长锁持有时间）
         if reranker_result.status == STATUS_AMBIGUOUS:
-            llm_result = rank_with_llm(
-                entity_name=entity_name,
-                entity_type=entity_type,
-                entity_data=entity_data,
-                source_text=source_text,
-                candidates=reranker_result.candidates or all_candidates,
-            )
-            logger.info(
-                f"[Disambiguation] Step6 LLM: '{entity_name}' → "
-                f"{llm_result.status} ({llm_result.reason})"
-            )
-            return llm_result
+            # llm_result = rank_with_llm(
+            #     entity_name=entity_name,
+            #     entity_type=entity_type,
+            #     entity_data=entity_data,
+            #     source_text=source_text,
+            #     candidates=reranker_result.candidates or all_candidates,
+            # )
+            # logger.info(
+            #     f"[Disambiguation] Step6 LLM: '{entity_name}' → "
+            #     f"{llm_result.status} ({llm_result.reason})"
+            # )
+            # return llm_result
+            logger.info(f"[Disambiguation] Step6 LLM skipped: '{entity_name}' → ambiguous")
+            return reranker_result
 
         # Reranker 返回 new_entity（低分）
         return reranker_result

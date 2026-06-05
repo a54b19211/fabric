@@ -723,8 +723,8 @@ def lookup_external_id(
         ).filter(
             EntityDict.entity_type == entity_type,
             EntityDict.is_deleted == False,
-            text(f"entity_dict.external_ids->>'{external_key}' = :val"),
-        ).params(val=str(external_value).strip()).first()
+            text("entity_dict.external_ids ->> :key = :val"),
+        ).params(key=external_key, val=str(external_value).strip()).first()
         if row:
             canonical = row.canonical_data or {}
             return {"dict_id": row.id, "canonical_name": canonical.get("name", "")}
@@ -807,10 +807,13 @@ def add_aliases_no_embedding(
     session, dict_id: int, entity_type: str, entity_name: str, entity_data: dict,
 ) -> int:
     """
-    轻量版 alias 写入：只写行，不生成 embedding。
-    extract 阶段 merge 使用，避免在持有 DB session 时调 HTTP API。
-    embedding 可后续批量补全。
+    写实体别名到 entity_aliases，同时生成 name_embedding。
+    消歧 Step 4 已在此 session/锁内调 HTTP embedding API，此处同理。
+    已存在则跳过（幂等）。返回新增条数。
     """
+    from core_engine.cloud_api_client import generate_embedding
+    from sqlalchemy import text as _text
+
     names_to_add: set[str] = set()
     names_to_add.add(entity_name.strip())
     data_name = (entity_data.get("name") or "").strip()
@@ -835,13 +838,29 @@ def add_aliases_no_embedding(
         )
         if exists is not None:
             continue
-        session.add(EntityAlias(
+        alias = EntityAlias(
             dict_id=dict_id,
             name=name,
             lang="zh" if any('一' <= c <= '鿿' for c in name) else "en",
             is_canonical=(name == (entity_data.get("name") or "")),
-        ))
+        )
+        session.add(alias)
         session.flush()
+
+        # 生成 embedding（与消歧 Step 4 同一 session/锁内，无额外约束）
+        try:
+            embedding = generate_embedding(name)
+            if embedding:
+                vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
+                session.execute(
+                    _text(
+                        "UPDATE entity_aliases SET name_embedding = "
+                        "CAST(:vec AS vector) WHERE id = :id"
+                    ),
+                    {"vec": vec_str, "id": alias.id},
+                )
+        except Exception as e:
+            logger.warning(f"[DB] alias '{name}' embedding 生成失败: {e}")
         added += 1
     return added
 
@@ -994,17 +1013,45 @@ def _do_insert_extraction_result(
     )
 
     # ── Phase 2: 插入新实体 ───────────────────────────────────────
+    # new_entity → 自动创建 entity_dict（is_verified=False），让后续消歧可匹配
+    # batch_dict_cache 防止同一批次内重复创建同名实体
+    batch_dict_cache: dict[tuple[str, str], int] = {}
+
     new_entities: list[ExtractedEntity] = []
     new_index_to_obj: dict[int, ExtractedEntity] = {}
 
     for i in insert_indices:
         rec = entities[i]
+        entity_type = rec["entity_type"]
+        entity_name = rec.get("entity_name", "").strip()
+        entity_data = rec.get("entity_data", {}) or {}
+        disambig = entity_data.get("_disambig", {}) or {}
+        dict_id = rec.get("dict_id")
+
+        # 消歧结果为 new_entity → 自动创建 entity_dict（未经审核）
+        if dict_id is None and disambig.get("status") == "new_entity" and entity_name:
+            cache_key = (entity_type, entity_name)
+            if cache_key in batch_dict_cache:
+                dict_id = batch_dict_cache[cache_key]
+            else:
+                new_dict_id = _create_entity_dict_from_extraction(
+                    session, entity_name, entity_type, entity_data,
+                    source_site=source_site, is_verified=False,
+                )
+                if new_dict_id:
+                    dict_id = new_dict_id
+                    batch_dict_cache[cache_key] = new_dict_id
+                    add_aliases_no_embedding(
+                        session, new_dict_id, entity_type, entity_name, entity_data,
+                    )
+            rec["dict_id"] = dict_id
+
         ent = ExtractedEntity(
             source_doc_uuid=source_doc_uuid,
             source_site=source_site,
-            entity_type=rec["entity_type"],
+            entity_type=entity_type,
             entity_name=rec.get("entity_name", ""),
-            entity_data=rec.get("entity_data", {}),
+            entity_data=entity_data,
             source_text=rec.get("source_text", ""),
             dict_id=rec.get("dict_id"),
             confidence_score=rec.get("confidence_score", 0.0),
@@ -1058,10 +1105,11 @@ def _do_insert_extraction_result(
                 + new_source
             )[:2000]
 
-        # 回写新别名（轻量版，无 HTTP 调用，避免 session 内阻塞）
+        # 回写新别名（同步生成 embedding）
         dict_id = rec["dict_id"]
         entity_name = rec.get("entity_name", "")
         entity_type = rec.get("entity_type", "")
+        added = 0
         if dict_id:
             added = add_aliases_no_embedding(
                 session, dict_id, entity_type, entity_name, new_entity_data,
@@ -1210,10 +1258,12 @@ def _create_entity_dict_from_extraction(
     entity_type: str,
     entity_data: dict,
     source_site: str = "",
+    is_verified: bool = True,
 ) -> int | None:
     """
     从抽取实体创建 entity_dict 记录，返回 dict_id。
     已存在同 entity_type + 同 canonical_name 则跳过（返回已有 id）。
+    is_verified=False 用于首次抽取自动创建（未经人工审核）。
     """
     existing = (
         session.query(EntityDict.id)
@@ -1244,7 +1294,7 @@ def _create_entity_dict_from_extraction(
         external_ids=external_ids,
         canonical_data=canonical_data,
         canonical_source=source_site,
-        is_verified=True,
+        is_verified=is_verified,
     )
     session.add(entity)
     session.flush()
@@ -1260,7 +1310,7 @@ def _write_aliases_with_embedding(
     entity_data: dict,
 ) -> int:
     """将 entity_name + entity_data 中的名称写为 entity_aliases，附带 embedding。返回新增条数。"""
-    from core_engine.cloud_api_client import generate_embedding, build_embedding_text
+    from core_engine.cloud_api_client import generate_embedding
 
     names_to_add: set[str] = set()
     names_to_add.add(entity_name.strip())
@@ -1291,8 +1341,7 @@ def _write_aliases_with_embedding(
             logger.debug(f"[DB] alias 已存在: '{name}' dict_id={dict_id}，跳过")
             continue
 
-        embed_text = build_embedding_text(name, entity_type, entity_data)
-        embedding = generate_embedding(embed_text)
+        embedding = generate_embedding(name)
 
         alias = EntityAlias(
             dict_id=dict_id,
@@ -1387,40 +1436,44 @@ def approve_entity_with_alias_writeback(
 
         if not target_dict_id:
             logger.info(f"[DB] 创建 entity_dict for '{ent.entity_name}'")
-            dict_id = _create_entity_dict_from_extraction(
+            new_id = _create_entity_dict_from_extraction(
                 session,
                 entity_name=ent.entity_name,
                 entity_type=ent.entity_type,
                 entity_data=entity_data,
                 source_site=ent.source_site or "",
             )
-            if dict_id:
-                ent.dict_id = dict_id
-                session.flush()
+            if new_id:
+                target_dict_id = new_id
             else:
                 logger.warning(f"[DB] 无法创建 entity_dict，跳过 alias 回写: entity_id={entity_id}")
                 return
 
+        # 更新实体 dict_id（审核员指定或新建）
+        if target_dict_id and target_dict_id != ent.dict_id:
+            ent.dict_id = target_dict_id
+            session.flush()
+
         # 回写别名
         added = _write_aliases_with_embedding(
-            session, dict_id, ent.entity_type, ent.entity_name, entity_data,
+            session, ent.dict_id, ent.entity_type, ent.entity_name, entity_data,
         )
         if added:
-            logger.info(f"[DB] alias write-back: entity_id={entity_id} dict_id={dict_id} added {added} aliases")
+            logger.info(f"[DB] alias write-back: entity_id={entity_id} dict_id={ent.dict_id} added {added} aliases")
 
         # 合并 entity_data 到 canonical_data
         merge_auto, merge_conflict = process_entity_merge(
-            session, dict_id, entity_id, entity_data, ent.source_site or "",
+            session, ent.dict_id, entity_id, entity_data, ent.source_site or "",
         )
         if merge_auto or merge_conflict:
             logger.info(
-                f"[DB] merge: entity_id={entity_id} dict_id={dict_id} "
+                f"[DB] merge: entity_id={entity_id} dict_id={ent.dict_id} "
                 f"auto_merged={merge_auto} conflicts={merge_conflict}"
             )
 
 
 def reject_entity(id: int, reviewer: str, note: str = "") -> None:
-    """审核拒绝实体，同时写 review_log。"""
+    """审核拒绝实体，同时级联拒绝关联的 pending 关系，写 review_log。"""
     from db.session import get_session
 
     with get_session() as session:
@@ -1438,6 +1491,28 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
         session.flush()
         _write_review_log(session, "entity", id, "reject", reviewer, note,
                           {"review_status": before}, {"review_status": "rejected"})
+
+        # 级联拒绝所有关联此实体的 pending 关系
+        affected_relations = (
+            session.query(EntityRelation)
+            .filter(
+                EntityRelation.review_status == "pending",
+                EntityRelation.is_deleted == False,
+                (EntityRelation.from_entity_id == id) | (EntityRelation.to_entity_id == id),
+            )
+            .all()
+        )
+        for rel in affected_relations:
+            rel.review_status = "rejected"
+            rel.reviewed_by = reviewer
+            rel.reviewer_note = f"端点实体 {id} 被拒绝，级联拒绝"
+            rel.reviewed_at = datetime.now(timezone.utc)
+
+        if affected_relations:
+            session.flush()
+            logger.info(
+                f"[DB] reject_entity: entity_id={id} 级联拒绝 {len(affected_relations)} 条关系"
+            )
 
 
 def batch_approve_entities(
@@ -1587,7 +1662,7 @@ def get_pending_review_relations(limit: int = 50) -> list[dict]:
 
 
 def approve_relation(id: int, reviewer: str, note: str = "") -> None:
-    """审核通过关系，同时写 review_log。"""
+    """审核通过关系，校验两端实体均未被拒绝，写 review_log。"""
     from db.session import get_session
 
     with get_session() as session:
@@ -1597,6 +1672,25 @@ def approve_relation(id: int, reviewer: str, note: str = "") -> None:
         if rel is None:
             logger.warning(f"[DB] approve_relation: 关系 {id} 不存在")
             return
+
+        # 校验两端实体均已通过审核
+        endpoint_ids = [rel.from_entity_id, rel.to_entity_id]
+        unapproved_entities = (
+            session.query(ExtractedEntity.id)
+            .filter(
+                ExtractedEntity.id.in_(endpoint_ids),
+                ExtractedEntity.review_status.notin_(["approved", "auto_approved"]),
+                ExtractedEntity.is_deleted == False,
+            )
+            .all()
+        )
+        if unapproved_entities:
+            unapproved_ids = [r.id for r in unapproved_entities]
+            logger.warning(
+                f"[DB] approve_relation: 关系 {id} 的端点实体 {unapproved_ids} 尚未通过审核，不允许通过"
+            )
+            return
+
         before = rel.review_status
         rel.review_status = "approved"
         rel.reviewer_note = note
@@ -1726,7 +1820,8 @@ def batch_reject_relations(
 
 def get_entity_dict_for_weknora(limit: int = 500) -> list[dict]:
     """
-    查询 weknora_sync_status='pending' 且 is_deleted=False 的 entity_dict 行。
+    查询 weknora_sync_status='pending' 且 is_deleted=False 且 is_verified=True 的 entity_dict 行。
+    未审核实体不推送 WeKnora，避免前端出现不完整数据。
     返回字段：id, entity_type, external_ids, canonical_data, canonical_source, is_deleted
     """
     from db.session import get_session
@@ -1739,6 +1834,7 @@ def get_entity_dict_for_weknora(limit: int = 500) -> list[dict]:
             .filter(
                 EntityDict.weknora_sync_status == "pending",
                 EntityDict.is_deleted == False,
+                EntityDict.is_verified == True,
             )
         )
         if limit:
@@ -1798,6 +1894,285 @@ def batch_mark_entity_dict_failed(ids: list[int], error: str = "") -> None:
             logger.warning(f"[DB] 批量标记 entity_dict failed: {len(ids)} 条, error={error[:200]}")
         else:
             logger.warning(f"[DB] 批量标记 entity_dict failed: {len(ids)} 条")
+
+
+# ── entity_dict / entity_alias 软删除（PrimeKG 来源保护）──────────────
+
+def soft_delete_entity_dict(dict_id: int, operator: str = "") -> None:
+    """
+    软删除 entity_dict 及其所有别名。
+    PrimeKG 来源（canonical_source='primekg'）禁止删除。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        ent = session.query(EntityDict).filter(EntityDict.id == dict_id).first()
+        if ent is None:
+            logger.warning(f"[DB] soft_delete_entity_dict: dict_id={dict_id} 不存在")
+            return
+        if ent.canonical_source == "primekg":
+            logger.warning(
+                f"[DB] soft_delete_entity_dict: dict_id={dict_id} 来源为 PrimeKG，禁止删除"
+            )
+            raise ValueError(f"无法删除 PrimeKG 来源的实体 (dict_id={dict_id})")
+
+        ent.is_deleted = True
+        session.query(EntityAlias).filter(
+            EntityAlias.dict_id == dict_id,
+            EntityAlias.is_deleted == False,
+        ).update({"is_deleted": True}, synchronize_session=False)
+
+        logger.info(
+            f"[DB] soft_delete_entity_dict: dict_id={dict_id} "
+            f"entity_type={ent.entity_type} operator={operator}"
+        )
+
+
+def soft_delete_entity_alias(alias_id: int, operator: str = "") -> None:
+    """
+    软删除单个别名。
+    若所属 entity_dict 来源为 PrimeKg，禁止删除。
+    若别名是 canonical 名称，禁止删除（标准名不可删）。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return
+        alias = session.query(EntityAlias).filter(EntityAlias.id == alias_id).first()
+        if alias is None:
+            logger.warning(f"[DB] soft_delete_entity_alias: alias_id={alias_id} 不存在")
+            return
+        if alias.is_deleted:
+            return
+
+        parent = session.query(EntityDict).filter(EntityDict.id == alias.dict_id).first()
+        if parent is None:
+            logger.warning(f"[DB] soft_delete_entity_alias: 所属 entity_dict 不存在 dict_id={alias.dict_id}")
+            return
+        if parent.canonical_source == "primekg":
+            logger.warning(
+                f"[DB] soft_delete_entity_alias: alias_id={alias_id} 所属实体来源为 PrimeKG，禁止删除"
+            )
+            raise ValueError(f"无法删除 PrimeKG 来源实体的别名 (alias_id={alias_id})")
+
+        if alias.is_canonical:
+            logger.warning(
+                f"[DB] soft_delete_entity_alias: alias_id={alias_id} "
+                f"'{alias.name}' 为标准名称，禁止删除"
+            )
+            raise ValueError(f"无法删除实体标准名称 '{alias.name}' (alias_id={alias_id})")
+
+        alias.is_deleted = True
+        logger.info(
+            f"[DB] soft_delete_entity_alias: alias_id={alias_id} "
+            f"'{alias.name}' dict_id={alias.dict_id} operator={operator}"
+        )
+
+
+# ── 审核页动态候选查询 ───────────────────────────────────────────
+
+def find_candidate_dicts_for_review(
+    entity_name: str,
+    entity_type: str,
+    entity_data: dict | None = None,
+    top_k: int = 10,
+) -> list[dict]:
+    """
+    审核页实时查询 entity_dict 中与给定实体相似的候选项。
+    不过滤 is_verified（未审核的 entity_dict 也要展示给审核员）。
+
+    查询路径：
+      1. entity_aliases 精确匹配
+      2. entity_aliases name_embedding 向量召回
+      3. BGE-Reranker 精排
+
+    返回：[{dict_id, entity_type, name, aliases, canonical_source,
+            is_verified, match_type, score}, ...]
+    """
+    from db.session import get_session
+    from core_engine.cloud_api_client import generate_embedding
+    from sqlalchemy import text as _text
+
+    entity_data = entity_data or {}
+
+    with get_session() as session:
+        if session is None:
+            return []
+
+        raw_results: dict[int, dict] = {}  # dict_id → {dict_id, name, match_type}
+
+        # 1. 别名精确匹配
+        exact_rows = (
+            session.query(EntityAlias.dict_id, EntityAlias.name)
+            .filter(
+                EntityAlias.name == entity_name.strip(),
+                EntityAlias.is_deleted == False,
+            )
+            .all()
+        )
+        for row in exact_rows:
+            raw_results[row.dict_id] = {
+                "dict_id": row.dict_id,
+                "name": row.name,
+                "match_type": "exact_alias",
+            }
+
+        # 2. 向量召回（top_k * 2 给 reranker 留余量）
+        embedding = generate_embedding(entity_name)
+        if embedding:
+            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
+            try:
+                sql = _text("""
+                    SELECT ea.dict_id, ea.name
+                    FROM entity_aliases ea
+                    JOIN entity_dict ed ON ea.dict_id = ed.id
+                    WHERE ea.is_deleted = FALSE
+                      AND ed.is_deleted = FALSE
+                      AND ed.entity_type = :entity_type
+                      AND ea.name_embedding IS NOT NULL
+                    ORDER BY ea.name_embedding <=> CAST(:vec AS vector)
+                    LIMIT :limit
+                """)
+                vector_rows = session.execute(
+                    sql,
+                    {"vec": vec_str, "entity_type": entity_type, "limit": top_k * 2},
+                ).fetchall()
+                for row in vector_rows:
+                    if row.dict_id not in raw_results:
+                        raw_results[row.dict_id] = {
+                            "dict_id": row.dict_id,
+                            "name": row.name,
+                            "match_type": "vector",
+                        }
+            except Exception as e:
+                logger.warning(f"[DB] find_candidate_dicts_for_review 向量搜索失败: {e}")
+
+        if not raw_results:
+            return []
+
+        # 3. 批量查 entity_dict 和 aliases
+        all_dict_ids = list(raw_results.keys())
+        dict_rows = (
+            session.query(EntityDict)
+            .filter(EntityDict.id.in_(all_dict_ids))
+            .all()
+        )
+        dict_map = {d.id: d for d in dict_rows}
+
+        alias_rows = (
+            session.query(EntityAlias.dict_id, EntityAlias.name)
+            .filter(
+                EntityAlias.dict_id.in_(all_dict_ids),
+                EntityAlias.is_deleted == False,
+            )
+            .all()
+        )
+        aliases_by_dict: dict[int, list[str]] = {}
+        for did, name in alias_rows:
+            aliases_by_dict.setdefault(did, []).append(name)
+
+        # 4. Reranker 精排
+        rerank_scores = _rerank_candidates(entity_name, entity_data, raw_results, dict_map, aliases_by_dict)
+
+        # 5. 组装结果，按 reranker 分数降序
+        output = []
+        for dict_id, r in raw_results.items():
+            d = dict_map.get(dict_id)
+            if d is None:
+                continue
+            score = rerank_scores.get(dict_id)
+            if score is None:
+                continue  # reranker 未返回分数，跳过
+            output.append({
+                "dict_id": dict_id,
+                "entity_type": d.entity_type,
+                "name": r["name"],
+                "aliases": aliases_by_dict.get(dict_id, []),
+                "canonical_source": d.canonical_source or "",
+                "is_verified": d.is_verified,
+                "match_type": r["match_type"],
+                "score": round(score, 4),
+            })
+
+        output.sort(key=lambda x: x["score"], reverse=True)
+        return output[:top_k]
+
+
+def _rerank_candidates(
+    entity_name: str,
+    entity_data: dict,
+    raw_results: dict[int, dict],
+    dict_map: dict[int, EntityDict],
+    aliases_by_dict: dict[int, list[str]],
+) -> dict[int, float]:
+    """
+    调用 BGE-Reranker 对候选 entity_dict 精排，返回 {dict_id: score}。
+    """
+    import requests
+    from config.settings import APP
+
+    if not raw_results:
+        return {}
+
+    # 构造 query 文本（多语言名称拼接）
+    query_parts = [entity_name]
+    if entity_data:
+        en = entity_data.get("name", "").strip()
+        if en and en != entity_name:
+            query_parts.append(en)
+        en2 = entity_data.get("name_en", "").strip()
+        if en2:
+            query_parts.append(en2)
+    query = " | ".join(query_parts)
+
+    # 构造每个候选的 text（名称 + aliases）
+    dict_ids_ordered = list(raw_results.keys())
+    texts = []
+    for did in dict_ids_ordered:
+        parts = [raw_results[did]["name"]]
+        d = dict_map.get(did)
+        if d:
+            cd = d.canonical_data or {}
+            cd_name = cd.get("name", "").strip()
+            if cd_name and cd_name != parts[0]:
+                parts.append(cd_name)
+            cd_name_en = cd.get("name_en", "").strip()
+            if cd_name_en:
+                parts.append(cd_name_en)
+        for alias in aliases_by_dict.get(did, []):
+            if alias not in parts:
+                parts.append(alias)
+        texts.append(" | ".join(parts))
+
+    base = APP.RERANK_API_BASE.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    rerank_url = base + "/rerank"
+
+    try:
+        resp = requests.post(
+            rerank_url,
+            json={"query": query, "texts": texts},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("results", [])
+        scores: dict[int, float] = {}
+        for item in items:
+            idx = item.get("index")
+            if idx is not None and 0 <= idx < len(dict_ids_ordered):
+                scores[dict_ids_ordered[idx]] = item.get("relevance_score", 0.0)
+        return scores
+    except Exception as e:
+        logger.warning(f"[DB] _rerank_candidates 失败: {e}")
+        # 降级：用 match_type 给粗略分
+        fallback: dict[int, float] = {}
+        for did, r in raw_results.items():
+            fallback[did] = 1.0 if r["match_type"] == "exact_alias" else 0.5
+        return fallback
 
 
 def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
@@ -1910,6 +2285,8 @@ def get_relations_for_weknora_graph(limit: int = 500) -> list[dict]:
                 EntityRelation.review_status.in_(["approved", "auto_approved"]),
                 EntityRelation.weknora_graph_status == "pending",
                 EntityRelation.is_deleted == False,
+                FromEntity.is_deleted == False,
+                ToEntity.is_deleted == False,
             )
         )
         if limit > 0:
