@@ -165,25 +165,25 @@ def get_stats():
             logger.error("[API] 数据库连接失败")
             raise HTTPException(status_code=503, detail="数据库未连接")
 
-    try:
-        def _count(status: str) -> int:
-            return session.query(Document).filter(
-                Document.weknora_sync_status == status,
-                Document.is_deleted == False,
-            ).count()
+        try:
+            def _count(status: str) -> int:
+                return session.query(Document).filter(
+                    Document.weknora_sync_status == status,
+                    Document.is_deleted == False,
+                ).count()
 
-        stats = WeknoraStatsResponse(
-            pending=_count("pending"),
-            synced=_count("synced"),
-            failed=_count("failed"),
-        )
+            stats = WeknoraStatsResponse(
+                pending=_count("pending"),
+                synced=_count("synced"),
+                failed=_count("failed"),
+            )
 
-        logger.info(f"[API] WeKnora 同步统计: {stats.json()}")
-        return stats
+            logger.info(f"[API] WeKnora 同步统计: {stats.json()}")
+            return stats
 
-    except Exception as e:
-        logger.error(f"[API] WeKnora 同步统计失败: {e}")
-        raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
+        except Exception as e:
+            logger.error(f"[API] WeKnora 同步统计失败: {e}")
+            raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
