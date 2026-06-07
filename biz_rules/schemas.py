@@ -109,6 +109,22 @@ class DrugbankExtra(BaseModel):
     synonyms: List[str] = Field(default_factory=list, description="同义词列表（最多10个）")
 
 
+class ClinicalTrialsExtra(BaseModel):
+    """ClinicalTrials.gov 特有字段"""
+    nct_id: str = Field(default="", description="NCT编号，如 NCT00001372")
+    study_type: str = Field(default="", description="研究类型：Interventional / Observational")
+    phase: List[str] = Field(default_factory=list, description="研究阶段：Phase 1 / Phase 2 / Phase 3 / Phase 4")
+    study_status: str = Field(default="", description="研究状态：Recruiting / Completed / Terminated")
+    enrollment: int = Field(default=0, description="计划入组人数")
+    study_completion_date: str = Field(default="", description="研究完成日期")
+    primary_completion_date: str = Field(default="", description="主要终点完成日期")
+    sponsor: str = Field(default="", description="申办方")
+    collaborators: List[str] = Field(default_factory=list, description="合作方列表")
+    conditions: List[str] = Field(default_factory=list, description="研究疾病/条件列表")
+    interventions: List[str] = Field(default_factory=list, description="干预措施列表")
+    arm_groups: List[str] = Field(default_factory=list, description="研究组别列表")
+
+
 class FdaEnforcementExtra(BaseModel):
     """FDA 药品召回（openFDA enforcement）特有字段"""
     recall_number: str = Field(default="", description="召回编号")
@@ -138,6 +154,7 @@ EXTRA_MODEL_MAP: Dict[str, type] = {
     "drugbank": DrugbankExtra,
     "fda_enforcement": FdaEnforcementExtra,
     "fda_drug_safety": FdaDrugSafetyExtra,
+    "clinicaltrials": ClinicalTrialsExtra,
 }
 
 

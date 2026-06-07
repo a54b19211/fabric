@@ -123,6 +123,28 @@ class PolicyEntity(BaseModel):
     affected_regions: list[str] = Field(default_factory=list, description="影响地区")
 
 
+class SafetyEventEntity(BaseModel):
+    id: str = Field(default="", description="内部ID")
+    event_type: str = Field(default="", description="不良事件/安全警示/黑框警告/上市后监测")
+    safety_signal: str = Field(default="", description="安全信号描述")
+    severity: str = Field(default="", description="严重/中等/轻微")
+    affected_population: str = Field(default="", description="受影响人群")
+    report_date: str = Field(default="", description="通报日期")
+    source_agency: str = Field(default="", description="来源机构（FDA/EMA/NMPA等）")
+    recommendation: str = Field(default="", description="机构建议措施")
+
+
+class RecallEventEntity(BaseModel):
+    id: str = Field(default="", description="内部ID")
+    recall_class: str = Field(default="", description="召回级别（I/II/III）")
+    recall_reason: str = Field(default="", description="召回原因")
+    recall_date: str = Field(default="", description="召回日期")
+    affected_batches: list[str] = Field(default_factory=list, description="受影响批次")
+    affected_regions: list[str] = Field(default_factory=list, description="召回地区")
+    recall_scope: str = Field(default="", description="零售/批发/用户级")
+    recall_status: str = Field(default="", description="进行中/已完成")
+
+
 class TCMFormulaEntity(BaseModel):
     id: str = Field(default="", description="内部ID")
     name: str = Field(default="", description="方剂名称")
@@ -186,6 +208,8 @@ ENTITY_SCHEMA_MAP: dict[str, type[BaseModel]] = {
     "DealItem":           DealItemEntity,
     "ApprovalEvent":      ApprovalEventEntity,
     "Policy":             PolicyEntity,
+    "SafetyEvent":        SafetyEventEntity,
+    "RecallEvent":        RecallEventEntity,
     "TCMFormula":         TCMFormulaEntity,
     "Compound":           CompoundEntity,
     "Pathway":            PathwayEntity,
