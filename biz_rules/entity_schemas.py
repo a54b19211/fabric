@@ -30,6 +30,7 @@ class CompanyEntity(BaseModel):
 class DrugEntity(BaseModel):
     id: str = Field(default="", description="DrugBank ID / NMPA批准文号 / 内部ID")
     name: str = Field(default="", description="通用名（INN名优先）")
+    name_en: str = Field(default="", description="英文通用名；若 entity_name 为英文则直接填入；若中文则翻译为英文")
     aliases: list[str] = Field(default_factory=list, description="商品名/研发代号/曾用名")
     drug_class: str = Field(default="", description="化学药品/生物制品/中药")
     modality: str = Field(default="", description="小分子/单抗/双抗/ADC/多肽/融合蛋白/纳米抗体/细胞治疗/基因治疗/核酸药物/反义寡核苷酸/小干扰RNA/放射性药物/疫苗/溶瘤病毒")
@@ -48,6 +49,7 @@ class DrugEntity(BaseModel):
 class TargetEntity(BaseModel):
     id: str = Field(default="", description="UniProt ID / HGNC ID")
     name: str = Field(default="", description="官方基因名/蛋白名（如 CLDN18.2）")
+    name_en: str = Field(default="", description="英文名/基因符号；若 entity_name 为英文则直接填入；若中文则翻译为英文")
     gene_symbol: str = Field(default="", description="基因符号（如 CLDN18）")
     aliases: list[str] = Field(default_factory=list, description="别名/曾用名")
     target_type: str = Field(default="", description="膜蛋白/GPCR/酶/转录因子/离子通道/免疫检查点/表面抗原/RNA")
@@ -60,6 +62,7 @@ class TargetEntity(BaseModel):
 class IndicationEntity(BaseModel):
     id: str = Field(default="", description="MeSH ID / ICD-11编码")
     name: str = Field(default="", description="适应症名称")
+    name_en: str = Field(default="", description="英文名；若 entity_name 为英文则直接填入；若中文则翻译为英文")
     aliases: list[str] = Field(default_factory=list, description="别名")
     icd_code: str = Field(default="", description="ICD编码")
     category: str = Field(default="", description="肿瘤/心血管/神经/内分泌/感染/免疫/罕见病/消化")
@@ -140,6 +143,7 @@ class CompoundEntity(BaseModel):
 class PathwayEntity(BaseModel):
     id: str = Field(default="", description="KEGG pathway ID（如 hsa04151）")
     name: str = Field(default="", description="通路名称")
+    name_en: str = Field(default="", description="英文名；若 entity_name 为英文则直接填入；若中文则翻译为英文")
     aliases: list[str] = Field(default_factory=list, description="别名")
     pathway_type: str = Field(default="", description="信号通路/代谢通路/免疫通路")
 

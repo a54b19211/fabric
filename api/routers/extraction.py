@@ -6,7 +6,7 @@ from loguru import logger
 from api.schemas.request import ExtractionTriggerRequest
 from api.schemas.response import (
     ExtractionTriggerResponse, ExtractionStatusResponse, ExtractionStatsResponse,
-    WorkerStatsResponse, WorkerItem,
+    WorkerStatsResponse, WorkerItem, ReExtractResponse,
 )
 from db.session import get_session
 from db.models import Document
@@ -208,6 +208,55 @@ def get_db_pool_status():
         raise HTTPException(status_code=500, detail=f"查询失败: {e}")
 
     return {"summary": summary, "connections": details}
+
+
+@router.post("/re-extract/{uuid}", response_model=ReExtractResponse)
+def re_extract_document(uuid: str):
+    """
+    触发单文档重抽取。
+    - 检查 extraction_status 不能是 "processing"
+    - 重置为 "processing" 并提交到 WorkerManager
+    - 旧 extracted_entities / entity_relations 保留不删
+    """
+    if not uuid or not uuid.strip():
+        raise HTTPException(status_code=400, detail="uuid 不能为空")
+
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        doc = session.query(Document).filter(
+            Document.uuid == uuid,
+            Document.is_deleted == False,
+        ).first()
+
+        if doc is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+
+        if doc.extraction_status == "processing":
+            raise HTTPException(status_code=409, detail="文档正在抽取中，请等待完成后再重试")
+
+        if not doc.raw_content or not doc.raw_content.strip():
+            raise HTTPException(status_code=400, detail="文档 raw_content 为空，无法抽取")
+
+        doc.extraction_status = "processing"
+        doc.extraction_error = ""
+        doc.extraction_model = ""
+
+    # 提交到 WorkerManager
+    try:
+        from flows.extraction_flow import run_extraction_for_uuids
+        result = run_extraction_for_uuids([uuid])
+        if result.get("failed", 0) > 0:
+            raise HTTPException(status_code=500, detail=result.get("error", "提交失败"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 重抽取提交失败: {uuid} | {e}")
+        raise HTTPException(status_code=500, detail=f"提交失败: {str(e)}")
+
+    logger.info(f"[API] 重抽取已提交: {uuid}")
+    return ReExtractResponse(success=True, uuid=uuid, message="已重新提交抽取")
 
 
 @router.get("/status/{uuid}", response_model=ExtractionStatusResponse)

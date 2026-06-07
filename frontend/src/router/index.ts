@@ -32,6 +32,12 @@ const router = createRouter({
       meta: { title: '批量审核工作台' },
     },
     {
+      path: '/graph-review',
+      name: 'GraphReview',
+      component: () => import('@/views/GraphReview.vue'),
+      meta: { title: '图谱审核' },
+    },
+    {
       path: '/neo4j',
       name: 'Neo4j',
       component: () => import('@/views/Neo4jManager.vue'),

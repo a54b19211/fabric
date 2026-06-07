@@ -248,3 +248,54 @@ class GraphSyncStatsResponse(BaseModel):
     entity_dict: GraphSyncStatusCount
     entities: GraphSyncStatusCount
     relations: GraphSyncStatusCount
+
+
+# ── Graph Review ─────────────────────────────────────────────────────────
+
+class GraphNode(BaseModel):
+    id: int
+    entity_type: str
+    entity_name: str
+    entity_data: dict = {}
+    dict_id: Optional[int] = None
+    review_status: str
+    source_doc_uuid: str
+    source_site: str
+    confidence_score: float = 0.0
+    is_verified: bool = False
+
+
+class GraphEdge(BaseModel):
+    id: int
+    relation_type: str
+    from_entity_id: Optional[int]
+    to_entity_id: Optional[int]
+    review_status: str
+    relation_props: dict = {}
+    source_doc_uuid: str
+
+
+class GraphResponse(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
+class StatusCounts(BaseModel):
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+
+
+class ReviewStatsResponse(BaseModel):
+    entities: StatusCounts
+    relations: StatusCounts
+    by_type: dict[str, StatusCounts] = {}
+    by_site: dict[str, StatusCounts] = {}
+
+
+# ── Re-extract ───────────────────────────────────────────────────────────
+
+class ReExtractResponse(BaseModel):
+    success: bool
+    uuid: str
+    message: str = ""

@@ -126,3 +126,68 @@ export const resolveMerge = (mergeId: number, reviewer: string, resolution: stri
   http.post<any, { success: boolean }>(`/review/merge-queue/${mergeId}/resolve`, {
     reviewer, resolution, resolved_value: resolvedValue,
   })
+
+// ── 图谱 ────────────────────────────────────────────────────────────────
+
+export interface GraphNode {
+  id: number
+  entity_type: string
+  entity_name: string
+  entity_data: Record<string, any>
+  dict_id: number | null
+  review_status: string
+  source_doc_uuid: string
+  source_site: string
+  confidence_score: number
+  is_verified: boolean
+}
+
+export interface GraphEdge {
+  id: number
+  relation_type: string
+  from_entity_id: number | null
+  to_entity_id: number | null
+  review_status: string
+  relation_props: Record<string, any>
+  source_doc_uuid: string
+}
+
+export interface GraphResponse {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+export const getReviewGraph = (params: {
+  entity_types?: string
+  source_site?: string
+  review_status?: string
+  source_doc_uuid?: string
+  include_relations?: boolean
+  limit?: number
+}) => http.get<any, GraphResponse>('/review/graph', { params })
+
+// ── 仪表盘统计 ──────────────────────────────────────────────────────────
+
+export interface StatusCounts {
+  pending: number
+  approved: number
+  rejected: number
+}
+
+export interface ReviewStats {
+  entities: StatusCounts
+  relations: StatusCounts
+  by_type: Record<string, StatusCounts>
+  by_site: Record<string, StatusCounts>
+}
+
+export const getReviewStats = () =>
+  http.get<any, ReviewStats>('/review/stats')
+
+// ── 元数据编辑 ──────────────────────────────────────────────────────────
+
+export const patchEntity = (id: number, entityData: Record<string, any>) =>
+  http.patch<any, { success: boolean; message?: string }>(`/review/entities/${id}`, { entity_data: entityData })
+
+export const patchRelation = (id: number, relationProps: Record<string, any>) =>
+  http.patch<any, { success: boolean; message?: string }>(`/review/relations/${id}`, { relation_props: relationProps })

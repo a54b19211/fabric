@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import text, func
 
 from db.models import (
     Document, DocExtra, Attachment,
     EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
     CrawlLog, ReviewLog,
     EntityMergeQueue,
+    OperationLog,
 )
 
 # ── 来源优先级（canonical_data 合并用）──────────────────────────────────
@@ -37,6 +38,37 @@ _SOURCE_PRIORITY: dict[str, int] = {
 _ARRAY_FIELDS = frozenset({"aliases", "types", "innovation_labels", "categories", "atc_codes", "synonyms"})
 # 快照字段：时间新的覆盖旧的（值本身是 dict，含 timestamp key）
 _SNAPSHOT_FIELDS = frozenset({"market_cap", "price", "stock_price"})
+
+
+# ── 操作日志 ───────────────────────────────────────────────────────────
+
+def _write_operation_log(
+    session,
+    operation: str,
+    target_table: str,
+    target_id: int | None,
+    business_action: str = "",
+    description: str = "",
+    details: dict | None = None,
+    operator: str = "system",
+    process: str = "",
+    trigger_source: str = "",
+) -> None:
+    """写入一条操作日志。不抛异常，失败只记 warning。"""
+    try:
+        session.add(OperationLog(
+            operation=operation,
+            target_table=target_table,
+            target_id=target_id,
+            business_action=business_action,
+            description=description,
+            details=details or {},
+            operator=operator,
+            process=process,
+            trigger_source=trigger_source,
+        ))
+    except Exception as e:
+        logger.warning(f"[OperationLog] 写入失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -82,6 +114,7 @@ def upsert_document(envelope) -> None:
             )
             session.add(doc)
             logger.info(f"[DB] 新增文档: {envelope.uuid}")
+            is_new = True
         else:
             # 只更新可变字段，保留 extraction_status / weknora_sync_status 等流水线状态
             doc.title = envelope.title or doc.title
@@ -92,8 +125,17 @@ def upsert_document(envelope) -> None:
             doc.doc_type = envelope.doc_type or doc.doc_type
             doc.language = envelope.language or doc.language
             logger.info(f"[DB] 更新文档: {envelope.uuid}")
+            is_new = False
 
         session.flush()  # 确保 doc.id 可用
+        _write_operation_log(
+            session, "insert" if is_new else "update", "documents", doc.id,
+            business_action="upsert",
+            description=f"{'新增' if is_new else '更新'}文档: {envelope.uuid} site={envelope.provenance.source_site or ''}",
+            details={"uuid": envelope.uuid, "source_site": envelope.provenance.source_site or "",
+                      "doc_type": envelope.doc_type or "", "parse_method": envelope.parse_method or ""},
+            trigger_source="upsert_document",
+        )
 
         # ── 2. doc_extra 表 ──────────────────────────────────────────
         if envelope.extra:
@@ -135,10 +177,26 @@ def _upsert_doc_extra_in_session(session, uuid: str, source_site: str, extra: di
     """内部辅助：在已有 session 中写 doc_extra，不自行 commit。"""
     row = session.query(DocExtra).filter(DocExtra.uuid == uuid).first()
     if row is None:
-        session.add(DocExtra(uuid=uuid, source_site=source_site, extra=extra))
+        row = DocExtra(uuid=uuid, source_site=source_site, extra=extra)
+        session.add(row)
+        session.flush()
+        _write_operation_log(
+            session, "insert", "doc_extra", row.id,
+            business_action="upsert",
+            description=f"新增 doc_extra: uuid={uuid} site={source_site}",
+            details={"uuid": uuid, "source_site": source_site},
+            trigger_source="_upsert_doc_extra_in_session",
+        )
     else:
         row.extra = extra
         row.source_site = source_site
+        _write_operation_log(
+            session, "update", "doc_extra", row.id,
+            business_action="upsert",
+            description=f"更新 doc_extra: uuid={uuid} site={source_site}",
+            details={"uuid": uuid, "source_site": source_site},
+            trigger_source="_upsert_doc_extra_in_session",
+        )
 
 
 def get_document_by_uuid(uuid: str) -> Optional[Document]:
@@ -172,6 +230,7 @@ def update_extraction_status(
         if doc is None:
             logger.warning(f"[DB] update_extraction_status: 文档不存在 {uuid}")
             return
+        before_status = doc.extraction_status
         doc.extraction_status = status
         if model:
             doc.extraction_model = model
@@ -179,6 +238,13 @@ def update_extraction_status(
             doc.extraction_error = error
         if status == "done":
             doc.extracted_at = extracted_at or datetime.now(timezone.utc)
+        _write_operation_log(
+            session, "update", "documents", doc.id,
+            business_action="extract",
+            description=f"extraction_status: {before_status} → {status} uuid={uuid}",
+            details={"uuid": uuid, "extraction_status": {"before": before_status, "after": status}, "model": model, "error": error},
+            trigger_source="update_extraction_status",
+        )
 
 
 def update_weknora_sync_status(uuid: str, status: str) -> None:
@@ -192,7 +258,15 @@ def update_weknora_sync_status(uuid: str, status: str) -> None:
         if doc is None:
             logger.warning(f"[DB] update_weknora_sync_status: 文档不存在 {uuid}")
             return
+        before_status = doc.weknora_sync_status
         doc.weknora_sync_status = status
+        _write_operation_log(
+            session, "update", "documents", doc.id,
+            business_action="weknora_sync",
+            description=f"weknora_sync_status: {before_status} → {status} uuid={uuid}",
+            details={"uuid": uuid, "weknora_sync_status": {"before": before_status, "after": status}},
+            trigger_source="update_weknora_sync_status",
+        )
 
 
 def get_pending_extraction(limit: int = 100) -> list[dict]:
@@ -363,6 +437,13 @@ def merge_canonical_data(dict_id: int, new_data: dict, source_site: str) -> None
         entity.canonical_data = merged
         entity.canonical_source = source_site
         entity.canonical_updated_at = datetime.now(timezone.utc)
+        _write_operation_log(
+            session, "update", "entity_dict", dict_id,
+            business_action="merge",
+            description=f"canonical_data 合并: source={source_site}",
+            details={"source_site": source_site, "canonical_data": dict(entity.canonical_data or {})},
+            trigger_source="merge_canonical_data",
+        )
 
 
 def get_entity_dict_by_id(dict_id: int) -> Optional[EntityDict]:
@@ -385,6 +466,56 @@ def get_entity_dict_by_id(dict_id: int) -> Optional[EntityDict]:
 
 # 这些字段合并风险低，差异直接跳过不排队
 _SKIP_MERGE_FIELDS = frozenset({"name", "name_en", "aliases", "source_text"})
+
+# entity_type → canonical_data 合法字段白名单
+# 只有白名单内的字段才能写入 entity_dict.canonical_data，防止跨实体类型字段污染。
+# 不在白名单中的 entity_type 不限制（向后兼容）。
+_VALID_FIELDS_BY_TYPE: dict[str, frozenset] = {
+    "Company": frozenset({
+        "id", "name", "name_en", "country", "stock_code", "exchange",
+        "founded_year", "types", "aliases", "market_cap", "market_cap_date",
+        "global_status", "primary_focus", "innovation_labels", "stage",
+    }),
+    "Drug": frozenset({
+        "id", "name", "name_en", "cas_number", "drug_class", "modality",
+        "phase_cn", "phase_eu", "phase_jp", "phase_us",
+        "patent_expiry_cn", "patent_expiry_us", "types", "aliases",
+        "global_status", "innovation_type", "atc_codes", "synonyms",
+    }),
+    "Target": frozenset({
+        "id", "name", "name_en", "gene_symbol", "uniprot_id",
+        "types", "aliases", "global_status",
+    }),
+    "Indication": frozenset({
+        "id", "name", "name_en", "types", "aliases", "icd_code",
+    }),
+    "ApprovalEvent": frozenset({
+        "id", "name", "name_en", "doc_number", "issue_date",
+        "types", "aliases",
+    }),
+    "Policy": frozenset({
+        "id", "name", "name_en", "policy_type", "doc_number",
+        "issue_date", "effective_date", "affected_regions",
+        "types", "aliases",
+    }),
+    "ClinicalTrial": frozenset({
+        "id", "name", "name_en", "phase_cn", "nct_number", "status",
+        "types", "aliases",
+    }),
+    "DealEvent": frozenset({
+        "id", "name", "name_en", "deal_type", "deal_value",
+        "types", "aliases",
+    }),
+    "TCMFormula": frozenset({
+        "id", "name", "name_en", "types", "aliases",
+    }),
+    "Compound": frozenset({
+        "id", "name", "name_en", "cas_number", "types", "aliases",
+    }),
+    "Pathway": frozenset({
+        "id", "name", "name_en", "types", "aliases",
+    }),
+}
 
 
 def process_entity_merge(
@@ -415,12 +546,16 @@ def process_entity_merge(
     current = dict(entity.canonical_data or {})
     current_priority = _SOURCE_PRIORITY.get(entity.canonical_source or "", 0)
     new_priority = _SOURCE_PRIORITY.get(source_site, 1)
+    valid_fields = _VALID_FIELDS_BY_TYPE.get(entity.entity_type)  # None = 不限制
 
     auto_count = 0
     conflict_count = 0
 
     for key, new_val in entity_data.items():
-        if key in _SKIP_MERGE_FIELDS or new_val is None:
+        # 跳过内部元数据、_SKIP_MERGE_FIELDS、空值、非白名单字段
+        if key.startswith("_") or key in _SKIP_MERGE_FIELDS or new_val is None:
+            continue
+        if valid_fields is not None and key not in valid_fields:
             continue
 
         existing_val = current.get(key)
@@ -455,8 +590,8 @@ def process_entity_merge(
         if existing_val == new_val:
             continue
 
-        # 5) 新来源优先级 >= 当前来源 → auto merge
-        if new_priority >= current_priority:
+        # 5) 新来源优先级严格高于当前来源 → auto merge
+        if new_priority > current_priority:
             current[key] = new_val
             auto_count += 1
             continue
@@ -492,6 +627,15 @@ def process_entity_merge(
         logger.info(
             f"[DB] process_entity_merge: dict_id={dict_id} "
             f"auto_merged={auto_count} conflicts={conflict_count}"
+        )
+        _write_operation_log(
+            session, "update", "entity_dict", dict_id,
+            business_action="merge",
+            description=f"canonical_data 合并: auto={auto_count} conflicts={conflict_count} source_entity={source_entity_id}",
+            details={"source_entity_id": source_entity_id, "source_site": source_site,
+                      "auto_merged": auto_count, "conflicts": conflict_count,
+                      "canonical_data": dict(entity.canonical_data or {})},
+            trigger_source="process_entity_merge",
         )
 
     return auto_count, conflict_count
@@ -569,6 +713,15 @@ def resolve_merge(
                 entity.canonical_data = canonical
                 entity.canonical_updated_at = datetime.now(timezone.utc)
 
+        _write_operation_log(
+            session, "update", "entity_merge_queue", merge_id,
+            business_action="merge_resolve",
+            description=f"合并冲突解决: field={merge.field_name} resolution={resolution} by {reviewer}",
+            details={"field_name": merge.field_name, "resolution": resolution,
+                      "target_dict_id": merge.target_dict_id, "reviewer": reviewer},
+            operator=reviewer,
+            trigger_source="resolve_merge",
+        )
         logger.info(f"[DB] resolve_merge: merge_id={merge_id} resolution={resolution}")
 
 
@@ -588,7 +741,7 @@ def lookup_alias(name: str, entity_type: str, session=None) -> Optional[int]:
             sess.query(EntityAlias.dict_id)
             .join(EntityDict, EntityAlias.dict_id == EntityDict.id)
             .filter(
-                EntityAlias.name == name,
+                func.lower(EntityAlias.name) == name.lower(),
                 EntityAlias.is_deleted == False,
                 EntityDict.entity_type == entity_type,
                 EntityDict.is_deleted == False,
@@ -696,12 +849,21 @@ def add_aliases(dict_id: int, aliases: list[tuple[str, str, bool]]) -> None:
                 .first()
             )
             if exists is None:
-                session.add(EntityAlias(
+                alias = EntityAlias(
                     dict_id=dict_id,
                     name=name,
                     lang=lang or "",
                     is_canonical=bool(is_canonical),
-                ))
+                )
+                session.add(alias)
+                session.flush()
+                _write_operation_log(
+                    session, "insert", "entity_aliases", alias.id,
+                    business_action="alias_sync",
+                    description=f"添加别名: '{name}' dict_id={dict_id}",
+                    details={"dict_id": dict_id, "name": name, "lang": lang, "is_canonical": bool(is_canonical)},
+                    trigger_source="add_aliases",
+                )
 
 
 def lookup_external_id(
@@ -802,6 +964,15 @@ def add_alias_with_embedding(
                 {"vec": vec_str, "id": alias.id},
             )
 
+        _write_operation_log(
+            session, "insert", "entity_aliases", alias.id,
+            business_action="alias_sync",
+            description=f"添加别名(含embedding): '{name}' dict_id={dict_id}",
+            details={"dict_id": dict_id, "name": name, "lang": lang, "is_canonical": bool(is_canonical),
+                      "has_embedding": bool(embedding)},
+            trigger_source="add_alias_with_embedding",
+        )
+
 
 def add_aliases_no_embedding(
     session, dict_id: int, entity_type: str, entity_name: str, entity_data: dict,
@@ -861,6 +1032,15 @@ def add_aliases_no_embedding(
                 )
         except Exception as e:
             logger.warning(f"[DB] alias '{name}' embedding 生成失败: {e}")
+
+        _write_operation_log(
+            session, "insert", "entity_aliases", alias.id,
+            business_action="alias_sync",
+            description=f"添加别名(消歧): '{name}' dict_id={dict_id}",
+            details={"dict_id": dict_id, "name": name, "entity_type": entity_type,
+                      "is_canonical": (name == (entity_data.get("name") or ""))},
+            trigger_source="add_aliases_no_embedding",
+        )
         added += 1
     return added
 
@@ -868,7 +1048,9 @@ def add_aliases_no_embedding(
 # ── 提取结果写入前：实体合并辅助函数 ─────────────────────────────────
 
 def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
-    """查找 dict_id + entity_type 对应的已审核 extracted_entities 行，找不到返回 None。"""
+    """
+    查找 dict_id + entity_type 对应的最老未删除 extracted_entities 行。
+    """
     from db.models import ExtractedEntity
 
     return (
@@ -876,60 +1058,11 @@ def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
         .filter(
             ExtractedEntity.dict_id == dict_id,
             ExtractedEntity.entity_type == entity_type,
-            ExtractedEntity.review_status == "approved",
             ExtractedEntity.is_deleted == False,
         )
         .order_by(ExtractedEntity.id.asc())
         .first()
     )
-
-
-def _merge_jsonb_entity_data(existing: dict, new: dict) -> dict:
-    """
-    合并两个 entity_data JSONB dict。
-    - 数组字段：追加去重
-    - 快照字段：时间戳新的覆盖旧的
-    - 标量字段：已有值保留，空缺值补入新值
-    - _disambig 等临时 key 不合并（从 new 中剔除）
-    """
-    merged = dict(existing)
-
-    for key, new_val in new.items():
-        if key.startswith("_"):
-            continue  # 跳过 _disambig 等元数据字段
-
-        if new_val is None:
-            continue
-
-        existing_val = merged.get(key)
-
-        # 1) 已有字段无值 → 直接补入
-        if existing_val is None:
-            merged[key] = new_val
-            continue
-
-        # 2) 数组字段 → 追加去重
-        if key in _ARRAY_FIELDS:
-            if isinstance(existing_val, list) and isinstance(new_val, list):
-                merged_list = list(dict.fromkeys(existing_val + new_val))
-                if merged_list != existing_val:
-                    merged[key] = merged_list
-            continue
-
-        # 3) 快照字段 → 时间新的覆盖旧的
-        if key in _SNAPSHOT_FIELDS:
-            if (
-                isinstance(new_val, dict)
-                and isinstance(existing_val, dict)
-                and new_val.get("timestamp", 0) > existing_val.get("timestamp", 0)
-            ):
-                merged[key] = new_val
-            continue
-
-        # 4) 标量值相同 → 跳过；值不同 → 保留已有（已有优先）
-        # 不做覆盖，已有数据是经过审核确认的
-
-    return merged
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -946,8 +1079,9 @@ def insert_extraction_result(
     """
     批量写入 LLM 抽取结果（实体 + 关系），同一事务。
 
-    去重逻辑：消歧结果为 auto_matched 且已有同 dict_id 的已审核实体时，
-    不插入新行，而是更新已有行的 entity_data、追加 alias、重置同步状态。
+    去重逻辑：消歧将实体匹配到已有 dict_id 且 entity_name 已作为 alias
+    存在于该 dict_id 下时（即 Step 2 别名精确命中），不插入新行，
+    而是更新已有行的 entity_data、追加 alias、重置同步状态。
 
     参数：
         entities:  [ExtractedEntityRecord.model_dump(), ...]
@@ -989,17 +1123,17 @@ def _do_insert_extraction_result(
     # ── Phase 1: 分类实体 ─────────────────────────────────────────
     # merged_id_map: 输入下标 → 已有 extracted_entities.id
     # insert_indices: 需要插入的实体下标列表
+    #
+    # dict_id 只由 Step 2 别名精确匹配设定，安全可靠，直接合并。
+    # Step 1/3/5 不会设 dict_id，走 Phase 2 创建新 entity_dict + alias。
     merged_id_map: dict[int, int] = {}
     insert_indices: list[int] = []
 
     for i, rec in enumerate(entities):
         dict_id = rec.get("dict_id")
         entity_type = rec.get("entity_type", "")
-        entity_data = rec.get("entity_data", {}) or {}
-        disambig = entity_data.get("_disambig", {}) or {}
-        disambig_status = disambig.get("status", "")
 
-        if dict_id and disambig_status == "auto_matched":
+        if dict_id:
             existing = _find_existing_entity_by_dict_id(session, dict_id, entity_type)
             if existing is not None:
                 merged_id_map[i] = existing.id
@@ -1023,13 +1157,13 @@ def _do_insert_extraction_result(
     for i in insert_indices:
         rec = entities[i]
         entity_type = rec["entity_type"]
-        entity_name = rec.get("entity_name", "").strip()
+        entity_name = (rec.get("entity_name") or "").strip()
         entity_data = rec.get("entity_data", {}) or {}
         disambig = entity_data.get("_disambig", {}) or {}
         dict_id = rec.get("dict_id")
 
-        # 消歧结果为 new_entity → 自动创建 entity_dict（未经审核）
-        if dict_id is None and disambig.get("status") == "new_entity" and entity_name:
+        # dict_id 仅由 Step 2 别名精确匹配设定，其余一律创建新 entity_dict + alias
+        if dict_id is None and entity_name:
             cache_key = (entity_type, entity_name)
             if cache_key in batch_dict_cache:
                 dict_id = batch_dict_cache[cache_key]
@@ -1041,9 +1175,6 @@ def _do_insert_extraction_result(
                 if new_dict_id:
                     dict_id = new_dict_id
                     batch_dict_cache[cache_key] = new_dict_id
-                    add_aliases_no_embedding(
-                        session, new_dict_id, entity_type, entity_name, entity_data,
-                    )
             rec["dict_id"] = dict_id
 
         ent = ExtractedEntity(
@@ -1064,6 +1195,16 @@ def _do_insert_extraction_result(
     if new_entities:
         session.add_all(new_entities)
         session.flush()  # 获取自增 id
+        for ent_obj in new_entities:
+            _write_operation_log(
+                session, "insert", "extracted_entities", ent_obj.id,
+                business_action="extract",
+                description=f"新实体: name='{ent_obj.entity_name}' type={ent_obj.entity_type} dict_id={ent_obj.dict_id}",
+                details={"entity_name": ent_obj.entity_name, "entity_type": ent_obj.entity_type,
+                          "dict_id": ent_obj.dict_id, "source_doc_uuid": ent_obj.source_doc_uuid,
+                          "source_site": ent_obj.source_site, "confidence": ent_obj.confidence_score},
+                trigger_source="_do_insert_extraction_result",
+            )
 
     # final_id_map: 输入下标 → DB id
     final_id_map: dict[int, int] = {}
@@ -1087,10 +1228,19 @@ def _do_insert_extraction_result(
         rec = entities[i]
         new_entity_data = rec.get("entity_data", {}) or {}
 
-        # 合并 entity_data
-        existing_ent.entity_data = _merge_jsonb_entity_data(
-            existing_ent.entity_data or {}, new_entity_data
+        # 合并 entity_data → process_entity_merge 写入 entity_dict.canonical_data
+        merge_auto, merge_conflict = process_entity_merge(
+            session, dict_id, existing_id, new_entity_data, source_site,
         )
+        # 只同步 canonical_data 中新增/变更的字段到 extracted_entities，不整体覆盖
+        # 避免清掉 extracted_entities 独有的元数据（如 _disambig）
+        if merge_auto > 0:
+            entity_dict = session.query(EntityDict).filter(EntityDict.id == dict_id).first()
+            if entity_dict and entity_dict.canonical_data:
+                existing = existing_ent.entity_data or {}
+                for key, val in entity_dict.canonical_data.items():
+                    if val is not None and key not in existing:
+                        existing[key] = val  # 仅补入新字段，不覆盖已有
 
         # 重置图同步状态，让更新推送到 WeKnora/Neo4j
         if existing_ent.weknora_graph_status == "pushed":
@@ -1121,6 +1271,15 @@ def _do_insert_extraction_result(
             f"[DB] 实体合并: index={i} name='{entity_name}' "
             f"→ extracted_entities.id={existing_id} dict_id={dict_id} "
             f"aliases_added={added}"
+        )
+        _write_operation_log(
+            session, "update", "extracted_entities", existing_id,
+            business_action="merge",
+            description=f"merge 实体: name='{entity_name}' type={entity_type} → id={existing_id} dict_id={dict_id}",
+            details={"entity_name": entity_name, "entity_type": entity_type,
+                      "dict_id": dict_id, "merge_auto": merge_auto, "merge_conflict": merge_conflict,
+                      "source_site": source_site, "aliases_added": added},
+            trigger_source="_do_insert_extraction_result",
         )
 
     if merge_count:
@@ -1167,6 +1326,17 @@ def _do_insert_extraction_result(
         ))
     if rel_objs:
         session.add_all(rel_objs)
+        session.flush()
+        for rel_obj in rel_objs:
+            _write_operation_log(
+                session, "insert", "entity_relations", rel_obj.id,
+                business_action="extract",
+                description=f"新关系: {rel_obj.relation_type} from={rel_obj.from_entity_id}→to={rel_obj.to_entity_id}",
+                details={"relation_type": rel_obj.relation_type,
+                          "from_entity_id": rel_obj.from_entity_id, "to_entity_id": rel_obj.to_entity_id,
+                          "source_doc_uuid": rel_obj.source_doc_uuid, "source_site": rel_obj.source_site},
+                trigger_source="_do_insert_extraction_result",
+            )
 
     # ── Phase 5: 更新文档抽取状态 ──────────────────────────────────
     doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
@@ -1229,6 +1399,14 @@ def approve_entity(id: int, reviewer: str, note: str = "") -> None:
         session.flush()
         _write_review_log(session, "entity", id, "approve", reviewer, note,
                           {"review_status": before}, {"review_status": "approved"})
+        _write_operation_log(
+            session, "update", "extracted_entities", id,
+            business_action="approve",
+            description=f"审核通过(简单): name='{ent.entity_name}' type={ent.entity_type}",
+            details={"review_status": {"before": before, "after": "approved"}, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="approve_entity",
+        )
 
 
 def _extract_external_ids(entity_type: str, entity_data: dict) -> dict:
@@ -1265,11 +1443,16 @@ def _create_entity_dict_from_extraction(
     已存在同 entity_type + 同 canonical_name 则跳过（返回已有 id）。
     is_verified=False 用于首次抽取自动创建（未经人工审核）。
     """
+    # 跨进程漏斗锁：同 entity_type + entity_name 的创建操作在 DB 层面串行化。
+    # 事务提交时 pg_advisory_xact_lock 自动释放，不需要手动 unlock。
+    lock_key = hash((entity_type, entity_name.strip().lower())) & 0x7FFFFFFF
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+
     existing = (
         session.query(EntityDict.id)
         .join(EntityAlias, EntityAlias.dict_id == EntityDict.id)
         .filter(
-            EntityAlias.name == entity_name,
+            func.lower(EntityAlias.name) == entity_name.lower(),
             EntityDict.entity_type == entity_type,
             EntityDict.is_deleted == False,
             EntityAlias.is_deleted == False,
@@ -1281,7 +1464,7 @@ def _create_entity_dict_from_extraction(
         return existing.id
 
     external_ids = _extract_external_ids(entity_type, entity_data)
-    canonical_data = dict(entity_data)
+    canonical_data = {k: v for k, v in entity_data.items() if not k.startswith("_")}
     canonical_data.setdefault("name", entity_name)
 
     logger.info(
@@ -1298,6 +1481,15 @@ def _create_entity_dict_from_extraction(
     )
     session.add(entity)
     session.flush()
+    _write_operation_log(
+        session, "insert", "entity_dict", entity.id,
+        business_action="extract",
+        description=f"新建 entity_dict: name='{entity_name}' type={entity_type} source={source_site}",
+        details={"entity_name": entity_name, "entity_type": entity_type, "canonical_data": canonical_data, "is_verified": is_verified},
+        trigger_source="_create_entity_dict_from_extraction",
+    )
+    # 立即写入 alias，让后续消歧 Step 2 可精确命中，避免同名实体反复创建
+    _write_aliases_with_embedding(session, entity.id, entity_type, entity_name, entity_data)
     logger.info(f"[DB] entity_dict 创建成功: dict_id={entity.id}")
     return entity.id
 
@@ -1365,6 +1557,78 @@ def _write_aliases_with_embedding(
     return added
 
 
+def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) -> int:
+    """
+    审核通过后去重：同 dict_id 下保留 keeper_id，其余软删除。
+    迁移数据：entity_name → alias，entity_data → process_entity_merge，
+    关系重定向到 keeper_id。冲突进 merge_queue 不阻塞去重。
+    """
+    duplicates = (
+        session.query(ExtractedEntity)
+        .filter(
+            ExtractedEntity.dict_id == dict_id,
+            ExtractedEntity.id != keeper_id,
+            ExtractedEntity.is_deleted == False,
+        )
+        .all()
+    )
+
+    if not duplicates:
+        return 0
+
+    for dup in duplicates:
+        # a. entity_name → alias
+        if dup.entity_name:
+            add_aliases_no_embedding(
+                session, dict_id, dup.entity_type, dup.entity_name, dup.entity_data or {},
+            )
+
+        # b. entity_data → process_entity_merge（冲突进 merge_queue）
+        if dup.entity_data:
+            process_entity_merge(
+                session, dict_id, keeper_id, dict(dup.entity_data), dup.source_site or "",
+            )
+
+        # c. EntityRelation 重定向到 keeper_id
+        affected_rels = (
+            session.query(EntityRelation)
+            .filter(
+                EntityRelation.is_deleted == False,
+                (EntityRelation.from_entity_id == dup.id) | (EntityRelation.to_entity_id == dup.id),
+            )
+            .all()
+        )
+        for rel in affected_rels:
+            if rel.from_entity_id == dup.id:
+                rel.from_entity_id = keeper_id
+            if rel.to_entity_id == dup.id:
+                rel.to_entity_id = keeper_id
+
+        # d. 软删除
+        dup.is_deleted = True
+
+        # e. review log
+        _write_review_log(
+            session, "entity", dup.id, "dedup_merge", "system",
+            f"merged into entity {keeper_id} (dict_id={dict_id})",
+            {"entity_name": dup.entity_name, "dict_id": dict_id},
+            {"is_deleted": True, "merged_into": keeper_id},
+        )
+
+        # f. operation log
+        _write_operation_log(
+            session, "update", "extracted_entities", dup.id,
+            business_action="dedup",
+            description=f"去重软删除: name='{dup.entity_name}' → keeper_id={keeper_id} dict_id={dict_id}",
+            details={"entity_name": dup.entity_name, "dict_id": dict_id, "keeper_id": keeper_id,
+                      "is_deleted": True, "relations_redirected": len(affected_rels)},
+            trigger_source="_dedup_extracted_entities_by_dict_id",
+        )
+
+    session.flush()
+    return len(duplicates)
+
+
 def approve_entity_with_alias_writeback(
     entity_id: int,
     reviewer: str,
@@ -1416,6 +1680,14 @@ def approve_entity_with_alias_writeback(
         session.flush()
         _write_review_log(session, "entity", entity_id, "approve", reviewer, note,
                           {"review_status": before}, {"review_status": "approved"})
+        _write_operation_log(
+            session, "update", "extracted_entities", entity_id,
+            business_action="approve",
+            description=f"审核通过: name='{ent.entity_name}' type={ent.entity_type} dict_id={ent.dict_id}",
+            details={"review_status": {"before": before, "after": "approved"}, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="approve_entity_with_alias_writeback",
+        )
 
         logger.info(
             f"[DB] approve_entity_with_alias_writeback: entity_id={entity_id} "
@@ -1460,6 +1732,14 @@ def approve_entity_with_alias_writeback(
         )
         if added:
             logger.info(f"[DB] alias write-back: entity_id={entity_id} dict_id={ent.dict_id} added {added} aliases")
+            _write_operation_log(
+                session, "insert", "entity_aliases", None,
+                business_action="alias_sync",
+                description=f"审核后别名回写: dict_id={ent.dict_id} name='{ent.entity_name}' added={added}",
+                details={"dict_id": ent.dict_id, "entity_name": ent.entity_name, "aliases_added": added},
+                operator=reviewer,
+                trigger_source="approve_entity_with_alias_writeback",
+            )
 
         # 合并 entity_data 到 canonical_data
         merge_auto, merge_conflict = process_entity_merge(
@@ -1470,6 +1750,15 @@ def approve_entity_with_alias_writeback(
                 f"[DB] merge: entity_id={entity_id} dict_id={ent.dict_id} "
                 f"auto_merged={merge_auto} conflicts={merge_conflict}"
             )
+
+        # 去重同 dict_id 的其他实体（保留当前审核通过的这一条）
+        if ent.dict_id:
+            deduped = _dedup_extracted_entities_by_dict_id(session, ent.dict_id, entity_id)
+            if deduped:
+                logger.info(
+                    f"[DB] dedup: entity_id={entity_id} dict_id={ent.dict_id} "
+                    f"removed {deduped} duplicates"
+                )
 
 
 def reject_entity(id: int, reviewer: str, note: str = "") -> None:
@@ -1491,6 +1780,14 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
         session.flush()
         _write_review_log(session, "entity", id, "reject", reviewer, note,
                           {"review_status": before}, {"review_status": "rejected"})
+        _write_operation_log(
+            session, "update", "extracted_entities", id,
+            business_action="reject",
+            description=f"审核拒绝: name='{ent.entity_name}' type={ent.entity_type}",
+            details={"review_status": {"before": before, "after": "rejected"}, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="reject_entity",
+        )
 
         # 级联拒绝所有关联此实体的 pending 关系
         affected_relations = (
@@ -1510,6 +1807,16 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
 
         if affected_relations:
             session.flush()
+            for rel in affected_relations:
+                _write_operation_log(
+                    session, "update", "entity_relations", rel.id,
+                    business_action="reject",
+                    description=f"级联拒绝: from={rel.from_entity_id}→to={rel.to_entity_id} (端点实体 {id} 被拒)",
+                    details={"entity_id": id, "relation_type": rel.relation_type,
+                              "from_entity_id": rel.from_entity_id, "to_entity_id": rel.to_entity_id},
+                    operator=reviewer,
+                    trigger_source="reject_entity",
+                )
             logger.info(
                 f"[DB] reject_entity: entity_id={id} 级联拒绝 {len(affected_relations)} 条关系"
             )
@@ -1586,6 +1893,16 @@ def batch_approve_entities(
                 )
 
         session.commit()
+        _write_operation_log(
+            session, "update", "extracted_entities", None,
+            business_action="approve",
+            description=f"批量审核通过: {count} 个实体, {alias_count} 个别名回写",
+            details={"count": count, "aliases_written": alias_count,
+                      "source_doc_uuid": source_doc_uuid, "entity_type": entity_type,
+                      "source_site": source_site, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="batch_approve_entities",
+        )
         logger.info(f"[DB] batch_approve_entities: {count} entities approved, {alias_count} aliases written")
         return {"success": True, "message": f"成功批量通过 {count} 个实体", "count": count}
 
@@ -1635,6 +1952,16 @@ def batch_reject_entities(
                             {"review_status": before}, {"review_status": "rejected"})
         
         session.commit()
+        _write_operation_log(
+            session, "update", "extracted_entities", None,
+            business_action="reject",
+            description=f"批量审核拒绝: {count} 个实体",
+            details={"count": count,
+                      "source_doc_uuid": source_doc_uuid, "entity_type": entity_type,
+                      "source_site": source_site, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="batch_reject_entities",
+        )
         return {"success": True, "message": f"成功批量拒绝 {count} 个实体", "count": count}
 
 
@@ -1699,6 +2026,16 @@ def approve_relation(id: int, reviewer: str, note: str = "") -> None:
         session.flush()
         _write_review_log(session, "relation", id, "approve", reviewer, note,
                           {"review_status": before}, {"review_status": "approved"})
+        _write_operation_log(
+            session, "update", "entity_relations", id,
+            business_action="approve",
+            description=f"审核通过关系: {rel.relation_type} from={rel.from_entity_id}→to={rel.to_entity_id}",
+            details={"relation_type": rel.relation_type,
+                      "from_entity_id": rel.from_entity_id, "to_entity_id": rel.to_entity_id,
+                      "review_status": {"before": before, "after": "approved"}, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="approve_relation",
+        )
 
 
 def reject_relation(id: int, reviewer: str, note: str = "") -> None:
@@ -1720,6 +2057,16 @@ def reject_relation(id: int, reviewer: str, note: str = "") -> None:
         session.flush()
         _write_review_log(session, "relation", id, "reject", reviewer, note,
                           {"review_status": before}, {"review_status": "rejected"})
+        _write_operation_log(
+            session, "update", "entity_relations", id,
+            business_action="reject",
+            description=f"审核拒绝关系: {rel.relation_type} from={rel.from_entity_id}→to={rel.to_entity_id}",
+            details={"relation_type": rel.relation_type,
+                      "from_entity_id": rel.from_entity_id, "to_entity_id": rel.to_entity_id,
+                      "review_status": {"before": before, "after": "rejected"}, "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="reject_relation",
+        )
 
 
 def batch_approve_relations(
@@ -1766,6 +2113,16 @@ def batch_approve_relations(
                             {"review_status": before}, {"review_status": "approved"})
         
         session.commit()
+        _write_operation_log(
+            session, "update", "entity_relations", None,
+            business_action="approve",
+            description=f"批量审核通过: {count} 个关系",
+            details={"count": count,
+                      "source_doc_uuid": source_doc_uuid, "source_site": source_site,
+                      "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="batch_approve_relations",
+        )
         return {"success": True, "message": f"成功批量通过 {count} 个关系", "count": count}
 
 
@@ -1811,6 +2168,16 @@ def batch_reject_relations(
                             {"review_status": before}, {"review_status": "rejected"})
         
         session.commit()
+        _write_operation_log(
+            session, "update", "entity_relations", None,
+            business_action="reject",
+            description=f"批量审核拒绝: {count} 个关系",
+            details={"count": count,
+                      "source_doc_uuid": source_doc_uuid, "source_site": source_site,
+                      "reviewer": reviewer, "note": note},
+            operator=reviewer,
+            trigger_source="batch_reject_relations",
+        )
         return {"success": True, "message": f"成功批量拒绝 {count} 个关系", "count": count}
 
 
@@ -1875,6 +2242,13 @@ def batch_mark_entity_dict_synced(ids: list[int]) -> None:
         session.query(EntityDict).filter(
             EntityDict.id.in_(ids)
         ).update({"weknora_sync_status": "synced"}, synchronize_session=False)
+        _write_operation_log(
+            session, "update", "entity_dict", None,
+            business_action="weknora_sync",
+            description=f"批量标记已同步: {len(ids)} 条 entity_dict",
+            details={"ids": ids, "weknora_sync_status": "synced"},
+            trigger_source="batch_mark_entity_dict_synced",
+        )
         logger.info(f"[DB] 批量标记 entity_dict synced: {len(ids)} 条")
 
 
@@ -1890,6 +2264,13 @@ def batch_mark_entity_dict_failed(ids: list[int], error: str = "") -> None:
         session.query(EntityDict).filter(
             EntityDict.id.in_(ids)
         ).update({"weknora_sync_status": "failed"}, synchronize_session=False)
+        _write_operation_log(
+            session, "update", "entity_dict", None,
+            business_action="weknora_sync",
+            description=f"批量标记同步失败: {len(ids)} 条 entity_dict",
+            details={"ids": ids, "weknora_sync_status": "failed", "error": error},
+            trigger_source="batch_mark_entity_dict_failed",
+        )
         if error:
             logger.warning(f"[DB] 批量标记 entity_dict failed: {len(ids)} 条, error={error[:200]}")
         else:
@@ -1924,6 +2305,15 @@ def soft_delete_entity_dict(dict_id: int, operator: str = "") -> None:
             EntityAlias.is_deleted == False,
         ).update({"is_deleted": True}, synchronize_session=False)
 
+        _write_operation_log(
+            session, "update", "entity_dict", dict_id,
+            business_action="delete",
+            description=f"软删除 entity_dict: type={ent.entity_type} operator={operator}",
+            details={"dict_id": dict_id, "entity_type": ent.entity_type, "canonical_source": ent.canonical_source,
+                      "operator": operator},
+            operator=operator,
+            trigger_source="soft_delete_entity_dict",
+        )
         logger.info(
             f"[DB] soft_delete_entity_dict: dict_id={dict_id} "
             f"entity_type={ent.entity_type} operator={operator}"
@@ -1966,6 +2356,15 @@ def soft_delete_entity_alias(alias_id: int, operator: str = "") -> None:
             raise ValueError(f"无法删除实体标准名称 '{alias.name}' (alias_id={alias_id})")
 
         alias.is_deleted = True
+        _write_operation_log(
+            session, "update", "entity_aliases", alias_id,
+            business_action="delete",
+            description=f"软删除别名: '{alias.name}' dict_id={alias.dict_id} operator={operator}",
+            details={"alias_id": alias_id, "name": alias.name, "dict_id": alias.dict_id,
+                      "operator": operator},
+            operator=operator,
+            trigger_source="soft_delete_entity_alias",
+        )
         logger.info(
             f"[DB] soft_delete_entity_alias: alias_id={alias_id} "
             f"'{alias.name}' dict_id={alias.dict_id} operator={operator}"
@@ -2235,6 +2634,13 @@ def batch_mark_entity_weknora_graph_pushed(entity_ids: list[int]) -> None:
         session.query(ExtractedEntity).filter(
             ExtractedEntity.id.in_(entity_ids)
         ).update({"weknora_graph_status": "pushed"}, synchronize_session=False)
+        _write_operation_log(
+            session, "update", "extracted_entities", None,
+            business_action="graph_sync",
+            description=f"批量标记实体图同步完成: {len(entity_ids)} 条",
+            details={"entity_ids": entity_ids, "weknora_graph_status": "pushed"},
+            trigger_source="batch_mark_entity_weknora_graph_pushed",
+        )
         logger.info(f"[DB] 批量标记实体 graph pushed: {len(entity_ids)} 条")
 
 
@@ -2250,6 +2656,13 @@ def batch_mark_entity_weknora_graph_failed(entity_ids: list[int], error: str = "
         session.query(ExtractedEntity).filter(
             ExtractedEntity.id.in_(entity_ids)
         ).update({"weknora_graph_status": "failed"}, synchronize_session=False)
+        _write_operation_log(
+            session, "update", "extracted_entities", None,
+            business_action="graph_sync",
+            description=f"批量标记实体图同步失败: {len(entity_ids)} 条",
+            details={"entity_ids": entity_ids, "weknora_graph_status": "failed", "error": error},
+            trigger_source="batch_mark_entity_weknora_graph_failed",
+        )
         if error:
             logger.warning(f"[DB] 批量标记实体 graph failed: {len(entity_ids)} 条, error={error[:200]}")
         else:
@@ -2327,6 +2740,13 @@ def batch_mark_relation_weknora_graph_pushed(relation_ids: list[int]) -> None:
         session.query(EntityRelation).filter(
             EntityRelation.id.in_(relation_ids)
         ).update({"weknora_graph_status": "pushed"}, synchronize_session=False)
+        _write_operation_log(
+            session, "update", "entity_relations", None,
+            business_action="graph_sync",
+            description=f"批量标记关系图同步完成: {len(relation_ids)} 条",
+            details={"relation_ids": relation_ids, "weknora_graph_status": "pushed"},
+            trigger_source="batch_mark_relation_weknora_graph_pushed",
+        )
         logger.info(f"[DB] 批量标记关系 graph pushed: {len(relation_ids)} 条")
 
 
@@ -2342,6 +2762,13 @@ def batch_mark_relation_weknora_graph_failed(relation_ids: list[int], error: str
         session.query(EntityRelation).filter(
             EntityRelation.id.in_(relation_ids)
         ).update({"weknora_graph_status": "failed"}, synchronize_session=False)
+        _write_operation_log(
+            session, "update", "entity_relations", None,
+            business_action="graph_sync",
+            description=f"批量标记关系图同步失败: {len(relation_ids)} 条",
+            details={"relation_ids": relation_ids, "weknora_graph_status": "failed", "error": error},
+            trigger_source="batch_mark_relation_weknora_graph_failed",
+        )
         if error:
             logger.warning(f"[DB] 批量标记关系 graph failed: {len(relation_ids)} 条, error={error[:200]}")
         else:
@@ -2412,6 +2839,13 @@ def log_crawl_task(
         session.add(log)
         session.flush()
         log_id = log.id
+        _write_operation_log(
+            session, "insert", "crawl_log", log_id,
+            business_action="crawl",
+            description=f"爬取任务开始: site={site_key} type={task_type}",
+            details={"site_key": site_key, "task_type": task_type, "config_snapshot": dict(config_snapshot)},
+            trigger_source="log_crawl_task",
+        )
         logger.info(f"[DB] 爬取任务日志创建: site={site_key} log_id={log_id}")
         return log_id
 
@@ -2440,6 +2874,14 @@ def update_crawl_log(
         log.failed_count = failed
         log.error_message = error
         log.finished_at = datetime.now(timezone.utc)
+        _write_operation_log(
+            session, "update", "crawl_log", log_id,
+            business_action="crawl",
+            description=f"爬取任务结束: site={log.site_key} status={status} total={total} passed={passed} failed={failed}",
+            details={"site_key": log.site_key, "task_type": log.task_type,
+                      "status": status, "total": total, "passed": passed, "failed": failed, "error": error},
+            trigger_source="update_crawl_log",
+        )
 
 
 def log_review_action(
@@ -2460,6 +2902,16 @@ def log_review_action(
         _write_review_log(
             session, object_type, object_id, action, reviewer, note,
             dict(before_data), dict(after_data),
+        )
+        _write_operation_log(
+            session, "insert", "review_log", object_id,
+            business_action="review",
+            description=f"审核操作: {action} {object_type}={object_id} by {reviewer}",
+            details={"object_type": object_type, "action": action,
+                      "reviewer": reviewer, "note": note,
+                      "before_data": dict(before_data), "after_data": dict(after_data)},
+            operator=reviewer,
+            trigger_source="log_review_action",
         )
 
 
@@ -2582,6 +3034,13 @@ def reset_document_for_recrawl(uuid: str) -> None:
             doc.extraction_model = ""
             doc.extracted_at = None
 
+        _write_operation_log(
+            session, "update", "documents", doc.id if doc else None,
+            business_action="recrawl",
+            description=f"重爬重置: uuid={uuid} 软删实体={deleted_ents} 软删关系={deleted_rels}",
+            details={"uuid": uuid, "deleted_entities": deleted_ents, "deleted_relations": deleted_rels},
+            trigger_source="reset_document_for_recrawl",
+        )
         logger.info(
             f"[DB] reset_document_for_recrawl: {uuid} "
             f"软删实体={deleted_ents} 软删关系={deleted_rels}"

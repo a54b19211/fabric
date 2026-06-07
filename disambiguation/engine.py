@@ -77,28 +77,42 @@ def disambiguate(
     step3_result = result  # 可能是 candidate_matched，暂存
 
     # ── Step 4: 向量召回（仅做候选集，分数不参与决策）──────────────
-    embedding = generate_embedding(entity_name)
-
     vector_candidates: list[CandidateEntity] = []
+    seen_ids: set[int] = set()
 
-    if embedding:
-        similar = search_similar_entities(embedding, entity_type, top_k=10, session=session)
-        if similar:
-            vector_candidates = [
-                CandidateEntity(
-                    dict_id=s["dict_id"],
-                    name=s["name"],
-                    similarity_score=s["similarity_score"],
-                    match_type="vector",
-                    canonical_data=s.get("canonical_data", {}),
-                    aliases=s.get("aliases", []),
+    def _recall_with_name(name: str, match_type: str = "vector") -> None:
+        if not name or not name.strip():
+            return
+        emb = generate_embedding(name)
+        if not emb:
+            return
+        similar = search_similar_entities(emb, entity_type, top_k=10, session=session)
+        if not similar:
+            return
+        for s in similar:
+            if s["dict_id"] not in seen_ids:
+                seen_ids.add(s["dict_id"])
+                vector_candidates.append(
+                    CandidateEntity(
+                        dict_id=s["dict_id"],
+                        name=s["name"],
+                        similarity_score=s["similarity_score"],
+                        match_type=match_type,
+                        canonical_data=s.get("canonical_data", {}),
+                        aliases=s.get("aliases", []),
+                    )
                 )
-                for s in similar
-            ]
-            logger.info(
-                f"[Disambiguation] Step4 recall: '{entity_name}' → "
-                f"{len(vector_candidates)} candidates"
-            )
+
+    _recall_with_name(entity_name)
+    name_en = (entity_data or {}).get("name_en", "").strip()
+    if name_en and name_en.lower() != entity_name.lower():
+        _recall_with_name(name_en, match_type="vector_en")
+
+    if vector_candidates:
+        logger.info(
+            f"[Disambiguation] Step4 recall: '{entity_name}' → "
+            f"{len(vector_candidates)} candidates"
+        )
     else:
         logger.warning(f"[Disambiguation] Step4: embedding 生成失败 '{entity_name}'")
 
@@ -193,7 +207,9 @@ def disambiguate_entities(entities: list[dict], session=None) -> list[dict]:
                 session=session,
             )
 
-            if result.status in (STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED):
+            # 只有 Step 2 别名精确匹配（名称 + entity_type 完全对上）才设定 dict_id
+            # Step 1/3/5 的匹配结果只记入 _disambig.candidates，不直接关联
+            if result.match_step == "step2_exact_alias":
                 ent["dict_id"] = result.dict_id
             else:
                 ent["dict_id"] = None

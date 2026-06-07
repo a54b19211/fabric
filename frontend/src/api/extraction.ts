@@ -21,3 +21,6 @@ export const getExtractionStatus = (uuid: string) =>
     extracted_at: string | null
     extraction_error: string
   }>(`/extraction/status/${uuid}`)
+
+export const reExtract = (uuid: string) =>
+  http.post<any, { success: boolean; uuid: string; message: string }>(`/extraction/re-extract/${uuid}`)

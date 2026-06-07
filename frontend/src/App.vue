@@ -55,9 +55,10 @@ import { Document, Connection } from '@element-plus/icons-vue'
 const collapsed = ref(true)
 
 const navItems = [
-  { path: '/documents', label: '文档列表', icon: Document },
-  { path: '/neo4j',     label: 'Neo4j 图推送', icon: Connection },
-  { path: '/weknora',   label: 'WeKnora 同步', icon: Connection },
+  { path: '/documents',    label: '文档列表', icon: Document },
+  { path: '/graph-review', label: '图谱审核', icon: Connection },
+  { path: '/neo4j',        label: 'Neo4j 图推送', icon: Connection },
+  { path: '/weknora',      label: 'WeKnora 同步', icon: Connection },
 ]
 </script>
 

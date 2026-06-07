@@ -73,3 +73,11 @@ class ResolveMergeRequest(BaseModel):
     reviewer: str
     resolution: str  # accept_new / keep_existing / custom
     resolved_value: Optional[dict] = None  # custom 时必填
+
+
+class PatchEntityRequest(BaseModel):
+    entity_data: dict = Field(default_factory=dict, description="需要合并的实体元数据字段")
+
+
+class PatchRelationRequest(BaseModel):
+    relation_props: dict = Field(default_factory=dict, description="需要合并的关系属性字段")

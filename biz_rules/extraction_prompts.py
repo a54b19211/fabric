@@ -161,6 +161,8 @@ _OUTPUT_FORMAT = """
 - 如果文档中没有可抽取的实体，返回 {"entities": [], "relations": []}
 - relation_props 中的枚举字段必须使用规定的枚举值，不得自造
 - 关系方向必须严格遵守白名单中的 from→to 定义
+- Drug / Target / Indication / Pathway 的 entity_data 必须填写 name_en 字段：
+  entity_name 本身是英文 → 直接填入 name_en；entity_name 是中文 → 翻译为英文填入 name_en
 """
 
 # ── 实体类型 + 字段说明（动态生成，供 prompt 引用）──────────────────────

@@ -94,6 +94,8 @@ def generate_candidate_names(
     seen: set[str] = set()
 
     def _add(n: str):
+        if not n or not isinstance(n, str):
+            return
         n = n.strip()
         if n and n not in seen:
             seen.add(n)

@@ -235,3 +235,22 @@ class EntityMergeQueue(Base):
     reviewed_by: Mapped[str] = mapped_column(Text, default="")
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── 11. operation_log ──────────────────────────────────────────
+
+class OperationLog(Base):
+    """操作日志：记录所有数据库写操作的审计追踪。"""
+    __tablename__ = "operation_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    operation: Mapped[str] = mapped_column(Text, nullable=False, default="")    # insert/update/delete/select
+    target_table: Mapped[str] = mapped_column(Text, nullable=False, default="") # 表名
+    target_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True) # 受影响行 id
+    business_action: Mapped[str] = mapped_column(Text, default="")              # 业务动作: merge/dedup/approve/reject/alias_sync/disambiguate
+    description: Mapped[str] = mapped_column(Text, default="")                  # 一句话描述
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)                  # before/after 快照、变更字段等
+    operator: Mapped[str] = mapped_column(Text, default="system")               # system / reviewer / disambiguation
+    process: Mapped[str] = mapped_column(Text, default="")                      # 进程源: backend / crawler / worker
+    trigger_source: Mapped[str] = mapped_column(Text, default="")               # 触发源函数名或 API path
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
