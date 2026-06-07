@@ -30,23 +30,16 @@ def get_engine():
     if not db_url:
         return None
 
-    try:
-        _engine = create_engine(
-            db_url,
-            pool_size=APP.DB_POOL_SIZE,
-            max_overflow=30,
-            pool_pre_ping=True,
-            echo=False,
-            connect_args={"client_encoding": "utf8"},
-        )
-        _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
-        logger.info(f"[DB] 数据库引擎已初始化: {APP.DB_HOST}:{APP.DB_PORT}/{APP.DB_NAME}")
-    except ImportError as e:
-        logger.warning(f"[DB] 缺少数据库驱动: {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"[DB] 数据库连接失败: {e}")
-        return None
+    _engine = create_engine(
+        db_url,
+        pool_size=APP.DB_POOL_SIZE,
+        max_overflow=30,
+        pool_pre_ping=True,
+        echo=False,
+        connect_args={"client_encoding": "utf8"},
+    )
+    _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
+    logger.info(f"[DB] 数据库引擎已初始化: {APP.DB_HOST}:{APP.DB_PORT}/{APP.DB_NAME}")
     return _engine
 
 
@@ -67,14 +60,10 @@ def get_session() -> Generator[Optional[Session], None, None]:
         yield None
         return
 
+    session: Session = _SessionLocal()
     try:
-        session: Session = _SessionLocal()
         yield session
         session.commit()
-    except ImportError as e:
-        logger.warning(f"[DB] 缺少数据库驱动，所有 DB 操作已跳过: {e}")
-        yield None
-        return
     except Exception as e:
         session.rollback()
         logger.error(f"[DB] Session 异常，已回滚: {e}")

@@ -22,10 +22,8 @@ from api.schemas.response import (
     DictCandidateItem, DictCandidateListResponse,
     GraphResponse, GraphNode, GraphEdge,
     ReviewStatsResponse, StatusCounts,
-    ReviewLogListResponse, ReviewLogItem,
 )
 from db.repository import (
-    is_db_connected,
     approve_entity_with_alias_writeback,
     approve_entity, reject_entity,
     approve_relation, reject_relation,
@@ -34,17 +32,17 @@ from db.repository import (
     log_review_action,
     get_pending_merges, resolve_merge,
     find_candidate_dicts_for_review,
-    list_entities, get_entity_by_id, get_entity_dict_by_id, get_aliases_for_dict,
-    get_review_graph, get_review_stats,
-    list_relations, get_relation_by_id,
-    get_review_logs,
-    patch_entity_data, patch_relation_props,
 )
+from db.session import get_session
+from db.models import ExtractedEntity, EntityRelation, EntityDict
+from sqlalchemy import func
+from sqlalchemy.orm import aliased
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
 
 def _extract_disambig(entity_data: dict | None) -> DisambigInfo | None:
+    """从 entity_data JSONB 中提取 _disambig 消歧元数据。"""
     if not entity_data:
         return None
     raw = entity_data.get("_disambig")
@@ -60,38 +58,10 @@ def _extract_disambig(entity_data: dict | None) -> DisambigInfo | None:
         return None
 
 
-def _enrich_entity(entity) -> EntityItem:
-    canonical_data = None
-    canonical_source = None
-    aliases = None
-    if entity.dict_id:
-        ed = get_entity_dict_by_id(entity.dict_id)
-        if ed:
-            canonical_data = ed.canonical_data
-            canonical_source = ed.canonical_source
-            aliases = get_aliases_for_dict(ed.id)
-    return EntityItem(
-        id=entity.id,
-        source_doc_uuid=entity.source_doc_uuid,
-        entity_type=entity.entity_type,
-        entity_name=entity.entity_name,
-        entity_data=entity.entity_data,
-        confidence_score=entity.confidence_score,
-        confidence_reason=entity.confidence_reason,
-        source_text=entity.source_text,
-        review_status=entity.review_status,
-        dict_id=entity.dict_id,
-        disambig=_extract_disambig(entity.entity_data),
-        canonical_data=canonical_data,
-        canonical_source=canonical_source,
-        aliases=aliases,
-    )
-
-
 # ── 实体 ───────────────────────────────────────────────────────────────
 
 @router.get("/entities", response_model=EntityListResponse)
-def list_entities_api(
+def list_entities(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     entity_type: str = Query(""),
@@ -99,29 +69,85 @@ def list_entities_api(
     source_doc_uuid: str = Query(""),
     review_status: str = Query("pending"),
 ):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    result = list_entities(
-        page=page, page_size=page_size, entity_type=entity_type,
-        source_site=source_site, source_doc_uuid=source_doc_uuid,
-        review_status=review_status,
-    )
-    items = [_enrich_entity(r) for r in result["items"]]
-    return EntityListResponse(total=result["total"], items=items)
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        q = session.query(ExtractedEntity).filter(
+            ExtractedEntity.review_status == review_status,
+            ExtractedEntity.is_deleted == False,
+        )
+        if entity_type:
+            q = q.filter(ExtractedEntity.entity_type == entity_type)
+        if source_site:
+            q = q.filter(ExtractedEntity.source_site == source_site)
+        if source_doc_uuid:
+            q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
+
+        total = q.count()
+        rows = q.offset((page - 1) * page_size).limit(page_size).all()
+
+        items = [
+            EntityItem(
+                id=r.id,
+                source_doc_uuid=r.source_doc_uuid,
+                entity_type=r.entity_type,
+                entity_name=r.entity_name,
+                entity_data=r.entity_data,
+                confidence_score=r.confidence_score,
+                confidence_reason=r.confidence_reason,
+                source_text=r.source_text,
+                review_status=r.review_status,
+                dict_id=r.dict_id,
+                disambig=_extract_disambig(r.entity_data),
+            )
+            for r in rows
+        ]
+        return EntityListResponse(total=total, items=items)
 
 
 @router.get("/entities/{entity_id}", response_model=EntityItem)
 def get_entity(entity_id: int):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    row = get_entity_by_id(entity_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="实体不存在")
-    return _enrich_entity(row)
+    """实体详情查询"""
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        try:
+            row = session.query(ExtractedEntity).filter(
+                ExtractedEntity.id == entity_id,
+                ExtractedEntity.is_deleted == False,
+            ).first()
+            
+            if row is None:
+                logger.warning(f"[API] 实体不存在: id={entity_id}")
+                raise HTTPException(status_code=404, detail="实体不存在")
+
+            return EntityItem(
+                id=row.id,
+                source_doc_uuid=row.source_doc_uuid or "",
+                entity_type=row.entity_type or "",
+                entity_name=row.entity_name or "",
+                entity_data=row.entity_data or {},
+                confidence_score=row.confidence_score or 0.0,
+                confidence_reason=row.confidence_reason or "",
+                source_text=row.source_text or "",
+                review_status=row.review_status or "",
+                dict_id=row.dict_id,
+                disambig=_extract_disambig(row.entity_data),
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"[API] 实体详情查询失败: id={entity_id} | {e}")
+            raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
 @router.post("/entities/batch/approve", response_model=ReviewActionResponse)
 def batch_approve_entities_api(body: BatchApproveEntitiesRequest):
+    """批量审核通过实体"""
     try:
         result = batch_approve_entities(
             source_doc_uuid=body.source_doc_uuid or "",
@@ -129,11 +155,16 @@ def batch_approve_entities_api(body: BatchApproveEntitiesRequest):
             source_site=body.source_site or "",
             reviewer=body.reviewer,
             note=body.note or "",
-            min_confidence=body.min_confidence,
+            min_confidence=body.min_confidence
         )
+        
         if not result.get("success", False):
+            logger.warning(f"[API] 批量审核实体失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
+        
+        logger.info(f"[API] 批量审核实体通过: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -143,17 +174,23 @@ def batch_approve_entities_api(body: BatchApproveEntitiesRequest):
 
 @router.post("/entities/batch/reject", response_model=ReviewActionResponse)
 def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
+    """批量审核拒绝实体"""
     try:
         result = batch_reject_entities(
             source_doc_uuid=body.source_doc_uuid or "",
             entity_type=body.entity_type or "",
             source_site=body.source_site or "",
             reviewer=body.reviewer,
-            note=body.note or "",
+            note=body.note or ""
         )
+        
         if not result.get("success", False):
+            logger.warning(f"[API] 批量审核实体失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
+        
+        logger.info(f"[API] 批量审核实体拒绝: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -163,15 +200,24 @@ def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
 
 @router.post("/entities/{entity_id}/approve", response_model=ReviewActionResponse)
 def approve_entity_api(entity_id: int, body: ReviewActionRequest):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    if get_entity_by_id(entity_id) is None:
-        raise HTTPException(status_code=404, detail="实体不存在")
+    """审核通过单个实体（含 alias 回写 + embedding 生成）。"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
+
     try:
         approve_entity_with_alias_writeback(
             entity_id, reviewer=body.reviewer, note=body.note or "",
-            dict_id=body.dict_id, force_new=body.force_new,
+            dict_id=body.dict_id,
+            force_new=body.force_new,
         )
+        logger.info(f"[API] 审核实体通过: id={entity_id}, reviewer={body.reviewer}, dict_id={body.dict_id}, force_new={body.force_new}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
@@ -182,12 +228,20 @@ def approve_entity_api(entity_id: int, body: ReviewActionRequest):
 
 @router.post("/entities/{entity_id}/reject", response_model=ReviewActionResponse)
 def reject_entity_api(entity_id: int, body: ReviewActionRequest):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    if get_entity_by_id(entity_id) is None:
-        raise HTTPException(status_code=404, detail="实体不存在")
+    """审核拒绝单个实体"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
+
     try:
         reject_entity(entity_id, reviewer=body.reviewer, note=body.note or "")
+        logger.info(f"[API] 审核实体拒绝: id={entity_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
@@ -197,24 +251,38 @@ def reject_entity_api(entity_id: int, body: ReviewActionRequest):
 
 
 @router.get("/entities/{entity_id}/candidates", response_model=DictCandidateListResponse)
-def get_entity_candidates(entity_id: int, top_k: int = Query(10, ge=1, le=50)):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    row = get_entity_by_id(entity_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="实体不存在")
+def get_entity_candidates(
+    entity_id: int,
+    top_k: int = Query(10, ge=1, le=50),
+):
+    """
+    审核页实时查询 entity_dict 中与该实体相似的候选项。
+    不依赖预计算的 _disambig.candidates，而是动态查 entity_aliases + 向量相似度。
+    返回的候选项包含 is_verified 标记，前端可区分"已审核"和"自动创建"。
+    """
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
 
-    entity_name = row.entity_name or ""
-    entity_type = row.entity_type or ""
-    entity_data = row.entity_data or {}
+        entity_name = row.entity_name or ""
+        entity_type = row.entity_type or ""
+        entity_data = row.entity_data or {}
 
     if not entity_name or not entity_type:
         return DictCandidateListResponse(total=0, items=[])
 
     try:
         candidates = find_candidate_dicts_for_review(
-            entity_name=entity_name, entity_type=entity_type,
-            entity_data=entity_data, top_k=top_k,
+            entity_name=entity_name,
+            entity_type=entity_type,
+            entity_data=entity_data,
+            top_k=top_k,
         )
         items = [DictCandidateItem(**c) for c in candidates]
         return DictCandidateListResponse(total=len(items), items=items)
@@ -226,39 +294,90 @@ def get_entity_candidates(entity_id: int, top_k: int = Query(10, ge=1, le=50)):
 # ── 关系 ───────────────────────────────────────────────────────────────
 
 @router.get("/relations", response_model=RelationListResponse)
-def list_relations_api(
+def list_relations(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     source_site: str = Query(""),
     source_doc_uuid: str = Query(""),
     review_status: str = Query("pending"),
 ):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    try:
-        result = list_relations(
-            page=page, page_size=page_size, source_site=source_site,
-            source_doc_uuid=source_doc_uuid, review_status=review_status,
-        )
-        items = [RelationItem(**it) for it in result["items"]]
-        return RelationListResponse(total=result["total"], items=items)
-    except Exception as e:
-        logger.error(f"[API] 关系列表查询失败: {e}")
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+    """关系列表查询（分页 + 筛选）"""
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        try:
+            FromEnt = aliased(ExtractedEntity)
+            ToEnt = aliased(ExtractedEntity)
+
+            q = (
+                session.query(
+                    EntityRelation,
+                    FromEnt.entity_name.label("from_name"),
+                    ToEnt.entity_name.label("to_name"),
+                )
+                .outerjoin(FromEnt, EntityRelation.from_entity_id == FromEnt.id)
+                .outerjoin(ToEnt, EntityRelation.to_entity_id == ToEnt.id)
+                .filter(
+                    EntityRelation.review_status == review_status,
+                    EntityRelation.is_deleted == False,
+                )
+            )
+
+            # 动态筛选条件
+            if source_site:
+                q = q.filter(EntityRelation.source_site == source_site)
+            if source_doc_uuid:
+                q = q.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+
+            total = q.count()
+            rows = q.offset((page - 1) * page_size).limit(page_size).all()
+
+            items = [
+                RelationItem(
+                    id=r.EntityRelation.id,
+                    source_doc_uuid=r.EntityRelation.source_doc_uuid or "",
+                    relation_type=r.EntityRelation.relation_type or "",
+                    from_entity_id=r.EntityRelation.from_entity_id,
+                    from_entity_name=r.from_name or "",
+                    to_entity_id=r.EntityRelation.to_entity_id,
+                    to_entity_name=r.to_name or "",
+                    relation_props=r.EntityRelation.relation_props or {},
+                    confidence_score=r.EntityRelation.confidence_score or 0.0,
+                    source_text=r.EntityRelation.source_text or "",
+                    review_status=r.EntityRelation.review_status or "",
+                )
+                for r in rows
+            ]
+            
+            logger.info(f"[API] 关系列表查询: page={page}, total={total}")
+            return RelationListResponse(total=total, items=items)
+            
+        except Exception as e:
+            logger.error(f"[API] 关系列表查询失败: {e}")
+            raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
 @router.post("/relations/batch/approve", response_model=ReviewActionResponse)
 def batch_approve_relations_api(body: BatchApproveRelationsRequest):
+    """批量审核通过关系"""
     try:
         result = batch_approve_relations(
             source_doc_uuid=body.source_doc_uuid or "",
             source_site=body.source_site or "",
-            reviewer=body.reviewer, note=body.note or "",
-            min_confidence=body.min_confidence,
+            reviewer=body.reviewer,
+            note=body.note or "",
+            min_confidence=body.min_confidence
         )
+        
         if not result.get("success", False):
+            logger.warning(f"[API] 批量审核关系失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
+        
+        logger.info(f"[API] 批量审核关系通过: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -268,15 +387,22 @@ def batch_approve_relations_api(body: BatchApproveRelationsRequest):
 
 @router.post("/relations/batch/reject", response_model=ReviewActionResponse)
 def batch_reject_relations_api(body: BatchRejectRelationsRequest):
+    """批量审核拒绝关系"""
     try:
         result = batch_reject_relations(
             source_doc_uuid=body.source_doc_uuid or "",
             source_site=body.source_site or "",
-            reviewer=body.reviewer, note=body.note or "",
+            reviewer=body.reviewer,
+            note=body.note or ""
         )
+        
         if not result.get("success", False):
+            logger.warning(f"[API] 批量审核关系失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
+        
+        logger.info(f"[API] 批量审核关系拒绝: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -286,12 +412,20 @@ def batch_reject_relations_api(body: BatchRejectRelationsRequest):
 
 @router.post("/relations/{relation_id}/approve", response_model=ReviewActionResponse)
 def approve_relation_api(relation_id: int, body: ReviewActionRequest):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    if get_relation_by_id(relation_id) is None:
-        raise HTTPException(status_code=404, detail="关系不存在")
+    """审核通过单个关系"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(EntityRelation).filter(
+            EntityRelation.id == relation_id,
+            EntityRelation.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="关系不存在")
+
     try:
         approve_relation(relation_id, reviewer=body.reviewer, note=body.note or "")
+        logger.info(f"[API] 审核关系通过: id={relation_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
@@ -302,12 +436,20 @@ def approve_relation_api(relation_id: int, body: ReviewActionRequest):
 
 @router.post("/relations/{relation_id}/reject", response_model=ReviewActionResponse)
 def reject_relation_api(relation_id: int, body: ReviewActionRequest):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    if get_relation_by_id(relation_id) is None:
-        raise HTTPException(status_code=404, detail="关系不存在")
+    """审核拒绝单个关系"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+        row = session.query(EntityRelation).filter(
+            EntityRelation.id == relation_id,
+            EntityRelation.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="关系不存在")
+
     try:
         reject_relation(relation_id, reviewer=body.reviewer, note=body.note or "")
+        logger.info(f"[API] 审核关系拒绝: id={relation_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
@@ -316,10 +458,11 @@ def reject_relation_api(relation_id: int, body: ReviewActionRequest):
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
 
 
-# ── 合并队列 ─────────────────────────────────────────────────────────
+# ── 合并队列 ───────────────────────────────────────────────────────────────
 
 @router.get("/merge-queue", response_model=MergeQueueListResponse)
 def list_merge_queue(limit: int = Query(50, ge=1, le=200)):
+    """查询待处理的合并冲突列表。"""
     try:
         rows = get_pending_merges(limit)
         items = [MergeQueueItem(**r) for r in rows]
@@ -331,85 +474,261 @@ def list_merge_queue(limit: int = Query(50, ge=1, le=200)):
 
 @router.post("/merge-queue/{merge_id}/resolve", response_model=ReviewActionResponse)
 def resolve_merge_api(merge_id: int, body: ResolveMergeRequest):
+    """解决合并冲突。resolution: accept_new | keep_existing | custom"""
     try:
         resolve_merge(merge_id, body.resolution, body.reviewer, body.resolved_value)
+        logger.info(f"[API] 合并冲突解决: merge_id={merge_id} resolution={body.resolution}")
         return ReviewActionResponse(success=True)
     except Exception as e:
         logger.error(f"[API] 合并冲突解决失败: merge_id={merge_id} | {e}")
         raise HTTPException(status_code=500, detail=f"解决失败: {str(e)}")
 
 
-# ── 图谱 ──────────────────────────────────────────────────────────────
+# ── 图谱 ─────────────────────────────────────────────────────────────────
 
 @router.get("/graph", response_model=GraphResponse)
-def get_review_graph_api(
-    entity_types: str = Query(""),
-    source_site: str = Query(""),
-    review_status: str = Query("pending,approved"),
-    source_doc_uuid: str = Query(""),
-    include_relations: bool = Query(True),
-    limit: int = Query(500, ge=1, le=2000),
+def get_review_graph(
+    entity_types: str = Query("", description="逗号分隔的实体类型"),
+    source_site: str = Query("", description="来源站点筛选"),
+    review_status: str = Query("pending,approved", description="逗号分隔的审核状态"),
+    source_doc_uuid: str = Query("", description="单文档 UUID"),
+    include_relations: bool = Query(True, description="是否包含关系边"),
+    limit: int = Query(500, ge=1, le=2000, description="最大节点数"),
 ):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    statuses = [s.strip() for s in review_status.split(",") if s.strip()] or ["pending", "approved"]
-    type_list = [t.strip() for t in entity_types.split(",") if t.strip()] or None
-    result = get_review_graph(
-        entity_types=type_list, source_site=source_site,
-        source_doc_uuid=source_doc_uuid, review_statuses=statuses,
-        include_relations=include_relations, limit=limit,
-    )
-    nodes = [GraphNode(**n) for n in result["nodes"]]
-    edges = [GraphEdge(**e) for e in result["edges"]]
+    """图谱数据接口：返回待审核/已审核的实体节点和关系边。"""
+    statuses = [s.strip() for s in review_status.split(",") if s.strip()]
+    if not statuses:
+        statuses = ["pending", "approved"]
+
+    type_list = [t.strip() for t in entity_types.split(",") if t.strip()]
+
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        # 节点查询：extracted_entities JOIN entity_dict 拿 is_verified
+        q = (
+            session.query(
+                ExtractedEntity,
+                EntityDict.is_verified,
+            )
+            .outerjoin(EntityDict, ExtractedEntity.dict_id == EntityDict.id)
+            .filter(
+                ExtractedEntity.review_status.in_(statuses),
+                ExtractedEntity.is_deleted == False,
+            )
+        )
+        if type_list:
+            q = q.filter(ExtractedEntity.entity_type.in_(type_list))
+        if source_site:
+            q = q.filter(ExtractedEntity.source_site == source_site)
+        if source_doc_uuid:
+            q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
+
+        rows = q.limit(limit).all()
+
+        nodes = [
+            GraphNode(
+                id=r.ExtractedEntity.id,
+                entity_type=r.ExtractedEntity.entity_type or "",
+                entity_name=r.ExtractedEntity.entity_name or "",
+                entity_data=r.ExtractedEntity.entity_data or {},
+                dict_id=r.ExtractedEntity.dict_id,
+                review_status=r.ExtractedEntity.review_status or "",
+                source_doc_uuid=r.ExtractedEntity.source_doc_uuid or "",
+                source_site=r.ExtractedEntity.source_site or "",
+                confidence_score=r.ExtractedEntity.confidence_score or 0.0,
+                is_verified=r.is_verified if r.is_verified is not None else False,
+            )
+            for r in rows
+        ]
+
+        # 边查询
+        edges: list[GraphEdge] = []
+        if include_relations:
+            node_ids = [n.id for n in nodes]
+            if node_ids:
+                rq = session.query(EntityRelation).filter(
+                    EntityRelation.review_status.in_(statuses),
+                    EntityRelation.is_deleted == False,
+                    EntityRelation.from_entity_id.in_(node_ids),
+                    EntityRelation.to_entity_id.in_(node_ids),
+                )
+                if source_doc_uuid:
+                    rq = rq.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+                rel_rows = rq.all()
+                edges = [
+                    GraphEdge(
+                        id=r.id,
+                        relation_type=r.relation_type or "",
+                        from_entity_id=r.from_entity_id,
+                        to_entity_id=r.to_entity_id,
+                        review_status=r.review_status or "",
+                        relation_props=r.relation_props or {},
+                        source_doc_uuid=r.source_doc_uuid or "",
+                    )
+                    for r in rel_rows
+                ]
+
     return GraphResponse(nodes=nodes, edges=edges)
 
 
-@router.get("/stats", response_model=ReviewStatsResponse)
-def get_review_stats_api():
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    s = get_review_stats()
-    return ReviewStatsResponse(
-        entities=StatusCounts(**s["entities"]),
-        relations=StatusCounts(**s["relations"]),
-        by_type={k: StatusCounts(**v) for k, v in s["by_type"].items()},
-        by_site={k: StatusCounts(**v) for k, v in s["by_site"].items()},
-    )
+# ── 仪表盘统计 ───────────────────────────────────────────────────────────
 
+@router.get("/stats", response_model=ReviewStatsResponse)
+def get_review_stats():
+    """仪表盘统计：按状态/类型/来源站点统计实体和关系数量。"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        # 实体按状态统计
+        ent_status = dict(
+            session.query(
+                ExtractedEntity.review_status,
+                func.count(ExtractedEntity.id),
+            )
+            .filter(
+                ExtractedEntity.is_deleted == False,
+            )
+            .group_by(ExtractedEntity.review_status)
+            .all()
+        )
+
+        # 关系按状态统计
+        rel_status = dict(
+            session.query(
+                EntityRelation.review_status,
+                func.count(EntityRelation.id),
+            )
+            .filter(
+                EntityRelation.is_deleted == False,
+            )
+            .group_by(EntityRelation.review_status)
+            .all()
+        )
+
+        def _normalize(status: str) -> str:
+            return "approved" if status == "auto_approved" else status
+
+        # 实体按类型统计
+        ent_by_type_rows = (
+            session.query(
+                ExtractedEntity.entity_type,
+                ExtractedEntity.review_status,
+                func.count(ExtractedEntity.id),
+            )
+            .filter(
+                ExtractedEntity.is_deleted == False,
+            )
+            .group_by(ExtractedEntity.entity_type, ExtractedEntity.review_status)
+            .all()
+        )
+
+        by_type: dict[str, StatusCounts] = {}
+        for entity_type, status, cnt in ent_by_type_rows:
+            key = _normalize(status)
+            if key not in ("pending", "approved", "rejected"):
+                continue
+            if entity_type not in by_type:
+                by_type[entity_type] = StatusCounts()
+            current = getattr(by_type[entity_type], key)
+            setattr(by_type[entity_type], key, current + cnt)
+
+        # 实体按来源站点统计
+        ent_by_site_rows = (
+            session.query(
+                ExtractedEntity.source_site,
+                ExtractedEntity.review_status,
+                func.count(ExtractedEntity.id),
+            )
+            .filter(
+                ExtractedEntity.is_deleted == False,
+            )
+            .group_by(ExtractedEntity.source_site, ExtractedEntity.review_status)
+            .all()
+        )
+
+        by_site: dict[str, StatusCounts] = {}
+        for source_site, status, cnt in ent_by_site_rows:
+            key = _normalize(status)
+            if key not in ("pending", "approved", "rejected"):
+                continue
+            site = source_site or "unknown"
+            if site not in by_site:
+                by_site[site] = StatusCounts()
+            current = getattr(by_site[site], key)
+            setattr(by_site[site], key, current + cnt)
+
+        return ReviewStatsResponse(
+            entities=StatusCounts(
+                pending=ent_status.get("pending", 0),
+                approved=ent_status.get("approved", 0) + ent_status.get("auto_approved", 0),
+                rejected=ent_status.get("rejected", 0),
+            ),
+            relations=StatusCounts(
+                pending=rel_status.get("pending", 0),
+                approved=rel_status.get("approved", 0) + rel_status.get("auto_approved", 0),
+                rejected=rel_status.get("rejected", 0),
+            ),
+            by_type=by_type,
+            by_site=by_site,
+        )
+
+
+# ── 实体/关系元数据编辑 ──────────────────────────────────────────────────
 
 @router.patch("/entities/{entity_id}", response_model=ReviewActionResponse)
 def patch_entity(entity_id: int, body: PatchEntityRequest):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    if not patch_entity_data(entity_id, body.entity_data):
-        raise HTTPException(status_code=404, detail="实体不存在")
+    """编辑实体元数据（entity_data 浅合并，不可修改 name/type/status）。"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        row = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="实体不存在")
+
+        # 浅合并 entity_data
+        existing = dict(row.entity_data or {})
+        existing.update(body.entity_data)
+        row.entity_data = existing
+
+        # 已推送的实体重置同步状态
+        if row.weknora_graph_status == "pushed":
+            row.weknora_graph_status = "pending"
+
+        session.commit()
+
+    logger.info(f"[API] 实体元数据更新: entity_id={entity_id}")
     return ReviewActionResponse(success=True, message="实体元数据已更新")
 
 
 @router.patch("/relations/{relation_id}", response_model=ReviewActionResponse)
 def patch_relation(relation_id: int, body: PatchRelationRequest):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    if not patch_relation_props(relation_id, body.relation_props):
-        raise HTTPException(status_code=404, detail="关系不存在")
+    """编辑关系元数据（relation_props 浅合并）。"""
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        row = session.query(EntityRelation).filter(
+            EntityRelation.id == relation_id,
+            EntityRelation.is_deleted == False,
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="关系不存在")
+
+        existing = dict(row.relation_props or {})
+        existing.update(body.relation_props)
+        row.relation_props = existing
+
+        if row.weknora_graph_status == "pushed":
+            row.weknora_graph_status = "pending"
+
+        session.commit()
+
+    logger.info(f"[API] 关系元数据更新: relation_id={relation_id}")
     return ReviewActionResponse(success=True, message="关系元数据已更新")
-
-
-# ── 审核历史 ──────────────────────────────────────────────────────────
-
-@router.get("/logs", response_model=ReviewLogListResponse)
-def get_review_logs_api(
-    object_type: str = Query(""),
-    object_id: int = Query(None),
-    action: str = Query(""),
-    reviewer: str = Query(""),
-    limit: int = Query(50, ge=1, le=200),
-):
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    result = get_review_logs(
-        object_type=object_type, object_id=object_id,
-        action=action, reviewer=reviewer, limit=limit,
-    )
-    items = [ReviewLogItem(**it) for it in result["items"]]
-    return ReviewLogListResponse(total=result["total"], items=items)

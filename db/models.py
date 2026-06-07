@@ -12,12 +12,6 @@ from typing import Optional
 
 from sqlalchemy import String, Text, Float, BigInteger, Boolean, DateTime, func
 from sqlalchemy.dialects.postgresql import JSONB
-
-try:
-    from pgvector.sqlalchemy import Vector
-    _EmbeddingType = Vector(1536)
-except ImportError:
-    _EmbeddingType = JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.mutable import MutableDict
 
@@ -51,7 +45,6 @@ class Document(Base):
     doc_type: Mapped[str] = mapped_column(Text, default="")
     # regulatory_notice/drug_recall/drug_label/clinical_trial/literature/industry_news/company_announcement/policy
     language: Mapped[str] = mapped_column(Text, default="")      # zh/en
-    content_hash: Mapped[str] = mapped_column(Text, default="")  # raw_content 的 MD5，跨源去重用
     weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")   # pending/synced/failed
     extraction_status: Mapped[str] = mapped_column(Text, default="pending")     # pending/processing/done/failed
     extraction_model: Mapped[str] = mapped_column(Text, default="")
@@ -101,7 +94,6 @@ class EntityDict(Base):
     entity_type: Mapped[str] = mapped_column(Text, nullable=False)
     external_ids: Mapped[dict] = mapped_column(JSONB, default=dict)
     canonical_data: Mapped[dict] = mapped_column(JSONB, default=dict)
-    phase_cn: Mapped[str] = mapped_column(Text, default="")
     # 合并规则（代码层定义）：
     #   数组字段（aliases/types）：追加去重
     #   状态字段（phase_cn/global_status）：来源优先级高的覆盖低的
@@ -126,7 +118,6 @@ class EntityAlias(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)           # 名称本身
     lang: Mapped[str] = mapped_column(Text, default="")               # zh/en/other
     is_canonical: Mapped[bool] = mapped_column(Boolean, default=False) # 是否标准名
-    name_embedding: Mapped[Optional[list]] = mapped_column(_EmbeddingType, nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 

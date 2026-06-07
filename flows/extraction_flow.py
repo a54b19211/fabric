@@ -349,9 +349,18 @@ def run_extraction_for_uuids(uuids: list[str]) -> dict:
     被 API 触发时调用。
     """
     from flows.extraction_worker import ExtractionTask, get_extraction_manager
-    from db.repository import filter_existing_uuids
 
-    existing = filter_existing_uuids(uuids)
+    with get_session() as session:
+        if session is None:
+            return {"submitted": 0, "failed": len(uuids), "error": "DB未连接"}
+        # 校验 uuid 是否存在，不预载内容
+        existing = {
+            r.uuid
+            for r in session.query(Document.uuid).filter(
+                Document.uuid.in_(uuids),
+                Document.is_deleted == False,
+            ).all()
+        }
 
     manager = get_extraction_manager()
     submitted = 0
@@ -381,14 +390,24 @@ def run_extraction_batch(limit: int = 10) -> dict:
     被定时任务调用。
     """
     from flows.extraction_worker import ExtractionTask, get_extraction_manager
-    from db.repository import get_processing_extraction_uuids
 
-    rows = get_processing_extraction_uuids(limit=limit)
+    with get_session() as session:
+        if session is None:
+            return {"submitted": 0, "failed": 0}
+        rows = (
+            session.query(Document.uuid)
+            .filter(
+                Document.extraction_status == "processing",
+                Document.is_deleted == False,
+            )
+            .limit(limit)
+            .all()
+        )
 
     manager = get_extraction_manager()
     submitted = 0
 
-    for uuid in rows:
+    for (uuid,) in rows:
         task = ExtractionTask(uuid=uuid)
         manager.submit(task)
         submitted += 1

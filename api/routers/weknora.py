@@ -13,8 +13,10 @@ from db.repository import (
     get_entity_dict_for_weknora, batch_mark_entity_dict_synced, batch_mark_entity_dict_failed,
     get_entities_for_weknora_graph, batch_mark_entity_weknora_graph_pushed, batch_mark_entity_weknora_graph_failed,
     get_relations_for_weknora_graph, batch_mark_relation_weknora_graph_pushed, batch_mark_relation_weknora_graph_failed,
-    get_weknora_graph_stats, is_db_connected, get_weknora_sync_stats,
+    get_weknora_graph_stats,
 )
+from db.session import get_session
+from db.models import Document
 from core_engine.weknora_graph_client import get_weknora_graph_client
 
 router = APIRouter(prefix="/api/weknora", tags=["weknora"])
@@ -78,8 +80,10 @@ def get_pending(limit: int = Query(100, ge=1, le=500)):
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit 必须在 1-500 之间")
 
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
 
     try:
         rows = get_pending_weknora_sync(limit=limit)
@@ -156,16 +160,30 @@ def sync_batch(body: WeknoraBatchRequest, kb_id: str = Query("", description="�
 @router.get("/stats", response_model=WeknoraStatsResponse)
 def get_stats():
     """WeKnora 文档同步状态统计"""
-    if not is_db_connected():
-        raise HTTPException(status_code=503, detail="数据库未连接")
-    try:
-        stats = get_weknora_sync_stats()
-        result = WeknoraStatsResponse(**stats)
-        logger.info(f"[API] WeKnora 同步统计: {result.json()}")
-        return result
-    except Exception as e:
-        logger.error(f"[API] WeKnora 同步统计失败: {e}")
-        raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
+    with get_session() as session:
+        if session is None:
+            logger.error("[API] 数据库连接失败")
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        try:
+            def _count(status: str) -> int:
+                return session.query(Document).filter(
+                    Document.weknora_sync_status == status,
+                    Document.is_deleted == False,
+                ).count()
+
+            stats = WeknoraStatsResponse(
+                pending=_count("pending"),
+                synced=_count("synced"),
+                failed=_count("failed"),
+            )
+
+            logger.info(f"[API] WeKnora 同步统计: {stats.json()}")
+            return stats
+
+        except Exception as e:
+            logger.error(f"[API] WeKnora 同步统计失败: {e}")
+            raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -177,8 +195,9 @@ BATCH_SIZE = 200
 
 def _do_sync_entity_dict(kb_id: str = "") -> tuple[int, int, str]:
     """将 entity_dict 推送到 WeKnora 镜像表，并自动初始化 PrimeKG 副本。"""
-    if not is_db_connected():
-        return 0, 0, "数据库未连接"
+    with get_session() as session:
+        if session is None:
+            return 0, 0, "数据库未连接"
 
     rows = get_entity_dict_for_weknora(limit=0)
     if not rows:
@@ -224,8 +243,9 @@ def _do_init_copies(kb_id: str) -> tuple[int, int, str]:
 
 def _do_sync_entities(kb_id: str) -> tuple[int, int, str]:
     """将审核通过的抽取实体推送到 WeKnora graph_entities。返回 (pushed, failed, message)。"""
-    if not is_db_connected():
-        return 0, 0, "数据库未连接"
+    with get_session() as session:
+        if session is None:
+            return 0, 0, "数据库未连接"
 
     entities = get_entities_for_weknora_graph(limit=0)
     logger.info(f"[API] sync-entities 查询到 {len(entities)} 条待推送实体")
@@ -258,8 +278,9 @@ def _do_sync_entities(kb_id: str) -> tuple[int, int, str]:
 
 def _do_sync_relations(kb_id: str) -> tuple[int, int, str]:
     """将审核通过的抽取关系推送到 WeKnora graph_relations。返回 (pushed, failed, message)。"""
-    if not is_db_connected():
-        return 0, 0, "数据库未连接"
+    with get_session() as session:
+        if session is None:
+            return 0, 0, "数据库未连接"
 
     relations = get_relations_for_weknora_graph(limit=0)
     if not relations:
