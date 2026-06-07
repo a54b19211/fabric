@@ -73,7 +73,6 @@ export const approveRelation = (id: number, reviewer: string, note = '') =>
 export const rejectRelation = (id: number, reviewer: string, note = '') =>
   http.post<any, { success: boolean }>(`/review/relations/${id}/reject`, { reviewer, note })
 
-// 批量审核接口
 export const batchApproveEntities = (params: {
   source_doc_uuid?: string
   entity_type?: string
@@ -106,7 +105,12 @@ export const batchRejectRelations = (params: {
   note?: string
 }) => http.post<any, { success: boolean; message?: string }>('/review/relations/batch/reject', params)
 
-// 合并队列
+export const patchEntity = (id: number, entityData: Record<string, any>) =>
+  http.patch<any, { success: boolean; message?: string }>(`/review/entities/${id}`, { entity_data: entityData })
+
+export const patchRelation = (id: number, relationProps: Record<string, any>) =>
+  http.patch<any, { success: boolean; message?: string }>(`/review/relations/${id}`, { relation_props: relationProps })
+
 export interface MergeQueueItem {
   id: number
   source_entity_id: number
@@ -126,8 +130,6 @@ export const resolveMerge = (mergeId: number, reviewer: string, resolution: stri
   http.post<any, { success: boolean }>(`/review/merge-queue/${mergeId}/resolve`, {
     reviewer, resolution, resolved_value: resolvedValue,
   })
-
-// ── 图谱 ────────────────────────────────────────────────────────────────
 
 export interface GraphNode {
   id: number
@@ -166,8 +168,6 @@ export const getReviewGraph = (params: {
   limit?: number
 }) => http.get<any, GraphResponse>('/review/graph', { params })
 
-// ── 仪表盘统计 ──────────────────────────────────────────────────────────
-
 export interface StatusCounts {
   pending: number
   approved: number
@@ -184,10 +184,31 @@ export interface ReviewStats {
 export const getReviewStats = () =>
   http.get<any, ReviewStats>('/review/stats')
 
-// ── 元数据编辑 ──────────────────────────────────────────────────────────
 
-export const patchEntity = (id: number, entityData: Record<string, any>) =>
-  http.patch<any, { success: boolean; message?: string }>(`/review/entities/${id}`, { entity_data: entityData })
+export interface ReviewLogItem {
+  id: number
+  object_type: string
+  object_id: number
+  action: string
+  reviewer: string
+  note: string
+  before_data: Record<string, any>
+  after_data: Record<string, any>
+  created_at: string | null
+}
 
-export const patchRelation = (id: number, relationProps: Record<string, any>) =>
-  http.patch<any, { success: boolean; message?: string }>(`/review/relations/${id}`, { relation_props: relationProps })
+export interface ReviewLogListResponse {
+  total: number
+  items: ReviewLogItem[]
+}
+
+export async function getReviewLogs(params?: {
+  object_type?: string
+  object_id?: number
+  action?: string
+  reviewer?: string
+  limit?: number
+}): Promise<ReviewLogListResponse> {
+  const { data } = await http.get('/review/logs', { params })
+  return data
+}

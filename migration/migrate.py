@@ -62,8 +62,75 @@ def _parse_filename(path: Path) -> tuple[str, str]:
 def _collect_migrations() -> list[Path]:
     if not VERSIONS_DIR.exists():
         return []
-    files = sorted(VERSIONS_DIR.glob("V*.sql"))
+    files = sorted(
+        f for f in VERSIONS_DIR.glob("V*.sql")
+        if ".rollback." not in f.name
+    )
     return files
+
+
+def run_rollback(steps: int = 1):
+    """
+    回滚最近 N 步迁移。
+    查找对应迁移的 .rollback.sql 文件，按降序执行回滚 SQL，
+    并从 schema_migrations 表中删除对应记录。
+    """
+    engine = get_engine()
+    if engine is None:
+        logger.error("[Migration] DB 未配置，无法执行回滚")
+        return
+
+    migrations = _collect_migrations()
+    if not migrations:
+        logger.info("[Migration] 未找到迁移文件")
+        return
+
+    with engine.connect() as conn:
+        _ensure_migration_table(conn)
+        applied = _applied_versions(conn)
+
+        applied_migrations = [
+            m for m in migrations
+            if _parse_filename(m)[0] in applied
+        ]
+        if not applied_migrations:
+            logger.info("[Migration] 没有已执行的迁移可供回滚")
+            return
+
+        targets = applied_migrations[-steps:]
+        targets = list(reversed(targets))
+
+        for path in targets:
+            version, description = _parse_filename(path)
+            rollback_path = path.with_name(f"{path.stem}.rollback.sql")
+            if not rollback_path.exists():
+                logger.warning(
+                    f"[Migration] 跳过 {version}: 缺少回滚文件 {rollback_path.name}"
+                )
+                continue
+
+            sql = rollback_path.read_text(encoding="utf-8")
+            logger.info(f"[Migration] 回滚: {path.name} ({description})")
+            try:
+                from sqlalchemy import text
+                for statement in sql.split(";"):
+                    lines = [
+                        line for line in statement.splitlines()
+                        if line.strip() and not line.strip().startswith("--")
+                    ]
+                    stmt = "\n".join(lines).strip()
+                    if stmt:
+                        conn.execute(text(stmt))
+
+                conn.execute(text(
+                    f"DELETE FROM {MIGRATION_TABLE} WHERE version = :v"
+                ), {"v": version})
+                conn.commit()
+                logger.info(f"[Migration] 回滚完成: {version}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"[Migration] 回滚失败: {path.name} | {e}")
+                raise
 
 
 def run_migrations():
@@ -132,7 +199,7 @@ def list_migrations():
     print("-" * 50)
     for path in migrations:
         version, description = _parse_filename(path)
-        status = "✓ 已执行" if version in applied else "○ 待执行"
+        status = "[done]" if version in applied else "[pending]"
         print(f"{version:<8} {status:<10} {description}")
     print()
 
@@ -140,9 +207,13 @@ def list_migrations():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ZK_Data Fabric 数据库迁移工具")
     parser.add_argument("--list", action="store_true", help="查看迁移状态")
+    parser.add_argument("--rollback", type=int, nargs="?", const=1, metavar="N",
+                        help="回滚最近 N 步迁移（默认 1 步）")
     args = parser.parse_args()
 
     if args.list:
         list_migrations()
+    elif args.rollback is not None:
+        run_rollback(args.rollback)
     else:
         run_migrations()

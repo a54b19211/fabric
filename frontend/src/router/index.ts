@@ -5,7 +5,13 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/documents',
+      redirect: '/dashboard',
+    },
+    {
+      path: '/dashboard',
+      name: 'Dashboard',
+      component: () => import('@/views/Dashboard.vue'),
+      meta: { title: '仪表盘' },
     },
     {
       path: '/documents',

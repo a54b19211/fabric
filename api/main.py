@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from api.routers import documents, extraction, review, weknora
+from api.routers import documents, extraction, review, weknora, stats
 
 app = FastAPI(
     title="ZK Data Fabric 审核后台 API",
@@ -27,6 +27,7 @@ app.include_router(documents.router)
 app.include_router(extraction.router)
 app.include_router(review.router)
 app.include_router(weknora.router)
+app.include_router(stats.router)
 
 
 # ── 统一错误处理 ────────────────────────────────────────────────────────

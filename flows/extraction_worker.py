@@ -111,8 +111,7 @@ class ExtractionWorker:
     def _process(self, task: ExtractionTask) -> None:
         """按 uuid 查 DB 获取文档内容后处理，完成后触发回调。"""
         from flows.extraction_flow import extract_single_document
-        from db.session import get_session
-        from db.models import Document
+        from db.repository import get_document_for_extraction
 
         logger.info(
             f"[Worker-{self.worker_id}] 开始处理: {task.uuid} "
@@ -123,21 +122,14 @@ class ExtractionWorker:
         success = False
         error_msg = ""
         try:
-            with get_session() as session:
-                if session is None:
-                    error_msg = "DB未连接"
-                    return
-                doc = session.query(Document).filter(
-                    Document.uuid == task.uuid,
-                    Document.is_deleted == False,
-                ).first()
-                if doc is None:
-                    error_msg = f"文档不存在: {task.uuid}"
-                    return
+            doc = get_document_for_extraction(task.uuid)
+            if doc is None:
+                error_msg = f"文档不存在: {task.uuid}"
+                return
 
-                raw_content = doc.raw_content or ""
-                source_site = doc.source_site or ""
-                doc_type = doc.doc_type or ""
+            raw_content = doc["raw_content"]
+            source_site = doc["source_site"]
+            doc_type = doc["doc_type"]
 
             if not raw_content.strip():
                 error_msg = "文档raw_content为空"

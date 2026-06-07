@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS documents (
     doc_type             TEXT        DEFAULT '',
     -- regulatory_notice/drug_recall/drug_label/clinical_trial/literature/industry_news/company_announcement/policy
     language             TEXT        DEFAULT '',   -- zh/en
+    content_hash         TEXT        DEFAULT '',   -- raw_content MD5，跨源去重
     weknora_sync_status  TEXT        DEFAULT 'pending',  -- pending/synced/failed
     extraction_status    TEXT        DEFAULT 'pending',  -- pending/processing/done/failed
     extraction_model     TEXT        DEFAULT '',
@@ -50,6 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_parent_uuid       ON documents(parent_uuid);
 CREATE INDEX IF NOT EXISTS idx_doc_extraction_status ON documents(extraction_status);
 CREATE INDEX IF NOT EXISTS idx_doc_weknora_sync      ON documents(weknora_sync_status);
 CREATE INDEX IF NOT EXISTS idx_doc_is_deleted        ON documents(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_doc_content_hash      ON documents(content_hash);
 
 
 -- ============================================================
@@ -98,6 +100,7 @@ CREATE TABLE IF NOT EXISTS entity_dict (
     -- Company/Drug/Target/Indication/ClinicalTrial/DealEvent/ApprovalEvent/Policy/Pathway/TCMFormula/Compound
     external_ids         JSONB       NOT NULL DEFAULT '{}',
     canonical_data       JSONB       NOT NULL DEFAULT '{}',
+    phase_cn             TEXT        DEFAULT '',
     canonical_source     TEXT        DEFAULT '',
     canonical_updated_at TIMESTAMPTZ DEFAULT NULL,
     is_verified          BOOLEAN     DEFAULT FALSE,
@@ -108,6 +111,8 @@ CREATE TABLE IF NOT EXISTS entity_dict (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dict_entity_type   ON entity_dict(entity_type);
+CREATE INDEX IF NOT EXISTS idx_dict_phase_cn      ON entity_dict(phase_cn);
+CREATE INDEX IF NOT EXISTS idx_dict_neo4j_node_id ON entity_dict(neo4j_node_id);
 CREATE INDEX IF NOT EXISTS idx_dict_external_ids  ON entity_dict USING GIN (external_ids);
 CREATE INDEX IF NOT EXISTS idx_dict_is_deleted    ON entity_dict(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_dict_weknora_sync ON entity_dict(weknora_sync_status);
@@ -167,6 +172,9 @@ CREATE INDEX IF NOT EXISTS idx_ent_review_status ON extracted_entities(review_st
 CREATE INDEX IF NOT EXISTS idx_ent_data_jsonb    ON extracted_entities USING GIN (entity_data);
 CREATE INDEX IF NOT EXISTS idx_ent_is_deleted    ON extracted_entities(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_ent_weknora_graph ON extracted_entities(weknora_graph_status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ent_doc_name_type
+    ON extracted_entities(source_doc_uuid, entity_name, entity_type, is_deleted)
+    WHERE is_deleted = FALSE;
 
 
 -- ============================================================
@@ -200,6 +208,9 @@ CREATE INDEX IF NOT EXISTS idx_rel_relation_type ON entity_relations(relation_ty
 CREATE INDEX IF NOT EXISTS idx_rel_review_status ON entity_relations(review_status);
 CREATE INDEX IF NOT EXISTS idx_rel_is_deleted    ON entity_relations(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_rel_weknora_graph ON entity_relations(weknora_graph_status);
+CREATE INDEX IF NOT EXISTS idx_rel_dedup
+    ON entity_relations(source_doc_uuid, from_entity_id, to_entity_id, relation_type)
+    WHERE is_deleted = FALSE;
 
 
 -- ============================================================
@@ -245,6 +256,7 @@ CREATE TABLE IF NOT EXISTS review_log (
 
 CREATE INDEX IF NOT EXISTS idx_review_object     ON review_log(object_type, object_id);
 CREATE INDEX IF NOT EXISTS idx_review_is_deleted ON review_log(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_review_created    ON review_log(created_at);
 
 -- ============================================================
 -- 10. operation_log — 所有数据库写操作审计追踪

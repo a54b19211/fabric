@@ -104,6 +104,9 @@ class EntityItem(BaseModel):
     review_status: str
     dict_id: Optional[int] = None
     disambig: Optional[DisambigInfo] = None
+    canonical_data: Optional[dict] = None
+    canonical_source: Optional[str] = None
+    aliases: Optional[list[str]] = None
 
 
 class EntityListResponse(BaseModel):
@@ -239,8 +242,6 @@ class GraphSyncStatusCount(BaseModel):
     pending: int = 0
     pushed: int = 0
     failed: int = 0
-
-    # entity_dict uses synced instead of pushed
     synced: int = 0
 
 
@@ -299,3 +300,61 @@ class ReExtractResponse(BaseModel):
     success: bool
     uuid: str
     message: str = ""
+
+
+# ── Dashboard Stats ─────────────────────────────────────────────────────
+
+class SourceDistribution(BaseModel):
+    site: str
+    count: int
+
+
+class DashboardResponse(BaseModel):
+    total_documents: int
+    today_new: int
+    source_distribution: list[SourceDistribution]
+    review_stats: EntityListResponse
+    entity_count: int
+    relation_count: int
+    avg_entity_confidence: float
+    review_pass_rate: float
+    neo4j_pending_entities: int
+    neo4j_pending_relations: int
+    neo4j_failed_total: int
+    weknora_pending: int
+    weknora_synced: int
+    weknora_failed: int
+    extraction_pending: int
+    extraction_done: int
+
+
+# ── Review History ──────────────────────────────────────────────────────
+
+class ReviewLogItem(BaseModel):
+    id: int
+    object_type: str
+    object_id: int
+    action: str
+    reviewer: str
+    note: str
+    before_data: dict = {}
+    after_data: dict = {}
+    created_at: Optional[str] = None
+
+
+class ReviewLogListResponse(BaseModel):
+    total: int
+    items: list[ReviewLogItem]
+
+
+# ── Entity Stats ────────────────────────────────────────────────────────
+
+class TopEntityItem(BaseModel):
+    entity_name: str
+    entity_type: str
+    doc_count: int
+    avg_confidence: float
+
+
+class TopEntitiesResponse(BaseModel):
+    items: list[TopEntityItem]
