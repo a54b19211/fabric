@@ -11,7 +11,7 @@ CONFIG = {
         "base_url": "https://api.fda.gov/drug/enforcement.json",
         "endpoint": "/drug/enforcement.json",
         "search": "",
-        "max_records": 500,
+        "max_records": 0,
     },
     "api_fetcher": iter_openfda,
     "uid_field": "recall_number",

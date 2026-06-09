@@ -149,7 +149,7 @@ import { triggerExtraction, getExtractionStats, type ExtractionStats } from '@/a
 const router = useRouter()
 const route = useRoute()
 
-const SITES = ['nmpa','cde','fda_press','fda_drug_safety','fda_drug_recalls',
+const SITES = ['nmpa','cde','fda_press','fda_drug_safety',
   'fda_api_drug_label','fda_api_enforcement','chictr','clinicaltrials',
   'pubmed','drugbank','hkex','fiercepharma','phirda_policy','phirda_industry',
   'phirda_rd','phirda_healthcare_reform','roche']

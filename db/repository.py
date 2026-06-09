@@ -24,7 +24,7 @@ from db.models import (
 # ── 来源优先级（canonical_data 合并用）──────────────────────────────────
 _SOURCE_PRIORITY: dict[str, int] = {
     "nmpa": 10, "fda": 10, "fda_press": 10, "fda_drug_safety": 10,
-    "fda_drug_recalls": 10, "fda_api_drug_label": 10, "fda_api_enforcement": 10,
+    "fda_api_drug_label": 10, "fda_api_enforcement": 10,
     "drugbank": 10,
     "chictr": 8, "clinicaltrials": 8,
     "hkex": 6,

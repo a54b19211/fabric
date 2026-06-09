@@ -319,13 +319,6 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
 - 提取安全信号描述（safety_signal）、受影响人群（affected_population）
 - 提取 FDA 建议措施（recommendation）
 - 关联关系：Drug -[RELATED_TO]-> SafetyEvent"""
-    elif "drug_recalls" in sub_source:
-        sub_guidance = """
-## 子源特化：FDA Drug Recalls（药品召回）
-- RecallEvent 是核心实体，必须提取召回级别（recall_class: I/II/III）
-- recall_class 含义：I级（最严重，可能致死/致残）→ II级（暂时性或可逆损害）→ III级（不太可能导致不良健康后果）
-- 提取召回原因（recall_reason）、受影响批次（affected_batches）、召回日期（recall_date）
-- 关联关系：Company -[RELATED_TO]-> RecallEvent，Drug -[RELATED_TO]-> RecallEvent"""
     elif "enforcement" in sub_source:
         sub_guidance = """
 ## 子源特化：FDA Enforcement（执法信息）
@@ -865,7 +858,6 @@ _PROMPT_MAP: dict[str, callable] = {
     # FDA相关
     "fda_press":                lambda t: get_fda_extraction_prompt(t, ""),
     "fda_drug_safety":          lambda t: get_fda_extraction_prompt(t, "drug_safety"),
-    "fda_drug_recalls":         lambda t: get_fda_extraction_prompt(t, "drug_recalls"),
     "fda_api_drug_label":       lambda t: get_fda_extraction_prompt(t, "drug_label"),
     "fda_api_enforcement":      lambda t: get_fda_extraction_prompt(t, "enforcement"),
     
