@@ -211,8 +211,18 @@ def disambiguate_entities(entities: list[dict], session=None) -> list[dict]:
             # Step 1/3/5 的匹配结果只记入 _disambig.candidates，不直接关联
             if result.match_step == "step2_exact_alias":
                 ent["dict_id"] = result.dict_id
+                logger.info(
+                    f"[Disambiguation] dict_id SET: '{name}' type={entity_type} "
+                    f"→ dict_id={result.dict_id} step={result.match_step} "
+                    f"status={result.status}"
+                )
             else:
                 ent["dict_id"] = None
+                logger.info(
+                    f"[Disambiguation] dict_id NONE: '{name}' type={entity_type} "
+                    f"step={result.match_step} status={result.status} "
+                    f"reason={result.reason}"
+                )
 
             ent["confidence_score"] = result.confidence
             ent["confidence_reason"] = result.reason

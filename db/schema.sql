@@ -50,6 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_parent_uuid       ON documents(parent_uuid);
 CREATE INDEX IF NOT EXISTS idx_doc_extraction_status ON documents(extraction_status);
 CREATE INDEX IF NOT EXISTS idx_doc_weknora_sync      ON documents(weknora_sync_status);
 CREATE INDEX IF NOT EXISTS idx_doc_is_deleted        ON documents(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_doc_filter_sort      ON documents(is_deleted, source_site, extraction_status, created_at DESC);
 
 
 -- ============================================================
@@ -166,6 +167,7 @@ CREATE INDEX IF NOT EXISTS idx_ent_dict_id       ON extracted_entities(dict_id);
 CREATE INDEX IF NOT EXISTS idx_ent_review_status ON extracted_entities(review_status);
 CREATE INDEX IF NOT EXISTS idx_ent_data_jsonb    ON extracted_entities USING GIN (entity_data);
 CREATE INDEX IF NOT EXISTS idx_ent_is_deleted    ON extracted_entities(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_ent_review_deleted ON extracted_entities(review_status, is_deleted);
 CREATE INDEX IF NOT EXISTS idx_ent_weknora_graph ON extracted_entities(weknora_graph_status);
 
 
@@ -199,6 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_rel_to_entity     ON entity_relations(to_entity_i
 CREATE INDEX IF NOT EXISTS idx_rel_relation_type ON entity_relations(relation_type);
 CREATE INDEX IF NOT EXISTS idx_rel_review_status ON entity_relations(review_status);
 CREATE INDEX IF NOT EXISTS idx_rel_is_deleted    ON entity_relations(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_rel_review_deleted ON entity_relations(review_status, is_deleted);
 CREATE INDEX IF NOT EXISTS idx_rel_weknora_graph ON entity_relations(weknora_graph_status);
 
 
@@ -267,3 +270,52 @@ CREATE INDEX IF NOT EXISTS idx_oplog_table      ON operation_log(target_table);
 CREATE INDEX IF NOT EXISTS idx_oplog_action     ON operation_log(business_action);
 CREATE INDEX IF NOT EXISTS idx_oplog_process    ON operation_log(process);
 CREATE INDEX IF NOT EXISTS idx_oplog_created_at ON operation_log(created_at);
+
+-- ============================================================
+-- 10. entity_merge_queue — 属性合并冲突队列
+CREATE TABLE IF NOT EXISTS entity_merge_queue (
+    id                          BIGSERIAL PRIMARY KEY,
+    source_entity_id            BIGINT NOT NULL,          -- 新值来源的 extracted_entity.id
+    target_dict_id              BIGINT NOT NULL,          -- 目标 entity_dict.id
+    field_name                  TEXT NOT NULL,            -- 冲突字段名
+    existing_value              JSONB,                    -- entity_dict 中的当前值
+    new_value                   JSONB,                    -- 待合并的新值
+    source_site                 TEXT DEFAULT '',          -- 新值来源站点
+    existing_source_entity_id   BIGINT,                   -- 现有值来源的 extracted_entity.id
+    existing_source_doc_uuid    TEXT DEFAULT '',          -- 现有值来源文档 UUID
+    resolution                  TEXT DEFAULT 'pending',   -- pending / accept_new / keep_existing / custom / resolved_*
+    resolved_value              JSONB,                    -- resolution=custom 时的自定义值
+    reviewer_note               TEXT DEFAULT '',
+    reviewed_by                 TEXT DEFAULT '',
+    reviewed_at                 TIMESTAMPTZ,
+    created_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_target       ON entity_merge_queue(target_dict_id);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_resolution   ON entity_merge_queue(resolution);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_field        ON entity_merge_queue(target_dict_id, field_name);
+
+-- 11. entity_merge_log — 实体合并日志（快照+回滚）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS entity_merge_log (
+    id                BIGSERIAL    PRIMARY KEY,
+    keeper_dict_id    BIGINT       NOT NULL,
+    absorbed_dict_ids BIGINT[]     NOT NULL,
+
+    before_snapshot   JSONB        NOT NULL,
+    after_snapshot    JSONB        NOT NULL,
+    field_decisions   JSONB        DEFAULT '{}',
+
+    merge_type        TEXT         DEFAULT 'identity',  -- identity | attribute
+    reviewer          TEXT         DEFAULT '',
+    note              TEXT         DEFAULT '',
+
+    is_rolled_back    BOOLEAN      DEFAULT FALSE,
+    rolled_back_at    TIMESTAMPTZ  DEFAULT NULL,
+    rollback_reason   TEXT         DEFAULT '',
+
+    created_at        TIMESTAMPTZ  DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_log_keeper   ON entity_merge_log(keeper_dict_id);
+CREATE INDEX IF NOT EXISTS idx_merge_log_rollback ON entity_merge_log(is_rolled_back);
+CREATE INDEX IF NOT EXISTS idx_merge_log_created  ON entity_merge_log(created_at);

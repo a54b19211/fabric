@@ -17,7 +17,7 @@ from db.models import (
     Document, DocExtra, Attachment,
     EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
     CrawlLog, ReviewLog,
-    EntityMergeQueue,
+    EntityMergeQueue, EntityMergeLog,
     OperationLog,
 )
 
@@ -464,6 +464,22 @@ def get_entity_dict_by_id(dict_id: int) -> Optional[EntityDict]:
 # 3b. 实体数据合并队列
 # ═══════════════════════════════════════════════════════════════════════
 
+def _is_empty_value(val) -> bool:
+    """值是否语义为空：None、空串、空数组、空对象、或 {"_val": 空值}。0 / False 不算空。"""
+    if val is None:
+        return True
+    if isinstance(val, str) and val == "":
+        return True
+    if isinstance(val, (list, tuple)) and len(val) == 0:
+        return True
+    if isinstance(val, dict):
+        if len(val) == 0:
+            return True
+        if list(val.keys()) == ["_val"]:
+            return _is_empty_value(val["_val"])
+    return False
+
+
 # 这些字段合并风险低，差异直接跳过不排队
 _SKIP_MERGE_FIELDS = frozenset({"name", "name_en", "aliases", "source_text"})
 
@@ -548,6 +564,19 @@ def process_entity_merge(
     new_priority = _SOURCE_PRIORITY.get(source_site, 1)
     valid_fields = _VALID_FIELDS_BY_TYPE.get(entity.entity_type)  # None = 不限制
 
+    # 查找现有值的来源实体（用于冲突记录时标记双方来源文档）
+    existing_source = (
+        session.query(ExtractedEntity)
+        .filter(
+            ExtractedEntity.dict_id == dict_id,
+            ExtractedEntity.id != source_entity_id,
+        )
+        .order_by(ExtractedEntity.id.desc())
+        .first()
+    )
+    existing_source_entity_id: int | None = existing_source.id if existing_source else None
+    existing_source_doc_uuid: str = existing_source.source_doc_uuid if existing_source else ""
+
     auto_count = 0
     conflict_count = 0
 
@@ -586,20 +615,32 @@ def process_entity_merge(
                 auto_count += 1
             continue
 
-        # 4) 值相同 → 跳过
+        # 4) 一侧语义为空 → 有值侧胜出
+        existing_empty = _is_empty_value(existing_val)
+        new_empty = _is_empty_value(new_val)
+        if existing_empty and not new_empty:
+            current[key] = new_val
+            auto_count += 1
+            continue
+        if new_empty and not existing_empty:
+            continue  # 保留现有值，新值为空
+        if existing_empty and new_empty:
+            continue  # 都为空，无冲突
+
+        # 5) 值相同 → 跳过
         if existing_val == new_val:
             continue
 
-        # 5) 新来源优先级严格高于当前来源 → auto merge
+        # 6) 新来源优先级严格高于当前来源 → auto merge
         if new_priority > current_priority:
             current[key] = new_val
             auto_count += 1
             continue
 
-        # 6) 同优先级不同源 → 人工审核
+        # 7) 同优先级不同源 → 人工审核
         if new_priority == current_priority:
             existing_record = session.query(EntityMergeQueue).filter(
-                EntityMergeQueue.source_entity_id == source_entity_id,
+                EntityMergeQueue.target_dict_id == dict_id,
                 EntityMergeQueue.field_name == key,
                 EntityMergeQueue.resolution == "pending",
             ).first()
@@ -611,12 +652,26 @@ def process_entity_merge(
                     existing_value=existing_val if isinstance(existing_val, (dict, list)) else {"_val": existing_val},
                     new_value=new_val if isinstance(new_val, (dict, list)) else {"_val": new_val},
                     source_site=source_site,
+                    existing_source_entity_id=existing_source_entity_id,
+                    existing_source_doc_uuid=existing_source_doc_uuid,
                     resolution="pending",
                 ))
                 conflict_count += 1
+            else:
+                # 同字段已有 pending 冲突 → 刷新值，保留最新
+                existing_record.existing_value = existing_val if isinstance(existing_val, (dict, list)) else {"_val": existing_val}
+                existing_record.new_value = new_val if isinstance(new_val, (dict, list)) else {"_val": new_val}
+                existing_record.source_entity_id = source_entity_id
+                existing_record.source_site = source_site
+                existing_record.existing_source_entity_id = existing_source_entity_id
+                existing_record.existing_source_doc_uuid = existing_source_doc_uuid
+                logger.debug(
+                    f"[DB] process_entity_merge: 刷新 pending 冲突 "
+                    f"dict_id={dict_id} field={key}"
+                )
             continue
 
-        # 7) 低优来源 → 跳过，不覆盖
+        # 8) 低优来源 → 跳过，不覆盖
         pass
 
     if auto_count > 0:
@@ -641,34 +696,213 @@ def process_entity_merge(
     return auto_count, conflict_count
 
 
-def get_pending_merges(limit: int = 50) -> list[dict]:
-    """查询 resolution=pending 的合并队列条目。"""
+def get_pending_merges(limit: int = 50) -> dict:
+    """
+    查询待处理合并冲突，按 dict_id 聚合。
+    返回前校验新鲜度（批量查表，无 N+1），自动 resolve 已过期冲突。
+    """
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
-            return []
-        rows = (
-            session.query(EntityMergeQueue)
+            return {"total_groups": 0, "groups": []}
+
+        # 1. 查待处理 dict_id（limit 在 dict_id 层面）
+        dict_id_rows = (
+            session.query(EntityMergeQueue.target_dict_id)
             .filter(EntityMergeQueue.resolution == "pending")
-            .order_by(EntityMergeQueue.created_at.desc())
+            .distinct()
+            .order_by(EntityMergeQueue.target_dict_id.desc())
             .limit(limit)
             .all()
         )
-        return [
-            {
-                "id": r.id,
-                "source_entity_id": r.source_entity_id,
-                "target_dict_id": r.target_dict_id,
+        if not dict_id_rows:
+            return {"total_groups": 0, "groups": []}
+
+        dict_ids = [r[0] for r in dict_id_rows]
+
+        # 2. 拉取这些 dict_id 的所有 pending 冲突
+        rows = (
+            session.query(EntityMergeQueue)
+            .filter(
+                EntityMergeQueue.resolution == "pending",
+                EntityMergeQueue.target_dict_id.in_(dict_ids),
+            )
+            .order_by(EntityMergeQueue.created_at.desc())
+            .all()
+        )
+
+        # 3. 批量预加载关联数据，避免 N+1
+        entity_ids = list({r.target_dict_id for r in rows})
+        source_ent_ids = list({r.source_entity_id for r in rows})
+
+        dict_map = {
+            e.id: e
+            for e in session.query(EntityDict).filter(
+                EntityDict.id.in_(entity_ids),
+                EntityDict.is_deleted == False,
+            ).all()
+        }
+        source_ent_map = {
+            se.id: se
+            for se in session.query(ExtractedEntity).filter(
+                ExtractedEntity.id.in_(source_ent_ids),
+                ExtractedEntity.is_deleted == False,
+            ).all()
+        }
+
+        # 4. 逐条校验新鲜度
+        groups: dict[int, dict] = {}
+        auto_resolved = 0
+
+        for r in rows:
+            entity = dict_map.get(r.target_dict_id)
+            if entity is None:
+                r.resolution = "resolved_dict_deleted"
+                r.reviewed_at = datetime.now(timezone.utc)
+                auto_resolved += 1
+                _write_operation_log(
+                    session, "update", "entity_merge_queue", r.id,
+                    business_action="auto_resolve",
+                    description=f"dict 已删除: dict_id={r.target_dict_id} field={r.field_name}",
+                    details={"reason": "dict_deleted", "dict_id": r.target_dict_id},
+                    trigger_source="get_pending_merges",
+                )
+                continue
+
+            source_ent = source_ent_map.get(r.source_entity_id)
+            if source_ent is None:
+                r.resolution = "resolved_source_deleted"
+                r.reviewed_at = datetime.now(timezone.utc)
+                auto_resolved += 1
+                _write_operation_log(
+                    session, "update", "entity_merge_queue", r.id,
+                    business_action="auto_resolve",
+                    description=f"source 实体已删除: entity_id={r.source_entity_id} field={r.field_name}",
+                    details={"reason": "source_deleted", "source_entity_id": r.source_entity_id},
+                    trigger_source="get_pending_merges",
+                )
+                continue
+
+            # 值相等 / 一侧语义为空 → 自动 resolve
+            canonical = entity.canonical_data or {}
+            current_val = canonical.get(r.field_name)
+            new_val = r.new_value.get("_val") if isinstance(r.new_value, dict) and list(r.new_value.keys()) == ["_val"] else r.new_value
+            cur_empty = _is_empty_value(current_val)
+            new_empty = _is_empty_value(new_val)
+            if cur_empty and new_empty:
+                r.resolution = "resolved_both_empty"
+                r.reviewed_at = datetime.now(timezone.utc)
+                auto_resolved += 1
+                continue
+            if cur_empty and not new_empty:
+                r.resolution = "accept_new"
+                r.reviewed_at = datetime.now(timezone.utc)
+                auto_resolved += 1
+                cd = dict(entity.canonical_data or {})
+                cd[r.field_name] = r.new_value
+                entity.canonical_data = cd
+                entity.canonical_updated_at = datetime.now(timezone.utc)
+                continue
+            if new_empty and not cur_empty:
+                r.resolution = "keep_existing"
+                r.reviewed_at = datetime.now(timezone.utc)
+                auto_resolved += 1
+                continue
+            if current_val == new_val:
+                r.resolution = "resolved_already_merged"
+                r.reviewed_at = datetime.now(timezone.utc)
+                auto_resolved += 1
+                _write_operation_log(
+                    session, "update", "entity_merge_queue", r.id,
+                    business_action="auto_resolve",
+                    description=f"值已通过其他途径合并: dict_id={r.target_dict_id} field={r.field_name}",
+                    details={"reason": "already_merged", "current_value": current_val},
+                    trigger_source="get_pending_merges",
+                )
+                continue
+
+            # 刷新过期的 existing_value
+            existing_val = r.existing_value.get("_val") if isinstance(r.existing_value, dict) and list(r.existing_value.keys()) == ["_val"] else r.existing_value
+            if existing_val != current_val and current_val is not None:
+                r.existing_value = current_val if isinstance(current_val, (dict, list)) else {"_val": current_val}
+
+            # 组装分组
+            if r.target_dict_id not in groups:
+                cd = entity.canonical_data or {}
+                groups[r.target_dict_id] = {
+                    "dict_id": r.target_dict_id,
+                    "entity_type": entity.entity_type,
+                    "entity_name": cd.get("name", ""),
+                    "canonical_data": cd,
+                    "canonical_source": entity.canonical_source or "",
+                    "conflicts": [],
+                }
+
+            existing_val_out = r.existing_value
+            new_val_out = r.new_value
+            groups[r.target_dict_id]["conflicts"].append({
+                "merge_id": r.id,
                 "field_name": r.field_name,
-                "existing_value": r.existing_value,
-                "new_value": r.new_value,
+                "existing_value": existing_val_out.get("_val") if isinstance(existing_val_out, dict) and list(existing_val_out.keys()) == ["_val"] else existing_val_out,
+                "new_value": new_val_out.get("_val") if isinstance(new_val_out, dict) and list(new_val_out.keys()) == ["_val"] else new_val_out,
+                "source_entity_id": r.source_entity_id,
                 "source_site": r.source_site,
-                "resolution": r.resolution,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ]
+                "source_doc_uuid": source_ent.source_doc_uuid,
+                "existing_source_doc_uuid": r.existing_source_doc_uuid or "",
+            })
+
+        if auto_resolved:
+            session.commit()
+            logger.info(f"[DB] get_pending_merges: auto resolved {auto_resolved} 条过期冲突")
+
+        # 5. 补全来源文档列表：查出所有关联实体，按字段值分组
+        group_dict_ids = list(groups.keys())
+        if group_dict_ids:
+            all_related_entities = (
+                session.query(ExtractedEntity)
+                .filter(
+                    ExtractedEntity.dict_id.in_(group_dict_ids),
+                )
+                .all()
+            )
+            # entities_by_dict[dict_id] = [entity, ...]
+            from collections import defaultdict
+            entities_by_dict: dict[int, list] = defaultdict(list)
+            for ent in all_related_entities:
+                entities_by_dict[ent.dict_id].append(ent)
+
+            for g in groups.values():
+                dict_entities = entities_by_dict.get(g["dict_id"], [])
+                for c in g["conflicts"]:
+                    ev = c["existing_value"]
+                    nv = c["new_value"]
+                    existing_sources: list[dict] = []
+                    new_sources: list[dict] = []
+                    seen_existing: set[str] = set()
+                    seen_new: set[str] = set()
+                    for ent in dict_entities:
+                        ed = ent.entity_data or {}
+                        ent_val = ed.get(c["field_name"])
+                        if ent_val is None:
+                            continue
+                        doc = ent.source_doc_uuid or ""
+                        src = {
+                            "entity_id": ent.id,
+                            "source_doc_uuid": doc,
+                            "source_site": ent.source_site or "",
+                        }
+                        if ent_val == ev and doc not in seen_existing:
+                            existing_sources.append(src)
+                            seen_existing.add(doc)
+                        elif ent_val == nv and doc not in seen_new:
+                            new_sources.append(src)
+                            seen_new.add(doc)
+                    c["existing_sources"] = existing_sources
+                    c["new_sources"] = new_sources
+
+        sorted_groups = sorted(groups.values(), key=lambda g: g["dict_id"], reverse=True)
+        return {"total_groups": len(sorted_groups), "groups": sorted_groups}
 
 
 def resolve_merge(
@@ -723,6 +957,586 @@ def resolve_merge(
             trigger_source="resolve_merge",
         )
         logger.info(f"[DB] resolve_merge: merge_id={merge_id} resolution={resolution}")
+
+
+def batch_resolve_merges(
+    decisions: list[dict],
+    reviewer: str = "",
+) -> dict:
+    """
+    批量解决合并冲突。一次请求解决同 dict_id 下所有冲突字段。
+    decisions: [{merge_id, resolution, resolved_value?}]
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "error": "数据库未连接"}
+
+        resolved_count = 0
+        for dec in decisions:
+            merge_id = dec["merge_id"]
+            resolution = dec["resolution"]
+            resolved_value = dec.get("resolved_value")
+
+            merge = session.query(EntityMergeQueue).filter(
+                EntityMergeQueue.id == merge_id,
+                EntityMergeQueue.resolution == "pending",
+            ).first()
+            if merge is None:
+                continue
+
+            merge.resolution = resolution
+            merge.reviewed_by = reviewer
+            merge.reviewed_at = datetime.now(timezone.utc)
+
+            if resolution == "accept_new":
+                entity = session.query(EntityDict).filter(
+                    EntityDict.id == merge.target_dict_id,
+                    EntityDict.is_deleted == False,
+                ).first()
+                if entity:
+                    canonical = dict(entity.canonical_data or {})
+                    new_val = merge.new_value.get("_val") if isinstance(merge.new_value, dict) and list(merge.new_value.keys()) == ["_val"] else merge.new_value
+                    canonical[merge.field_name] = new_val
+                    entity.canonical_data = canonical
+                    entity.canonical_updated_at = datetime.now(timezone.utc)
+            elif resolution == "keep_existing":
+                pass
+            elif resolution == "custom" and resolved_value is not None:
+                merge.resolved_value = resolved_value
+                entity = session.query(EntityDict).filter(
+                    EntityDict.id == merge.target_dict_id,
+                    EntityDict.is_deleted == False,
+                ).first()
+                if entity:
+                    canonical = dict(entity.canonical_data or {})
+                    canonical[merge.field_name] = resolved_value
+                    entity.canonical_data = canonical
+                    entity.canonical_updated_at = datetime.now(timezone.utc)
+
+            resolved_count += 1
+            _write_operation_log(
+                session, "update", "entity_merge_queue", merge_id,
+                business_action="merge_resolve",
+                description=f"批量合并冲突解决: field={merge.field_name} resolution={resolution}",
+                details={"field_name": merge.field_name, "resolution": resolution,
+                          "target_dict_id": merge.target_dict_id, "reviewer": reviewer},
+                operator=reviewer,
+                trigger_source="batch_resolve_merges",
+            )
+
+        session.commit()
+        logger.info(f"[DB] batch_resolve_merges: resolved {resolved_count} conflicts")
+
+        return {"success": True, "resolved_count": resolved_count}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 3c. 实体搜索 & 合并工作台
+# ═══════════════════════════════════════════════════════════════════════
+
+def search_entity_dicts(q: str, limit: int = 20) -> list[dict]:
+    """模糊搜索 entity_dict：按名称或别名匹配。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return []
+
+        pattern = f"%{q.strip()}%"
+        results: list[dict] = []
+        seen: set[int] = set()
+
+        # 1. 按别名搜索
+        alias_rows = (
+            session.query(EntityAlias.dict_id, EntityAlias.name)
+            .filter(
+                EntityAlias.is_deleted == False,
+                func.lower(EntityAlias.name).like(func.lower(pattern)),
+            )
+            .limit(limit)
+            .all()
+        )
+        for dict_id, matched_alias in alias_rows:
+            if dict_id in seen:
+                continue
+            entity = session.query(EntityDict).filter(
+                EntityDict.id == dict_id,
+                EntityDict.is_deleted == False,
+            ).first()
+            if entity is None:
+                continue
+            seen.add(dict_id)
+            results.append(_build_search_result(session, entity))
+
+        # 2. 按 canonical_data.name 搜索
+        remaining = limit - len(results)
+        if remaining > 0:
+            name_rows = (
+                session.query(EntityDict)
+                .filter(
+                    EntityDict.is_deleted == False,
+                    func.lower(func.jsonb_extract_path_text(
+                        EntityDict.canonical_data, "name"
+                    )).like(func.lower(pattern)),
+                )
+                .limit(remaining)
+                .all()
+            )
+            for entity in name_rows:
+                if entity.id in seen:
+                    continue
+                seen.add(entity.id)
+                results.append(_build_search_result(session, entity))
+
+        return results
+
+
+def _build_search_result(session, entity: EntityDict) -> dict:
+    """构建搜索结果的 dict。"""
+    aliases = [
+        a.name for a in session.query(EntityAlias.name).filter(
+            EntityAlias.dict_id == entity.id,
+            EntityAlias.is_deleted == False,
+        ).all()
+    ]
+    count = session.query(ExtractedEntity).filter(
+        ExtractedEntity.dict_id == entity.id,
+        ExtractedEntity.is_deleted == False,
+    ).count()
+
+    cd = entity.canonical_data or {}
+    return {
+        "dict_id": entity.id,
+        "entity_type": entity.entity_type,
+        "entity_name": cd.get("name", ""),
+        "canonical_source": entity.canonical_source or "",
+        "aliases": aliases,
+        "extracted_entities_count": count,
+    }
+
+
+def compare_entities(dict_ids: list[int]) -> dict:
+    """对比多个 entity_dict 的 canonical_data，返回 entity 信息和 field_diff。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return {"entities": [], "field_diff": []}
+
+        entities_raw = (
+            session.query(EntityDict)
+            .filter(EntityDict.id.in_(dict_ids), EntityDict.is_deleted == False)
+            .all()
+        )
+        if not entities_raw:
+            return {"entities": [], "field_diff": []}
+
+        entities_info: list[dict] = []
+        all_fields: set[str] = set()
+        values_by_field: dict[str, dict[str, object]] = {}
+
+        for ent in entities_raw:
+            cd = ent.canonical_data or {}
+            all_fields.update(cd.keys())
+
+            aliases = [
+                a.name for a in session.query(EntityAlias.name).filter(
+                    EntityAlias.dict_id == ent.id,
+                    EntityAlias.is_deleted == False,
+                ).all()
+            ]
+            count = session.query(ExtractedEntity).filter(
+                ExtractedEntity.dict_id == ent.id,
+                ExtractedEntity.is_deleted == False,
+            ).count()
+
+            entities_info.append({
+                "dict_id": ent.id,
+                "entity_type": ent.entity_type,
+                "entity_name": cd.get("name", ""),
+                "canonical_data": cd,
+                "canonical_source": ent.canonical_source or "",
+                "aliases": aliases,
+                "extracted_entities_count": count,
+            })
+
+            for key, val in cd.items():
+                if key not in values_by_field:
+                    values_by_field[key] = {}
+                values_by_field[key][str(ent.id)] = val
+
+    # 跳过 _SKIP_MERGE_FIELDS 和内部字段
+    skip_fields = {"name", "name_en", "aliases", "source_text"}
+
+    field_diff: list[dict] = []
+    for field in sorted(all_fields):
+        if field.startswith("_") or field in skip_fields:
+            continue
+        vals = values_by_field.get(field, {})
+        unique = set(
+            tuple(v) if isinstance(v, list) else str(v)
+            for v in vals.values()
+        )
+        conflict = len(unique) > 1
+        field_diff.append({
+            "field": field,
+            "values": vals,
+            "conflict": conflict,
+        })
+
+    return {"entities": entities_info, "field_diff": field_diff}
+
+
+def merge_entities(
+    keeper_dict_id: int,
+    absorbed_dict_ids: list[int],
+    field_decisions: dict,
+    reviewer: str = "",
+    note: str = "",
+) -> dict:
+    """
+    实体身份合并（事务内）：
+    1. 快照 before_snapshot
+    2. 后端计算 final_canonical_data（auto-merge + field_decisions）
+    3. keeper.canonical_data = final_canonical_data
+    4. absorbed 的 extracted_entities / aliases → keeper
+    5. absorbed entity_dict 软删除
+    6. absorbed 相关 entity_merge_queue pending → resolved
+    7. 写 entity_merge_log + operation_log
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "error": "数据库未连接"}
+
+        # 校验 keeper
+        keeper = session.query(EntityDict).filter(
+            EntityDict.id == keeper_dict_id,
+            EntityDict.is_deleted == False,
+        ).first()
+        if keeper is None:
+            return {"success": False, "error": f"keeper dict_id={keeper_dict_id} 不存在"}
+
+        # 校验 absorbed
+        absorbed_entities = session.query(EntityDict).filter(
+            EntityDict.id.in_(absorbed_dict_ids),
+            EntityDict.is_deleted == False,
+        ).all()
+        if len(absorbed_entities) != len(absorbed_dict_ids):
+            return {"success": False, "error": "部分 absorbed dict_id 不存在或已删除"}
+
+        # ── 1. 快照 before_snapshot ─────────────────────────────
+        keeper_cd = dict(keeper.canonical_data or {})
+        before = {
+            "keeper": {
+                "dict_id": keeper.id,
+                "entity_type": keeper.entity_type,
+                "entity_name": keeper_cd.get("name", ""),
+                "canonical_data": keeper_cd,
+                "canonical_source": keeper.canonical_source or "",
+                "is_verified": keeper.is_verified,
+            },
+            "absorbed": [],
+        }
+
+        for abs_ent in absorbed_entities:
+            abs_cd = dict(abs_ent.canonical_data or {})
+            abs_aliases = [
+                {"id": a.id, "name": a.name, "is_canonical": a.is_canonical}
+                for a in session.query(EntityAlias).filter(
+                    EntityAlias.dict_id == abs_ent.id,
+                    EntityAlias.is_deleted == False,
+                ).all()
+            ]
+            abs_extractions = session.query(ExtractedEntity).filter(
+                ExtractedEntity.dict_id == abs_ent.id,
+                ExtractedEntity.is_deleted == False,
+            ).all()
+
+            before["absorbed"].append({
+                "dict_id": abs_ent.id,
+                "entity_type": abs_ent.entity_type,
+                "entity_name": abs_cd.get("name", ""),
+                "canonical_data": abs_cd,
+                "canonical_source": abs_ent.canonical_source or "",
+                "is_verified": abs_ent.is_verified,
+                "aliases": [{"id": a["id"], "name": a["name"]} for a in abs_aliases],
+                "extracted_entity_ids": [e.id for e in abs_extractions],
+            })
+
+        # ── 2. 计算合并后的 canonical_data ─────────────────────
+        entity_type = keeper.entity_type
+        valid_fields = _VALID_FIELDS_BY_TYPE.get(entity_type)
+        skip_fields = {"name", "name_en", "aliases", "source_text"}
+
+        keeper_cd = dict(keeper.canonical_data or {})
+        merged_cd = dict(keeper_cd)
+
+        for abs_ent in absorbed_entities:
+            abs_cd = dict(abs_ent.canonical_data or {})
+            for key, val in abs_cd.items():
+                if key.startswith("_") or key in skip_fields:
+                    continue
+                if valid_fields is not None and key not in valid_fields:
+                    continue
+
+                keeper_val = merged_cd.get(key)
+                if keeper_val is None:
+                    # keeper 无 → 补入 absorbed
+                    merged_cd[key] = val
+                elif keeper_val != val:
+                    # 都有但不同 → 看 field_decisions
+                    decision = field_decisions.get(key)
+                    if decision and decision.get("picked_dict_id"):
+                        picked_id = decision["picked_dict_id"]
+                        if picked_id == abs_ent.id:
+                            merged_cd[key] = val
+                        # 否则保留 keeper 的值（不覆盖）
+
+        keeper.canonical_data = merged_cd
+        keeper.canonical_updated_at = datetime.now(timezone.utc)
+
+        # ── 3a. 迁移 extracted_entities ─────────────────────────
+        migrated_extractions = 0
+        for abs_ent in absorbed_entities:
+            exts = session.query(ExtractedEntity).filter(
+                ExtractedEntity.dict_id == abs_ent.id,
+                ExtractedEntity.is_deleted == False,
+            ).all()
+            for ext in exts:
+                ext.dict_id = keeper_dict_id
+                migrated_extractions += 1
+
+        # ── 3b. 迁移 aliases（同名去重） ─────────────────────────
+        existing_alias_names = {
+            a.name.lower()
+            for a in session.query(EntityAlias).filter(
+                EntityAlias.dict_id == keeper_dict_id,
+                EntityAlias.is_deleted == False,
+            ).all()
+        }
+        migrated_aliases = 0
+        for abs_ent in absorbed_entities:
+            abs_aliases = session.query(EntityAlias).filter(
+                EntityAlias.dict_id == abs_ent.id,
+                EntityAlias.is_deleted == False,
+            ).all()
+            for alias in abs_aliases:
+                if alias.name.lower() in existing_alias_names:
+                    alias.is_deleted = True  # 同名 → 软删除
+                else:
+                    alias.dict_id = keeper_dict_id
+                    existing_alias_names.add(alias.name.lower())
+                    migrated_aliases += 1
+
+        # 软删除 absorbed entity_dict
+        for abs_ent in absorbed_entities:
+            abs_ent.is_deleted = True
+
+        # ── 5. 解决 absorbed 相关的 pending merge_queue ─────────
+        resolved_queue = 0
+        for abs_ent in absorbed_entities:
+            pending_items = session.query(EntityMergeQueue).filter(
+                EntityMergeQueue.target_dict_id == abs_ent.id,
+                EntityMergeQueue.resolution == "pending",
+            ).all()
+            for item in pending_items:
+                item.resolution = "resolved_merged"
+                item.reviewed_by = reviewer
+                item.reviewed_at = datetime.now(timezone.utc)
+                resolved_queue += 1
+
+        # ── 6a. 写 entity_merge_log ─────────────────────────────
+        after = {
+            "keeper_dict_id": keeper_dict_id,
+            "canonical_data": filtered_cd,
+            "absorbed_dict_ids": absorbed_dict_ids,
+        }
+        merge_log = EntityMergeLog(
+            keeper_dict_id=keeper_dict_id,
+            absorbed_dict_ids=absorbed_dict_ids,
+            before_snapshot=before,
+            after_snapshot=after,
+            field_decisions=field_decisions,
+            merge_type="identity",
+            reviewer=reviewer,
+            note=note,
+        )
+        session.add(merge_log)
+        session.flush()
+        merge_log_id = merge_log.id
+
+        # ── 6b. 写 operation_log ────────────────────────────────
+        _write_operation_log(
+            session, "update", "entity_dict", keeper_dict_id,
+            business_action="identity_merge",
+            description=f"实体身份合并: keeper={keeper_dict_id} absorbed={absorbed_dict_ids}",
+            details={
+                "keeper_dict_id": keeper_dict_id,
+                "absorbed_dict_ids": absorbed_dict_ids,
+                "field_decisions": field_decisions,
+                "migrated_extractions": migrated_extractions,
+                "migrated_aliases": migrated_aliases,
+                "merge_log_id": merge_log_id,
+            },
+            operator=reviewer,
+            trigger_source="merge_entities",
+        )
+
+        session.commit()
+
+        logger.info(
+            f"[DB] merge_entities: keeper={keeper_dict_id} "
+            f"absorbed={absorbed_dict_ids} "
+            f"extractions={migrated_extractions} aliases={migrated_aliases} "
+            f"merge_log={merge_log_id}"
+        )
+
+        return {
+            "success": True,
+            "merge_log_id": merge_log_id,
+            "keeper_dict_id": keeper_dict_id,
+            "merged_count": len(absorbed_dict_ids),
+            "migrated_extractions": migrated_extractions,
+            "migrated_aliases": migrated_aliases,
+            "migrated_relations": 0,
+        }
+
+
+def rollback_merge(merge_log_id: int, reason: str = "") -> dict:
+    """回滚实体合并：从 entity_merge_log.before_snapshot 恢复状态。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return {"success": False, "error": "数据库未连接"}
+
+        merge_log = session.query(EntityMergeLog).filter(
+            EntityMergeLog.id == merge_log_id
+        ).first()
+        if merge_log is None:
+            return {"success": False, "error": f"merge_log_id={merge_log_id} 不存在"}
+        if merge_log.is_rolled_back:
+            return {"success": False, "error": "该合并记录已被回滚"}
+
+        before = merge_log.before_snapshot or {}
+        keeper_snap = before.get("keeper", {})
+        absorbed_snaps = before.get("absorbed", [])
+
+        # ── 1. 恢复 keeper canonical_data ───────────────────────
+        keeper = session.query(EntityDict).filter(
+            EntityDict.id == keeper_snap.get("dict_id"),
+            EntityDict.is_deleted == False,
+        ).first()
+        if keeper:
+            keeper.canonical_data = keeper_snap.get("canonical_data", {})
+            keeper.canonical_source = keeper_snap.get("canonical_source", "")
+            keeper.is_verified = keeper_snap.get("is_verified", False)
+
+        restored_dict_ids: list[int] = []
+        restored_extractions = 0
+        restored_aliases = 0
+
+        # ── 2. 恢复每个 absorbed entity_dict ───────────────────
+        for abs_snap in absorbed_snaps:
+            abs_dict_id = abs_snap.get("dict_id")
+            abs_ent = session.query(EntityDict).filter(
+                EntityDict.id == abs_dict_id,
+            ).first()
+            if abs_ent is None:
+                continue
+            abs_ent.is_deleted = False
+            abs_ent.canonical_data = abs_snap.get("canonical_data", {})
+            abs_ent.canonical_source = abs_snap.get("canonical_source", "")
+            abs_ent.is_verified = abs_snap.get("is_verified", False)
+            restored_dict_ids.append(abs_dict_id)
+
+            # 恢复 extracted_entities.dict_id
+            for ext_id in abs_snap.get("extracted_entity_ids", []):
+                ext = session.query(ExtractedEntity).filter(
+                    ExtractedEntity.id == ext_id,
+                ).first()
+                if ext and ext.dict_id != abs_dict_id:
+                    ext.dict_id = abs_dict_id
+                    restored_extractions += 1
+
+            # 恢复 aliases（包括被同名去重软删除的）
+            for alias_info in abs_snap.get("aliases", []):
+                alias = session.query(EntityAlias).filter(
+                    EntityAlias.id == alias_info.get("id"),
+                ).first()
+                if alias:
+                    if alias.is_deleted:
+                        alias.is_deleted = False
+                        restored_aliases += 1
+                    if alias.dict_id != abs_dict_id:
+                        alias.dict_id = abs_dict_id
+                        restored_aliases += 1
+
+        # ── 3. 标记回滚 ─────────────────────────────────────────
+        merge_log.is_rolled_back = True
+        merge_log.rolled_back_at = datetime.now(timezone.utc)
+        merge_log.rollback_reason = reason
+
+        _write_operation_log(
+            session, "update", "entity_merge_log", merge_log_id,
+            business_action="rollback_merge",
+            description=f"回滚实体合并: merge_log_id={merge_log_id} reason={reason}",
+            details={
+                "merge_log_id": merge_log_id,
+                "reason": reason,
+                "restored_dict_ids": restored_dict_ids,
+            },
+            trigger_source="rollback_merge",
+        )
+
+        session.commit()
+
+        logger.info(
+            f"[DB] rollback_merge: merge_log_id={merge_log_id} "
+            f"restored={restored_dict_ids} "
+            f"extractions={restored_extractions} aliases={restored_aliases}"
+        )
+
+        return {
+            "success": True,
+            "merge_log_id": merge_log_id,
+            "restored_dict_ids": restored_dict_ids,
+            "restored_extractions": restored_extractions,
+            "restored_aliases": restored_aliases,
+            "restored_relations": 0,
+        }
+
+
+def get_merge_logs(limit: int = 50, include_rolled_back: bool = True) -> list[dict]:
+    """查询合并日志列表。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return []
+
+        q = session.query(EntityMergeLog).order_by(EntityMergeLog.created_at.desc())
+        if not include_rolled_back:
+            q = q.filter(EntityMergeLog.is_rolled_back == False)
+        rows = q.limit(limit).all()
+
+        return [
+            {
+                "id": r.id,
+                "keeper_dict_id": r.keeper_dict_id,
+                "absorbed_dict_ids": r.absorbed_dict_ids or [],
+                "merge_type": r.merge_type,
+                "reviewer": r.reviewer,
+                "note": r.note,
+                "is_rolled_back": r.is_rolled_back,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -979,7 +1793,7 @@ def add_aliases_no_embedding(
 ) -> int:
     """
     写实体别名到 entity_aliases，同时生成 name_embedding。
-    消歧 Step 4 已在此 session/锁内调 HTTP embedding API，此处同理。
+    优先使用锁外预生成的 _embeddings 缓存，未命中才实时调 API。
     已存在则跳过（幂等）。返回新增条数。
     """
     from core_engine.cloud_api_client import generate_embedding
@@ -997,6 +1811,8 @@ def add_aliases_no_embedding(
         alias_str = str(alias).strip()
         if alias_str:
             names_to_add.add(alias_str)
+
+    embeddings_cache: dict[str, list[float]] = entity_data.pop("_embeddings", {}) or {}
 
     added = 0
     for name in names_to_add:
@@ -1018,9 +1834,8 @@ def add_aliases_no_embedding(
         session.add(alias)
         session.flush()
 
-        # 生成 embedding（与消歧 Step 4 同一 session/锁内，无额外约束）
         try:
-            embedding = generate_embedding(name)
+            embedding = embeddings_cache.get(name) or generate_embedding(name)
             if embedding:
                 vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
                 session.execute(
@@ -1094,7 +1909,7 @@ def insert_extraction_result(
         session:   可选，传入则复用（不 commit），不传则自开（向后兼容）
 
     返回：
-        final_id_map 按输入顺序对应的 DB id 列表（merge 实体返回已有 id），失败返回 []
+        final_ids: 按输入顺序对应的 DB id 列表（merge 实体返回已有 id），失败返回 []
     """
     if session is not None:
         return _do_insert_extraction_result(
@@ -1132,12 +1947,22 @@ def _do_insert_extraction_result(
     for i, rec in enumerate(entities):
         dict_id = rec.get("dict_id")
         entity_type = rec.get("entity_type", "")
+        entity_name = rec.get("entity_name", "")
 
         if dict_id:
             existing = _find_existing_entity_by_dict_id(session, dict_id, entity_type)
             if existing is not None:
                 merged_id_map[i] = existing.id
+                logger.info(
+                    f"[DB] Phase1 MERGE: '{entity_name}' type={entity_type} "
+                    f"dict_id={dict_id} → existing extracted_entities.id={existing.id}"
+                )
                 continue
+            else:
+                logger.warning(
+                    f"[DB] Phase1 INSERT (dict_id有值但无已存在行): "
+                    f"'{entity_name}' type={entity_type} dict_id={dict_id}"
+                )
 
         insert_indices.append(i)
 
@@ -1167,6 +1992,10 @@ def _do_insert_extraction_result(
             cache_key = (entity_type, entity_name)
             if cache_key in batch_dict_cache:
                 dict_id = batch_dict_cache[cache_key]
+                logger.info(
+                    f"[DB] Phase2 batch_cache HIT: '{entity_name}' type={entity_type} "
+                    f"dict_id={dict_id} (批次内复用)"
+                )
             else:
                 new_dict_id = _create_entity_dict_from_extraction(
                     session, entity_name, entity_type, entity_data,
@@ -1226,6 +2055,7 @@ def _do_insert_extraction_result(
             continue
 
         rec = entities[i]
+        dict_id = rec.get("dict_id")
         new_entity_data = rec.get("entity_data", {}) or {}
 
         # 合并 entity_data → process_entity_merge 写入 entity_dict.canonical_data
@@ -1446,6 +2276,10 @@ def _create_entity_dict_from_extraction(
     # 跨进程漏斗锁：同 entity_type + entity_name 的创建操作在 DB 层面串行化。
     # 事务提交时 pg_advisory_xact_lock 自动释放，不需要手动 unlock。
     lock_key = hash((entity_type, entity_name.strip().lower())) & 0x7FFFFFFF
+    logger.debug(
+        f"[DB] 获取 advisory lock: name='{entity_name}' type={entity_type} "
+        f"key={lock_key}"
+    )
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
 
     existing = (
@@ -1488,7 +2322,7 @@ def _create_entity_dict_from_extraction(
         details={"entity_name": entity_name, "entity_type": entity_type, "canonical_data": canonical_data, "is_verified": is_verified},
         trigger_source="_create_entity_dict_from_extraction",
     )
-    # 立即写入 alias，让后续消歧 Step 2 可精确命中，避免同名实体反复创建
+    # 写入 alias（embedding 已在锁外预生成，从 entity_data._embeddings 缓存读取）
     _write_aliases_with_embedding(session, entity.id, entity_type, entity_name, entity_data)
     logger.info(f"[DB] entity_dict 创建成功: dict_id={entity.id}")
     return entity.id
@@ -1518,6 +2352,9 @@ def _write_aliases_with_embedding(
         if alias_str:
             names_to_add.add(alias_str)
 
+    # 锁外预生成的 embedding 缓存，优先使用，未命中则实时调 API
+    embeddings_cache: dict[str, list[float]] = entity_data.pop("_embeddings", {}) or {}
+
     logger.info(f"[DB] alias write-back: dict_id={dict_id} names={list(names_to_add)}")
 
     added = 0
@@ -1533,7 +2370,7 @@ def _write_aliases_with_embedding(
             logger.debug(f"[DB] alias 已存在: '{name}' dict_id={dict_id}，跳过")
             continue
 
-        embedding = generate_embedding(name)
+        embedding = embeddings_cache.get(name) or generate_embedding(name)
 
         alias = EntityAlias(
             dict_id=dict_id,

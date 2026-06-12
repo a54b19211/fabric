@@ -62,12 +62,15 @@ def route_webpage(page_data: dict) -> dict:
         logger.info(f"[特解] {site_key}: {url}")
         extracted = extractor(page)
         body_text = extracted.get("body_text", "")
-        if body_text:
+        attachment_links = extracted.get("attachment_links", [])
+        has_body = bool(body_text and body_text.strip())
+        has_attachment = bool(attachment_links)
+        if has_body or has_attachment:
             result["title"] = clean_title(extracted.get("title", ""))
             result["publish_date"] = extracted.get("publish_date", "")
-            result["markdown"] = f"# {result['title']}\n\n{remove_extra_whitespace(body_text)}"
+            result["markdown"] = f"# {result['title']}\n\n{remove_extra_whitespace(body_text)}" if has_body else ""
             result["parse_method"] = "css_extract"
-            result["attachment_links"] = extracted.get("attachment_links", [])
+            result["attachment_links"] = attachment_links
             result["structured_data"] = {
                 "title": result["title"],
                 "publish_date": result["publish_date"],

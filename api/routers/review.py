@@ -12,16 +12,24 @@ from api.schemas.request import (
     ResolveMergeRequest,
     PatchEntityRequest,
     PatchRelationRequest,
+    BatchResolveMergeRequest,
+    MergeEntitiesRequest,
+    RollbackMergeRequest,
 )
 from api.schemas.response import (
     EntityListResponse, EntityItem,
     RelationListResponse, RelationItem,
     ReviewActionResponse,
     DisambigInfo, DisambigCandidate,
-    MergeQueueItem, MergeQueueListResponse,
+    MergeQueueGroup, MergeQueueListResponse,
     DictCandidateItem, DictCandidateListResponse,
     GraphResponse, GraphNode, GraphEdge,
     ReviewStatsResponse, StatusCounts,
+    SearchEntityItem,
+    CompareEntitiesResponse,
+    MergeEntitiesResponse,
+    RollbackMergeResponse,
+    MergeLogItem, MergeLogListResponse,
 )
 from db.repository import (
     approve_entity_with_alias_writeback,
@@ -30,8 +38,11 @@ from db.repository import (
     batch_approve_entities, batch_reject_entities,
     batch_approve_relations, batch_reject_relations,
     log_review_action,
-    get_pending_merges, resolve_merge,
+    get_pending_merges, resolve_merge, batch_resolve_merges,
     find_candidate_dicts_for_review,
+    search_entity_dicts, compare_entities,
+    merge_entities, rollback_merge,
+    get_merge_logs,
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation, EntityDict
@@ -462,11 +473,10 @@ def reject_relation_api(relation_id: int, body: ReviewActionRequest):
 
 @router.get("/merge-queue", response_model=MergeQueueListResponse)
 def list_merge_queue(limit: int = Query(50, ge=1, le=200)):
-    """查询待处理的合并冲突列表。"""
+    """查询待处理的合并冲突列表（按 dict_id 分组，含实体上下文）。"""
     try:
-        rows = get_pending_merges(limit)
-        items = [MergeQueueItem(**r) for r in rows]
-        return MergeQueueListResponse(total=len(items), items=items)
+        result = get_pending_merges(limit)
+        return MergeQueueListResponse(**result)
     except Exception as e:
         logger.error(f"[API] 合并队列查询失败: {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
@@ -474,7 +484,7 @@ def list_merge_queue(limit: int = Query(50, ge=1, le=200)):
 
 @router.post("/merge-queue/{merge_id}/resolve", response_model=ReviewActionResponse)
 def resolve_merge_api(merge_id: int, body: ResolveMergeRequest):
-    """解决合并冲突。resolution: accept_new | keep_existing | custom"""
+    """解决单个合并冲突。resolution: accept_new | keep_existing | custom"""
     try:
         resolve_merge(merge_id, body.resolution, body.reviewer, body.resolved_value)
         logger.info(f"[API] 合并冲突解决: merge_id={merge_id} resolution={body.resolution}")
@@ -482,6 +492,22 @@ def resolve_merge_api(merge_id: int, body: ResolveMergeRequest):
     except Exception as e:
         logger.error(f"[API] 合并冲突解决失败: merge_id={merge_id} | {e}")
         raise HTTPException(status_code=500, detail=f"解决失败: {str(e)}")
+
+
+@router.post("/merge-queue/resolve-batch", response_model=ReviewActionResponse)
+def batch_resolve_merge_api(body: BatchResolveMergeRequest):
+    """批量解决合并冲突：一次请求解决同 dict_id 下所有冲突字段。"""
+    try:
+        result = batch_resolve_merges(body.decisions, body.reviewer)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "批量解决失败"))
+        logger.info(f"[API] 批量合并冲突解决: {result['resolved_count']} 条")
+        return ReviewActionResponse(success=True, message=f"已解决 {result['resolved_count']} 条冲突")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 批量合并冲突解决失败: {e}")
+        raise HTTPException(status_code=500, detail=f"批量解决失败: {str(e)}")
 
 
 # ── 图谱 ─────────────────────────────────────────────────────────────────
@@ -506,10 +532,18 @@ def get_review_graph(
         if session is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
 
-        # 节点查询：extracted_entities JOIN entity_dict 拿 is_verified
+        # 节点查询：只选所需列，避免拉取 source_text 等 TEXT 列（TOAST 开销大）
         q = (
             session.query(
-                ExtractedEntity,
+                ExtractedEntity.id,
+                ExtractedEntity.entity_type,
+                ExtractedEntity.entity_name,
+                ExtractedEntity.entity_data,
+                ExtractedEntity.dict_id,
+                ExtractedEntity.review_status,
+                ExtractedEntity.source_doc_uuid,
+                ExtractedEntity.source_site,
+                ExtractedEntity.confidence_score,
                 EntityDict.is_verified,
             )
             .outerjoin(EntityDict, ExtractedEntity.dict_id == EntityDict.id)
@@ -529,15 +563,15 @@ def get_review_graph(
 
         nodes = [
             GraphNode(
-                id=r.ExtractedEntity.id,
-                entity_type=r.ExtractedEntity.entity_type or "",
-                entity_name=r.ExtractedEntity.entity_name or "",
-                entity_data=r.ExtractedEntity.entity_data or {},
-                dict_id=r.ExtractedEntity.dict_id,
-                review_status=r.ExtractedEntity.review_status or "",
-                source_doc_uuid=r.ExtractedEntity.source_doc_uuid or "",
-                source_site=r.ExtractedEntity.source_site or "",
-                confidence_score=r.ExtractedEntity.confidence_score or 0.0,
+                id=r.id,
+                entity_type=r.entity_type or "",
+                entity_name=r.entity_name or "",
+                entity_data=r.entity_data or {},
+                dict_id=r.dict_id,
+                review_status=r.review_status or "",
+                source_doc_uuid=r.source_doc_uuid or "",
+                source_site=r.source_site or "",
+                confidence_score=r.confidence_score or 0.0,
                 is_verified=r.is_verified if r.is_verified is not None else False,
             )
             for r in rows
@@ -548,7 +582,15 @@ def get_review_graph(
         if include_relations:
             node_ids = [n.id for n in nodes]
             if node_ids:
-                rq = session.query(EntityRelation).filter(
+                rq = session.query(
+                    EntityRelation.id,
+                    EntityRelation.relation_type,
+                    EntityRelation.from_entity_id,
+                    EntityRelation.to_entity_id,
+                    EntityRelation.review_status,
+                    EntityRelation.relation_props,
+                    EntityRelation.source_doc_uuid,
+                ).filter(
                     EntityRelation.review_status.in_(statuses),
                     EntityRelation.is_deleted == False,
                     EntityRelation.from_entity_id.in_(node_ids),
@@ -570,7 +612,22 @@ def get_review_graph(
                     for r in rel_rows
                 ]
 
-    return GraphResponse(nodes=nodes, edges=edges)
+    return GraphResponse(
+        nodes=nodes,
+        edges=edges,
+        entity_types=sorted(
+            t[0] for t in session.query(ExtractedEntity.entity_type.distinct())
+            .filter(ExtractedEntity.is_deleted == False, ExtractedEntity.entity_type.isnot(None))
+            .all()
+            if t[0]
+        ),
+        source_sites=sorted(
+            s[0] for s in session.query(ExtractedEntity.source_site.distinct())
+            .filter(ExtractedEntity.is_deleted == False, ExtractedEntity.source_site.isnot(None))
+            .all()
+            if s[0]
+        ),
+    )
 
 
 # ── 仪表盘统计 ───────────────────────────────────────────────────────────
@@ -732,3 +789,95 @@ def patch_relation(relation_id: int, body: PatchRelationRequest):
 
     logger.info(f"[API] 关系元数据更新: relation_id={relation_id}")
     return ReviewActionResponse(success=True, message="关系元数据已更新")
+
+
+# ── 实体合并工作台 ─────────────────────────────────────────────────────────
+
+
+@router.get("/search-entities")
+def search_entities(q: str = Query("", description="搜索关键词"), limit: int = Query(20, ge=1, le=100)):
+    """模糊搜索 entity_dict（按别名或名称），用于合并工作台的实体选择。"""
+    try:
+        if not q.strip():
+            return []
+        results = search_entity_dicts(q, limit)
+        return [SearchEntityItem(**r) for r in results]
+    except Exception as e:
+        logger.error(f"[API] 实体搜索失败: q={q} | {e}")
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+@router.get("/compare-entities", response_model=CompareEntitiesResponse)
+def compare_entities_api(dict_ids: str = Query("", description="逗号分隔的 dict_id 列表")):
+    """对比多个 entity_dict 的 canonical_data，返回并排字段差异。"""
+    try:
+        ids = [int(x.strip()) for x in dict_ids.split(",") if x.strip()]
+        if len(ids) < 2:
+            raise HTTPException(status_code=400, detail="至少需要 2 个 dict_id")
+        if len(ids) > 10:
+            raise HTTPException(status_code=400, detail="最多支持 10 个实体对比")
+        result = compare_entities(ids)
+        return CompareEntitiesResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 实体对比失败: dict_ids={dict_ids} | {e}")
+        raise HTTPException(status_code=500, detail=f"对比失败: {str(e)}")
+
+
+@router.post("/merge-entities", response_model=MergeEntitiesResponse)
+def merge_entities_api(body: MergeEntitiesRequest):
+    """执行实体身份合并。后端根据 field_decisions 自动计算合并结果。"""
+    try:
+        if body.keeper_dict_id in body.absorbed_dict_ids:
+            raise HTTPException(status_code=400, detail="keeper 不能出现在 absorbed 列表中")
+        result = merge_entities(
+            keeper_dict_id=body.keeper_dict_id,
+            absorbed_dict_ids=body.absorbed_dict_ids,
+            field_decisions=body.field_decisions,
+            reviewer=body.reviewer,
+            note=body.note,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "合并失败"))
+        logger.info(
+            f"[API] 实体合并完成: keeper={body.keeper_dict_id} "
+            f"absorbed={body.absorbed_dict_ids} merge_log={result.get('merge_log_id')}"
+        )
+        return MergeEntitiesResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 实体合并失败: {e}")
+        raise HTTPException(status_code=500, detail=f"合并失败: {str(e)}")
+
+
+@router.post("/rollback-merge", response_model=RollbackMergeResponse)
+def rollback_merge_api(body: RollbackMergeRequest):
+    """回滚实体合并：从 entity_merge_log 快照恢复合并前状态。"""
+    try:
+        result = rollback_merge(body.merge_log_id, body.reason)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "回滚失败"))
+        logger.info(
+            f"[API] 合并回滚完成: merge_log={body.merge_log_id} "
+            f"restored={result.get('restored_dict_ids')}"
+        )
+        return RollbackMergeResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 合并回滚失败: merge_log={body.merge_log_id} | {e}")
+        raise HTTPException(status_code=500, detail=f"回滚失败: {str(e)}")
+
+
+@router.get("/merge-logs", response_model=MergeLogListResponse)
+def list_merge_logs(limit: int = Query(50, ge=1, le=200)):
+    """查询实体合并日志列表。"""
+    try:
+        rows = get_merge_logs(limit)
+        items = [MergeLogItem(**r) for r in rows]
+        return MergeLogListResponse(total=len(items), items=items)
+    except Exception as e:
+        logger.error(f"[API] 合并日志查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")

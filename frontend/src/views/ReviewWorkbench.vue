@@ -170,29 +170,53 @@
 
           <!-- 合并队列 -->
           <div v-if="activeTab === 'merges'" class="card-list">
-            <div
-              v-for="m in mergeQueue"
-              :key="m.id"
-              class="review-card"
-            >
+            <div v-for="group in mergeQueue" :key="group.dict_id" class="review-card">
               <div class="card-header">
-                <el-tag size="small" type="danger">冲突字段</el-tag>
-                <span class="entity-name">{{ m.field_name }}</span>
-                <el-tag size="small" type="info">{{ m.source_site }}</el-tag>
+                <el-tag size="small" type="primary">{{ group.entity_type }}</el-tag>
+                <span class="entity-name">{{ group.entity_name }}</span>
+                <span style="font-size:12px;color:#909399">dict_id={{ group.dict_id }}</span>
               </div>
-              <div class="merge-row">
-                <div class="merge-col">
-                  <div class="merge-label">现有值（entity_dict #{{ m.target_dict_id }}）</div>
-                  <pre class="merge-value">{{ JSON.stringify(m.existing_value, null, 2) }}</pre>
+              <div v-for="c in group.conflicts" :key="c.merge_id" style="margin-top:8px;padding:8px;background:#fafafa;border-radius:4px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                  <el-tag size="small" type="danger">{{ c.field_name }}</el-tag>
+                  <el-tag size="small" type="info">{{ c.source_site }}</el-tag>
                 </div>
-                <div class="merge-col">
-                  <div class="merge-label">新值（entity #{{ m.source_entity_id }}）</div>
-                  <pre class="merge-value">{{ JSON.stringify(m.new_value, null, 2) }}</pre>
+                <div class="merge-row">
+                  <div class="merge-col">
+                    <div class="merge-label">
+                      现有值
+                      <router-link
+                        v-for="s in c.existing_sources"
+                        :key="s.source_doc_uuid"
+                        :to="`/review/${s.source_doc_uuid}`"
+                        :title="s.source_doc_uuid + ' (' + s.source_site + ')'"
+                        style="font-size:11px;color:#409eff;margin-left:4px"
+                      >
+                        {{ s.source_doc_uuid.slice(0, 8) }}...
+                      </router-link>
+                    </div>
+                    <pre class="merge-value">{{ JSON.stringify(c.existing_value, null, 2) }}</pre>
+                  </div>
+                  <div class="merge-col">
+                    <div class="merge-label">
+                      新值
+                      <router-link
+                        v-for="s in c.new_sources"
+                        :key="s.source_doc_uuid"
+                        :to="`/review/${s.source_doc_uuid}`"
+                        :title="s.source_doc_uuid + ' (' + s.source_site + ')'"
+                        style="font-size:11px;color:#409eff;margin-left:4px"
+                      >
+                        {{ s.source_doc_uuid.slice(0, 8) }}...
+                      </router-link>
+                    </div>
+                    <pre class="merge-value">{{ JSON.stringify(c.new_value, null, 2) }}</pre>
+                  </div>
                 </div>
-              </div>
-              <div class="card-actions">
-                <el-button size="small" type="success" @click="doResolveMerge(m.id, 'accept_new')">采用新值</el-button>
-                <el-button size="small" type="warning" @click="doResolveMerge(m.id, 'keep_existing')">保留现有</el-button>
+                <div class="card-actions">
+                  <el-button size="small" type="success" @click="doResolveMerge(c.merge_id, 'accept_new', group.dict_id)">采用新值</el-button>
+                  <el-button size="small" type="warning" @click="doResolveMerge(c.merge_id, 'keep_existing', group.dict_id)">保留现有</el-button>
+                </div>
               </div>
             </div>
             <el-empty v-if="!mergeQueue.length" description="暂无待处理的合并冲突" />
@@ -216,7 +240,7 @@ import {
   batchApproveEntities, batchRejectEntities,
   batchApproveRelations, batchRejectRelations,
   getMergeQueue, resolveMerge,
-  type EntityItem, type RelationItem, type MergeQueueItem,
+  type EntityItem, type RelationItem, type MergeQueueGroup,
 } from '@/api/review'
 
 const route = useRoute()
@@ -245,7 +269,7 @@ const relationPagination = ref({
   total: 0
 })
 
-const mergeQueue = ref<MergeQueueItem[]>([])
+const mergeQueue = ref<MergeQueueGroup[]>([])
 
 const renderedContent = computed(() => {
   if (!rawContent.value) return '<p style="color:#999">暂无内容</p>'
@@ -521,17 +545,24 @@ async function rejectAllRelations() {
 async function loadMergeQueue() {
   try {
     const res = await getMergeQueue(50)
-    mergeQueue.value = res.items
+    mergeQueue.value = res.groups
   } catch (e: any) {
     ElMessage.error('加载合并队列失败')
   }
 }
 
-async function doResolveMerge(mergeId: number, resolution: string) {
+async function doResolveMerge(mergeId: number, resolution: string, dictId: number) {
   try {
     await resolveMerge(mergeId, reviewer.value, resolution)
     ElMessage.success('冲突已解决')
-    loadMergeQueue()
+    // Remove resolved conflict from local state
+    for (const g of mergeQueue.value) {
+      if (g.dict_id === dictId) {
+        g.conflicts = g.conflicts.filter(c => c.merge_id !== mergeId)
+        break
+      }
+    }
+    mergeQueue.value = mergeQueue.value.filter(g => g.conflicts.length > 0)
   } catch (e: any) {
     ElMessage.error('解决冲突失败')
   }

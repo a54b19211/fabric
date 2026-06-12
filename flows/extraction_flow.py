@@ -14,8 +14,9 @@ LLM 实体抽取流程
   - 直接运行：python -m flows.extraction_flow [limit]
   - 被 API 触发：from flows.extraction_flow import run_extraction_for_uuids
 """
-import threading
+import time
 from loguru import logger
+from sqlalchemy import text
 
 from biz_rules.extraction_prompts import get_extraction_prompt, VALID_RELATION_TYPES
 from biz_rules.entity_schemas import validate_entity_data, VALID_ENTITY_TYPES
@@ -24,6 +25,7 @@ from flows.chunking import split_document, build_memory_context
 from db.repository import (
     update_extraction_status,
     insert_extraction_result,
+    lookup_alias,
 )
 from db.session import get_session
 from db.models import Document
@@ -226,10 +228,10 @@ def _disambiguate(entities: list[dict], session=None) -> list[dict]:
 # 主流程
 # ═══════════════════════════════════════════════════════════════════════
 
-# 消歧 + entity_dict 创建 + 入库串行锁。
-# 多个 Worker 并行处理不同文档时，消歧可能同时判定同一实体为 new_entity，
-# 各自创建 entity_dict 导致重复。加锁确保同一时刻只有一个 Worker 执行此临界区。
-_disambig_insert_lock = threading.Lock()
+# 全局写库串行锁 key（pg_advisory_xact_lock）。
+# 跨进程有效，确保同一时刻只有一个 Worker 执行"复核 + 写库"临界区。
+# 事务提交时自动释放，无需手动 unlock。
+_EXTRACTION_WRITE_LOCK_KEY = 0x7A4B3C2D
 
 
 def extract_single_document(
@@ -302,33 +304,128 @@ def extract_single_document(
         update_extraction_status(doc_uuid, "done", model=APP.EXTRACTION_MODEL_NAME)
         return True  # 不算失败，文档可能确实没有可抽取的实体
 
-    # 4-5. 消歧 + 入库（同一 DB session，避免连接池耗尽）
+    # 4. 消歧（DB 事务内但锁外执行，可并行，可包含慢 API 调用）
     for ent in entities:
         ent["source_site"] = source_site
 
     try:
-        with _disambig_insert_lock:
-            with get_session() as session:
-                if session is None:
-                    logger.error(f"[Extraction] DB 未连接，无法入库: {doc_uuid}")
-                    return False
+        with get_session() as session:
+            if session is None:
+                logger.error(f"[Extraction] DB 未连接，无法入库: {doc_uuid}")
+                return False
 
-                entities = _disambiguate(entities, session=session)
+            # 4a. 消歧 — 锁外，多进程可并行
+            disambig_start = time.time()
+            entities = _disambiguate(entities, session=session)
+            disambig_sec = time.time() - disambig_start
+            logger.info(
+                f"[Extraction] 消歧完成: doc={doc_uuid} "
+                f"elapsed={disambig_sec:.2f}s entities={len(entities)}"
+            )
 
-                # 将消歧元数据合并到 entity_data，并清理临时字段
-                for ent in entities:
-                    disambig = ent.pop("_disambig", None)
-                    if disambig:
-                        ent.setdefault("entity_data", {})["_disambig"] = disambig
-                    ent.pop("source_site", None)
-
-                insert_extraction_result(
-                    source_doc_uuid=doc_uuid,
-                    source_site=source_site,
-                    entities=entities,
-                    relations=relations,
-                    session=session,
+            # 4a2. 锁外预生成 embedding — 对消歧判 new 的实体，提前调云 API
+            #       embedding 缓存写入 entity_data["_embeddings"]，
+            #       锁内 _write_aliases_with_embedding 直接复用，不占锁
+            from core_engine.cloud_api_client import generate_embedding
+            embed_start = time.time()
+            embed_count = 0
+            for ent in entities:
+                ed = ent.get("entity_data", {}) or {}
+                entity_name = (ent.get("entity_name") or "").strip()
+                names: set[str] = {entity_name} if entity_name else set()
+                data_name = (ed.get("name") or "").strip()
+                if data_name:
+                    names.add(data_name)
+                data_name_en = (ed.get("name_en") or "").strip()
+                if data_name_en:
+                    names.add(data_name_en)
+                for a in (ed.get("aliases") or []):
+                    s = (str(a) or "").strip()
+                    if s:
+                        names.add(s)
+                names.discard("")
+                if not names:
+                    continue
+                cache: dict[str, list[float]] = {}
+                for name in names:
+                    emb = generate_embedding(name)
+                    if emb:
+                        cache[name] = emb
+                        embed_count += 1
+                if cache:
+                    ed["_embeddings"] = cache
+                    ent["entity_data"] = ed
+            embed_sec = time.time() - embed_start
+            if embed_count:
+                logger.info(
+                    f"[Extraction] 预生成 embedding: doc={doc_uuid} "
+                    f"count={embed_count} elapsed={embed_sec:.2f}s"
                 )
+
+            # 4b. 获取全局写库串行锁（pg_advisory_xact_lock，跨进程有效，
+            #     事务提交时自动释放）
+            lock_wait_start = time.time()
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _EXTRACTION_WRITE_LOCK_KEY},
+            )
+            lock_wait_sec = time.time() - lock_wait_start
+            if lock_wait_sec > 0.1:
+                logger.warning(
+                    f"[Extraction] advisory lock 等待: doc={doc_uuid} "
+                    f"wait={lock_wait_sec:.2f}s"
+                )
+            lock_hold_start = time.time()
+            logger.info(f"[Extraction] 进入写库临界区: doc={doc_uuid}")
+
+            # 4c. 快速复核：对消歧判为 new 的实体，重跑 Step 2 alias lookup。
+            #     解决多进程竞态：消歧时其他进程的 alias 尚未 commit，
+            #     此时已可见，命中则修正 dict_id。
+            recheck_hits = 0
+            for ent in entities:
+                if ent.get("dict_id") is None:
+                    name = ent.get("entity_name", "")
+                    etype = ent.get("entity_type", "")
+                    if name and etype:
+                        dict_id = lookup_alias(name, etype, session=session)
+                        if dict_id:
+                            ent["dict_id"] = dict_id
+                            recheck_hits += 1
+                            logger.info(
+                                f"[Extraction] 锁内复核命中: '{name}' "
+                                f"type={etype} → dict_id={dict_id}"
+                            )
+            if recheck_hits:
+                logger.info(
+                    f"[Extraction] 锁内复核: doc={doc_uuid} "
+                    f"命中 {recheck_hits} 个实体"
+                )
+
+            # 4d. 清理消歧临时字段
+            for ent in entities:
+                disambig = ent.pop("_disambig", None)
+                if disambig:
+                    ent.setdefault("entity_data", {})["_disambig"] = disambig
+                ent.pop("source_site", None)
+                # 清理预生成 embedding 缓存（insert 路径已在 _write_aliases_with_embedding 中 pop）
+                ent.setdefault("entity_data", {}).pop("_embeddings", None)
+
+            # 4e. 入库（alias + embedding 已在锁外预生成，锁内直接写）
+            insert_extraction_result(
+                source_doc_uuid=doc_uuid,
+                source_site=source_site,
+                entities=entities,
+                relations=relations,
+                session=session,
+            )
+
+            lock_hold_sec = time.time() - lock_hold_start
+            logger.info(
+                f"[Extraction] 离开写库临界区: doc={doc_uuid} "
+                f"hold={lock_hold_sec:.2f}s"
+            )
+        # session commit → advisory lock 释放
+
     except Exception as e:
         logger.error(f"[Extraction] 写库失败: {doc_uuid} | {e}")
         update_extraction_status(doc_uuid, "failed", error=f"写库失败: {e}")

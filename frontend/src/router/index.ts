@@ -38,6 +38,18 @@ const router = createRouter({
       meta: { title: '图谱审核' },
     },
     {
+      path: '/review/merge-workbench',
+      name: 'MergeWorkbench',
+      component: () => import('@/views/MergeWorkbench.vue'),
+      meta: { title: '实体身份合并' },
+    },
+    {
+      path: '/review/field-conflict',
+      name: 'FieldConflict',
+      component: () => import('@/views/FieldConflict.vue'),
+      meta: { title: '属性冲突处理' },
+    },
+    {
       path: '/neo4j',
       name: 'Neo4j',
       component: () => import('@/views/Neo4jManager.vue'),

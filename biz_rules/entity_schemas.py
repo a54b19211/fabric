@@ -42,6 +42,7 @@ class DrugEntity(BaseModel):
     phase_eu: str = Field(default="", description="同上，欧洲")
     phase_jp: str = Field(default="", description="同上，日本")
     cas_number: str = Field(default="", description="CAS号（小分子用）")
+    registration_number: str = Field(default="", description="登记号（如Y20190009999）/ 备案号")
     patent_expiry_cn: str = Field(default="", description="中国化合物专利到期日")
     patent_expiry_us: str = Field(default="", description="美国化合物专利到期日")
 

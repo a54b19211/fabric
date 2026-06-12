@@ -66,10 +66,7 @@ def _sanitize_metadata(value: str) -> str:
         v = v.replace(d, "")
     return v.strip()
 
-_PHARMA_INDUSTRY_CORE_TYPES = [
-    "Drug", "Company", "ClinicalTrial", "DealEvent", "DealItem",
-    "DevelopmentProject", "ApprovalEvent",
-]
+_ALL_ENTITY_TYPES = list(ENTITY_SCHEMA_MAP.keys())  # 所有 16 种实体类型，各来源统一可见
 
 # ── 关系类型白名单 ──────────────────────────────────────────────────────
 VALID_RELATION_TYPES = {
@@ -96,54 +93,55 @@ VALID_RELATION_TYPES = {
     "RELATED_TO",
 }
 
-# ── 关系属性说明（供 prompt 引用）──────────────────────────────────────
+# ── 关系属性速查表（紧凑版）──────────────────────────────────────────────
 _RELATION_PROPS_GUIDE = """
-## 关系属性说明（relation_props 字段）
+## relation_type 属性速查（格式: from→to | 必填属性 | 可选属性）
 
-| relation_type          | from → to                        | 必填属性                          | 可选属性                        |
-|------------------------|----------------------------------|-----------------------------------|---------------------------------|
-| DEVELOPS               | Company → Drug                   | dev_role, rights_role, start_date | end_date                        |
-| DEVELOPS               | DevelopmentProject → Drug        | —                                 | —                               |
-| PARTICIPATES_IN        | Company → DealEvent              | role, start_date                  | —                               |
-| INVESTED_IN            | Company → Company                | date                              | round, amount_usd               |
-| SUBSIDIARY_OF          | Company → Company                | start_date                        | ratio, end_date                 |
-| SPONSORS               | Company → ClinicalTrial          | —                                 | —                               |
-| ISSUES                 | Company → Policy                 | —                                 | —                               |
-| APPROVES               | Company → ApprovalEvent          | —                                 | —                               |
-| PARTICIPATES_IN_PROJECT| Company → DevelopmentProject     | role                              | contribution                    |
-| TARGETS                | Drug → Target                    | mechanism                         | binding_affinity                |
-| TARGETS                | Compound → Target                | mechanism, evidence_level         | —                               |
-| TREATS                 | Drug/TCMFormula → Indication     | —                                 | phase, phase_date, region, status|
-| IN_TRIAL               | Drug → ClinicalTrial             | —                                 | —                               |
-| HAS_APPROVAL           | Drug → ApprovalEvent             | —                                 | —                               |
-| HAS_ITEM               | DealEvent → DealItem             | —                                 | —                               |
-| INVOLVES_DRUG          | DealItem → Drug                  | —                                 | —                               || EVALUATES              | ClinicalTrial → TrialIndication  | —                                 | —                               |
-| FOR_INDICATION         | TrialIndication → Indication     | —                                 | —                               |
-| IN_PATHWAY             | Target → Pathway                 | —                                 | role                            |
-| ASSOCIATED_WITH        | Target → Indication              | —                                 | —                               |
-| HOMOLOG_OF             | Target → Target                  | species                           | —                               |
-| SUBTYPE_OF             | Indication → Indication          | —                                 | is_core_subtype                 |
-| AFFECTS                | Policy → Company/Drug/Indication/Target | impact_direction, start_date | impact_scope               |
-| DEVELOPED_BY           | TCMFormula → Company             | —                                 | —                               |
-| CONTAINS               | TCMFormula → Compound            | —                                 | content_pct                     |
-| RELATED_TO            | Drug → SafetyEvent              | —                                 | —                               |
-| RELATED_TO            | Company → RecallEvent           | —                                 | —                               |
-| RELATED_TO            | Drug → RecallEvent              | —                                 | —                               |
+Company→Drug DEVELOPS           | dev_role, rights_role, start_date | end_date
+DevProject→Drug DEVELOPS        | —                                 | —
+Company→DealEvent PARTICIPATES_IN | role, start_date                  | —
+Company→Company INVESTED_IN     | date                              | round, amount_usd
+Company→Company SUBSIDIARY_OF   | start_date                        | ratio, end_date
+Company→Trial SPONSORS          | —                                 | —
+Company→Policy ISSUES           | —                                 | —
+Company→ApprovalEvent APPROVES  | —                                 | —
+Company→DevProject PARTICIPATES_IN_PROJECT | role                    | contribution
+Drug→Target TARGETS             | mechanism                         | binding_affinity
+Compound→Target TARGETS         | mechanism, evidence_level          | —
+Drug→Indication TREATS          | —                                 | phase, phase_date, region, status
+TCMFormula→Indication TREATS    | —                                 | phase, phase_date, region, status
+Drug→Trial IN_TRIAL             | —                                 | —
+Drug→ApprovalEvent HAS_APPROVAL | —                                 | —
+DealEvent→DealItem HAS_ITEM     | —                                 | —
+DealItem→Drug INVOLVES_DRUG     | —                                 | —
+Trial→TrialIndication EVALUATES | —                                 | —
+TrialIndication→Indication FOR_INDICATION | —                        | —
+Target→Pathway IN_PATHWAY       | —                                 | role
+Target→Indication ASSOCIATED_WITH | —                               | —
+Target→Target HOMOLOG_OF        | species                           | —
+Indication→Indication SUBTYPE_OF | —                                | is_core_subtype
+Policy→X AFFECTS                | impact_direction, start_date       | impact_scope
+TCMFormula→Company DEVELOPED_BY | —                                 | —
+TCMFormula→Compound CONTAINS    | —                                 | content_pct
+Drug→SafetyEvent RELATED_TO     | —                                 | —
+Company→RecallEvent RELATED_TO  | —                                 | —
+Drug→RecallEvent RELATED_TO     | —                                 | —
 
-dev_role 枚举: "原研" / "合作开发" / "仿制"
-rights_role 枚举: "权益方" / "被授权方" / "无权益"
-mechanism 枚举(Drug→Target): "激动剂" / "拮抗剂" / "抑制剂" / "降解剂" / "调节剂"
-evidence_level 枚举: "体外" / "动物" / "临床"
-impact_direction 枚举: "正向" / "负向" / "中性"
-impact_scope 枚举: "研发" / "生产" / "销售" / "定价"
-role(IN_PATHWAY) 枚举: "上游" / "下游" / "平行"
-species 枚举: "mouse" / "rat" / "monkey"
-role(PARTICIPATES_IN) 枚举: "转让方" / "受让方" / "投资方" / "被投方" / "中介" / "许可方" / "被许可方" / "合作方"
-role(PARTICIPATES_IN_PROJECT) 枚举: "主导方" / "合作方"
-item_type(DealItem) 枚举: "药物权益" / "技术平台权益"
-status(DevelopmentProject) 枚举: "进行中" / "完成" / "终止"
-status(TrialIndication) 枚举: "进行中" / "完成" / "终止"
-phase(TrialIndication) 枚举: "I" / "II" / "III"
+枚举:
+  dev_role: 原研 / 合作开发 / 仿制
+  rights_role: 权益方 / 被授权方 / 无权益
+  mechanism(Drug→Target): 激动剂 / 拮抗剂 / 抑制剂 / 降解剂 / 调节剂
+  evidence_level: 体外 / 动物 / 临床
+  impact_direction: 正向 / 负向 / 中性
+  impact_scope: 研发 / 生产 / 销售 / 定价
+  role(IN_PATHWAY): 上游 / 下游 / 平行
+  role(PARTICIPATES_IN): 转让方 / 受让方 / 投资方 / 被投方 / 中介 / 许可方 / 被许可方 / 合作方
+  role(PARTICIPATES_IN_PROJECT): 主导方 / 合作方
+  species: mouse / rat / monkey
+  status(DevProject): 进行中 / 完成 / 终止
+  status(TrialIndication): 进行中 / 完成 / 终止
+  phase(TrialIndication): I / II / III
+  item_type(DealItem): 药物权益 / 技术平台权益
 """
 
 # ── 输出格式说明（所有 prompt 共用）────────────────────────────────────
@@ -152,7 +150,7 @@ _OUTPUT_FORMAT = """
 {
   "entities": [
     {
-      "entity_type": "实体类型（见上方支持列表）",
+      "entity_type": "实体类型（必须从上方支持列表中选择，禁止自造）",
       "entity_name": "实体的主要名称（用于消歧）",
       "entity_data": { /* 对应实体类型的字段，见上方字段说明 */ },
       "confidence_score": 0.0到1.0之间的浮点数,
@@ -164,7 +162,7 @@ _OUTPUT_FORMAT = """
     {
       "from_entity_idx": 0,
       "to_entity_idx": 1,
-      "relation_type": "关系类型（见上方白名单）",
+      "relation_type": "关系类型（必须从上方白名单中选择，禁止自造）",
       "relation_props": { /* 关系属性，严格按上方属性说明填写，枚举值必须在规定范围内 */ },
       "confidence_score": 0.0到1.0之间的浮点数,
       "confidence_reason": "置信度说明",
@@ -174,6 +172,7 @@ _OUTPUT_FORMAT = """
 }
 
 注意：
+- entity_type 和 relation_type 必须严格从上方列表/白名单中选取，禁止使用列表外的任何类型
 - from_entity_idx 和 to_entity_idx 是 entities 数组的下标（从0开始）
 - 找不到的字段填空字符串 "" 或 null，不要编造
 - 置信度：原文明确提及=0.9+，可推断=0.6-0.8，不确定=0.3-0.5
@@ -182,71 +181,151 @@ _OUTPUT_FORMAT = """
 - 关系方向必须严格遵守白名单中的 from→to 定义
 - Drug / Target / Indication / Pathway 的 entity_data 必须填写 name_en 字段：
   entity_name 本身是英文 → 直接填入 name_en；entity_name 是中文 → 翻译为英文填入 name_en
+- 双语别名规则：entity_name 为英文时，将中文翻译填入 aliases；entity_name 为中文时，将英文翻译填入 aliases
+  例如 "Hydrocortisone" → aliases: ["氢化可的松"]；"阿司匹林" → aliases: ["Aspirin"]
 """
 
-# ── 全局抽取质量规则（所有 prompt 共用）─────────────────────────────────
+# ── 全局抽取质量规则（所有 prompt 共用，压缩版）─────────────────────────
 _COMMON_EXTRACTION_RULES = """
-## 全局抽取规则（必须遵守）
+## 强制规则（违反将导致输出被拒绝）
 
-### entity_name 命名规则
-- entity_name 是实体的唯一标识，用于下游消歧去重，必须精确且有区分度
-- Drug：使用 INN 通用名（如 "pembrolizumab"），附带关键修饰以区分（如 "liposomal doxorubicin" vs "doxorubicin"）
-- Company：使用完整官方名（如 "Roche Holding AG"），辅以股票代码区分（如 "Roche (ROG.SW)"）
-- Indication：使用标准 ICD/MeSH 疾病名 + 分期/分型（如 "Non-Small Cell Lung Cancer (Stage IV)"）
-- Target：使用 HGNC 基因符号（如 "EGFR"），膜蛋白标注别名（如 "CLDN18.2 / CLDN18 isoform 2"）
-- ClinicalTrial：使用 NCT/CTR 注册号（如 "NCT04256421"）
-- 禁止使用模糊名称如 "the drug"、"这家公司"、"上述适应症"
+### 0. 类型约束（最高优先级）
+- entity_type 必须严格从上方的「支持的实体类型」列表中选择，禁止自造或使用列表外的实体类型
+- relation_type 必须严格从上方的 relation_type 白名单中选择，禁止自造或使用白名单外的关系类型
 
-### 实体去重规则
-- 同一文本中多次出现的同一实体，只在 entities 数组中出现一次
-- 多块抽取时，前序块已知的实体也需要建立关系，但实体本身不重复创建
-- 如 "Keytruda" 和 "pembrolizumab" 指同一药物，只创建一个 Drug 实体，aliases 字段列出其他名称
+### 1. entity_name 命名
+- Drug → INN 通用名 + 关键修饰（如 "liposomal doxorubicin"）
+- Company → 完整官方名 + 股票代码（如 "Roche Holding AG (ROG.SW)"）
+- Indication → ICD/MeSH 标准疾病名 + 分期分型（如 "NSCLC Stage IV"）
+- Target → HGNC 基因符号 + 膜蛋白别名（如 "EGFR" / "CLDN18.2"）
+- ClinicalTrial → NCT/CTR 注册号（如 "NCT04256421"）
+- 禁止: "the drug"、"这家公司"、"上述适应症" 等模糊名称
 
-### 实体分类规则（entity_type 选择）
-- 监管批准文件 → ApprovalEvent（不要归为 Policy）
-- 临床试验注册信息 → ClinicalTrial（不要归为 DealEvent）
-- 药企合作开发 → DevelopmentProject / DealEvent（不要归为 ApprovalEvent）
-- 药物安全公告 → SafetyEvent（不要归为 Policy）
-- 产品召回 → RecallEvent（不要归为 ApprovalEvent）
+### 2. 去重
+- 同文本内同一实体只出现一次（"Keytruda"="pembrolizumab" → 一个 Drug，aliases 列变体）
+- 多块拆分时实体不重复创建，但关系可在任一块建立
 
-### 负向规则（以下内容不要抽取）
-- 不抽取文档中的日期、作者、期刊名、页码等文献元数据作为实体
-- 不抽取泛指的类别名作为实体（如 "化疗药物"、"靶向药" 作为 entity_data 的 drug_class 字段值可以，但不作为独立 Drug 实体）
-- 不抽取文档中仅作为背景提及的非核心实体（如引文中提到的其他药物/公司）
-- 不抽取非医药领域的公司（如会计事务所、律师事务所，除非作为交易中介）
-- 不抽取非药物相关的化合物（如溶剂、辅料，除非作为 TCMFormula 的 CONTAINS 目标）
+### 3. 禁止抽取的实体类型
+- 文献元数据（日期/作者/期刊/页码） | 泛称类别名（"化疗药物"→ 填 drug_class 字段，不作为 Drug） | 背景引文中的非核心实体 | 非医药公司（律所/会计所，除非是交易中介） | 辅料溶剂（除非作为 CONTAINS 目标）
 
-### source_text 规则
-- source_text 必须是原文中支持该实体的关键句子原文截取，不超过 100 个字符
-- 不要改写、总结或翻译原文
-- 如实体由多个句子共同支持，选取最关键的一句
-- 如关系由上下文推断，选取最直接的证据句
+### 4. source_text
+- 原文截取 ≤100 字符，不改写/不总结/不翻译
+- 取最直接的一句证据
 
-### 关系方向规则
-- 严格遵守白名单中 relation_type 的 from → to 方向
-- COMPANY → DRUG 用 DEVELOPS（不是 DRUG → COMPANY）
-- DRUG → TARGET 用 TARGETS（不是 TARGET → DRUG）
-- POLICY → DRUG/COMPANY 用 AFFECTS（不是 DRUG/COMPANY → POLICY）
-- 方向错误会导致知识图谱推理链断裂
+### 5. 关系方向（严格按白名单 from→to）
+- Company→Drug = DEVELOPS | Drug→Target = TARGETS | Policy→X = AFFECTS
+- 方向错误 = 图谱推理链断裂，整条关系无效
 
-### 关系完整度规则
-- 每个关系必须对应一对已存在的实体（from_entity_idx 和 to_entity_idx 必须在 entities 数组范围内）
-- 如果一个 Drug 有 TREATS 关系指向某个 Indication，该 Drug 实体和 Indication 实体都必须已创建
-- 不允许空关系（指向实体后又未创建该实体）
+### 6. 关系完整性
+- from/to 下标必须在 entities 范围内
+- 关系引用的实体必须已存在于 entities 数组
 
-### 置信度规则
-- 原文明确提及实体名称且上下文中直接支持该关系的：0.9-1.0
-- 实体名称需要从上下文推断但证据充分：0.7-0.85
-- 从多个隐含线索综合推断：0.5-0.65
-- 仅有间接暗示、存在歧义：0.3-0.45
-- 不要把所有置信度都设为 0.9 以上——区分确定性和推断性
+### 7. 置信度（禁止全标 0.9+）
+- 0.9-1.0: 原文明确提及 | 0.7-0.85: 上下文强推断 | 0.5-0.65: 多线索综合 | 0.3-0.45: 间接暗示/存疑
 """
 
 _EMPTY_RESULT_GUIDANCE = """
 ### 空结果规则
 - 如果文档中没有任何可抽取的实体，返回 {"entities": [], "relations": []}
 - 不要在无法确认时强行编造实体——宁可返回空结果，也不返回虚假实体
-- 空结果示例场景：纯元数据页、目录页、索引页、参考文献列表
+- 空结果示例场景：纯元数据页、目录页、索引页、参考文献列表"""
+
+_CDE_TABLE_FEWSHOT = """
+### 表格化药品列表示例
+
+输入：
+```
+2025 年国家药监局批准的创新药
+
+序号  药品名称      上市许可持有人            药品类型  适应症/功能主治                                  加快上市程序
+1     阿夫凯泰片     Cytokinetics,Incorporated 化学药品  梗阻性肥厚型心肌病（HCM, NYHA II-III级）          突破性治疗优先审评审批
+2     艾考磷布韦片  宜昌东阳光长江药业股份公司  化学药品  基因1/2/3/6型成人慢性丙型肝炎（HCV）
+```
+
+抽取结果：
+```json
+{
+  "entities": [
+    {"entity_type": "Drug", "entity_name": "阿夫凯泰片", "entity_data": {"name": "阿夫凯泰片", "drug_class": "化学药品"}, "confidence_score": 0.95, "source_text": "1 阿夫凯泰片"},
+    {"entity_type": "Company", "entity_name": "Cytokinetics,Incorporated", "entity_data": {"name": "Cytokinetics,Incorporated", "name_en": "Cytokinetics,Incorporated"}, "confidence_score": 0.9, "source_text": "Cytokinetics,Incorporated"},
+    {"entity_type": "Indication", "entity_name": "梗阻性肥厚型心肌病", "entity_data": {"name": "梗阻性肥厚型心肌病", "name_en": "Obstructive Hypertrophic Cardiomyopathy"}, "confidence_score": 0.9, "source_text": "梗阻性肥厚型心肌病（HCM）"},
+    {"entity_type": "ApprovalEvent", "entity_name": "阿夫凯泰片-2025创新药批准", "entity_data": {"application_type": "NDA", "designations": ["突破性疗法", "优先审评"], "status": "获批"}, "confidence_score": 0.9, "source_text": "突破性治疗优先审评审批"},
+    {"entity_type": "Drug", "entity_name": "艾考磷布韦片", "entity_data": {"name": "艾考磷布韦片", "drug_class": "化学药品"}, "confidence_score": 0.95, "source_text": "2 艾考磷布韦片"},
+    {"entity_type": "Company", "entity_name": "宜昌东阳光长江药业股份公司", "entity_data": {"name": "宜昌东阳光长江药业股份公司"}, "confidence_score": 0.9, "source_text": "宜昌东阳光长江药业股份公司"},
+    {"entity_type": "Indication", "entity_name": "慢性丙型肝炎", "entity_data": {"name": "慢性丙型肝炎", "name_en": "Chronic Hepatitis C"}, "confidence_score": 0.9, "source_text": "慢性丙型肝炎（HCV）"}
+  ],
+  "relations": [
+    {"from_entity_idx": 1, "to_entity_idx": 0, "relation_type": "DEVELOPS", "relation_props": {"dev_role": "原研"}, "confidence_score": 0.9, "source_text": "Cytokinetics,Incorporated"},
+    {"from_entity_idx": 0, "to_entity_idx": 2, "relation_type": "TREATS", "relation_props": {}, "confidence_score": 0.9, "source_text": "梗阻性肥厚型心肌病"},
+    {"from_entity_idx": 0, "to_entity_idx": 3, "relation_type": "HAS_APPROVAL", "relation_props": {}, "confidence_score": 0.9, "source_text": "突破性治疗优先审评审批"},
+    {"from_entity_idx": 5, "to_entity_idx": 4, "relation_type": "DEVELOPS", "relation_props": {"dev_role": "原研"}, "confidence_score": 0.9, "source_text": "宜昌东阳光长江药业"},
+    {"from_entity_idx": 4, "to_entity_idx": 6, "relation_type": "TREATS", "relation_props": {}, "confidence_score": 0.9, "source_text": "慢性丙型肝炎"}
+  ]
+}
+```
+注意：第 2 行无加快上市程序，不创建 ApprovalEvent；entity_data 只填原文能确认的字段。
+"""
+
+_CT_FEWSHOT = """
+### 临床试验注册示例
+
+输入：
+```
+注册号：ChiCTR2000029418
+注册时间：2020-01-30
+注册号状态：预注册
+注册题目：中药治疗新型冠状病毒感染肺炎(COVID-19)重型患者随机对照试验
+研究类型：干预性研究
+研究设计：随机平行对照
+干预措施：西医治疗
+纳入标准：1) 年龄≥18周岁； 2) 符合重型COVID-19诊断标准
+```
+
+抽取结果：
+```json
+{
+  "entities": [
+    {"entity_type": "ClinicalTrial", "entity_name": "ChiCTR2000029418", "entity_data": {"trial_id": "ChiCTR2000029418", "phase": "", "status": "预注册", "start_date": "2020-01-30"}, "confidence_score": 0.95, "source_text": "注册号：ChiCTR2000029418"},
+    {"entity_type": "Drug", "entity_name": "中药", "entity_data": {"name": "中药", "drug_class": "中药"}, "confidence_score": 0.7, "source_text": "中药治疗新型冠状病毒感染肺炎"},
+    {"entity_type": "Indication", "entity_name": "新型冠状病毒感染肺炎", "entity_data": {"name": "新型冠状病毒感染肺炎", "name_en": "COVID-19", "category": "感染"}, "confidence_score": 0.9, "source_text": "新型冠状病毒感染肺炎(COVID-19)重型"},
+    {"entity_type": "TrialIndication", "entity_name": "ChiCTR2000029418-重型COVID-19-西医治疗", "entity_data": {"phase": "", "status": "预注册"}, "confidence_score": 0.85, "source_text": "中药治疗新型冠状病毒感染肺炎(COVID-19)重型"}
+  ],
+  "relations": [
+    {"from_entity_idx": 1, "to_entity_idx": 0, "relation_type": "IN_TRIAL", "relation_props": {}, "confidence_score": 0.85, "source_text": "中药治疗新型冠状病毒感染肺炎"},
+    {"from_entity_idx": 0, "to_entity_idx": 3, "relation_type": "EVALUATES", "relation_props": {}, "confidence_score": 0.9, "source_text": "ChiCTR2000029418"},
+    {"from_entity_idx": 3, "to_entity_idx": 2, "relation_type": "FOR_INDICATION", "relation_props": {}, "confidence_score": 0.9, "source_text": "新型冠状病毒感染肺炎(COVID-19)重型"},
+    {"from_entity_idx": 1, "to_entity_idx": 2, "relation_type": "TREATS", "relation_props": {}, "confidence_score": 0.8, "source_text": "中药治疗COVID-19"}
+  ]
+}
+```
+注意：ChiCTR 不填 phase 为常见情况；药物名称为通用描述（如"中药"）时 confidence_score 适当降低。
+"""
+
+_CT_GOV_FEWSHOT = """
+### ClinicalTrials.gov JSON 示例
+
+输入（API 返回的 JSON 片段）：
+```
+{"identificationModule": {"nctId": "NCT00039715", "organization": {"fullName": "National Institutes of Health Clinical Center (CC)"}, "briefTitle": "Effects of Hydrocortisone in Patients With Post-Traumatic Stress Disorder", "officialTitle": "Effect of Hydrocortisone Infusion on Hippocampal Glucose Metabolism...in Patients With PTSD"}}
+```
+
+抽取结果：
+```json
+{
+  "entities": [
+    {"entity_type": "ClinicalTrial", "entity_name": "NCT00039715", "entity_data": {"trial_id": "NCT00039715", "brief_title": "Effects of Hydrocortisone in Patients With PTSD"}, "confidence_score": 0.95, "source_text": "nctId: NCT00039715"},
+    {"entity_type": "Drug", "entity_name": "Hydrocortisone", "entity_data": {"name": "Hydrocortisone", "name_en": "Hydrocortisone", "aliases": ["氢化可的松"]}, "confidence_score": 0.9, "source_text": "Effects of Hydrocortisone"},
+    {"entity_type": "Indication", "entity_name": "Post-Traumatic Stress Disorder", "entity_data": {"name": "Post-Traumatic Stress Disorder", "name_en": "Post-Traumatic Stress Disorder", "aliases": ["创伤后应激障碍", "PTSD"]}, "confidence_score": 0.9, "source_text": "Post-Traumatic Stress Disorder (PTSD)"},
+    {"entity_type": "Company", "entity_name": "National Institutes of Health Clinical Center", "entity_data": {"name": "National Institutes of Health Clinical Center", "types": ["academic"]}, "confidence_score": 0.85, "source_text": "National Institutes of Health Clinical Center (CC)"}
+  ],
+  "relations": [
+    {"from_entity_idx": 1, "to_entity_idx": 0, "relation_type": "IN_TRIAL", "relation_props": {}, "confidence_score": 0.9, "source_text": "Hydrocortisone in Patients With PTSD"},
+    {"from_entity_idx": 1, "to_entity_idx": 2, "relation_type": "TREATS", "relation_props": {}, "confidence_score": 0.9, "source_text": "Hydrocortisone...PTSD"},
+    {"from_entity_idx": 3, "to_entity_idx": 0, "relation_type": "SPONSORS", "relation_props": {}, "confidence_score": 0.85, "source_text": "National Institutes of Health Clinical Center"}
+  ]
+}
+```
+注意：英文实体名务必把中文翻译填入 aliases（如 Hydrocortisone→氢化可的松，PTSD→创伤后应激障碍）。
 """
 
 # ── 实体类型 + 字段说明（动态生成，供 prompt 引用）──────────────────────
@@ -263,35 +342,30 @@ def _build_entity_type_section(entity_types: list[str]) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 def get_nmpa_extraction_prompt(text: str) -> str:
-    """NMPA / CDE / FDA 监管公告：重点抽取 Drug、ApprovalEvent、Company、Policy"""
-    entity_section = _build_entity_type_section(
-        ["Drug", "ApprovalEvent", "Company", "Policy"]
-    )
+    """NMPA / CDE 监管公告：优先 Drug、ApprovalEvent、Company、Policy、SafetyEvent"""
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是医药监管信息提取专家。请从以下 NMPA/CDE 监管公告中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
 {_RELATION_PROPS_GUIDE}
 {_EMPTY_RESULT_GUIDANCE}
 
-## 本来源特有规则
-- NMPA 公告以药品批准和补充申请为主：批准文号格式为 "国药准字H/Z/S+8位数字" 或 "国药准字J+8位数字"
-- 每个审批记录对应一个 ApprovalEvent 实体，多个审批号应拆分
-- Company 的 types 应填 "pharma"（国内药企）
-- 如公告为"药品注册证书"类：dev_role 填 "原研"（创新药）或 "仿制"（仿制药）
-- 不要抽取文档元数据（发布日期、公告编号）作为实体——它们属于 Policy（如果该公告本身是政策文件）
-- 同一条公告中审批多个药品，每个药品单独创建 Drug 实体
+## 本来源抽取重点
 
-## 抽取重点
-- Drug：药品通用名（INN名优先）、批准文号、剂型、规格、cas_number
-- ApprovalEvent：批准类型（NDA/BLA/补充申请/再注册）、批准日期（approval_date）、申请类型（application_type）
-- Company：申请人/持有人/生产企业全称，name 用中文全称
-- Policy：仅限公告本身为政策类时抽取（如"关于XX事项的通告"），policy_type 填 "审批改革/监管规范"
-- 关系重点：
-  * Company -[DEVELOPS]-> Drug（dev_role="原研"/"合作开发"/"仿制", rights_role="权益方", start_date必填）
-  * Drug -[HAS_APPROVAL]-> ApprovalEvent
-  * Company -[APPROVES]-> ApprovalEvent（NMPA/CDE作为监管机构批准，Company指监管机构）
-  * Policy -[AFFECTS]-> Drug/Company（impact_direction 必填, impact_scope 必填, start_date 必填）
+### 审批/公告类文档
+- 药品批准/补充申请 → Drug + ApprovalEvent
+- 现场检查/不合规/警告信 → SafetyEvent（event_type="安全警示"/"现场检查", source_agency="NMPA", severity="严重"/"中等"）
+- 产品召回 → RecallEvent（recall_class="I"/"II"/"III"）
+- 申请人/持有人/生产企业 → Company（name 用中文全称）
+- 政策/通告/指导原则 → Policy（policy_type="审批改革"/"监管规范"/"鼓励政策"）
+- Drug：INN通用名优先，批准文号（国药准字H/Z/S/J...）和登记号（Y开头）填入 registration_number
+- ApprovalEvent：批准类型（NDA/BLA/补充申请/再注册）、批准日期
+- 关系重点：Company-[DEVELOPS]->Drug | Drug-[HAS_APPROVAL]->ApprovalEvent | Policy-[AFFECTS]->Drug/Company | Drug-[RELATED_TO]->SafetyEvent | Company-[RELATED_TO]->RecallEvent
+
+{_CDE_TABLE_FEWSHOT}
 
 ## 文档内容
 {text}
@@ -300,34 +374,31 @@ def get_nmpa_extraction_prompt(text: str) -> str:
 
 
 def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
-    """FDA 各类监管公告（新闻、安全通讯、召回、药品说明书、执法信息）"""
-    base_types = ["Drug", "ApprovalEvent", "Company", "Policy", "SafetyEvent", "RecallEvent"]
+    """FDA 监管公告：全类型可见，子源调整重点"""
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     sub_guidance = ""
 
     if "drug_label" in sub_source:
-        base_types.extend(["Indication", "Target"])
         sub_guidance = """
 ## 子源特化：FDA Drug Label（药品说明书）
-- 从药品说明书中提取完整的适应症列表、靶点信息、用法用量
-- Indication 实体应覆盖所有获批适应症
-- Target 实体应覆盖药物作用靶点
-- 适应症-靶点关联关系必须抽取"""
+- 优先 Drug + Indication + Target
+- 从说明书中提取完整适应症列表、靶点信息、用法用量"""
     elif "drug_safety" in sub_source:
         sub_guidance = """
-## 子源特化：FDA Drug Safety Communication（药物安全通讯）
-- SafetyEvent 是核心实体，event_type 填 "安全警示"
-- 提取安全信号描述（safety_signal）、受影响人群（affected_population）
-- 提取 FDA 建议措施（recommendation）
-- 关联关系：Drug -[RELATED_TO]-> SafetyEvent"""
+## 子源特化：FDA Drug Safety Communication
+- 优先 SafetyEvent（event_type="安全警示"） + Drug
+- 提取安全信号描述（safety_signal）、受影响人群（affected_population）、FDA 建议（recommendation）
+- 关系：Drug -[RELATED_TO]-> SafetyEvent"""
     elif "enforcement" in sub_source:
         sub_guidance = """
-## 子源特化：FDA Enforcement（执法信息）
-- Policy 实体的 policy_type 填 "监管规范"
+## 子源特化：FDA Enforcement
+- 优先 Policy（policy_type="监管规范"） + Company
 - 提取违规企业、违规行为、处罚措施
-- 关联关系：Policy -[AFFECTS]-> Company（impact_direction="负向", impact_scope="生产"/"销售"）"""
+- 关系：Policy -[AFFECTS]-> Company（impact_direction="负向"）"""
 
-    entity_section = _build_entity_type_section(base_types)
     return f"""你是FDA监管信息提取专家。请从以下FDA监管公告中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -335,37 +406,15 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
 {_EMPTY_RESULT_GUIDANCE}
 {sub_guidance}
 
-## 本来源特有规则
-- FDA 文档中英文原文为主，entity_name 使用英文通用名，中文译名填入 aliases
-- FDA 批准编号格式：NDA 6位数字、BLA 6位数字、ANDA 6位数字
-- FDA Drug Label 中的适应症描述包含用药人群（如"for adult patients with..."），需将完整描述填入 ApprovalEvent.indication_text
-- 不要抽取药品说明书中的辅料（inactive ingredients）为 Compound 实体
-- 不要将 FDA Advisory Committee 会议纪要为 Policy——应抽取为 ApprovalEvent 相关的 SafetyEvent
-- 不同剂型/规格的同一药品不需要重复创建 Drug 实体，aliases 中列出变体
-
-## 抽取重点
-- Drug：药品名称（通用名优先、商品名填入 aliases）、批准文号（NDA/BLA号）、剂型、modality、drug_class
-  * dev_role 统一使用中文枚举值："原研"（originator）、"合作开发"（co-developed）、"仿制"（generic）
-- ApprovalEvent：FDA批准事件、批准日期、申请类型（NDA/BLA/sNDA/sBLA/IND/ANDA）
-  * application_type: NDA/BLA/sNDA/sBLA/IND/ANDA
-  * designations: 突破性疗法/优先审评/孤儿药/快速通道
-  * 多个审批事件（如原始NDA+补充申请）分别创建 ApprovalEvent
-- Company：申请人/持证人/召回企业/违规企业，name 用英文官方全称
-- SafetyEvent：药物安全事件
-  * event_type: 不良事件/安全警示/黑框警告/上市后监测
-  * severity: 严重/中等/轻微
-- RecallEvent：药品召回事件
-  * recall_class: I/II/III
-  * recall_scope: 零售/批发/用户级
-- Policy：FDA政策公告或执法文件
-- 关系重点：
-  * Company -[DEVELOPS]-> Drug（dev_role="原研"/"合作开发"/"仿制", rights_role="权益方"/"被授权方", start_date必填）
-  * Drug -[HAS_APPROVAL]-> ApprovalEvent
-  * Company -[APPROVES]-> ApprovalEvent（FDA作为监管机构批准，Company为监管机构）
-  * Policy -[AFFECTS]-> Drug/Company（impact_direction, impact_scope, start_date必填）
-  * Drug -[RELATED_TO]-> SafetyEvent
-  * Company -[RELATED_TO]-> RecallEvent
-  * Drug -[RELATED_TO]-> RecallEvent
+## 本来源抽取重点
+- Drug：通用名优先、商品名入 aliases、NDA/BLA号、modality、drug_class
+- ApprovalEvent：申请类型(NDA/BLA/sNDA/sBLA/IND/ANDA)、designations(突破性疗法/优先审评/孤儿药/快速通道)、多个审批事件分别创建
+- Company：申请人/持证人/违规企业，name 用英文官方全称
+- SafetyEvent：event_type(不良事件/安全警示/黑框警告/上市后监测)、severity
+- RecallEvent：recall_class(I/II/III)、recall_scope(零售/批发/用户级)
+- Policy：政策公告或执法文件
+- 不抽取: 辅料为Compound | Advisory Committee 纪要 | 同药不同剂型重复创建
+- 关系重点：Company-[DEVELOPS]->Drug | Drug-[HAS_APPROVAL]->ApprovalEvent | Drug-[RELATED_TO]->SafetyEvent | Company-[RELATED_TO]->RecallEvent | Policy-[AFFECTS]->Drug/Company
 
 ## 文档内容
 {text}
@@ -375,24 +424,22 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
 
 def get_clinical_trial_extraction_prompt(text: str) -> str:
     """ChiCTR / ClinicalTrials 临床试验：重点抽取 ClinicalTrial、Drug、Company、Indication、TrialIndication"""
-    entity_section = _build_entity_type_section(
-        ["ClinicalTrial", "Drug", "Company", "Indication", "TrialIndication", "Target"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是临床试验信息提取专家。请从以下临床试验注册信息中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
 {_RELATION_PROPS_GUIDE}
 {_EMPTY_RESULT_GUIDANCE}
 
-## 本来源特有规则
+## 本来源抽取重点
 - ClinicalTrial 的 trial_id 必须使用注册号：NCT 后跟8位数字（如 NCT04256421），ChiCTR 后跟数字（如 ChiCTR200003xxxx）
 - 不要将 sponsor 的 CRO 公司误认为是研发主体——CRO 作为 Company 抽取但 role 不一定是 DEVELOPS
 - 多臂试验中每一条 arm 的药物单独创建 Drug 实体
 - 试验的 inclusion/exclusion criteria 描述填入 TrialIndication 中（人群描述、治疗线次）
 - ClinicalTrial 实体只创建一次，多臂试验不要创建多个同 NCT 的 ClinicalTrial
-
-## 抽取重点
 - ClinicalTrial：注册号（NCT/CTR 编号，直接填 trial_id）、期别（phase）、状态（status）、样本量（sample_size）、主要终点（primary_endpoint）
 - Drug：试验药物名称（INN名）和/或研发代号，多个药物组合时各自拆分
 - Company：申办方/合作方/CRO，name 用官方全称
@@ -407,6 +454,10 @@ def get_clinical_trial_extraction_prompt(text: str) -> str:
   * Drug -[TREATS]-> Indication（phase, region可填）
   * Drug -[TARGETS]-> Target（如为靶向药物）
 
+{_CT_FEWSHOT}
+
+{_CT_GOV_FEWSHOT}
+
 ## 文档内容
 {text}
 
@@ -415,10 +466,7 @@ def get_clinical_trial_extraction_prompt(text: str) -> str:
 
 def get_pubmed_extraction_prompt(text: str, metadata: dict = None) -> str:
     """PubMed 学术文献：重点抽取 Drug、Target、Indication、Pathway、Compound"""
-    entity_section = _build_entity_type_section(
-        ["Drug", "Target", "Indication", "Pathway", "Company", "Compound",
-         "ClinicalTrial", "TrialIndication"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     meta_header = ""
     if metadata:
         lines = ["## 文献元数据"]
@@ -458,6 +506,8 @@ def get_pubmed_extraction_prompt(text: str, metadata: dict = None) -> str:
 
 {meta_header}
 {entity_section}
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {_RELATION_PROPS_GUIDE}
 {_COMMON_EXTRACTION_RULES}
@@ -506,10 +556,10 @@ def get_pubmed_extraction_prompt(text: str, metadata: dict = None) -> str:
 
 def get_hkex_extraction_prompt(text: str) -> str:
     """港交所公告：重点抽取 Company、DealEvent、DealItem、Drug、DevelopmentProject"""
-    entity_section = _build_entity_type_section(
-        ["Company", "DealEvent", "DealItem", "Drug", "ClinicalTrial", "DevelopmentProject"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是医药行业投融资信息提取专家。请从以下港交所公告中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -567,11 +617,10 @@ def get_hkex_extraction_prompt(text: str) -> str:
 
 def get_fiercepharma_extraction_prompt(text: str) -> str:
     """FiercePharma / PHIRDA 行业新闻：重点抽取 Company、Drug、DealEvent、DealItem"""
-    entity_section = _build_entity_type_section(
-        ["Company", "Drug", "DealEvent", "DealItem", "ClinicalTrial",
-         "ApprovalEvent", "DevelopmentProject"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是医药行业新闻信息提取专家。请从以下行业新闻中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -612,8 +661,10 @@ def get_fiercepharma_extraction_prompt(text: str) -> str:
 
 def get_phirda_rd_industry_prompt(text: str) -> str:
     """PHIRDA研发追踪和产业资讯：重点抽取 Drug、Company、ClinicalTrial、DealEvent、DevelopmentProject"""
-    entity_section = _build_entity_type_section(_PHARMA_INDUSTRY_CORE_TYPES)
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是中国医药产业信息提取专家。请从以下药促会研发追踪或产业资讯中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -657,10 +708,10 @@ def get_phirda_rd_industry_prompt(text: str) -> str:
 
 def get_policy_extraction_prompt(text: str) -> str:
     """政策文件（PHIRDA policy/healthcare_reform）：重点抽取 Policy、Drug、Company、Indication"""
-    entity_section = _build_entity_type_section(
-        ["Policy", "Drug", "Company", "Indication", "Target"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是医药政策信息提取专家。请从以下政策文件中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -693,10 +744,10 @@ def get_policy_extraction_prompt(text: str) -> str:
 
 def get_drugbank_extraction_prompt(text: str) -> str:
     """DrugBank 药物数据库：重点抽取 Drug、Target、Pathway、Compound、Indication"""
-    entity_section = _build_entity_type_section(
-        ["Drug", "Target", "Pathway", "Compound", "Indication"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是药物数据库信息提取专家。请从以下 DrugBank 药物信息中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -731,10 +782,10 @@ def get_drugbank_extraction_prompt(text: str) -> str:
 
 def get_nccn_extraction_prompt(text: str) -> str:
     """NCCN 临床实践指南：重点抽取 Drug、Indication、Target、ClinicalTrial、TrialIndication、Company"""
-    entity_section = _build_entity_type_section(
-        ["Drug", "Indication", "Target", "ClinicalTrial", "TrialIndication", "Pathway", "Company"]
-    )
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是临床实践指南信息提取专家。请从以下 NCCN 临床实践指南中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -782,8 +833,10 @@ NCCN 指南按以下层级组织治疗方案，抽取时需注意：
 
 def get_pharma_company_news_prompt(text: str) -> str:
     """制药企业新闻（如Roche、其他药企官网新闻）：重点抽取 Company、Drug、ClinicalTrial、ApprovalEvent、DealEvent"""
-    entity_section = _build_entity_type_section(_PHARMA_INDUSTRY_CORE_TYPES)
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是制药企业新闻信息提取专家。请从以下制药企业官方新闻中抽取图谱实体和关系。
+
+上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。
 
 {entity_section}
 
@@ -824,7 +877,7 @@ def get_pharma_company_news_prompt(text: str) -> str:
 
 def get_general_extraction_prompt(text: str) -> str:
     """通用兜底 prompt，覆盖未定义来源"""
-    entity_section = _build_entity_type_section(list(ENTITY_SCHEMA_MAP.keys()))
+    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
     return f"""你是医药行业知识图谱信息提取专家。请从以下文档中抽取图谱实体和关系。
 
 {entity_section}

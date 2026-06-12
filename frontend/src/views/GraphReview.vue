@@ -41,7 +41,7 @@
           </template>
           <span class="node-count">节点: {{ visibleNodeCount }} / {{ nodes.length }} | 边: {{ visibleEdgeCount }} / {{ edges.length }}</span>
           <el-button size="small" type="warning" plain @click="openMergeQueue">
-            合并队列 {{ mergeQueue.length > 0 ? `(${mergeQueue.length})` : '' }}
+            合并队列 {{ mergeQueueGroups.length > 0 ? `(${mergeQueueGroups.length} 组)` : '' }}
           </el-button>
           <el-button size="small" type="success" @click="batchApproveSelected" :disabled="selectedNodeIds.size === 0">
             &#x2713; 批量通过 ({{ selectedNodeIds.size }})
@@ -55,7 +55,6 @@
     </el-card>
 
     <el-row :gutter="12" class="main-row">
-      <!-- 图谱画布 -->
       <el-col :span="detailNode ? 16 : 24">
         <el-card shadow="never" class="graph-card">
           <div class="graph-legend">
@@ -63,19 +62,9 @@
             <span class="legend-item"><span class="dot approved"></span> 已通过</span>
             <span class="legend-item"><span class="dot rejected"></span> 已拒绝</span>
             <span class="legend-item">— 虚线=待审核 实线=已通过</span>
-            <span class="legend-tip">拖拽节点 | 滚轮缩放 | 点击节点查看详情 | Shift+点击多选</span>
+            <span class="legend-tip">点击节点查看详情 | Shift+点击多选 | 滚轮缩放 | 拖拽平移</span>
           </div>
-          <div class="canvas-wrapper" ref="canvasWrapperRef">
-            <canvas
-              ref="canvasRef"
-              @mousedown="onMouseDown"
-              @mousemove="onMouseMove"
-              @mouseup="onMouseUp"
-              @wheel="onWheel"
-              @dblclick="onDblClick"
-              @contextmenu.prevent
-            />
-          </div>
+          <div ref="cyContainerRef" class="cy-container" />
         </el-card>
       </el-col>
 
@@ -174,30 +163,36 @@
     </el-row>
 
     <!-- 合并队列 Drawer -->
-    <el-drawer v-model="showMergeDrawer" title="合并队列" size="460px" direction="rtl">
+    <el-drawer v-model="showMergeDrawer" title="合并队列" size="500px" direction="rtl">
       <div class="merge-queue-panel" v-loading="mergeQueueLoading">
-        <div v-for="m in mergeQueue" :key="m.id" class="merge-card">
-          <div class="merge-card-header">
-            <el-tag size="small" type="danger">{{ m.field_name }}</el-tag>
-            <span class="merge-source">entity #{{ m.source_entity_id }} → dict #{{ m.target_dict_id }}</span>
-            <el-tag size="small" type="info">{{ m.source_site }}</el-tag>
+        <div v-for="group in mergeQueueGroups" :key="group.dict_id" class="merge-group">
+          <div class="merge-group-header">
+            <strong>{{ group.entity_name }}</strong>
+            <el-tag size="small" type="info">{{ group.entity_type }}</el-tag>
+            <span class="merge-group-source">dict_id={{ group.dict_id }}</span>
           </div>
-          <div class="merge-row">
-            <div class="merge-col">
-              <div class="merge-label">现有值</div>
-              <pre class="merge-value">{{ formatMergeValue(m.existing_value) }}</pre>
+          <div v-for="m in group.conflicts" :key="m.merge_id" class="merge-card">
+            <div class="merge-card-header">
+              <el-tag size="small" type="danger">{{ m.field_name }}</el-tag>
+              <span class="merge-source">entity #{{ m.source_entity_id }} → dict #{{ group.dict_id }}</span>
             </div>
-            <div class="merge-col">
-              <div class="merge-label">新值</div>
-              <pre class="merge-value">{{ formatMergeValue(m.new_value) }}</pre>
+            <div class="merge-row">
+              <div class="merge-col">
+                <div class="merge-label">现有值</div>
+                <pre class="merge-value">{{ formatMergeValue(m.existing_value) }}</pre>
+              </div>
+              <div class="merge-col">
+                <div class="merge-label">新值</div>
+                <pre class="merge-value">{{ formatMergeValue(m.new_value) }}</pre>
+              </div>
             </div>
-          </div>
-          <div class="merge-card-actions">
-            <el-button size="small" type="success" @click="doResolveMerge(m.id, 'accept_new')">采用新值</el-button>
-            <el-button size="small" type="warning" @click="doResolveMerge(m.id, 'keep_existing')">保留现有</el-button>
+            <div class="merge-card-actions">
+              <el-button size="small" type="success" @click="doResolveMerge(m.merge_id, 'accept_new')">采用新值</el-button>
+              <el-button size="small" type="warning" @click="doResolveMerge(m.merge_id, 'keep_existing')">保留现有</el-button>
+            </div>
           </div>
         </div>
-        <el-empty v-if="!mergeQueue.length && !mergeQueueLoading" description="暂无待处理的合并冲突" />
+        <el-empty v-if="!mergeQueueGroups.length && !mergeQueueLoading" description="暂无待处理的合并冲突" />
       </div>
     </el-drawer>
   </div>
@@ -207,15 +202,15 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import cytoscape, { type Core, type EventObject } from 'cytoscape'
 import {
-  getReviewGraph, getReviewStats,
+  getReviewGraph,
   approveEntity, rejectEntity,
   approveRelation, rejectRelation,
-  batchApproveEntities, batchRejectEntities,
   patchEntity,
   getMergeQueue, resolveMerge,
-  type GraphNode, type GraphEdge, type ReviewStats,
-  type MergeQueueItem,
+  type GraphNode, type GraphEdge,
+  type MergeQueueGroup,
 } from '@/api/review'
 
 const router = useRouter()
@@ -227,7 +222,6 @@ const savingData = ref(false)
 const mergeQueueLoading = ref(false)
 const nodes = ref<GraphNode[]>([])
 const edges = ref<GraphEdge[]>([])
-const stats = ref<ReviewStats | null>(null)
 const entityTypeOptions = ref<string[]>([])
 const siteOptions = ref<string[]>([])
 
@@ -238,19 +232,18 @@ const filterSourceSite = ref('')
 const filterReviewStatus = ref<string[]>(['pending', 'approved'])
 const filterDocUuid = ref('')
 
-// ── 本地筛选（客户端过滤，不请求 API）──────────────────────────────────
-const filterName = ref('')                    // 实体名模糊搜索
-const focusNodeId = ref<number | null>(null)  // 邻接模式：只看该节点 + 1-hop 邻居
-const filterIsolated = ref('all')             // all / hide / only
-const filterVerified = ref('all')             // all / yes / no
-const filterMinConf = ref(0)                  // 最低置信度
+// ── 本地筛选 ────────────────────────────────────────────────────────────
+const filterName = ref('')
+const focusNodeId = ref<number | null>(null)
+const filterIsolated = ref('all')
+const filterVerified = ref('all')
+const filterMinConf = ref(0)
 
 const focusNodeName = computed(() => {
   if (focusNodeId.value === null) return ''
   return nodes.value.find(n => n.id === focusNodeId.value)?.entity_name || ''
 })
 
-// 每个节点的度数（用于孤立点判断）
 const nodeDegrees = computed(() => {
   const deg: Record<number, number> = {}
   for (const n of nodes.value) deg[n.id] = 0
@@ -261,7 +254,6 @@ const nodeDegrees = computed(() => {
   return deg
 })
 
-// 邻接模式的邻居集合
 const neighborSet = computed(() => {
   if (focusNodeId.value === null) return null
   const s = new Set<number>([focusNodeId.value])
@@ -272,16 +264,13 @@ const neighborSet = computed(() => {
   return s
 })
 
-// 过滤后的可见节点 ID 集合
 const visibleNodeIds = computed(() => {
   let result = new Set<number>(nodes.value.map(n => n.id))
 
-  // 邻接模式
   if (neighborSet.value !== null) {
     result = new Set([...result].filter(id => neighborSet.value!.has(id)))
   }
 
-  // 实体名搜索
   if (filterName.value.trim()) {
     const q = filterName.value.trim().toLowerCase()
     result = new Set(
@@ -292,21 +281,18 @@ const visibleNodeIds = computed(() => {
     )
   }
 
-  // 孤立点
   if (filterIsolated.value === 'hide') {
     result = new Set([...result].filter(id => (nodeDegrees.value[id] || 0) > 0))
   } else if (filterIsolated.value === 'only') {
     result = new Set([...result].filter(id => (nodeDegrees.value[id] || 0) === 0))
   }
 
-  // 验证状态
   if (filterVerified.value === 'yes') {
     result = new Set([...result].filter(id => nodes.value.find(n => n.id === id)?.is_verified))
   } else if (filterVerified.value === 'no') {
     result = new Set([...result].filter(id => !nodes.value.find(n => n.id === id)?.is_verified))
   }
 
-  // 置信度
   if (filterMinConf.value > 0) {
     result = new Set([...result].filter(id => {
       const n = nodes.value.find(nd => nd.id === id)
@@ -329,7 +315,7 @@ const visibleEdgeCount = computed(() => visibleEdges.value.length)
 // ── 合并队列 ─────────────────────────────────────────────────────────────
 
 const showMergeDrawer = ref(false)
-const mergeQueue = ref<MergeQueueItem[]>([])
+const mergeQueueGroups = ref<MergeQueueGroup[]>([])
 
 async function openMergeQueue() {
   showMergeDrawer.value = true
@@ -340,10 +326,8 @@ async function loadMergeQueue() {
   mergeQueueLoading.value = true
   try {
     const res = await getMergeQueue(50)
-    mergeQueue.value = res.items
-  } catch {
-    // ignore
-  } finally {
+    mergeQueueGroups.value = res.groups
+  } catch { /* ignore */ } finally {
     mergeQueueLoading.value = false
   }
 }
@@ -352,7 +336,11 @@ async function doResolveMerge(mergeId: number, resolution: string) {
   try {
     await resolveMerge(mergeId, '审核员', resolution)
     ElMessage.success(resolution === 'accept_new' ? '已采用新值' : '已保留现有值')
-    mergeQueue.value = mergeQueue.value.filter(m => m.id !== mergeId)
+    // 从 groups 中移除已解决的 conflict
+    for (const g of mergeQueueGroups.value) {
+      g.conflicts = g.conflicts.filter(c => c.merge_id !== mergeId)
+    }
+    mergeQueueGroups.value = mergeQueueGroups.value.filter(g => g.conflicts.length > 0)
   } catch (e: any) {
     ElMessage.error('操作失败: ' + (e.message || ''))
   }
@@ -376,328 +364,239 @@ const relatedEdges = computed(() =>
     : []
 )
 
-// ── Canvas 力导向图 ──────────────────────────────────────────────────────
+// ── Cytoscape ────────────────────────────────────────────────────────────
 
-const canvasRef = ref<HTMLCanvasElement | null>(null)
-const canvasWrapperRef = ref<HTMLDivElement | null>(null)
+const cyContainerRef = ref<HTMLDivElement | null>(null)
+let cy: Core | null = null
 
-interface SimNode {
-  id: number
-  x: number
-  y: number
-  vx: number
-  vy: number
-  radius: number
-  color: string
-  status: string
+function nodeCssClass(status: string): string {
+  if (status === 'approved' || status === 'auto_approved') return 'approved'
+  if (status === 'rejected') return 'rejected'
+  return 'pending'
 }
 
-interface SimEdge {
-  source: number
-  target: number
-  status: string
+function transformToCyData(nodes: GraphNode[], edges: GraphEdge[]) {
+  const nodeIdSet = new Set(nodes.map(n => n.id))
+
+  return {
+    nodes: nodes.map(n => ({
+      data: {
+        id: String(n.id),
+        label: (n.is_verified ? '✓ ' : '') + (n.entity_name || '').slice(0, 14),
+        entity_type: n.entity_type,
+        entity_name: n.entity_name,
+        review_status: n.review_status,
+        confidence_score: n.confidence_score,
+        is_verified: n.is_verified,
+        source_doc_uuid: n.source_doc_uuid,
+        source_site: n.source_site,
+        dict_id: n.dict_id,
+        entity_data: n.entity_data,
+      },
+      classes: nodeCssClass(n.review_status),
+    })),
+    edges: edges
+      .filter(e => nodeIdSet.has(e.from_entity_id!) && nodeIdSet.has(e.to_entity_id!))
+      .map(e => ({
+        data: {
+          id: String(e.id),
+          source: String(e.from_entity_id),
+          target: String(e.to_entity_id),
+          relation_type: e.relation_type,
+          review_status: e.review_status,
+          relation_props: e.relation_props,
+          source_doc_uuid: e.source_doc_uuid,
+        },
+        classes: nodeCssClass(e.review_status),
+      })),
+  }
 }
 
-let simNodes: SimNode[] = []
-let simEdges: SimEdge[] = []
-let animFrameId = 0
-let transform = { x: 0, y: 0, scale: 1 }
-let dragging: { node: SimNode; ox: number; oy: number } | null = null
-let hoveredNode: SimNode | null = null
-let isShiftDown = false
-let canvasWidth = 800
-let canvasHeight = 600
+const cyStyles = [
+  // Base node
+  { selector: 'node', style: {
+    'shape': 'ellipse',
+    'label': 'data(label)',
+    'text-valign': 'bottom',
+    'text-halign': 'center',
+    'font-size': '11px',
+    'font-family': 'system-ui, -apple-system, sans-serif',
+    'color': '#303133',
+    'text-margin-y': 5,
+    'text-max-width': '110px',
+    'text-wrap': 'ellipsis',
+    'border-width': 2.5,
+    'border-color': '#fff',
+    'width': 'mapData(confidence_score, 0, 1, 28, 48)',
+    'height': 'mapData(confidence_score, 0, 1, 28, 48)',
+    'background-opacity': 0.9,
+    'transition-property': 'background-color, border-color, border-width, border-opacity',
+    'transition-duration': 180,
+  }},
+  // Status colors
+  { selector: 'node.pending', style: {
+    'background-color': '#f0a841',
+    'background-blacken': -0.08,
+  }},
+  { selector: 'node.approved', style: {
+    'background-color': '#14b8a6',
+    'background-blacken': -0.08,
+  }},
+  { selector: 'node.rejected', style: {
+    'background-color': '#e85d75',
+    'background-blacken': -0.08,
+  }},
+  // Selected state
+  { selector: 'node:selected', style: {
+    'border-color': '#3b82f6',
+    'border-width': 4,
+    'border-opacity': 1,
+    'shadow-color': '#3b82f6',
+    'shadow-blur': 16,
+    'shadow-opacity': 0.45,
+    'shadow-offset-x': 0,
+    'shadow-offset-y': 0,
+  }},
+  // Hover state
+  { selector: 'node:active', style: {
+    'border-color': '#60a5fa',
+    'border-width': 3,
+    'border-opacity': 0.9,
+    'overlay-opacity': 0.12,
+    'overlay-color': '#3b82f6',
+    'overlay-padding': 8,
+  }},
+  // Base edge
+  { selector: 'edge', style: {
+    'width': 1.6,
+    'curve-style': 'bezier',
+    'target-arrow-shape': 'triangle',
+    'arrow-scale': 0.8,
+    'line-opacity': 0.7,
+    'transition-property': 'line-color, line-style, width, line-opacity',
+    'transition-duration': 180,
+  }},
+  { selector: 'edge.pending', style: {
+    'line-color': '#f0a841',
+    'line-style': 'dashed',
+    'line-dash-pattern': [6, 4],
+    'target-arrow-color': '#f0a841',
+  }},
+  { selector: 'edge.approved', style: {
+    'line-color': '#14b8a6',
+    'line-style': 'solid',
+    'target-arrow-color': '#14b8a6',
+  }},
+  { selector: 'edge.rejected', style: {
+    'line-color': '#e85d75',
+    'line-style': 'dashed',
+    'line-dash-pattern': [4, 4],
+    'target-arrow-color': '#e85d75',
+    'line-opacity': 0.4,
+  }},
+  { selector: 'edge:selected', style: {
+    'width': 3,
+    'line-opacity': 1,
+  }},
+]
 
-function initSimulation() {
-  const w = canvasWidth
-  const h = canvasHeight
-  const cx = w / 2
-  const cy = h / 2
+const layoutOptions = {
+  name: 'cose',
+  nodeRepulsion: 6000,
+  edgeElasticity: 0.4,
+  idealEdgeLength: 120,
+  gravity: 0.3,
+  numIter: 800,
+  initialTemp: 150,
+  coolingFactor: 0.95,
+  refresh: 15,
+  animate: 'during' as const,
+  animationDuration: 1000,
+  fit: true,
+  padding: 60,
+  randomize: false,
+}
 
-  // 初始化节点位置（圆形排布 + 随机偏移）
-  simNodes = nodes.value.map((n, i) => {
-    const angle = (2 * Math.PI * i) / Math.max(nodes.value.length, 1)
-    const r = Math.min(w, h) * 0.35
-    return {
-      id: n.id,
-      x: cx + r * Math.cos(angle) + (Math.random() - 0.5) * 80,
-      y: cy + r * Math.sin(angle) + (Math.random() - 0.5) * 80,
-      vx: 0,
-      vy: 0,
-      radius: 12 + Math.min(n.confidence_score * 10, 12),
-      color: nodeColor(n.review_status),
-      status: n.review_status,
+function initCy(container: HTMLDivElement): Core {
+  return cytoscape({
+    container,
+    style: cyStyles as any,
+    wheelSensitivity: 0.3,
+    minZoom: 0.08,
+    maxZoom: 5,
+    boxSelectionEnabled: true,
+    autounselectify: false,
+    selectionType: 'additive',
+    layout: layoutOptions as any,
+    // subtle background grid via canvas style
+    styleEnabled: true,
+  })
+}
+
+function applyFiltersToGraph() {
+  if (!cy) return
+  const visSet = visibleNodeIds.value
+  const visEdgeIds = new Set(visibleEdges.value.map(e => e.id))
+
+  cy.batch(() => {
+    cy!.nodes().forEach(n => {
+      n.style('display', visSet.has(Number(n.id())) ? 'element' : 'none')
+    })
+    cy!.edges().forEach(e => {
+      e.style('display', visEdgeIds.has(Number(e.id())) ? 'element' : 'none')
+    })
+  })
+}
+
+function wireCyEvents() {
+  if (!cy) return
+
+  cy.on('tap', 'node', (evt: EventObject) => {
+    const node = evt.target
+    const nodeId = Number(node.id())
+    const nodeData = nodes.value.find(n => n.id === nodeId)
+    if (!nodeData) return
+
+    if ((evt.originalEvent as MouseEvent)?.shiftKey) {
+      // Shift+click: cytoscape handles multi-select natively with selectionType:'additive'
+      // Sync our selectedNodeIds with cy selection
+      syncSelectionFromCy()
+    } else {
+      // Single click: show detail, cy auto-deselects others with default behavior
+      detailNode.value = nodeData
     }
   })
 
-  // 构建邻接表
-  const nodeIdSet = new Set(simNodes.map(n => n.id))
-  simEdges = edges.value
-    .filter(e => nodeIdSet.has(e.from_entity_id!) && nodeIdSet.has(e.to_entity_id!))
-    .map(e => ({
-      source: e.from_entity_id!,
-      target: e.to_entity_id!,
-      status: e.review_status,
-    }))
-}
-
-function nodeColor(status: string): string {
-  if (status === 'approved' || status === 'auto_approved') return '#0e9e8e'
-  if (status === 'rejected') return '#c0392b'
-  return '#e6a23c' // pending
-}
-
-function tick() {
-  if (!simNodes.length) return
-
-  // 力参数
-  const repulsion = 800
-  const attraction = 0.005
-  const damping = 0.85
-  const centerForce = 0.01
-  const w = canvasWidth
-  const h = canvasHeight
-  const cx = w / 2
-  const cy = h / 2
-
-  for (const n of simNodes) {
-    if (dragging && dragging.node === n) continue
-
-    // 中心引力
-    n.vx += (cx - n.x) * centerForce
-    n.vy += (cy - n.y) * centerForce
-
-    // 节点间斥力
-    for (const m of simNodes) {
-      if (n === m) continue
-      let dx = n.x - m.x
-      let dy = n.y - m.y
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1
-      const force = repulsion / (dist * dist)
-      n.vx += (dx / dist) * force
-      n.vy += (dy / dist) * force
+  cy.on('tap', (evt: EventObject) => {
+    if (evt.target === cy) {
+      // Canvas background clicked
+      selectedNodeIds.clear()
     }
-  }
+  })
 
-  // 边引力
-  for (const e of simEdges) {
-    const src = simNodes.find(n => n.id === e.source)
-    const tgt = simNodes.find(n => n.id === e.target)
-    if (!src || !tgt) continue
-    const dx = tgt.x - src.x
-    const dy = tgt.y - src.y
-    const dist = Math.sqrt(dx * dx + dy * dy) || 1
-    const force = dist * attraction
-    const fx = (dx / dist) * force
-    const fy = (dy / dist) * force
-    if (!dragging || dragging.node !== src) { src.vx += fx; src.vy += fy }
-    if (!dragging || dragging.node !== tgt) { tgt.vx -= fx; tgt.vy -= fy }
-  }
+  cy.on('select unselect', () => {
+    syncSelectionFromCy()
+  })
 
-  // 应用速度 + 阻尼 + 边界约束
-  for (const n of simNodes) {
-    if (dragging && dragging.node === n) continue
-    n.vx *= damping
-    n.vy *= damping
-    n.x += n.vx
-    n.y += n.vy
-    n.x = Math.max(n.radius, Math.min(w - n.radius, n.x))
-    n.y = Math.max(n.radius, Math.min(h - n.radius, n.y))
-  }
-}
-
-function draw() {
-  const canvas = canvasRef.value
-  if (!canvas) return
-  const ctx = canvas.getContext('2d')!
-  const { x, y, scale } = transform
-
-  ctx.clearRect(0, 0, canvasWidth, canvasHeight)
-  ctx.save()
-  ctx.translate(x, y)
-  ctx.scale(scale, scale)
-
-  const visSet = visibleNodeIds.value
-  const visEdges = visibleEdges.value
-
-  // 边（仅两端都可见的）
-  for (const e of visEdges) {
-    const src = simNodes.find(n => n.id === e.from_entity_id)
-    const tgt = simNodes.find(n => n.id === e.to_entity_id)
-    if (!src || !tgt) continue
-    if (!visSet.has(src.id) || !visSet.has(tgt.id)) continue
-    ctx.beginPath()
-    ctx.moveTo(src.x, src.y)
-    ctx.lineTo(tgt.x, tgt.y)
-    ctx.strokeStyle = e.review_status === 'approved' || e.review_status === 'auto_approved' ? '#0e9e8e' : '#e6a23c'
-    ctx.lineWidth = 1.2 / scale
-    if (e.review_status === 'pending') ctx.setLineDash([4 / scale, 3 / scale])
-    else ctx.setLineDash([])
-    ctx.stroke()
-  }
-  ctx.setLineDash([])
-
-  // 节点（仅可见的）
-  for (const n of simNodes) {
-    if (!visSet.has(n.id)) continue
-
-    const isSelected = selectedNodeIds.has(n.id)
-    const isHovered = hoveredNode === n
-    const isDetail = detailNode.value?.id === n.id
-    const isFocus = focusNodeId.value === n.id
-
-    // 选中/悬浮/焦点光晕
-    if (isSelected || isHovered || isDetail) {
-      ctx.beginPath()
-      ctx.arc(n.x, n.y, n.radius + 5, 0, Math.PI * 2)
-      ctx.fillStyle = isDetail || isFocus ? 'rgba(64,158,255,0.35)' : 'rgba(64,158,255,0.15)'
-      ctx.fill()
-    }
-
-    // 节点圆
-    ctx.beginPath()
-    ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2)
-    ctx.fillStyle = n.color
-    ctx.fill()
-    ctx.strokeStyle = isFocus ? '#409EFF' : '#fff'
-    ctx.lineWidth = isFocus ? 2.5 / scale : 1.5 / scale
-    ctx.stroke()
-
-    // 已验证标记（小对勾）
-    const nodeData = nodes.value.find(nd => nd.id === n.id)
-    if (nodeData?.is_verified) {
-      ctx.fillStyle = '#fff'
-      ctx.font = `${10 / scale}px sans-serif`
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText('✓', n.x, n.y)
-    }
-
-    // 标签
-    const label = nodeData?.entity_name || ''
-    if (label && scale > 0.3) {
-      ctx.fillStyle = '#303133'
-      ctx.font = `${11 / scale}px sans-serif`
-      ctx.textAlign = 'center'
-      ctx.fillText(label.slice(0, 12), n.x, n.y + n.radius + 12 / scale)
-    }
-  }
-
-  ctx.restore()
-}
-
-function animate() {
-  tick()
-  draw()
-  animFrameId = requestAnimationFrame(animate)
-}
-
-// ── Canvas 交互 ──────────────────────────────────────────────────────────
-
-function canvasPos(e: MouseEvent): { x: number; y: number } {
-  const rect = canvasRef.value!.getBoundingClientRect()
-  return {
-    x: (e.clientX - rect.left - transform.x) / transform.scale,
-    y: (e.clientY - rect.top - transform.y) / transform.scale,
-  }
-}
-
-function hitTest(sx: number, sy: number): SimNode | null {
-  const visSet = visibleNodeIds.value
-  for (let i = simNodes.length - 1; i >= 0; i--) {
-    const n = simNodes[i]
-    if (!visSet.has(n.id)) continue
-    const dx = n.x - sx
-    const dy = n.y - sy
-    if (Math.sqrt(dx * dx + dy * dy) <= n.radius + 4) return n
-  }
-  return null
-}
-
-function onMouseDown(e: MouseEvent) {
-  const pos = canvasPos(e)
-  const hit = hitTest(pos.x, pos.y)
-
-  if (hit) {
-    if (e.shiftKey) {
-      // Shift+点击：多选
-      if (selectedNodeIds.has(hit.id)) selectedNodeIds.delete(hit.id)
-      else selectedNodeIds.add(hit.id)
-    } else {
-      // 点击节点
-      selectNode(hit.id)
-    }
-    dragging = { node: hit, ox: hit.x - pos.x, oy: hit.y - pos.y }
-  } else {
-    // 点击空白：拖拽画布
-    dragging = { node: null as any, ox: e.clientX - transform.x, oy: e.clientY - transform.y }
-  }
-}
-
-function onMouseMove(e: MouseEvent) {
-  const pos = canvasPos(e)
-
-  if (dragging) {
-    if (dragging.node) {
-      dragging.node.x = pos.x + dragging.ox
-      dragging.node.y = pos.y + dragging.oy
-    } else {
-      transform.x = e.clientX - dragging.ox
-      transform.y = e.clientY - dragging.oy
-    }
-  } else {
-    hoveredNode = hitTest(pos.x, pos.y)
-    const canvas = canvasRef.value!
-    canvas.style.cursor = hoveredNode ? 'pointer' : 'default'
-  }
-}
-
-function onMouseUp(_e: MouseEvent) {
-  dragging = null
-}
-
-function onWheel(e: WheelEvent) {
-  e.preventDefault()
-  const delta = e.deltaY > 0 ? 0.9 : 1.1
-  const newScale = transform.scale * delta
-  if (newScale < 0.1 || newScale > 5) return
-  // 以鼠标位置为中心缩放
-  const rect = canvasRef.value!.getBoundingClientRect()
-  const mx = e.clientX - rect.left
-  const my = e.clientY - rect.top
-  transform.x = mx - (mx - transform.x) * (newScale / transform.scale)
-  transform.y = my - (my - transform.y) * (newScale / transform.scale)
-  transform.scale = newScale
-}
-
-function onDblClick(e: MouseEvent) {
-  const pos = canvasPos(e)
-  const hit = hitTest(pos.x, pos.y)
-  if (hit) {
-    // 双击展开：以该节点为中心，重新加载关联节点
-    const nodeData = nodes.value.find(n => n.id === hit.id)
+  cy.on('dbltap', 'node', (evt: EventObject) => {
+    const nodeId = Number(evt.target.id())
+    const nodeData = nodes.value.find(n => n.id === nodeId)
     if (nodeData?.source_doc_uuid) {
       filterDocUuid.value = nodeData.source_doc_uuid
       reloadGraph()
     }
-  }
+  })
 }
 
-// ── 节点选择与详情 ──────────────────────────────────────────────────────
-
-function selectNode(id: number) {
-  const node = nodes.value.find(n => n.id === id)
-  if (node) {
-    detailNode.value = node
-    // 复制 entity_data 到可编辑对象
-    Object.keys(editableData).forEach(k => delete editableData[k])
-    Object.assign(editableData, JSON.parse(JSON.stringify(node.entity_data || {})))
-    if (!isShiftDown) {
-      selectedNodeIds.clear()
-      selectedNodeIds.add(id)
-    }
-  }
+function syncSelectionFromCy() {
+  if (!cy) return
+  selectedNodeIds.clear()
+  cy.nodes(':selected').forEach(n => {
+    selectedNodeIds.add(Number(n.id()))
+  })
 }
+
+// ── 工具函数 ────────────────────────────────────────────────────────────
 
 function getNodeName(id: number | null): string {
   if (!id) return '?'
@@ -719,17 +618,12 @@ async function reloadGraph() {
     if (filterSourceSite.value) params.source_site = filterSourceSite.value
     if (filterDocUuid.value) params.source_doc_uuid = filterDocUuid.value
 
-    const [graphRes, statsRes] = await Promise.all([
-      getReviewGraph(params),
-      getReviewStats(),
-    ])
+    const graphRes = await getReviewGraph(params)
     nodes.value = graphRes.nodes
     edges.value = graphRes.edges
-    stats.value = statsRes
 
-    // 提取筛选选项
-    entityTypeOptions.value = Object.keys(statsRes.by_type).sort()
-    siteOptions.value = Object.keys(statsRes.by_site).sort()
+    entityTypeOptions.value = graphRes.entity_types || []
+    siteOptions.value = graphRes.source_sites || []
 
     detailNode.value = null
     Object.keys(editableData).forEach(k => delete editableData[k])
@@ -737,7 +631,14 @@ async function reloadGraph() {
     focusNodeId.value = null
 
     await nextTick()
-    initSimulation()
+
+    if (cy) {
+      const data = transformToCyData(nodes.value, edges.value)
+      cy.elements().remove()
+      cy.add(data.nodes)
+      cy.add(data.edges)
+      cy.layout(layoutOptions as any).run()
+    }
   } finally {
     loading.value = false
   }
@@ -747,33 +648,42 @@ async function reloadGraph() {
 
 async function doApproveEntity(id: number) {
   await approveEntity(id, '审核员')
-  ElMessage.success('已通过')
   updateNodeStatus(id, 'approved')
+  ElMessage.success('已通过')
 }
 
 async function doRejectEntity(id: number) {
   await rejectEntity(id, '审核员')
-  ElMessage.warning('已拒绝')
   updateNodeStatus(id, 'rejected')
+  ElMessage.warning('已拒绝')
 }
 
 function updateNodeStatus(id: number, status: string) {
   const node = nodes.value.find(n => n.id === id)
   if (node) node.review_status = status
-  const simNode = simNodes.find(n => n.id === id)
-  if (simNode) { simNode.status = status; simNode.color = nodeColor(status) }
   if (detailNode.value?.id === id) detailNode.value.review_status = status
+
+  if (cy) {
+    const ele = cy.getElementById(String(id))
+    if (ele.length) {
+      ele.removeClass('pending approved rejected').addClass(nodeCssClass(status))
+      ele.data('review_status', status)
+    }
+  }
 }
 
 async function doApproveRelation(id: number) {
   await approveRelation(id, '审核员')
   const edge = edges.value.find(e => e.id === id)
   if (edge) edge.review_status = 'approved'
-  const simEdge = simEdges.find(e => {
-    const r = edges.value.find(re => re.id === id)
-    return r && e.source === r.from_entity_id && e.target === r.to_entity_id
-  })
-  if (simEdge) simEdge.status = 'approved'
+
+  if (cy) {
+    const ele = cy.getElementById(String(id))
+    if (ele.length) {
+      ele.removeClass('pending approved rejected').addClass('approved')
+      ele.data('review_status', 'approved')
+    }
+  }
   ElMessage.success('关系已通过')
 }
 
@@ -781,6 +691,14 @@ async function doRejectRelation(id: number) {
   await rejectRelation(id, '审核员')
   const edge = edges.value.find(e => e.id === id)
   if (edge) edge.review_status = 'rejected'
+
+  if (cy) {
+    const ele = cy.getElementById(String(id))
+    if (ele.length) {
+      ele.removeClass('pending approved rejected').addClass('rejected')
+      ele.data('review_status', 'rejected')
+    }
+  }
   ElMessage.warning('关系已拒绝')
 }
 
@@ -790,7 +708,6 @@ async function saveEntityData() {
   try {
     const rawData: Record<string, any> = {}
     for (const [k, v] of Object.entries(editableData)) {
-      // 尝试解析数组
       if (typeof v === 'string' && v.includes(',')) {
         const arr = v.split(',').map(s => s.trim()).filter(Boolean)
         rawData[k] = arr.length > 1 ? arr : v
@@ -813,9 +730,10 @@ async function saveEntityData() {
 async function batchApproveSelected() {
   if (selectedNodeIds.size === 0) return
   try {
-    await Promise.all([...selectedNodeIds].map(id => approveEntity(id, '审核员')))
-    for (const id of selectedNodeIds) updateNodeStatus(id, 'approved')
-    ElMessage.success(`已批量通过 ${selectedNodeIds.size} 个实体`)
+    const ids = [...selectedNodeIds]
+    await Promise.all(ids.map(id => approveEntity(id, '审核员')))
+    for (const id of ids) updateNodeStatus(id, 'approved')
+    ElMessage.success(`已批量通过 ${ids.length} 个实体`)
     selectedNodeIds.clear()
   } catch (e: any) {
     ElMessage.error('批量通过失败')
@@ -825,9 +743,10 @@ async function batchApproveSelected() {
 async function batchRejectSelected() {
   if (selectedNodeIds.size === 0) return
   try {
-    await Promise.all([...selectedNodeIds].map(id => rejectEntity(id, '审核员')))
-    for (const id of selectedNodeIds) updateNodeStatus(id, 'rejected')
-    ElMessage.warning(`已批量拒绝 ${selectedNodeIds.size} 个实体`)
+    const ids = [...selectedNodeIds]
+    await Promise.all(ids.map(id => rejectEntity(id, '审核员')))
+    for (const id of ids) updateNodeStatus(id, 'rejected')
+    ElMessage.warning(`已批量拒绝 ${ids.length} 个实体`)
     selectedNodeIds.clear()
   } catch (e: any) {
     ElMessage.error('批量拒绝失败')
@@ -840,14 +759,6 @@ function showNeighbors(id: number) {
 
 function goToDocument(uuid: string) {
   router.push(`/documents/${uuid}`)
-}
-
-function resetLocalFilters() {
-  filterName.value = ''
-  focusNodeId.value = null
-  filterIsolated.value = 'all'
-  filterVerified.value = 'all'
-  filterMinConf.value = 0
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────────────
@@ -868,38 +779,42 @@ function statusLabel(s: string): string {
   return map[s] || s
 }
 
-// ── 生命周期 ────────────────────────────────────────────────────────────
-
-function onKeyDown(e: KeyboardEvent) { isShiftDown = e.shiftKey }
-function onKeyUp(e: KeyboardEvent) { isShiftDown = e.shiftKey }
 function onResize() {
-  if (!canvasWrapperRef.value || !canvasRef.value) return
-  const rect = canvasWrapperRef.value.getBoundingClientRect()
-  canvasWidth = rect.width
-  canvasHeight = rect.height
-  const dpr = window.devicePixelRatio || 1
-  canvasRef.value.width = canvasWidth * dpr
-  canvasRef.value.height = canvasHeight * dpr
-  canvasRef.value.style.width = canvasWidth + 'px'
-  canvasRef.value.style.height = canvasHeight + 'px'
-  const ctx = canvasRef.value.getContext('2d')!
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  if (cy && cyContainerRef.value) {
+    const { width, height } = cyContainerRef.value.getBoundingClientRect()
+    if (width > 0 && height > 0) {
+      cy.resize().fit(undefined, 30)
+    }
+  }
 }
 
+// ── 生命周期 ────────────────────────────────────────────────────────────
+
 onMounted(async () => {
-  window.addEventListener('keydown', onKeyDown)
-  window.addEventListener('keyup', onKeyUp)
-  window.addEventListener('resize', onResize)
-  onResize()
   await Promise.all([reloadGraph(), loadMergeQueue()])
-  animFrameId = requestAnimationFrame(animate)
+
+  await nextTick()
+  if (cyContainerRef.value && !cy) {
+    cy = initCy(cyContainerRef.value)
+    wireCyEvents()
+    // Load initial data
+    const data = transformToCyData(nodes.value, edges.value)
+    cy.add(data.nodes)
+    cy.add(data.edges)
+    cy.layout(layoutOptions as any).run()
+  }
+
+  window.addEventListener('resize', onResize)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('keydown', onKeyDown)
-  window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('resize', onResize)
-  cancelAnimationFrame(animFrameId)
+  cy?.destroy()
+  cy = null
+})
+
+watch([visibleNodeIds, visibleEdges], () => {
+  applyFiltersToGraph()
 })
 
 watch(detailNode, (node) => {
@@ -913,7 +828,6 @@ watch(detailNode, (node) => {
 <style scoped>
 .graph-review { height: calc(100vh - 40px); display: flex; flex-direction: column; padding: 0 16px; }
 
-/* 筛选栏 */
 .filter-bar { margin-bottom: 8px; flex-shrink: 0; }
 .filter-bar :deep(.el-card__body) { padding: 10px 16px; }
 .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -925,29 +839,33 @@ watch(detailNode, (node) => {
 .local-filter :deep(.el-input__wrapper) { background: #f0f9eb; }
 .node-count { font-size: 13px; color: #909399; white-space: nowrap; }
 
-/* 主区域 */
 .main-row { flex: 1; overflow: hidden; }
 
-/* 图谱 */
 .graph-card { height: 100%; display: flex; flex-direction: column; }
 .graph-card :deep(.el-card__body) { flex: 1; display: flex; flex-direction: column; padding: 8px 12px 12px; overflow: hidden; }
 .graph-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #606266; margin-bottom: 6px; flex-shrink: 0; }
 .legend-item { display: flex; align-items: center; gap: 4px; }
 .legend-tip { color: #c0c4cc; margin-left: auto; }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.dot.pending { background: #e6a23c; }
-.dot.approved { background: #0e9e8e; }
-.dot.rejected { background: #c0392b; }
-.canvas-wrapper { flex: 1; overflow: hidden; background: #fafbfc; border-radius: 6px; border: 1px solid #ebeef5; }
-.canvas-wrapper canvas { display: block; }
+.dot.pending { background: #f0a841; }
+.dot.approved { background: #14b8a6; }
+.dot.rejected { background: #e85d75; }
 
-/* 详情面板 */
+.cy-container {
+  flex: 1;
+  background: #f8f9fb;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+}
+
 .detail-panel { height: 100%; overflow-y: auto; }
 .detail-header { display: flex; justify-content: space-between; align-items: center; }
 .field-value { font-weight: 500; }
 .empty-hint { color: #c0c4cc; font-size: 13px; }
 
-/* 关联关系 */
 .related-relations { max-height: 200px; overflow-y: auto; }
 .rel-item { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .rel-pending { border-left: 3px solid #e6a23c; background: #fef8ee; }
@@ -958,7 +876,6 @@ watch(detailNode, (node) => {
 
 .detail-actions { display: flex; gap: 8px; }
 
-/* 合并队列 */
 .merge-queue-panel { padding: 0 4px; }
 .merge-card {
   border: 1px solid #ebeef5; border-radius: 8px; padding: 12px; margin-bottom: 10px;
@@ -975,7 +892,6 @@ watch(detailNode, (node) => {
 }
 .merge-card-actions { display: flex; gap: 8px; margin-top: 10px; }
 
-/* 响应式 */
 @media (max-width: 1400px) {
   .filter-row { flex-direction: column; align-items: flex-start; }
   .filter-right { margin-left: 0; width: 100%; }

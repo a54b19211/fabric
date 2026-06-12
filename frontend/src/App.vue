@@ -49,16 +49,18 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Document, Connection } from '@element-plus/icons-vue'
+import { Document, Connection, Link, Setting } from '@element-plus/icons-vue'
 
 // 默认收起，鼠标移入侧边栏展开
 const collapsed = ref(true)
 
 const navItems = [
-  { path: '/documents',    label: '文档列表', icon: Document },
-  { path: '/graph-review', label: '图谱审核', icon: Connection },
-  { path: '/neo4j',        label: 'Neo4j 图推送', icon: Connection },
-  { path: '/weknora',      label: 'WeKnora 同步', icon: Connection },
+  { path: '/documents',              label: '文档列表',     icon: Document },
+  { path: '/graph-review',           label: '图谱审核',     icon: Connection },
+  { path: '/review/merge-workbench', label: '实体身份合并', icon: Link },
+  { path: '/review/field-conflict',  label: '属性冲突处理', icon: Setting },
+  { path: '/neo4j',                  label: 'Neo4j 图推送', icon: Connection },
+  { path: '/weknora',                label: 'WeKnora 同步', icon: Connection },
 ]
 </script>
 

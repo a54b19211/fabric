@@ -32,8 +32,8 @@ def extract_cde_detail(page) -> dict:
             if m2:
                 result["publish_date"] = m2.group()
 
-    # 正文：div.new_detail_content
-    body_els = page.css("div.new_detail_content")
+    # 正文：div.new_detail_content（新版）或 div.new_detail_content_old（旧版）
+    body_els = page.css("div.new_detail_content") or page.css("div.new_detail_content_old")
     body_el = body_els[0] if body_els else None
     if body_el:
         result["body_html"] = body_el.html_content

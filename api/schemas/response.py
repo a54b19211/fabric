@@ -209,21 +209,37 @@ class WorkerStatsResponse(BaseModel):
 
 # ── Merge Queue ─────────────────────────────────────────────────────────
 
-class MergeQueueItem(BaseModel):
-    id: int
-    source_entity_id: int
-    target_dict_id: int
+class MergeSourceInfo(BaseModel):
+    entity_id: int = 0
+    source_doc_uuid: str = ""
+    source_site: str = ""
+
+
+class MergeQueueConflict(BaseModel):
+    merge_id: int
     field_name: str
     existing_value: Any = None
     new_value: Any = None
+    source_entity_id: int = 0
     source_site: str = ""
-    resolution: str = ""
-    created_at: Optional[str] = None
+    source_doc_uuid: str = ""
+    existing_source_doc_uuid: str = ""
+    existing_sources: list[MergeSourceInfo] = []
+    new_sources: list[MergeSourceInfo] = []
+
+
+class MergeQueueGroup(BaseModel):
+    dict_id: int
+    entity_type: str = ""
+    entity_name: str = ""
+    canonical_data: dict = {}
+    canonical_source: str = ""
+    conflicts: list[MergeQueueConflict] = []
 
 
 class MergeQueueListResponse(BaseModel):
-    total: int
-    items: list[MergeQueueItem]
+    total_groups: int
+    groups: list[MergeQueueGroup]
 
 
 # ── WeKnora Graph Sync ──────────────────────────────────────────────────
@@ -278,6 +294,8 @@ class GraphEdge(BaseModel):
 class GraphResponse(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    entity_types: list[str] = []
+    source_sites: list[str] = []
 
 
 class StatusCounts(BaseModel):
@@ -299,3 +317,70 @@ class ReExtractResponse(BaseModel):
     success: bool
     uuid: str
     message: str = ""
+
+
+# ── Entity Merge Workbench ──────────────────────────────────────────────
+
+class SearchEntityItem(BaseModel):
+    dict_id: int
+    entity_type: str
+    entity_name: str
+    canonical_source: str = ""
+    aliases: list[str] = []
+    extracted_entities_count: int = 0
+
+
+class CompareEntityInfo(BaseModel):
+    dict_id: int
+    entity_type: str
+    entity_name: str
+    canonical_data: dict = {}
+    canonical_source: str = ""
+    aliases: list[str] = []
+    extracted_entities_count: int = 0
+
+
+class FieldDiffItem(BaseModel):
+    field: str
+    values: dict[str, Any] = {}  # dict_id → value
+    conflict: bool
+
+
+class CompareEntitiesResponse(BaseModel):
+    entities: list[CompareEntityInfo]
+    field_diff: list[FieldDiffItem]
+
+
+class MergeEntitiesResponse(BaseModel):
+    success: bool
+    merge_log_id: int = 0
+    keeper_dict_id: int
+    merged_count: int = 0
+    migrated_extractions: int = 0
+    migrated_aliases: int = 0
+    migrated_relations: int = 0
+
+
+class RollbackMergeResponse(BaseModel):
+    success: bool
+    merge_log_id: int = 0
+    restored_dict_ids: list[int] = []
+    restored_extractions: int = 0
+    restored_aliases: int = 0
+    restored_relations: int = 0
+
+
+class MergeLogItem(BaseModel):
+    id: int
+    keeper_dict_id: int
+    absorbed_dict_ids: list[int] = []
+    merge_type: str = ""
+    reviewer: str = ""
+    note: str = ""
+    is_rolled_back: bool = False
+    created_at: Optional[str] = None
+
+
+class MergeLogListResponse(BaseModel):
+    total: int
+    items: list[MergeLogItem]

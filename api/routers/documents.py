@@ -10,6 +10,7 @@ from api.schemas.response import (
 )
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
+from sqlalchemy import func as sqlfunc
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -31,7 +32,17 @@ def list_documents(
             raise HTTPException(status_code=503, detail="数据库未连接")
 
         try:
-            q = session.query(Document).filter(Document.is_deleted == False)
+            # 只查列表需要的列，避免拉 raw_content 等大字段
+            cols = (
+                Document.id, Document.uuid, Document.title,
+                Document.source_site, Document.publish_date, Document.doc_status,
+                Document.confidence_score, Document.extraction_status,
+                Document.weknora_sync_status,
+            )
+            q = (
+                session.query(*cols)
+                .filter(Document.is_deleted == False)
+            )
 
             # 动态筛选条件
             if source_site:
@@ -45,9 +56,16 @@ def list_documents(
             if date_to:
                 q = q.filter(Document.publish_date <= date_to)
 
-            # 获取总数
-            total = q.count()
-            
+            # 获取总数（用轻量 count，不走子查询）
+            total = session.query(sqlfunc.count(Document.id)).filter(
+                Document.is_deleted == False,
+                *([Document.source_site == source_site] if source_site else []),
+                *([Document.doc_status == doc_status] if doc_status else []),
+                *([Document.extraction_status == extraction_status] if extraction_status else []),
+                *([Document.publish_date >= date_from] if date_from else []),
+                *([Document.publish_date <= date_to] if date_to else []),
+            ).scalar()
+
             # 分页查询
             rows = (
                 q.order_by(Document.created_at.desc())
@@ -173,9 +191,12 @@ def recrawl_document(uuid: str, body: RecrawlRequest = RecrawlRequest()):
             raise HTTPException(status_code=503, detail="数据库未连接")
         
         try:
-            doc = session.query(Document).filter(
-                Document.uuid == uuid, Document.is_deleted == False
-            ).first()
+            doc = (
+                session.query(Document.uuid, Document.source_url)
+                .filter(
+                    Document.uuid == uuid, Document.is_deleted == False
+                ).first()
+            )
             if doc is None:
                 logger.warning(f"[API] 文档不存在: {uuid}")
                 raise HTTPException(status_code=404, detail="文档不存在")
@@ -232,10 +253,14 @@ def batch_recrawl_documents(body: BatchRecrawlRequest):
             raise HTTPException(status_code=503, detail="数据库未连接")
 
         try:
-            docs = session.query(Document).filter(
-                Document.uuid.in_(body.uuids),
-                Document.is_deleted == False,
-            ).all()
+            docs = (
+                session.query(Document.uuid, Document.source_url)
+                .filter(
+                    Document.uuid.in_(body.uuids),
+                    Document.is_deleted == False,
+                )
+                .all()
+            )
 
             found_uuids = {d.uuid for d in docs}
             missing = [u for u in body.uuids if u not in found_uuids]

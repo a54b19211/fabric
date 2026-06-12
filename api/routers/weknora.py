@@ -17,6 +17,7 @@ from db.repository import (
 )
 from db.session import get_session
 from db.models import Document
+from sqlalchemy import func
 from core_engine.weknora_graph_client import get_weknora_graph_client
 
 router = APIRouter(prefix="/api/weknora", tags=["weknora"])
@@ -167,10 +168,10 @@ def get_stats():
 
         try:
             def _count(status: str) -> int:
-                return session.query(Document).filter(
+                return session.query(func.count(Document.id)).filter(
                     Document.weknora_sync_status == status,
                     Document.is_deleted == False,
-                ).count()
+                ).scalar()
 
             stats = WeknoraStatsResponse(
                 pending=_count("pending"),

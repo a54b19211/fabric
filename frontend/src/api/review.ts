@@ -107,24 +107,45 @@ export const batchRejectRelations = (params: {
 }) => http.post<any, { success: boolean; message?: string }>('/review/relations/batch/reject', params)
 
 // 合并队列
-export interface MergeQueueItem {
-  id: number
-  source_entity_id: number
-  target_dict_id: number
+export interface MergeSourceInfo {
+  entity_id: number
+  source_doc_uuid: string
+  source_site: string
+}
+
+export interface MergeQueueConflict {
+  merge_id: number
   field_name: string
   existing_value: any
   new_value: any
+  source_entity_id: number
   source_site: string
-  resolution: string
-  created_at: string | null
+  source_doc_uuid: string
+  existing_source_doc_uuid: string
+  existing_sources: MergeSourceInfo[]
+  new_sources: MergeSourceInfo[]
+}
+
+export interface MergeQueueGroup {
+  dict_id: number
+  entity_type: string
+  entity_name: string
+  canonical_data: Record<string, any>
+  canonical_source: string
+  conflicts: MergeQueueConflict[]
 }
 
 export const getMergeQueue = (limit = 50) =>
-  http.get<any, { total: number; items: MergeQueueItem[] }>('/review/merge-queue', { params: { limit } })
+  http.get<any, { total_groups: number; groups: MergeQueueGroup[] }>('/review/merge-queue', { params: { limit } })
 
 export const resolveMerge = (mergeId: number, reviewer: string, resolution: string, resolvedValue?: any) =>
   http.post<any, { success: boolean }>(`/review/merge-queue/${mergeId}/resolve`, {
     reviewer, resolution, resolved_value: resolvedValue,
+  })
+
+export const batchResolveMerge = (decisions: { merge_id: number; resolution: string; resolved_value?: any }[], reviewer: string) =>
+  http.post<any, { success: boolean; message?: string }>('/review/merge-queue/resolve-batch', {
+    decisions, reviewer,
   })
 
 // ── 图谱 ────────────────────────────────────────────────────────────────
@@ -155,6 +176,8 @@ export interface GraphEdge {
 export interface GraphResponse {
   nodes: GraphNode[]
   edges: GraphEdge[]
+  entity_types: string[]
+  source_sites: string[]
 }
 
 export const getReviewGraph = (params: {

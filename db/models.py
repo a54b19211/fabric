@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import String, Text, Float, BigInteger, Boolean, DateTime, func
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.mutable import MutableDict
@@ -229,6 +230,8 @@ class EntityMergeQueue(Base):
     existing_value: Mapped[dict] = mapped_column(JSONB, nullable=True)
     new_value: Mapped[dict] = mapped_column(JSONB, nullable=True)
     source_site: Mapped[str] = mapped_column(Text, default="")
+    existing_source_entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    existing_source_doc_uuid: Mapped[str] = mapped_column(Text, default="")
     resolution: Mapped[str] = mapped_column(Text, default="pending")
     resolved_value: Mapped[dict] = mapped_column(JSONB, nullable=True)
     reviewer_note: Mapped[str] = mapped_column(Text, default="")
@@ -237,7 +240,32 @@ class EntityMergeQueue(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-# ── 11. operation_log ──────────────────────────────────────────
+# ── 11. entity_merge_log ────────────────────────────────────────
+
+class EntityMergeLog(Base):
+    """实体合并日志：记录每次合并操作的完整快照，支持追溯和回滚。"""
+    __tablename__ = "entity_merge_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    keeper_dict_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    absorbed_dict_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger), nullable=False)
+
+    before_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    after_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    field_decisions: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    merge_type: Mapped[str] = mapped_column(Text, default="identity")  # identity | attribute
+    reviewer: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+
+    is_rolled_back: Mapped[bool] = mapped_column(Boolean, default=False)
+    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rollback_reason: Mapped[str] = mapped_column(Text, default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── 12. operation_log ──────────────────────────────────────────
 
 class OperationLog(Base):
     """操作日志：记录所有数据库写操作的审计追踪。"""

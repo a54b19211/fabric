@@ -81,3 +81,21 @@ class PatchEntityRequest(BaseModel):
 
 class PatchRelationRequest(BaseModel):
     relation_props: dict = Field(default_factory=dict, description="需要合并的关系属性字段")
+
+
+class MergeEntitiesRequest(BaseModel):
+    keeper_dict_id: int
+    absorbed_dict_ids: list[int]
+    field_decisions: dict = Field(default_factory=dict)
+    reviewer: str = ""
+    note: str = ""
+
+
+class BatchResolveMergeRequest(BaseModel):
+    decisions: list[dict] = Field(default_factory=list)
+    reviewer: str = ""
+
+
+class RollbackMergeRequest(BaseModel):
+    merge_log_id: int
+    reason: str = ""
