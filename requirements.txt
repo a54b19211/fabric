@@ -36,3 +36,7 @@ xlrd==2.0.1                  # 读取 .xls 旧版二进制格式（纯 Python，
 fastapi>=0.111.0             # Web 框架
 uvicorn[standard]>=0.29.0    # ASGI 服务器
 
+# --- 任务队列 ---
+rq>=2.0                      # Redis Queue，任务持久化
+redis>=5.0                   # Redis Python 客户端
+

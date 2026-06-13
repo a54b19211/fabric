@@ -147,6 +147,7 @@ Drug→RecallEvent RELATED_TO     | —                                 | —
 # ── 输出格式说明（所有 prompt 共用）────────────────────────────────────
 _OUTPUT_FORMAT = """
 ## 输出格式（严格 JSON，不要添加任何额外文字）
+输出纯 JSON 文本，禁止用 ```json 代码块标记包裹，直接以 { 开头。
 {
   "entities": [
     {

@@ -165,7 +165,7 @@ async function triggerRecrawl() {
 }
 
 const extractionStatusType = (s: string) =>
-  ({ pending: 'info', processing: 'warning', done: 'success', failed: 'danger' }[s] ?? '')
+  ({ pending: 'info', queued: '', processing: 'warning', done: 'success', failed: 'danger' }[s] ?? '')
 
 const timeTick = ref(0)
 const formatTime = (iso: string | null) => {

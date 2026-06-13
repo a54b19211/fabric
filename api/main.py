@@ -3,15 +3,22 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from loguru import logger
 
 from api.routers import documents, extraction, review, weknora
+from core_engine.exception_logger import ExceptionLogger
 
 app = FastAPI(
     title="ZK Data Fabric 审核后台 API",
     description="医药数据采集与知识图谱审核系统",
     version="1.0.0",
 )
+
+
+@app.on_event("startup")
+def _startup_recovery():
+    """启动时回退崩溃残留的 queued/processing → pending。"""
+    from db.repository import reset_stale_extractions
+    reset_stale_extractions()
 
 # ── CORS（前端本地开发需要）──────────────────────────────────────────────
 app.add_middleware(
@@ -32,7 +39,7 @@ app.include_router(weknora.router)
 # ── 统一错误处理 ────────────────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"[API] 未处理异常: {request.url} | {exc}")
+    ExceptionLogger.log(f"[API] 未处理异常 url={request.url}")
     return JSONResponse(
         status_code=500,
         content={"error": str(exc), "code": 500},

@@ -25,6 +25,7 @@
   }
 """
 import re
+from loguru import logger
 
 
 def _abs(href: str) -> str:
@@ -90,8 +91,9 @@ def extract_nccn_detail(page) -> dict:
                     "version": version,
                 })
 
-    except Exception:
-        # BeautifulSoup 不可用时降级：直接用 css() 收集所有 PDF 链接
+    except Exception as e:
+        logger.warning(f"[NCCN] BeautifulSoup 提取失败，降级 CSS: {e}")
+        # 降级：直接用 css() 收集所有 PDF 链接
         for a_el in page.css("a[href]"):
             href = a_el.attrib.get("href", "")
             if not href.endswith(".pdf"):

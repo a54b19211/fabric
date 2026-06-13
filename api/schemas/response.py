@@ -73,6 +73,7 @@ class ExtractionStatusResponse(BaseModel):
 
 class ExtractionStatsResponse(BaseModel):
     pending: int
+    queued: int
     processing: int
     done: int
     failed: int

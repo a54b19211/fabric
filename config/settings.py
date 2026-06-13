@@ -124,6 +124,10 @@ class _AppSettings(BaseSettings):
     TASK_RETRY_DELAY: int = 10              # 秒
     EXTRACTION_CONCURRENCY: int = 3         # LLM 抽取 Worker 数量（并行文档数）
 
+    # ======================== 任务队列 ========================
+    TASK_QUEUE_BACKEND: str = "memory"      # "memory" | "redis" — 任务队列后端
+    REDIS_URL: str = "redis://localhost:6379/0"  # Redis 连接地址（backend=redis 时使用）
+
     # ======================== 远程数据库 ========================
     # 支持 PostgreSQL / MySQL，留空则不推送
     DB_HOST: str = ""

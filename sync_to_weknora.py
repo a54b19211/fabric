@@ -64,7 +64,8 @@ def load_envelope(uuid: str, site: str) -> dict:
         return {}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[WeKnora] 信封加载失败 uuid={uuid} site={site}: {e}")
         return {}
 
 
@@ -105,7 +106,7 @@ def update_db_status(uuid: str, weknora_id: str) -> None:
                 if weknora_id and hasattr(doc, "minio_object_key"):
                     pass  # weknora_id 暂无专用字段，留空
     except Exception as e:
-        logger.debug(f"DB 更新跳过 ({uuid}): {e}")
+        logger.warning(f"[WeKnora] DB 状态更新失败 uuid={uuid}: {e}")
 
 
 # ── WeKnora 客户端 ────────────────────────────────────────────────────────────

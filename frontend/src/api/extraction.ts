@@ -2,6 +2,7 @@ import http from './http'
 
 export interface ExtractionStats {
   pending: number
+  queued: number
   processing: number
   done: number
   failed: number

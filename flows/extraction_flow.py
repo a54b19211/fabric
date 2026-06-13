@@ -2,7 +2,7 @@
 LLM 实体抽取流程
 
 流程：
-  1. 从 documents 表取 extraction_status=processing 的文档
+  1. 从 documents 表取 extraction_status=queued 的文档
   2. 智能分块（文章型按标题/表格型按行），带记忆上下文
   3. 逐块调 LLM → 解析 JSON → Pydantic 校验
   4. 跨块实体去重合并，关系下标重映射
@@ -482,9 +482,10 @@ def run_extraction_for_uuids(uuids: list[str]) -> dict:
 
 def run_extraction_batch(limit: int = 10) -> dict:
     """
-    批量处理 extraction_status=processing 的文档，提交到 WorkerManager。
+    批量处理 extraction_status=queued 的文档，提交到 WorkerManager。
+    作为定时任务恢复机制：API 标记 queued 后如果进程崩溃，
+    本函数将遗漏的 queued 文档重新入队。
     Worker 执行时按需查 DB 取内容，队列只存 uuid。
-    被定时任务调用。
     """
     from flows.extraction_worker import ExtractionTask, get_extraction_manager
 
@@ -494,7 +495,7 @@ def run_extraction_batch(limit: int = 10) -> dict:
         rows = (
             session.query(Document.uuid)
             .filter(
-                Document.extraction_status == "processing",
+                Document.extraction_status == "queued",
                 Document.is_deleted == False,
             )
             .limit(limit)

@@ -124,7 +124,8 @@ def excel_to_markdown(file_path: str) -> str:
             logger.info(f"[Excel] 未知扩展名 {ext}，尝试 xlsx 解析: {file_path}")
             try:
                 result = _parse_xlsx(file_path)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[Excel] xlsx 解析失败，降级 xls: {e}")
                 result = _parse_xls(file_path)
 
         if result:

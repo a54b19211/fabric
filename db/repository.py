@@ -220,7 +220,7 @@ def update_extraction_status(
     error: str = "",
     extracted_at=None,
 ) -> None:
-    """更新文档的 LLM 抽取状态。status: pending / processing / done / failed"""
+    """更新文档的 LLM 抽取状态。status: pending / queued / processing / done / failed"""
     from db.session import get_session
 
     with get_session() as session:
@@ -245,6 +245,35 @@ def update_extraction_status(
             details={"uuid": uuid, "extraction_status": {"before": before_status, "after": status}, "model": model, "error": error},
             trigger_source="update_extraction_status",
         )
+
+
+def reset_stale_extractions() -> int:
+    """
+    服务启动时调用：将残留的 queued / processing 重置为 pending。
+    返回重置的文档数量。
+
+    适用场景：Worker 进程崩溃后，队列中的任务已丢失，
+    但 DB 仍显示 queued/processing，需要回退到 pending 以便重新入队。
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return 0
+        result = (
+            session.query(Document)
+            .filter(
+                Document.extraction_status.in_(["queued", "processing"]),
+                Document.is_deleted == False,
+            )
+            .update(
+                {"extraction_status": "pending", "extraction_error": "服务重启，状态回退"},
+                synchronize_session=False,
+            )
+        )
+        if result:
+            logger.info(f"[DB] reset_stale_extractions: {result} 篇回退 pending")
+        return result
 
 
 def update_weknora_sync_status(uuid: str, status: str) -> None:
@@ -1820,7 +1849,7 @@ def add_aliases_no_embedding(
             continue
         exists = (
             session.query(EntityAlias)
-            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name)
+            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name, EntityAlias.is_deleted == False)
             .first()
         )
         if exists is not None:
@@ -2559,8 +2588,46 @@ def approve_entity_with_alias_writeback(
                 return
 
         # 更新实体 dict_id（审核员指定或新建）
+        old_dict_id = ent.dict_id
         if target_dict_id and target_dict_id != ent.dict_id:
             ent.dict_id = target_dict_id
+            session.flush()
+
+        # ── 迁移/清理旧 dict_id 下的别名 ──
+        if old_dict_id and target_dict_id and old_dict_id != target_dict_id:
+            logger.info(
+                f"[DB] approve: dict_id 变更 entity_id={entity_id} "
+                f"{old_dict_id} → {target_dict_id}，迁移 alias"
+            )
+            existing_names = {
+                a.name.lower()
+                for a in session.query(EntityAlias).filter(
+                    EntityAlias.dict_id == target_dict_id,
+                    EntityAlias.is_deleted == False,
+                ).all()
+            }
+            old_aliases = session.query(EntityAlias).filter(
+                EntityAlias.dict_id == old_dict_id,
+                EntityAlias.is_deleted == False,
+            ).all()
+            for alias in old_aliases:
+                if alias.name.lower() in existing_names:
+                    alias.is_deleted = True  # 同名 → 软删除
+                else:
+                    alias.dict_id = target_dict_id  # 迁移到新 dict_id
+                    existing_names.add(alias.name.lower())
+
+            # 检查旧 dict_id 是否成孤儿（无其他实体引用）
+            remaining = session.query(ExtractedEntity).filter(
+                ExtractedEntity.dict_id == old_dict_id,
+                ExtractedEntity.is_deleted == False,
+            ).count()
+            if remaining == 0:
+                old_dict = session.query(EntityDict).filter(EntityDict.id == old_dict_id).first()
+                if old_dict and not old_dict.is_verified:
+                    old_dict.is_deleted = True
+                    logger.info(f"[DB] approve: 孤儿 entity_dict {old_dict_id} 已软删除")
+
             session.flush()
 
         # 回写别名

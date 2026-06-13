@@ -3,12 +3,51 @@ API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）�
 """
 
 import json
+import tempfile
 from pathlib import Path
 
 import httpx
 from openai import OpenAI
-from loguru import logger
 from prefect import task
+from loguru import logger
+
+
+def _format_json_error(raw: str, exc: json.JSONDecodeError) -> str:
+    """生成 JSON 解析错误的详细诊断信息，定位到出错位置附近。"""
+    pos = exc.pos
+    start = max(0, pos - 200)
+    end = min(len(raw), pos + 200)
+    snippet = raw[start:end]
+    pointer = " " * (pos - start) + "^-- HERE"
+
+    # 计算出错位置的行号（基于原字符串）
+    before = raw[:pos]
+    line_num = before.count("\n") + 1
+    last_nl = before.rfind("\n")
+    col_num = pos - (last_nl + 1) if last_nl >= 0 else pos
+
+    lines = [
+        f"JSON 解析失败: {exc.msg}",
+        f"位置: 第 {line_num} 行, 第 {col_num} 列 (char {pos})",
+        f"上下文:",
+        f"```json",
+        f"{snippet}",
+        f"{pointer}",
+        f"```",
+    ]
+    return "\n".join(lines)
+
+
+def _strip_json_fence(raw: str) -> str:
+    """剥离 LLM 输出中可能包裹的 ```json ... ``` 围栏。"""
+    s = raw.strip()
+    if s.startswith("```json"):
+        s = s[7:]
+    elif s.startswith("```"):
+        s = s[3:]
+    if s.endswith("```"):
+        s = s[:-3]
+    return s.strip()
 
 from config.settings import APP
 
@@ -138,7 +177,7 @@ def qwen_extract_structured(
         logger.error("LLM API Key 未配置（LLM_API_KEY），跳过结构化提取")
         return {}
 
-    default_system = "你是专业的医药文档信息提取助手，请严格按 JSON 格式返回，不要添加任何额外文字。"
+    default_system = "你是专业的医药文档信息提取助手。直接输出纯 JSON 文本（以 { 开头），禁止用 ```json 代码块包裹，禁止添加任何解释或额外文字。"
     messages = [
         {"role": "system", "content": system_prompt or default_system},
         {"role": "user", "content": prompt},
@@ -166,12 +205,15 @@ def _batch_extract(client: OpenAI, model_name: str, messages: list) -> dict:
             temperature=0.1,
             response_format={"type": "json_object"},
         )
-        raw_content = response.choices[0].message.content
+        raw_content = _strip_json_fence(response.choices[0].message.content)
         result = json.loads(raw_content)
         logger.info(f"LLM 提取成功，模型={model_name}，字段数={len(result)}")
         return result
     except json.JSONDecodeError as e:
-        logger.error(f"LLM 返回内容非合法 JSON: {e}")
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8")
+        tmp.write(raw_content)
+        tmp.close()
+        logger.error(f"LLM 返回内容非合法 JSON\n{_format_json_error(raw_content, e)}\n完整内容(原始): {tmp.name}")
         return {}
 
 
@@ -203,13 +245,17 @@ def _stream_extract(client: OpenAI, model_name: str, messages: list) -> dict:
         print("\n" + "-" * 60, flush=True)
         logger.info(f"[LLM] 流式输出完成，总长度={len(full_content)}")
 
-        # 解析完整 JSON
-        result = json.loads(full_content)
+        # 解析完整 JSON（先剥离可能的围栏）
+        clean_content = _strip_json_fence(full_content)
+        result = json.loads(clean_content)
         logger.info(f"LLM 提取成功，模型={model_name}，字段数={len(result)}")
         return result
 
     except json.JSONDecodeError as e:
-        logger.error(f"LLM 流式输出非合法 JSON: {e}\n原始内容: {full_content[:500]}")
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8")
+        tmp.write(full_content)
+        tmp.close()
+        logger.error(f"LLM 流式输出非合法 JSON\n{_format_json_error(clean_content, e)}\n完整内容(原始): {tmp.name}")
         return {}
     except Exception as e:
         logger.error(f"LLM 流式调用异常: {e}")

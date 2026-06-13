@@ -58,8 +58,8 @@ def _sniff_bytes(content: bytes) -> str:
                 return ".xlsx"
             if any(n.startswith("word/") for n in names):
                 return ".docx"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[Scrapling] MIME 嗅探失败，回退 .docx: {e}")
         return ".docx"
     return ".bin"
 

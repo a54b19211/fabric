@@ -57,7 +57,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                         Document.uuid.in_(valid_uuids),
                         Document.is_deleted == False,
                     ).update(
-                        {"extraction_status": "processing", "extraction_error": ""},
+                        {"extraction_status": "queued", "extraction_error": ""},
                         synchronize_session=False,
                     )
                     uuids_to_run = valid_uuids
@@ -79,13 +79,13 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                     session.query(Document).filter(
                         Document.uuid.in_(pending_uuids),
                     ).update(
-                        {"extraction_status": "processing", "extraction_error": ""},
+                        {"extraction_status": "queued", "extraction_error": ""},
                         synchronize_session=False,
                     )
                     uuids_to_run = pending_uuids
 
             count = len(uuids_to_run)
-            logger.info(f"[Extraction] 标记 processing: {count} 篇")
+            logger.info(f"[Extraction] 标记 queued: {count} 篇")
 
         except Exception as e:
             logger.error(f"[Extraction] 查询文档失败: {e}")
@@ -99,6 +99,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
             logger.info(f"[Extraction] 已提交 {count} 篇到抽取队列")
         except Exception as e:
             logger.error(f"[Extraction] 提交抽取任务失败: {e}")
+            raise HTTPException(status_code=500, detail=f"抽取任务提交失败: {e}")
 
     return ExtractionTriggerResponse(
         triggered=count,
@@ -123,6 +124,7 @@ def get_extraction_stats():
 
             stats = ExtractionStatsResponse(
                 pending=_count("pending"),
+                queued=_count("queued"),
                 processing=_count("processing"),
                 done=_count("done"),
                 failed=_count("failed"),
@@ -220,6 +222,7 @@ def get_db_pool_status():
         cur.close()
         conn.close()
     except Exception as e:
+        logger.error(f"[Extraction] pg_stat_activity 查询失败: {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {e}")
 
     return {"summary": summary, "connections": details}
@@ -229,8 +232,8 @@ def get_db_pool_status():
 def re_extract_document(uuid: str):
     """
     触发单文档重抽取。
-    - 检查 extraction_status 不能是 "processing"
-    - 重置为 "processing" 并提交到 WorkerManager
+    - 检查 extraction_status 不能是 "queued" 或 "processing"
+    - 重置为 "queued" 并提交到 WorkerManager
     - 旧 extracted_entities / entity_relations 保留不删
     """
     if not uuid or not uuid.strip():
@@ -248,13 +251,13 @@ def re_extract_document(uuid: str):
         if doc is None:
             raise HTTPException(status_code=404, detail="文档不存在")
 
-        if doc.extraction_status == "processing":
-            raise HTTPException(status_code=409, detail="文档正在抽取中，请等待完成后再重试")
+        if doc.extraction_status in ("queued", "processing"):
+            raise HTTPException(status_code=409, detail="文档正在排队或抽取中，请等待完成后再重试")
 
         if not doc.raw_content or not doc.raw_content.strip():
             raise HTTPException(status_code=400, detail="文档 raw_content 为空，无法抽取")
 
-        doc.extraction_status = "processing"
+        doc.extraction_status = "queued"
         doc.extraction_error = ""
         doc.extraction_model = ""
 

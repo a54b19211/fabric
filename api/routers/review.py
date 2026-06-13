@@ -65,7 +65,8 @@ def _extract_disambig(entity_data: dict | None) -> DisambigInfo | None:
             candidates=[DisambigCandidate(**c) for c in raw.get("candidates", [])],
             match_step=raw.get("match_step", ""),
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[Review] _disambig 解析失败: {e}")
         return None
 
 

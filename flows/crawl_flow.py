@@ -49,7 +49,8 @@ def _sniff_file_type(local_path: str) -> str:
         with open(local_path, "rb") as f:
             ext = _sniff_bytes(f.read())
         return ext
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[Crawl] 文件类型嗅探失败 path={local_path}: {e}")
         return ".bin"
 
 
@@ -288,6 +289,7 @@ def crawl_url_flow(url: str, site_key: str = "") -> dict:
     try:
         parsed_list = fetch_and_parse_url(url, site_key, profile)
     except Exception as e:
+        logger.error(f"[CrawlOnDemand] 抓取失败 url={url} site_key={site_key}: {e}")
         return {"success": False, "error": str(e), "url": url}
 
     stored = 0

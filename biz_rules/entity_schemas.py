@@ -8,6 +8,7 @@
   3. 推送 Neo4j 时的数据规范
 """
 from typing import Optional
+from loguru import logger
 from pydantic import BaseModel, Field
 
 
@@ -231,8 +232,8 @@ def validate_entity_data(entity_type: str, raw: dict) -> dict:
         return raw
     try:
         return model_cls(**raw).model_dump()
-    except Exception:
-        # 校验失败时保留原始数据，不丢弃
+    except Exception as e:
+        logger.warning(f"[Schema] entity_type={entity_type} 校验失败，保留原始数据: {e}")
         return raw
 
 

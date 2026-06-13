@@ -125,8 +125,8 @@ def sync_single(uuid: str, kb_id: str = Query("", description="目标知识库 I
         logger.error(f"[API] WeKnora 同步失败: {uuid} | {e}")
         try:
             update_weknora_sync_status(uuid, "failed")
-        except Exception:
-            pass
+        except Exception as se:
+            logger.warning(f"[API] 更新同步状态失败 uuid={uuid}: {se}")
         return WeknoraSyncResponse(success=False, message=str(e))
 
 
@@ -147,8 +147,8 @@ def sync_batch(body: WeknoraBatchRequest, kb_id: str = Query("", description="�
                 logger.error(f"[API] 批量同步失败 {row['uuid']}: {e}")
                 try:
                     update_weknora_sync_status(row["uuid"], "failed")
-                except Exception:
-                    pass
+                except Exception as se:
+                    logger.warning(f"[API] 批量同步-更新状态失败 uuid={row['uuid']}: {se}")
 
         logger.info(f"[API] WeKnora 批量同步完成: {success_count}/{len(rows)}")
         return WeknoraBatchResponse(triggered=success_count)

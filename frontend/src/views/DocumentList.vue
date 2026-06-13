@@ -28,6 +28,7 @@
         <el-form-item label="抽取状态">
           <el-select v-model="filters.extraction_status" clearable placeholder="全部" style="width:130px">
             <el-option label="pending" value="pending" />
+            <el-option label="queued" value="queued" />
             <el-option label="processing" value="processing" />
             <el-option label="done" value="done" />
             <el-option label="failed" value="failed" />
@@ -172,7 +173,7 @@ const dateRange = ref<[string, string] | null>(
     ? [route.query.date_from as string, route.query.date_to as string]
     : null
 )
-const stats = ref<ExtractionStats>({ pending: 0, processing: 0, done: 0, failed: 0 })
+const stats = ref<ExtractionStats>({ pending: 0, queued: 0, processing: 0, done: 0, failed: 0 })
 
 const selectedUuids = ref<string[]>([])
 const batchRecrawling = ref(false)
@@ -197,6 +198,7 @@ const doneSelectedCount = computed(() => {
 
 const statCards = computed(() => [
   { label: '待抽取', value: stats.value.pending, color: 'var(--dp-primary-light)', filterValue: 'pending' },
+  { label: '排队中', value: stats.value.queued, color: '#8b7cf6', filterValue: 'queued' },
   { label: '抽取中', value: stats.value.processing, color: 'var(--dp-warning)', filterValue: 'processing' },
   { label: '已完成', value: stats.value.done, color: 'var(--dp-primary)', filterValue: 'done' },
   { label: '失败', value: stats.value.failed, color: 'var(--dp-danger)', filterValue: 'failed' },
@@ -348,7 +350,7 @@ const docStatusType = (s: string) =>
   ({ AUTO_PROCESSED: 'success', PENDING_REVIEW: 'warning', REVIEWED: 'info' }[s] ?? '')
 
 const extractionStatusType = (s: string) =>
-  ({ pending: 'info', processing: 'warning', done: 'success', failed: 'danger' }[s] ?? '')
+  ({ pending: 'info', queued: '', processing: 'warning', done: 'success', failed: 'danger' }[s] ?? '')
 
 const formatTime = (iso: string | null) => {
   timeTick.value
@@ -361,7 +363,7 @@ let timeTimer: ReturnType<typeof setInterval> | null = null
 
 // 有 processing 时每 5 秒轮询
 let timer: ReturnType<typeof setInterval> | null = null
-watch(() => stats.value.processing, (v) => {
+watch(() => stats.value.queued + stats.value.processing, (v) => {
   if (v > 0 && !timer) {
     timer = setInterval(() => { loadData(true); loadStats() }, 5000)
   } else if (v === 0 && timer) {
