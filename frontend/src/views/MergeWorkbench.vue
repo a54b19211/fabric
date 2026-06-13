@@ -572,18 +572,18 @@ onMounted(() => {
   align-items: flex-start;
   gap: 8px;
   padding: 8px;
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
+  border: 1px solid var(--dp-border-light);
+  border-radius: var(--dp-radius-xs);
   margin-bottom: 6px;
   cursor: pointer;
   transition: background 0.2s;
 }
 .search-item:hover {
-  background: #f5f7fa;
+  background: var(--dp-muted-bg);
 }
 .search-item.selected {
-  border-color: #409eff;
-  background: #ecf5ff;
+  border-color: var(--dp-link);
+  background: var(--dp-info-light);
 }
 .item-info {
   display: flex;
@@ -600,14 +600,14 @@ onMounted(() => {
 }
 .item-meta {
   font-size: 12px;
-  color: #909399;
+  color: var(--dp-text-secondary);
   display: flex;
   gap: 8px;
   align-items: center;
 }
 .item-aliases {
   font-size: 11px;
-  color: #c0c4cc;
+  color: var(--dp-text-placeholder);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -617,7 +617,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 6px 0;
-  border-bottom: 1px solid #f2f3f5;
+  border-bottom: 1px solid var(--dp-border-light);
 }
 .selected-info {
   display: flex;
@@ -626,27 +626,27 @@ onMounted(() => {
 }
 .selected-meta {
   font-size: 11px;
-  color: #909399;
+  color: var(--dp-text-secondary);
   margin-left: 24px;
 }
 .hint {
   font-size: 12px;
-  color: #909399;
+  color: var(--dp-text-secondary);
   margin-top: 4px;
 }
 .hint.success {
-  color: #67c23a;
+  color: var(--dp-success);
 }
 .conflict-field {
   font-weight: 600;
-  color: #e6a23c;
+  color: var(--dp-warning);
 }
 .cell-value {
   font-size: 13px;
   word-break: break-all;
 }
 .cell-value.cell-selected {
-  color: #409eff;
+  color: var(--dp-link);
   font-weight: 600;
   cursor: pointer;
 }
@@ -655,7 +655,7 @@ onMounted(() => {
 }
 .check-mark {
   margin-right: 4px;
-  color: #67c23a;
+  color: var(--dp-success);
   font-weight: bold;
 }
 .placeholder {
@@ -676,12 +676,12 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 500;
   margin-bottom: 4px;
-  color: #e6a23c;
+  color: var(--dp-warning);
 }
 .preview-box {
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
+  background: var(--dp-muted-bg);
+  border: 1px solid var(--dp-border);
+  border-radius: var(--dp-radius-xs);
   padding: 8px;
   max-height: 200px;
   overflow: auto;

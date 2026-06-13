@@ -1,0 +1,123 @@
+/* ── DataPulse Design Tokens ────────────────────────────────────────
+   与 Next.js 前端保持一致的全局设计变量体系
+   Reference: frontend-next/src/app/globals.css
+   ──────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── 基础色板 ── */
+  --dp-bg:       #f0f2f8;
+  --dp-card:     #ffffff;
+  --dp-foreground: #303133;
+  --dp-text-regular: #606266;
+  --dp-text-secondary: #909399;
+  --dp-text-placeholder: #c0c4cc;
+
+  /* ── 品牌主色（Teal 绿） ── */
+  --dp-primary:          #28aa86;
+  --dp-primary-light:    #4dc7a4;
+  --dp-primary-lighter:  #78ddb9;
+  --dp-primary-lightest: #a6f3d0;
+  --dp-primary-dark:     #1e8c6f;
+  --dp-primary-bg:       #e8f8f6;
+
+  /* ── 成功/通过（T​eal） ── */
+  --dp-success:       #14b8a6;
+  --dp-success-dark:  #0e9e8e;
+  --dp-success-light: #f0f9eb;
+  --dp-success-bg:    #e8f8f6;
+
+  /* ── 警告/待定（Orange） ── */
+  --dp-warning:       #f0a841;
+  --dp-warning-dark:  #e6a23c;
+  --dp-warning-light: #fdf6ec;
+  --dp-warning-bg:    #fef8ee;
+
+  /* ── 危险/拒绝（Red） ── */
+  --dp-danger:        #e85d75;
+  --dp-danger-dark:   #c0392b;
+  --dp-danger-light:  #fdf0ee;
+  --dp-danger-bg:     #fef0f0;
+
+  /* ── 信息/待处理（Blue-gray） ── */
+  --dp-info:          #4a7fa5;
+  --dp-info-light:    #ecf5ff;
+
+  /* ── 链接/交互 ── */
+  --dp-link:          #409eff;
+  --dp-link-light:    #66b1ff;
+
+  /* ── 选中/高亮 ── */
+  --dp-selection:     #3b82f6;
+  --dp-selection-light: #60a5fa;
+  --dp-highlight:     #ffe58f;
+
+  /* ── 边框与背景 ── */
+  --dp-border:        #e4e7ed;
+  --dp-border-light:  #ebeef5;
+  --dp-muted-bg:      #f5f7fa;
+  --dp-muted-bg-secondary: #fafafa;
+
+  /* ── 圆角 ── */
+  --dp-radius-xs:  4px;
+  --dp-radius-sm:  6px;
+  --dp-radius-md:  8px;
+  --dp-radius-lg:  10px;
+  --dp-radius-xl:  12px;
+
+  /* ── 阴影 ── */
+  --dp-shadow-sm:  0 2px 8px rgba(0, 0, 0, 0.08);
+  --dp-shadow-md:  0 4px 12px rgba(0, 0, 0, 0.1);
+
+  /* ── 侧边栏 ── */
+  --dp-sidebar-bg:            #178582;
+  --dp-sidebar-fg:            #ffffff;
+  --dp-sidebar-primary:       #1a9e93;
+  --dp-sidebar-primary-fg:    #ffffff;
+  --dp-sidebar-accent:        rgba(255, 255, 255, 0.1);
+  --dp-sidebar-accent-fg:     #ffffff;
+  --dp-sidebar-border:        rgba(255, 255, 255, 0.08);
+  --dp-sidebar-ring:          #c5f9e7;
+  --dp-sidebar-nav-inactive:  rgba(255, 255, 255, 0.55);
+  --dp-sidebar-nav-hover:     rgba(255, 255, 255, 0.07);
+  --dp-sidebar-nav-hover-fg:  rgba(255, 255, 255, 0.9);
+
+  /* ── 图谱专用色 ── */
+  --dp-graph-pending:  #f0a841;
+  --dp-graph-approved: #14b8a6;
+  --dp-graph-rejected: #e85d75;
+
+  /* ── Element Plus 主题覆盖（与全局主色一致） ── */
+  --el-color-primary:           var(--dp-primary);
+  --el-color-primary-light-3:   var(--dp-primary-light);
+  --el-color-primary-light-5:   var(--dp-primary-lighter);
+  --el-color-primary-light-7:   var(--dp-primary-lightest);
+  --el-color-primary-light-8:   #c5fae3;
+  --el-color-primary-light-9:   #e2fdf2;
+  --el-color-primary-dark-2:    var(--dp-primary-dark);
+
+  --el-color-success:           var(--dp-primary);
+  --el-color-success-light-3:   var(--dp-primary-light);
+  --el-color-success-light-5:   var(--dp-primary-lighter);
+  --el-color-success-light-7:   var(--dp-primary-lightest);
+  --el-color-success-light-8:   #c5fae3;
+  --el-color-success-light-9:   #e2fdf2;
+  --el-color-success-dark-2:    var(--dp-primary-dark);
+
+  --el-color-warning:           #f08a3f;
+  --el-color-warning-light-3:   #f6a96e;
+  --el-color-warning-light-5:   #fac59c;
+  --el-color-warning-light-7:   #fde1c7;
+  --el-color-warning-light-8:   #fef0dc;
+  --el-color-warning-light-9:   #fff7ed;
+  --el-color-warning-dark-2:    #cc7130;
+
+  --el-color-danger:            #ff5a3d;
+  --el-color-danger-light-3:    #ff8064;
+  --el-color-danger-light-5:    #ffaa91;
+  --el-color-danger-light-7:    #ffd1c6;
+  --el-color-danger-light-8:    #ffe7da;
+  --el-color-danger-light-9:    #fff1ee;
+  --el-color-danger-dark-2:     #d3432e;
+
+  --el-color-info:              #4bc5a8;
+}

@@ -87,14 +87,14 @@
                 :class="{ 'card-approved': ent.review_status === 'approved', 'card-rejected': ent.review_status === 'rejected' }"
               >
                 <div class="card-header">
-                  <el-tag size="small" type="primary">{{ ent.entity_type }}</el-tag>
+                  <span class="badge badge-entity-type">{{ ent.entity_type }}</span>
                   <span class="entity-name">{{ ent.entity_name }}</span>
-                  <el-tag size="small" :type="confidenceType(ent.confidence_score)">
+                  <span :class="['badge badge-confidence', confidenceClass(ent.confidence_score)]">
                     {{ (ent.confidence_score * 100).toFixed(0) }}%
-                  </el-tag>
-                  <el-tag size="small" :type="disambigType(ent)">
+                  </span>
+                  <span :class="['badge badge-disambig', disambigClass(ent)]">
                     {{ disambigLabel(ent) }}
-                  </el-tag>
+                  </span>
                 </div>
                 <div class="source-text" v-if="ent.source_text">
                   "{{ ent.source_text.slice(0, 80) }}{{ ent.source_text.length > 80 ? '...' : '' }}"
@@ -114,19 +114,18 @@
                     </div>
                   </el-radio-group>
                 </div>
-                <el-collapse>
-                  <el-collapse-item title="字段详情">
-                    <pre class="entity-data">{{ JSON.stringify(ent.entity_data, null, 2) }}</pre>
-                  </el-collapse-item>
-                </el-collapse>
+                <details class="field-details">
+                  <summary class="field-details-summary">字段详情</summary>
+                  <pre class="entity-data">{{ JSON.stringify(ent.entity_data, null, 2) }}</pre>
+                </details>
                 <div class="card-actions" v-if="ent.review_status === 'pending'">
                   <el-button size="small" type="success" @click="doApproveEntity(ent.id)">&#x2713; 通过</el-button>
                   <el-button v-if="ent.disambig?.status && ent.disambig.status !== 'new_entity'" size="small" type="primary" @click="doApproveEntityAsNew(ent.id)">新实体</el-button>
                   <el-button size="small" type="danger" @click="doRejectEntity(ent.id)">&#x2717; 拒绝</el-button>
                 </div>
-                <el-tag v-else size="small" :type="ent.review_status === 'approved' ? 'success' : 'danger'">
+                <span v-else :class="['badge', ent.review_status === 'approved' ? 'badge-emerald' : 'badge-red']" style="margin-top:6px">
                   {{ ent.review_status === 'approved' ? '已通过' : '已拒绝' }}
-                </el-tag>
+                </span>
               </div>
             </div>
             <el-empty v-if="!allEntities.length" description="暂无待审核实体" />
@@ -151,13 +150,13 @@
                 :class="{ 'card-approved': rel.review_status === 'approved', 'card-rejected': rel.review_status === 'rejected' }"
               >
                 <div class="card-header">
-                  <el-tag size="small" type="warning">{{ rel.relation_type }}</el-tag>
+                  <span class="badge badge-relation-type">{{ rel.relation_type }}</span>
                   <span class="entity-name">
                     {{ rel.from_entity_name || rel.from_entity_id || '?' }} → {{ rel.to_entity_name || rel.to_entity_id || '?' }}
                   </span>
-                  <el-tag size="small" :type="confidenceType(rel.confidence_score)">
+                  <span :class="['badge badge-confidence', confidenceClass(rel.confidence_score)]">
                     {{ (rel.confidence_score * 100).toFixed(0) }}%
-                  </el-tag>
+                  </span>
                 </div>
                 <div class="source-text" v-if="rel.source_text">
                   "{{ rel.source_text.slice(0, 80) }}{{ rel.source_text.length > 80 ? '...' : '' }}"
@@ -253,7 +252,7 @@ async function loadPage() {
             rendered: doc.raw_content ? (marked(doc.raw_content) as string) : '<p style="color:#999">暂无内容</p>',
           }
         } catch {
-          return { uuid, title: '加载失败', source_site: '', rendered: '<p style="color:#ff5a3d">文档加载失败</p>' }
+          return { uuid, title: '加载失败', source_site: '', rendered: '<p style="color:var(--dp-danger)">文档加载失败</p>' }
         }
       })
     )
@@ -412,7 +411,7 @@ async function rejectAllRelationsForAllDocs() {
   } catch (e: any) { ElMessage.error(e.message || '批量拒绝关系失败') }
 }
 
-const confidenceType = (s: number) => s >= 0.8 ? 'success' : s >= 0.5 ? 'warning' : 'danger'
+const confidenceClass = (s: number) => s >= 0.8 ? 'badge-emerald' : s >= 0.5 ? 'badge-amber' : 'badge-red'
 
 const disambigLabel = (ent: EntityItem) => {
   const status = ent.disambig?.status || (ent.dict_id !== null ? 'auto_matched' : 'new_entity')
@@ -423,10 +422,10 @@ const disambigLabel = (ent: EntityItem) => {
   return map[status] || '⚪ 未知'
 }
 
-const disambigType = (ent: EntityItem) => {
+const disambigClass = (ent: EntityItem) => {
   const status = ent.disambig?.status || (ent.dict_id !== null ? 'auto_matched' : 'new_entity')
-  const map: Record<string, string> = { auto_matched: 'success', candidate_matched: 'warning', new_entity: 'info', ambiguous: 'danger' }
-  return map[status] || 'info'
+  const map: Record<string, string> = { auto_matched: 'badge-emerald', candidate_matched: 'badge-amber', new_entity: 'badge-blue', ambiguous: 'badge-orange' }
+  return map[status] || 'badge-gray'
 }
 
 onMounted(() => {
@@ -451,38 +450,66 @@ onMounted(() => {
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .toolbar-left { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .toolbar-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.toolbar-actions-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e4e7ed; }
-.relation-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; padding: 8px 12px; background: #fafafa; border-radius: 4px; }
-.toolbar-label { font-size: 13px; color: #606266; white-space: nowrap; }
-.page-info { font-size: 13px; color: #606266; white-space: nowrap; }
-.header-sub { font-size: 12px; color: #909399; margin-left: 8px; }
+.toolbar-actions-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--dp-border); }
+.relation-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; padding: 8px 12px; background: var(--dp-muted-bg-secondary); border-radius: var(--dp-radius-xs); }
+.toolbar-label { font-size: 13px; color: var(--dp-text-regular); white-space: nowrap; }
+.page-info { font-size: 13px; color: var(--dp-text-regular); white-space: nowrap; }
+.header-sub { font-size: 12px; color: var(--dp-text-secondary); margin-left: 8px; }
 
 .card-list { flex: 1; overflow-y: auto; padding: 12px; min-height: 0; }
 
 .entity-group { margin-bottom: 16px; }
-.entity-group-title { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e4e7ed; margin-bottom: 8px; position: sticky; top: 0; background: #fff; z-index: 1; }
-.entity-count { font-size: 12px; color: #909399; }
+.entity-group-title { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--dp-border); margin-bottom: 8px; position: sticky; top: 0; background: var(--dp-card); z-index: 1; }
+.entity-count { font-size: 12px; color: var(--dp-text-secondary); }
 
 .doc-section { margin-bottom: 0; }
-.doc-section-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #f0f9eb; border-radius: 6px; margin-bottom: 12px; position: sticky; top: 0; z-index: 2; }
+.doc-section-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--dp-success-light); border-radius: var(--dp-radius-sm); margin-bottom: 12px; position: sticky; top: 0; z-index: 2; }
 .doc-section-title { font-weight: 600; font-size: 14px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.doc-index { font-size: 12px; color: #909399; white-space: nowrap; }
+.doc-index { font-size: 12px; color: var(--dp-text-secondary); white-space: nowrap; }
 .doc-content { height: auto; overflow: visible; padding: 0; }
 
-.review-card { border: 1px solid #e4e7ed; border-radius: 6px; padding: 12px; margin-bottom: 10px; transition: border-color 0.2s; }
-.review-card:hover { border-color: #28aa86; }
-.card-approved { border-color: #28aa86; background: #e2fdf2; }
-.card-rejected { border-color: #ff5a3d; background: #fff1ee; }
+.review-card { border: 1px solid var(--dp-border); border-radius: var(--dp-radius-sm); padding: 12px; margin-bottom: 10px; transition: border-color 0.2s; }
+.review-card:hover { border-color: var(--dp-primary); }
+.card-approved { border-color: var(--dp-primary); background: var(--el-color-success-light-9); }
+.card-rejected { border-color: var(--dp-danger); background: var(--el-color-danger-light-9); }
 .card-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .entity-name { font-weight: 600; font-size: 14px; }
-.source-text { font-size: 12px; color: #909399; margin: 6px 0; font-style: italic; }
-.reason-text { font-size: 12px; color: #606266; margin: 4px 0; padding: 4px 8px; background: #f0f9eb; border-radius: 4px; }
-.entity-data { font-size: 11px; background: #f5f7fa; padding: 8px; border-radius: 4px; overflow-x: auto; }
-.candidates-section { margin-top: 6px; padding: 8px; background: #fdf6ec; border-radius: 4px; }
-.candidates-label { font-size: 12px; color: #909399; margin-bottom: 4px; }
+.source-text { font-size: 12px; color: var(--dp-text-secondary); margin: 6px 0; font-style: italic; }
+.reason-text { font-size: 12px; color: var(--dp-text-regular); margin: 4px 0; padding: 4px 8px; background: var(--dp-success-light); border-radius: var(--dp-radius-xs); }
+.entity-data { font-size: 11px; background: var(--dp-muted-bg); padding: 8px; border-radius: var(--dp-radius-xs); overflow-x: auto; }
+.candidates-section { margin-top: 6px; padding: 8px; background: var(--dp-warning-light); border-radius: var(--dp-radius-xs); }
+.candidates-label { font-size: 12px; color: var(--dp-text-secondary); margin-bottom: 4px; }
 .candidate-item { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 13px; }
 .candidate-name { margin-right: 6px; font-weight: 500; }
 .candidates-radio-group { width: 100%; }
 .candidates-radio-group :deep(.el-radio) { margin-right: 0; display: flex; align-items: center; }
 .card-actions { margin-top: 8px; display: flex; gap: 8px; }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--dp-radius-xs);
+  border: 1px solid transparent;
+}
+.badge-entity-type { border-color: rgba(40,170,134,0.3); background: rgba(40,170,134,0.05); color: var(--dp-primary); }
+.badge-relation-type { border-color: rgba(240,138,63,0.3); background: rgba(240,138,63,0.05); color: var(--dp-warning); }
+.badge-confidence { font-size: 11px; }
+.badge-emerald { border-color: var(--dp-success-dark); background: #ecfdf5; color: #065f46; }
+.badge-amber { border-color: var(--dp-warning-dark); background: #fffbeb; color: #92400e; }
+.badge-red { border-color: var(--dp-danger-dark); background: #fef2f2; color: #991b1b; }
+.badge-blue { border-color: #3b82f6; background: #eff6ff; color: #1e40af; }
+.badge-orange { border-color: #f97316; background: #fff7ed; color: #9a3412; }
+.badge-gray { border-color: var(--dp-border); background: var(--dp-muted-bg); color: var(--dp-text-secondary); }
+
+.field-details { margin-top: 6px; }
+.field-details-summary {
+  font-size: 12px;
+  color: var(--dp-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.field-details-summary:hover { color: var(--dp-foreground); }
 </style>

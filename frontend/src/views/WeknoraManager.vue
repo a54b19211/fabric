@@ -59,9 +59,9 @@ const selectedUuids = ref<string[]>([])
 const activeCard = ref('pending')
 
 const statCards = computed(() => [
-  { label: '待同步', value: stats.value.pending, color: '#4a7fa5', key: 'pending' },
-  { label: '已同步', value: stats.value.synced,  color: '#0e9e8e', key: 'synced' },
-  { label: '失败',   value: stats.value.failed,  color: '#c0392b', key: 'failed' },
+  { label: '待同步', value: stats.value.pending, color: 'var(--dp-info)', key: 'pending' },
+  { label: '已同步', value: stats.value.synced,  color: 'var(--dp-success-dark)', key: 'synced' },
+  { label: '失败',   value: stats.value.failed,  color: 'var(--dp-danger-dark)', key: 'failed' },
 ])
 
 function filterByCard(key: string) {
@@ -135,10 +135,10 @@ onMounted(() => {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 .active-card {
-  border: 2px solid #409eff;
+  border: 2px solid var(--dp-link);
 }
 .stat-num { font-size: 28px; font-weight: 700; }
-.stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
+.stat-label { font-size: 12px; color: var(--dp-text-secondary); margin-top: 4px; }
 .filter-card {
   margin-bottom: 16px;
   border-radius: 12px;

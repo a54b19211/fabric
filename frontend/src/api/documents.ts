@@ -10,6 +10,7 @@ export interface DocumentItem {
   confidence_score: number
   extraction_status: string
   weknora_sync_status: string
+  updated_at: string | null
 }
 
 export interface DocumentDetail extends DocumentItem {

@@ -20,6 +20,7 @@ class DocumentItem(BaseModel):
     confidence_score: float
     extraction_status: str
     weknora_sync_status: str
+    updated_at: Optional[str] = None
 
 
 class DocumentListResponse(BaseModel):

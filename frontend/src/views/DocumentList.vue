@@ -3,7 +3,7 @@
     <!-- 抽取状态统计卡片 -->
     <el-row :gutter="16" class="stats-row">
       <el-col :span="6" v-for="s in statCards" :key="s.label">
-        <el-card shadow="never" class="stat-card clickable-card" @click="filterByCard(s.filterValue)">
+        <el-card shadow="never" class="stat-card clickable-card" :class="{ 'active-card': filters.extraction_status === s.filterValue }" @click="filterByCard(s.filterValue)">
           <div class="stat-num" :style="{ color: s.color }">{{ s.value }}</div>
           <div class="stat-label">{{ s.label }}</div>
         </el-card>
@@ -66,7 +66,7 @@
 
     <!-- 数据表格 -->
     <el-card shadow="never">
-      <el-table ref="tableRef" :data="rows" v-loading="loading" stripe @selection-change="handleSelectionChange" row-key="uuid">
+      <el-table ref="tableRef" :data="rows" v-loading="loading" @selection-change="handleSelectionChange" row-key="uuid">
         <el-table-column type="selection" width="45" reserve-selection />
         <el-table-column prop="title" label="标题" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">
@@ -79,7 +79,7 @@
         <el-table-column prop="publish_date" label="发布日期" width="110" />
         <el-table-column label="置信度" width="90">
           <template #default="{ row }">
-            <span :style="{ color: row.confidence_score < 0.8 ? '#c0392b' : '#0e9e8e' }">
+            <span :style="{ color: row.confidence_score < 0.8 ? 'var(--dp-danger-dark)' : 'var(--dp-success-dark)' }">
               {{ row.confidence_score.toFixed(2) }}
             </span>
           </template>
@@ -98,10 +98,15 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="操作时间" width="80">
+          <template #default="{ row }">
+            <span class="relative-time">{{ formatTime(row.updated_at) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <div class="action-btns">
-              <el-button size="small" @click="$router.push({ path: `/documents/${row.uuid}`, query: $route.query })">查看</el-button>
+              <el-button size="small" plain @click="$router.push({ path: `/documents/${row.uuid}`, query: $route.query })">查看</el-button>
               <el-button
                 v-if="row.extraction_status === 'pending'"
                 size="small"
@@ -111,12 +116,12 @@
               <el-button
                 v-if="row.extraction_status === 'done'"
                 size="small"
-                type="success"
+                style="background-color:var(--dp-success-dark);border-color:var(--dp-success-dark);color:#fff"
                 @click="$router.push({ path: `/review/${row.uuid}`, query: $route.query })"
               >审核</el-button>
               <el-button
                 size="small"
-                type="warning"
+                style="color:var(--dp-warning-dark);border-color:var(--dp-warning-dark)"
                 :loading="recrawlingUuids.has(row.uuid)"
                 @click="recrawlOne(row.uuid)"
               >重爬</el-button>
@@ -145,6 +150,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getDocuments, recrawlDocument, batchRecrawlDocuments, type DocumentItem } from '@/api/documents'
 import { triggerExtraction, getExtractionStats, type ExtractionStats } from '@/api/extraction'
+import { relativeTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
@@ -190,10 +196,10 @@ const doneSelectedCount = computed(() => {
 })
 
 const statCards = computed(() => [
-  { label: '待抽取', value: stats.value.pending, color: '#4bc5a8', filterValue: 'pending' },
-  { label: '抽取中', value: stats.value.processing, color: '#f08a3f', filterValue: 'processing' },
-  { label: '已完成', value: stats.value.done, color: '#28aa86', filterValue: 'done' },
-  { label: '失败', value: stats.value.failed, color: '#ff5a3d', filterValue: 'failed' },
+  { label: '待抽取', value: stats.value.pending, color: 'var(--dp-primary-light)', filterValue: 'pending' },
+  { label: '抽取中', value: stats.value.processing, color: 'var(--dp-warning)', filterValue: 'processing' },
+  { label: '已完成', value: stats.value.done, color: 'var(--dp-primary)', filterValue: 'done' },
+  { label: '失败', value: stats.value.failed, color: 'var(--dp-danger)', filterValue: 'failed' },
 ])
 
 function syncToUrl() {
@@ -344,6 +350,15 @@ const docStatusType = (s: string) =>
 const extractionStatusType = (s: string) =>
   ({ pending: 'info', processing: 'warning', done: 'success', failed: 'danger' }[s] ?? '')
 
+const formatTime = (iso: string | null) => {
+  timeTick.value
+  return relativeTime(iso)
+}
+
+// 相对时间每 10 秒刷新一次
+const timeTick = ref(0)
+let timeTimer: ReturnType<typeof setInterval> | null = null
+
 // 有 processing 时每 5 秒轮询
 let timer: ReturnType<typeof setInterval> | null = null
 watch(() => stats.value.processing, (v) => {
@@ -354,8 +369,14 @@ watch(() => stats.value.processing, (v) => {
   }
 })
 
-onMounted(() => { loadData(); loadStats() })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onMounted(() => {
+  loadData(); loadStats()
+  timeTimer = setInterval(() => timeTick.value++, 10000)
+})
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  if (timeTimer) clearInterval(timeTimer)
+})
 </script>
 
 <style scoped>
@@ -363,7 +384,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .stat-card {
   text-align: center;
   padding: 8px 0;
-  border-radius: 12px;
+  border-radius: var(--dp-radius-xl);
 }
 .clickable-card {
   cursor: pointer;
@@ -371,21 +392,25 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 }
 .clickable-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--dp-shadow-md);
+}
+.clickable-card.active-card {
+  border: 2px solid var(--dp-primary) !important;
 }
 .stat-num { font-size: 28px; font-weight: 700; }
-.stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
+.stat-label { font-size: 12px; color: var(--dp-text-secondary); margin-top: 4px; }
 .filter-card {
   margin-bottom: 16px;
-  border-radius: 12px;
+  border-radius: var(--dp-radius-xl);
 }
-.title-link { color: #1d6fa4; text-decoration: none; }
+.title-link { color: var(--dp-link); text-decoration: none; }
 .title-link:hover { text-decoration: underline; }
 .pagination { margin-top: 16px; justify-content: flex-end; }
+.relative-time { font-family: monospace; font-size: 11px; color: var(--dp-text-secondary); white-space: nowrap; }
 
 /* 表格卡片圆角 */
 :deep(.el-card) {
-  border-radius: 12px;
+  border-radius: var(--dp-radius-xl);
 }
 
 /* 操作列：强制一行，按钮紧凑排列 */

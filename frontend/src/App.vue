@@ -65,43 +65,6 @@ const navItems = [
 </script>
 
 <style>
-/* ── 全局主题色覆盖（绿 + 橙红系） ── */
-:root {
-  --el-color-primary:           #28aa86;
-  --el-color-primary-light-3:   #4dc7a4;
-  --el-color-primary-light-5:   #78ddb9;
-  --el-color-primary-light-7:   #a6f3d0;
-  --el-color-primary-light-8:   #c5fae3;
-  --el-color-primary-light-9:   #e2fdf2;
-  --el-color-primary-dark-2:    #1e8c6f;
-
-  --el-color-success:           #28aa86;
-  --el-color-success-light-3:   #4dc7a4;
-  --el-color-success-light-5:   #78ddb9;
-  --el-color-success-light-7:   #a6f3d0;
-  --el-color-success-light-8:   #c5fae3;
-  --el-color-success-light-9:   #e2fdf2;
-  --el-color-success-dark-2:    #1e8c6f;
-
-  --el-color-warning:           #f08a3f;
-  --el-color-warning-light-3:   #f6a96e;
-  --el-color-warning-light-5:   #fac59c;
-  --el-color-warning-light-7:   #fde1c7;
-  --el-color-warning-light-8:   #fef0dc;
-  --el-color-warning-light-9:   #fff7ed;
-  --el-color-warning-dark-2:    #cc7130;
-
-  --el-color-danger:            #ff5a3d;
-  --el-color-danger-light-3:    #ff8064;
-  --el-color-danger-light-5:    #ffaa91;
-  --el-color-danger-light-7:    #ffd1c6;
-  --el-color-danger-light-8:    #ffe7da;
-  --el-color-danger-light-9:    #fff1ee;
-  --el-color-danger-dark-2:     #d3432e;
-
-  --el-color-info:              #4bc5a8;
-}
-
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
@@ -116,7 +79,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .sidebar {
   width: 200px;
   min-width: 200px;
-  background: #178582;
+  background: var(--dp-sidebar-bg);
   display: flex;
   flex-direction: column;
   transition: width 0.22s ease, min-width 0.22s ease;
@@ -136,7 +99,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   display: flex;
   align-items: center;
   padding: 0 14px 0 20px;
-  border-bottom: 1px solid rgba(255,255,255,0.07);
+  border-bottom: 1px solid var(--dp-sidebar-border);
   flex-shrink: 0;
 }
 .logo-text {
@@ -148,14 +111,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 }
 .logo-icon {
   font-size: 20px;
-  color: #c5f9e7;
+  color: var(--dp-sidebar-ring);
   flex-shrink: 0;
   line-height: 1;
   width: 20px;
   text-align: center;
 }
 .logo-name {
-  color: #fff;
+  color: var(--dp-sidebar-fg);
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -176,8 +139,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   align-items: center;
   gap: 12px;
   padding: 13px 14px;
-  border-radius: 8px;
-  color: rgba(255,255,255,0.55);
+  border-radius: var(--dp-radius-md);
+  color: var(--dp-sidebar-nav-inactive);
   text-decoration: none;
   font-size: 15px;
   white-space: nowrap;
@@ -186,12 +149,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   cursor: pointer;
 }
 .nav-item:hover {
-  background: rgba(255,255,255,0.07);
-  color: rgba(255,255,255,0.9);
+  background: var(--dp-sidebar-nav-hover);
+  color: var(--dp-sidebar-nav-hover-fg);
 }
 .nav-item.active {
-  background: #1a9e93;
-  color: #fff;
+  background: var(--dp-sidebar-primary);
+  color: var(--dp-sidebar-fg);
 }
 
 .nav-icon {
@@ -211,11 +174,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   left: calc(100% + 10px);
   top: 50%;
   transform: translateY(-50%);
-  background: #28aa86;
-  color: #fff;
+  background: var(--dp-primary);
+  color: var(--dp-sidebar-fg);
   font-size: 13px;
   padding: 6px 12px;
-  border-radius: 6px;
+  border-radius: var(--dp-radius-sm);
   white-space: nowrap;
   pointer-events: none;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
@@ -228,7 +191,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   top: 50%;
   transform: translateY(-50%);
   border: 5px solid transparent;
-  border-right-color: #178582;
+  border-right-color: var(--dp-sidebar-bg);
 }
 .sidebar.collapsed .nav-item:hover .nav-tooltip {
   display: block;
@@ -244,8 +207,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
 .top-header {
   height: 56px;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
+  background: var(--dp-card);
+  border-bottom: 1px solid var(--dp-border);
   display: flex;
   align-items: center;
   padding: 0 24px;
@@ -254,7 +217,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
 .main-content {
   flex: 1;
-  background: #f0f2f8;
+  background: var(--dp-bg);
   padding: 20px;
   overflow-y: auto;
 }

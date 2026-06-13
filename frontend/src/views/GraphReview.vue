@@ -1,168 +1,136 @@
 <template>
   <div class="graph-review" v-loading="loading">
-    <!-- 筛选栏 -->
-    <el-card shadow="never" class="filter-bar">
-      <div class="filter-row">
-        <div class="filter-left">
-          <el-input v-model="filterName" placeholder="搜索实体名..." clearable style="width:180px" class="local-filter" />
-          <el-select v-model="filterEntityTypes" multiple collapse-tags placeholder="实体类型" clearable style="width:200px" @change="reloadGraph">
-            <el-option v-for="t in entityTypeOptions" :key="t" :label="t" :value="t" />
-          </el-select>
-          <el-select v-model="filterSourceSite" placeholder="来源站点" clearable style="width:140px" @change="reloadGraph">
-            <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
-          </el-select>
-          <el-select v-model="filterReviewStatus" multiple collapse-tags placeholder="审核状态" style="width:180px" @change="reloadGraph">
-            <el-option label="待审核" value="pending" />
-            <el-option label="已通过" value="approved" />
-            <el-option label="自动通过" value="auto_approved" />
-          </el-select>
-          <el-input v-model="filterDocUuid" placeholder="文档UUID（可选）" clearable style="width:240px" @change="reloadGraph" />
-        </div>
-        <div class="filter-middle">
-          <el-select v-model="filterIsolated" style="width:130px" class="local-filter">
-            <el-option label="全部节点" value="all" />
-            <el-option label="隐藏孤立点" value="hide" />
-            <el-option label="只看孤立点" value="only" />
-          </el-select>
-          <el-select v-model="filterVerified" style="width:120px" class="local-filter">
-            <el-option label="全部验证" value="all" />
-            <el-option label="已验证" value="yes" />
-            <el-option label="未验证" value="no" />
-          </el-select>
-          <div class="conf-slider">
-            <span class="slider-label">置信度≥</span>
-            <el-slider v-model="filterMinConf" :min="0" :max="1" :step="0.05" style="width:100px" class="local-filter" :show-tooltip="true" />
-          </div>
-        </div>
-        <div class="filter-right">
-          <template v-if="focusNodeId !== null">
-            <el-tag type="warning" closable @close="focusNodeId = null">邻接模式: {{ focusNodeName }}</el-tag>
-            <el-button size="small" type="primary" @click="focusNodeId = null">返回全局</el-button>
-          </template>
-          <span class="node-count">节点: {{ visibleNodeCount }} / {{ nodes.length }} | 边: {{ visibleEdgeCount }} / {{ edges.length }}</span>
-          <el-button size="small" type="warning" plain @click="openMergeQueue">
-            合并队列 {{ mergeQueueGroups.length > 0 ? `(${mergeQueueGroups.length} 组)` : '' }}
-          </el-button>
-          <el-button size="small" type="success" @click="batchApproveSelected" :disabled="selectedNodeIds.size === 0">
-            &#x2713; 批量通过 ({{ selectedNodeIds.size }})
-          </el-button>
-          <el-button size="small" type="danger" @click="batchRejectSelected" :disabled="selectedNodeIds.size === 0">
-            &#x2717; 批量拒绝
-          </el-button>
-          <el-button size="small" @click="reloadGraph">&#x21bb; 刷新</el-button>
-        </div>
+    <div class="graph-toolbar">
+      <div class="toolbar-left">
+        <el-input v-model="filterName" placeholder="搜索实体名..." clearable size="small" style="width:160px" class="local-filter" />
+        <el-select v-model="filterEntityTypes" multiple collapse-tags placeholder="实体类型" clearable size="small" style="width:180px" @change="debouncedReloadGraph">
+          <el-option v-for="t in entityTypeOptions" :key="t" :label="t" :value="t" />
+        </el-select>
+        <el-select v-model="filterSourceSite" placeholder="来源站点" clearable size="small" style="width:130px" @change="debouncedReloadGraph">
+          <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
+        </el-select>
+        <el-select v-model="filterReviewStatus" multiple collapse-tags placeholder="审核状态" size="small" style="width:170px" @change="debouncedReloadGraph">
+          <el-option label="待审核" value="pending" />
+          <el-option label="已通过" value="approved" />
+          <el-option label="自动通过" value="auto_approved" />
+        </el-select>
       </div>
-    </el-card>
+      <div class="toolbar-right">
+        <span class="node-count">节点: {{ visibleNodeCount }} / {{ nodes.length }} | 边: {{ visibleEdgeCount }} / {{ edges.length }}</span>
+        <template v-if="focusNodeId !== null">
+          <el-tag size="small" type="warning" closable @close="focusNodeId = null">邻接: {{ focusNodeName }}</el-tag>
+          <el-button size="small" @click="focusNodeId = null">返回全局</el-button>
+        </template>
+        <el-button size="small" type="success" @click="batchApproveSelected" :disabled="selectedNodeIds.size === 0">&#x2713; 通过 ({{ selectedNodeIds.size }})</el-button>
+        <el-button size="small" type="danger" @click="batchRejectSelected" :disabled="selectedNodeIds.size === 0">&#x2717; 拒绝</el-button>
+        <el-button size="small" type="warning" plain @click="openMergeQueue">合并 ({{ mergeQueueGroups.length }})</el-button>
+        <el-button size="small" type="primary" plain title="自动调整布局，使实体不堆叠" @click="rerunLayout">&#x2699;&#xFE0F; 自动调整</el-button>
+      </div>
+    </div>
 
-    <el-row :gutter="12" class="main-row">
-      <el-col :span="detailNode ? 16 : 24">
-        <el-card shadow="never" class="graph-card">
-          <div class="graph-legend">
-            <span class="legend-item"><span class="dot pending"></span> 待审核</span>
-            <span class="legend-item"><span class="dot approved"></span> 已通过</span>
-            <span class="legend-item"><span class="dot rejected"></span> 已拒绝</span>
-            <span class="legend-item">— 虚线=待审核 实线=已通过</span>
-            <span class="legend-tip">点击节点查看详情 | Shift+点击多选 | 滚轮缩放 | 拖拽平移</span>
-          </div>
-          <div ref="cyContainerRef" class="cy-container" />
-        </el-card>
-      </el-col>
+    <div class="toolbar-local">
+      <el-select v-model="filterIsolated" size="small" style="width:130px" class="local-filter">
+        <el-option label="全部节点" value="all" />
+        <el-option label="隐藏孤立点" value="hide" />
+        <el-option label="只看孤立点" value="only" />
+      </el-select>
+      <el-select v-model="filterVerified" size="small" style="width:110px" class="local-filter">
+        <el-option label="全部验证" value="all" />
+        <el-option label="已验证" value="yes" />
+        <el-option label="未验证" value="no" />
+      </el-select>
+      <div class="conf-slider">
+        <span class="slider-label">置信度≥</span>
+        <el-slider v-model="filterMinConf" :min="0" :max="1" :step="0.05" size="small" style="width:100px" class="local-filter" :show-tooltip="true" />
+      </div>
+    </div>
 
-      <!-- 详情面板 -->
-      <el-col :span="8" v-if="detailNode">
-        <el-card shadow="never" class="detail-panel">
-          <template #header>
-            <div class="detail-header">
-              <span>实体详情 #{{ detailNode.id }}</span>
-              <el-button size="small" text @click="detailNode = null">&#x2715;</el-button>
+    <div class="graph-main">
+      <div ref="cyContainerRef" class="cy-container" />
+      <div class="graph-legend">
+        <span class="legend-item"><span class="dot pending"></span>待审核</span>
+        <span class="legend-item"><span class="dot approved"></span>已通过</span>
+        <span class="legend-item"><span class="dot rejected"></span>已拒绝</span>
+        <span class="legend-sep">|</span>
+        <span class="legend-item">虚线=待审核 实线=已通过</span>
+      </div>
+      <div class="graph-tip">点击节点查看详情 | Shift+多选 | Ctrl+框选 | 滚轮缩放 | 中键平移</div>
+    </div>
+
+    <el-drawer v-model="showDetailPanel" title="实体详情" size="420px" direction="rtl" @close="detailNode = null">
+      <template v-if="detailNode">
+        <el-form label-width="80px" size="small">
+          <el-form-item label="名称">
+            <span class="field-value">{{ detailNode.entity_name }}</span>
+          </el-form-item>
+          <el-form-item label="类型">
+            <el-tag size="small">{{ detailNode.entity_type }}</el-tag>
+          </el-form-item>
+          <el-form-item label="来源">
+            <span class="field-value">{{ detailNode.source_site }}</span>
+          </el-form-item>
+          <el-form-item label="置信度">
+            <el-progress :percentage="Math.round(detailNode.confidence_score * 100)" :stroke-width="8" style="width:120px" />
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-tag size="small" :type="statusTagType(detailNode.review_status)">{{ statusLabel(detailNode.review_status) }}</el-tag>
+          </el-form-item>
+          <el-form-item label="已验证">
+            <el-tag size="small" :type="detailNode.is_verified ? 'success' : 'info'">{{ detailNode.is_verified ? '是' : '否' }}</el-tag>
+          </el-form-item>
+        </el-form>
+
+        <el-divider content-position="left">元数据</el-divider>
+        <el-form label-width="0" size="small">
+          <el-form-item v-for="(val, key) in editableData" :key="key" :label="key" label-width="100px">
+            <template v-if="typeof val === 'string' || typeof val === 'number'">
+              <el-input v-model="editableData[key]" />
+            </template>
+            <template v-else-if="Array.isArray(val)">
+              <el-input v-model="editableData[key]" :placeholder="'逗号分隔:' + val.join(',')" />
+            </template>
+            <template v-else>
+              <el-input v-model="editableData[key]" type="textarea" :rows="2" />
+            </template>
+          </el-form-item>
+          <el-form-item v-if="Object.keys(editableData).length === 0">
+            <span class="empty-hint">暂无元数据</span>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" size="small" @click="saveEntityData" :loading="savingData">&#x1f4be; 保存元数据</el-button>
+          </el-form-item>
+        </el-form>
+
+        <el-divider content-position="left">关联关系</el-divider>
+        <div class="related-relations">
+          <div v-for="rel in relatedEdges" :key="rel.id" class="rel-item" :class="{ 'rel-pending': rel.review_status === 'pending', 'rel-approved': rel.review_status === 'approved' }">
+            <div class="rel-type">
+              <span class="badge badge-relation-type" style="font-size:11px">{{ rel.relation_type }}</span>
             </div>
-          </template>
-
-          <el-form label-width="80px" size="small">
-            <el-form-item label="名称">
-              <span class="field-value">{{ detailNode.entity_name }}</span>
-            </el-form-item>
-            <el-form-item label="类型">
-              <el-tag size="small">{{ detailNode.entity_type }}</el-tag>
-            </el-form-item>
-            <el-form-item label="来源">
-              <span class="field-value">{{ detailNode.source_site }}</span>
-            </el-form-item>
-            <el-form-item label="置信度">
-              <el-progress :percentage="Math.round(detailNode.confidence_score * 100)" :stroke-width="8" style="width:120px" />
-            </el-form-item>
-            <el-form-item label="状态">
-              <el-tag size="small" :type="statusTagType(detailNode.review_status)">
-                {{ statusLabel(detailNode.review_status) }}
-              </el-tag>
-            </el-form-item>
-            <el-form-item label="已验证">
-              <el-tag size="small" :type="detailNode.is_verified ? 'success' : 'info'">
-                {{ detailNode.is_verified ? '是' : '否' }}
-              </el-tag>
-            </el-form-item>
-          </el-form>
-
-          <el-divider content-position="left">元数据 (entity_data)</el-divider>
-          <el-form label-width="0" size="small">
-            <el-form-item v-for="(val, key) in editableData" :key="key" :label="key" label-width="100px">
-              <template v-if="typeof val === 'string' || typeof val === 'number'">
-                <el-input v-model="editableData[key]" />
-              </template>
-              <template v-else-if="Array.isArray(val)">
-                <el-input v-model="editableData[key]" :placeholder="'逗号分隔:' + val.join(',')" />
-              </template>
-              <template v-else>
-                <el-input v-model="editableData[key]" type="textarea" :rows="2" />
-              </template>
-            </el-form-item>
-            <el-form-item v-if="Object.keys(editableData).length === 0">
-              <span class="empty-hint">暂无元数据</span>
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" size="small" @click="saveEntityData" :loading="savingData">
-                &#x1f4be; 保存元数据
-              </el-button>
-            </el-form-item>
-          </el-form>
-
-          <el-divider content-position="left">关联关系</el-divider>
-          <div class="related-relations">
-            <div v-for="rel in relatedEdges" :key="rel.id" class="rel-item" :class="{ 'rel-pending': rel.review_status === 'pending', 'rel-approved': rel.review_status === 'approved' }">
-              <div class="rel-type">
-                <el-tag size="small" type="warning">{{ rel.relation_type }}</el-tag>
-              </div>
-              <div class="rel-nodes">
-                {{ getNodeName(rel.from_entity_id) }} &#x2192; {{ getNodeName(rel.to_entity_id) }}
-              </div>
-              <div class="rel-actions" v-if="rel.review_status === 'pending'">
-                <el-button size="small" text type="success" @click="doApproveRelation(rel.id)">&#x2713;</el-button>
-                <el-button size="small" text type="danger" @click="doRejectRelation(rel.id)">&#x2717;</el-button>
-              </div>
+            <div class="rel-nodes">
+              {{ getNodeName(rel.from_entity_id) }} &#x2192; {{ getNodeName(rel.to_entity_id) }}
             </div>
-            <div v-if="relatedEdges.length === 0" class="empty-hint">无关联关系</div>
+            <div class="rel-actions" v-if="rel.review_status === 'pending'">
+              <el-button size="small" text type="success" @click="doApproveRelation(rel.id)">&#x2713;</el-button>
+              <el-button size="small" text type="danger" @click="doRejectRelation(rel.id)">&#x2717;</el-button>
+            </div>
           </div>
+          <div v-if="relatedEdges.length === 0" class="empty-hint">无关联关系</div>
+        </div>
 
-          <el-divider />
-          <div class="detail-actions">
-            <el-button v-if="detailNode.review_status === 'pending'" type="success" @click="doApproveEntity(detailNode.id)">
-              &#x2713; 审核通过
-            </el-button>
-            <el-button v-if="detailNode.review_status === 'pending'" type="danger" @click="doRejectEntity(detailNode.id)">
-              &#x2717; 审核拒绝
-            </el-button>
-            <el-button type="primary" plain @click="showNeighbors(detailNode.id)">
-              &#x1f50d; 查看邻接
-            </el-button>
-            <el-button v-if="detailNode.source_doc_uuid" @click="goToDocument(detailNode.source_doc_uuid)">
-              &#x1f4c4; 查看文档
-            </el-button>
+        <template v-if="detailNode.review_status === 'pending'">
+          <div class="detail-actions" style="margin-top:16px">
+            <el-button type="success" @click="doApproveEntity(detailNode.id)">&#x2713; 审核通过</el-button>
+            <el-button type="danger" @click="doRejectEntity(detailNode.id)">&#x2717; 审核拒绝</el-button>
           </div>
-        </el-card>
-      </el-col>
-    </el-row>
+        </template>
+        <div class="detail-actions" style="margin-top:8px">
+          <el-button plain @click="showNeighbors(detailNode.id)">&#x1f50d; 查看邻接</el-button>
+          <el-button v-if="detailNode.source_doc_uuid" @click="goToDocument(detailNode.source_doc_uuid)">&#x1f4c4; 查看文档</el-button>
+        </div>
+      </template>
+    </el-drawer>
 
-    <!-- 合并队列 Drawer -->
     <el-drawer v-model="showMergeDrawer" title="合并队列" size="500px" direction="rtl">
       <div class="merge-queue-panel" v-loading="mergeQueueLoading">
         <div v-for="group in mergeQueueGroups" :key="group.dict_id" class="merge-group">
@@ -214,6 +182,18 @@ import {
 } from '@/api/review'
 
 const router = useRouter()
+
+let debounceTimer: ReturnType<typeof setTimeout> | null = null
+function debouncedReloadGraph(delay = 300) {
+  if (debounceTimer) clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => reloadGraph(), delay)
+}
+
+let localFilterTimer: ReturnType<typeof setTimeout> | null = null
+function debouncedApplyFilters(delay = 120) {
+  if (localFilterTimer) clearTimeout(localFilterTimer)
+  localFilterTimer = setTimeout(() => applyFiltersToGraph(), delay)
+}
 
 // ── 数据状态 ────────────────────────────────────────────────────────────
 
@@ -355,6 +335,7 @@ function formatMergeValue(val: any): string {
 // ── 详情面板 ─────────────────────────────────────────────────────────────
 
 const detailNode = ref<GraphNode | null>(null)
+const showDetailPanel = ref(false)
 const editableData = reactive<Record<string, any>>({})
 const selectedNodeIds = reactive(new Set<number>())
 
@@ -413,7 +394,6 @@ function transformToCyData(nodes: GraphNode[], edges: GraphEdge[]) {
 }
 
 const cyStyles = [
-  // Base node
   { selector: 'node', style: {
     'shape': 'ellipse',
     'label': 'data(label)',
@@ -426,14 +406,13 @@ const cyStyles = [
     'text-max-width': '110px',
     'text-wrap': 'ellipsis',
     'border-width': 2.5,
-    'border-color': '#fff',
+    'border-color': '#ffffff',
     'width': 'mapData(confidence_score, 0, 1, 28, 48)',
     'height': 'mapData(confidence_score, 0, 1, 28, 48)',
     'background-opacity': 0.9,
     'transition-property': 'background-color, border-color, border-width, border-opacity',
     'transition-duration': 180,
   }},
-  // Status colors
   { selector: 'node.pending', style: {
     'background-color': '#f0a841',
     'background-blacken': -0.08,
@@ -446,7 +425,6 @@ const cyStyles = [
     'background-color': '#e85d75',
     'background-blacken': -0.08,
   }},
-  // Selected state
   { selector: 'node:selected', style: {
     'border-color': '#3b82f6',
     'border-width': 4,
@@ -457,7 +435,6 @@ const cyStyles = [
     'shadow-offset-x': 0,
     'shadow-offset-y': 0,
   }},
-  // Hover state
   { selector: 'node:active', style: {
     'border-color': '#60a5fa',
     'border-width': 3,
@@ -466,7 +443,6 @@ const cyStyles = [
     'overlay-color': '#3b82f6',
     'overlay-padding': 8,
   }},
-  // Base edge
   { selector: 'edge', style: {
     'width': 1.6,
     'curve-style': 'bezier',
@@ -502,33 +478,33 @@ const cyStyles = [
 
 const layoutOptions = {
   name: 'cose',
-  nodeRepulsion: 6000,
-  edgeElasticity: 0.4,
-  idealEdgeLength: 120,
-  gravity: 0.3,
-  numIter: 800,
-  initialTemp: 150,
-  coolingFactor: 0.95,
-  refresh: 15,
+  nodeRepulsion: 800000,
+  edgeElasticity: 0.45,
+  idealEdgeLength: 220,
+  gravity: 0.1,
+  numIter: 2000,
+  initialTemp: 300,
+  coolingFactor: 0.97,
+  refresh: 20,
   animate: 'during' as const,
   animationDuration: 1000,
   fit: true,
-  padding: 60,
+  padding: 80,
   randomize: false,
+  nodeDimensionsIncludeLabels: true,
 }
 
 function initCy(container: HTMLDivElement): Core {
   return cytoscape({
     container,
     style: cyStyles as any,
-    wheelSensitivity: 0.3,
-    minZoom: 0.08,
-    maxZoom: 5,
-    boxSelectionEnabled: true,
+    boxSelectionEnabled: false,
     autounselectify: false,
     selectionType: 'additive',
     layout: layoutOptions as any,
-    // subtle background grid via canvas style
+    minZoom: 0.2,
+    maxZoom: 3,
+    wheelSensitivity: 0.6,
     styleEnabled: true,
   })
 }
@@ -562,16 +538,23 @@ function wireCyEvents() {
       // Sync our selectedNodeIds with cy selection
       syncSelectionFromCy()
     } else {
-      // Single click: show detail, cy auto-deselects others with default behavior
       detailNode.value = nodeData
+      showDetailPanel.value = true
     }
   })
 
   cy.on('tap', (evt: EventObject) => {
     if (evt.target === cy) {
-      // Canvas background clicked
       selectedNodeIds.clear()
     }
+  })
+
+  cy.on('boxend', () => {
+    syncSelectionFromCy()
+  })
+
+  cy.on('boxend', () => {
+    syncSelectionFromCy()
   })
 
   cy.on('select unselect', () => {
@@ -586,6 +569,68 @@ function wireCyEvents() {
       reloadGraph()
     }
   })
+
+  cy.on('zoom', () => {
+    updateLabelVisibility()
+  })
+}
+
+function updateLabelVisibility() {
+  if (!cy) return
+  const zoom = cy.zoom()
+  const showLabel = zoom > 0.8
+  const fontSize = zoom > 1.5 ? '11px' : zoom > 0.8 ? '9px' : '0px'
+  cy.nodes().style({
+    'font-size': fontSize,
+    'text-opacity': showLabel ? 1 : 0,
+  })
+}
+
+function rerunLayout() {
+  if (!cy) return
+
+  // 计算可见节点数量
+  const visibleCount = cy.nodes().filter(n => n.style('display') !== 'none').length
+  const isLarge = visibleCount > 50
+
+  // 先随机化位置，确保节点不重叠
+  const nodes = cy.nodes()
+  const box = cy.container()?.getBoundingClientRect()
+  const w = box ? box.width : 800
+  const h = box ? box.height : 600
+
+  nodes.forEach((n, i) => {
+    const angle = (2 * Math.PI * i) / nodes.length
+    const radius = Math.min(w, h) * 0.35
+    n.position({
+      x: w / 2 + radius * Math.cos(angle),
+      y: h / 2 + radius * Math.sin(angle),
+    })
+  })
+
+  // 执行力导向布局，用固定的大数值确保节点充分展开
+  cy.layout({
+    name: 'cose',
+    nodeRepulsion: 2000000,
+    edgeElasticity: 0.5,
+    idealEdgeLength: 300,
+    gravity: 0.05,
+    numIter: 3000,
+    initialTemp: 500,
+    coolingFactor: 0.98,
+    refresh: 30,
+    animate: 'during' as const,
+    animationDuration: 2000,
+    fit: true,
+    padding: 120,
+    randomize: false,
+    nodeDimensionsIncludeLabels: true,
+  } as any).run()
+
+  // 布局完成后更新标签可见性
+  setTimeout(() => {
+    updateLabelVisibility()
+  }, 2200)
 }
 
 function syncSelectionFromCy() {
@@ -611,7 +656,7 @@ async function reloadGraph() {
   try {
     const params: any = {
       review_status: filterReviewStatus.value.join(','),
-      limit: 800,
+      limit: 500,
       include_relations: true,
     }
     if (filterEntityTypes.value.length) params.entity_types = filterEntityTypes.value.join(',')
@@ -638,6 +683,7 @@ async function reloadGraph() {
       cy.add(data.nodes)
       cy.add(data.edges)
       cy.layout(layoutOptions as any).run()
+      updateLabelVisibility()
     }
   } finally {
     loading.value = false
@@ -788,7 +834,17 @@ function onResize() {
   }
 }
 
-// ── 生命周期 ────────────────────────────────────────────────────────────
+function onKeyDown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && !e.repeat) {
+    cy?.boxSelectionEnabled(true)
+  }
+}
+
+function onKeyUp(e: KeyboardEvent) {
+  if (!e.ctrlKey && !e.metaKey) {
+    cy?.boxSelectionEnabled(false)
+  }
+}
 
 onMounted(async () => {
   await Promise.all([reloadGraph(), loadMergeQueue()])
@@ -797,7 +853,6 @@ onMounted(async () => {
   if (cyContainerRef.value && !cy) {
     cy = initCy(cyContainerRef.value)
     wireCyEvents()
-    // Load initial data
     const data = transformToCyData(nodes.value, edges.value)
     cy.add(data.nodes)
     cy.add(data.edges)
@@ -805,16 +860,21 @@ onMounted(async () => {
   }
 
   window.addEventListener('resize', onResize)
+
+  document.addEventListener('keydown', onKeyDown)
+  document.addEventListener('keyup', onKeyUp)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
+  document.removeEventListener('keydown', onKeyDown)
+  document.removeEventListener('keyup', onKeyUp)
   cy?.destroy()
   cy = null
 })
 
 watch([visibleNodeIds, visibleEdges], () => {
-  applyFiltersToGraph()
+  debouncedApplyFilters()
 })
 
 watch(detailNode, (node) => {
@@ -828,48 +888,86 @@ watch(detailNode, (node) => {
 <style scoped>
 .graph-review { height: calc(100vh - 40px); display: flex; flex-direction: column; padding: 0 16px; }
 
-.filter-bar { margin-bottom: 8px; flex-shrink: 0; }
-.filter-bar :deep(.el-card__body) { padding: 10px 16px; }
-.filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.filter-left { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.filter-middle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.filter-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.graph-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--dp-border);
+  border-radius: var(--dp-radius-md);
+  margin-bottom: 4px;
+  background: var(--dp-card);
+  flex-shrink: 0;
+}
+.toolbar-left { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.toolbar-right { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.toolbar-local {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px 6px;
+  flex-shrink: 0;
+}
 .conf-slider { display: flex; align-items: center; gap: 4px; }
-.slider-label { font-size: 12px; color: #909399; white-space: nowrap; }
-.local-filter :deep(.el-input__wrapper) { background: #f0f9eb; }
-.node-count { font-size: 13px; color: #909399; white-space: nowrap; }
+.slider-label { font-size: 12px; color: var(--dp-text-secondary); white-space: nowrap; }
+.local-filter :deep(.el-input__wrapper) { background: var(--dp-success-light); }
+.node-count { font-size: 12px; color: var(--dp-text-secondary); white-space: nowrap; }
 
-.main-row { flex: 1; overflow: hidden; }
-
-.graph-card { height: 100%; display: flex; flex-direction: column; }
-.graph-card :deep(.el-card__body) { flex: 1; display: flex; flex-direction: column; padding: 8px 12px 12px; overflow: hidden; }
-.graph-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #606266; margin-bottom: 6px; flex-shrink: 0; }
-.legend-item { display: flex; align-items: center; gap: 4px; }
-.legend-tip { color: #c0c4cc; margin-left: auto; }
-.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.dot.pending { background: #f0a841; }
-.dot.approved { background: #14b8a6; }
-.dot.rejected { background: #e85d75; }
-
-.cy-container {
+.graph-main {
   flex: 1;
-  background: #f8f9fb;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
   position: relative;
-  z-index: 1;
+  border: 1px solid var(--dp-border);
+  border-radius: var(--dp-radius-lg);
   overflow: hidden;
+  background: var(--dp-muted-bg-secondary);
 }
 
-.detail-panel { height: 100%; overflow-y: auto; }
-.detail-header { display: flex; justify-content: space-between; align-items: center; }
+.cy-container {
+  position: absolute;
+  inset: 0;
+}
+
+.graph-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--dp-text-regular);
+  background: var(--dp-card);
+  padding: 6px 10px;
+  border-radius: var(--dp-radius-md);
+  border: 1px solid var(--dp-border);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  z-index: 2;
+  pointer-events: none;
+}
+.graph-legend .legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-sep { color: var(--dp-border); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.pending { background: var(--dp-graph-pending); }
+.dot.approved { background: var(--dp-graph-approved); }
+.dot.rejected { background: var(--dp-graph-rejected); }
+.graph-tip {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  font-size: 11px;
+  color: var(--dp-text-placeholder);
+  background: var(--dp-card);
+  padding: 6px 10px;
+  border-radius: var(--dp-radius-md);
+  border: 1px solid var(--dp-border);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  z-index: 2;
+  pointer-events: none;
+}
+
 .field-value { font-weight: 500; }
-.empty-hint { color: #c0c4cc; font-size: 13px; }
+.empty-hint { color: var(--dp-text-placeholder); font-size: 13px; }
 
 .related-relations { max-height: 200px; overflow-y: auto; }
-.rel-item { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; font-size: 13px; }
-.rel-pending { border-left: 3px solid #e6a23c; background: #fef8ee; }
-.rel-approved { border-left: 3px solid #0e9e8e; background: #e8f8f6; }
+.rel-item { padding: 6px 8px; border-radius: var(--dp-radius-xs); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.rel-pending { border-left: 3px solid var(--dp-warning-dark); background: var(--dp-warning-bg); }
+.rel-approved { border-left: 3px solid var(--dp-success-dark); background: var(--dp-success-bg); }
 .rel-type { flex-shrink: 0; }
 .rel-nodes { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rel-actions { flex-shrink: 0; }
@@ -878,22 +976,33 @@ watch(detailNode, (node) => {
 
 .merge-queue-panel { padding: 0 4px; }
 .merge-card {
-  border: 1px solid #ebeef5; border-radius: 8px; padding: 12px; margin-bottom: 10px;
-  background: #fff;
+  border: 1px solid var(--dp-border-light); border-radius: var(--dp-radius-md); padding: 12px; margin-bottom: 10px;
+  background: var(--dp-card);
 }
 .merge-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.merge-source { font-size: 12px; color: #909399; }
+.merge-source { font-size: 12px; color: var(--dp-text-secondary); }
 .merge-row { display: flex; gap: 10px; }
 .merge-col { flex: 1; min-width: 0; }
-.merge-label { font-size: 11px; color: #909399; margin-bottom: 4px; }
+.merge-label { font-size: 11px; color: var(--dp-text-secondary); margin-bottom: 4px; }
 .merge-value {
-  font-size: 12px; background: #f5f7fa; border-radius: 4px; padding: 6px 8px;
+  font-size: 12px; background: var(--dp-muted-bg); border-radius: var(--dp-radius-xs); padding: 6px 8px;
   margin: 0; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
 }
 .merge-card-actions { display: flex; gap: 8px; margin-top: 10px; }
 
-@media (max-width: 1400px) {
-  .filter-row { flex-direction: column; align-items: flex-start; }
-  .filter-right { margin-left: 0; width: 100%; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--dp-radius-xs);
+  border: 1px solid transparent;
+}
+.badge-relation-type { border-color: rgba(240,138,63,0.3); background: rgba(240,138,63,0.05); color: var(--dp-warning); }
+
+@media (max-width: 1200px) {
+  .graph-toolbar { flex-direction: column; align-items: flex-start; }
+  .toolbar-right { margin-left: 0; width: 100%; }
 }
 </style>

@@ -38,6 +38,7 @@ def list_documents(
                 Document.source_site, Document.publish_date, Document.doc_status,
                 Document.confidence_score, Document.extraction_status,
                 Document.weknora_sync_status,
+                Document.updated_at,
             )
             q = (
                 session.query(*cols)
@@ -68,7 +69,7 @@ def list_documents(
 
             # 分页查询
             rows = (
-                q.order_by(Document.created_at.desc())
+                q.order_by(Document.updated_at.desc())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
                 .all()
@@ -86,6 +87,7 @@ def list_documents(
                     confidence_score=r.confidence_score or 0.0,
                     extraction_status=r.extraction_status or "",
                     weknora_sync_status=r.weknora_sync_status or "",
+                    updated_at=r.updated_at.isoformat() if r.updated_at else None,
                 )
                 for r in rows
             ]

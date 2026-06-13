@@ -238,7 +238,7 @@ loadData()
   display: flex;
   align-items: center;
   gap: 12px;
-  color: #909399;
+  color: var(--dp-text-secondary);
   font-size: 14px;
 }
 .conflict-list {
@@ -264,14 +264,14 @@ loadData()
 }
 .group-meta {
   font-size: 12px;
-  color: #909399;
+  color: var(--dp-text-secondary);
 }
 .cd-context {
   margin-bottom: 4px;
 }
 .context-label {
   font-size: 12px;
-  color: #909399;
+  color: var(--dp-text-secondary);
   margin-bottom: 6px;
   display: block;
 }
@@ -284,21 +284,21 @@ loadData()
   display: flex;
   align-items: center;
   gap: 4px;
-  background: #f5f7fa;
+  background: var(--dp-muted-bg);
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--dp-radius-xs);
   font-size: 12px;
 }
 .cd-field.cd-field-conflict {
-  background: #fef0f0;
-  border: 1px solid #fde2e2;
+  background: var(--dp-danger-bg);
+  border: 1px solid var(--dp-danger-light);
 }
 .cd-field-name {
   font-weight: 500;
-  color: #606266;
+  color: var(--dp-text-regular);
 }
 .cd-field-val {
-  color: #909399;
+  color: var(--dp-text-secondary);
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -307,8 +307,8 @@ loadData()
 .conflict-card {
   margin-bottom: 12px;
   padding: 12px;
-  background: #fafafa;
-  border-radius: 6px;
+  background: var(--dp-muted-bg-secondary);
+  border-radius: var(--dp-radius-sm);
 }
 .card-header { margin-bottom: 8px; }
 .card-tags {
@@ -318,11 +318,11 @@ loadData()
 }
 .card-source {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--dp-text-placeholder);
 }
 .doc-link {
   font-size: 12px;
-  color: #409eff;
+  color: var(--dp-link);
   text-decoration: none;
 }
 .doc-link:hover {
@@ -330,16 +330,16 @@ loadData()
 }
 .compare-row { margin-bottom: 10px; }
 .value-box {
-  background: #fff;
-  border-radius: 6px;
+  background: var(--dp-card);
+  border-radius: var(--dp-radius-sm);
   padding: 8px 12px;
   min-height: 50px;
 }
-.value-box.existing { border-left: 3px solid #e6a23c; }
-.value-box.incoming { border-left: 3px solid #409eff; }
+.value-box.existing { border-left: 3px solid var(--dp-warning-dark); }
+.value-box.incoming { border-left: 3px solid var(--dp-link); }
 .value-label {
   font-size: 12px;
-  color: #909399;
+  color: var(--dp-text-secondary);
   margin-bottom: 4px;
   font-weight: 500;
 }

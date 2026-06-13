@@ -1,7 +1,7 @@
 <template>
   <div v-loading="loading">
     <h2 style="margin-bottom:16px">Neo4j 图数据推送</h2>
-    <p style="color:#909399;margin-bottom:16px;font-size:13px">
+    <p style="color:var(--dp-text-secondary);margin-bottom:16px;font-size:13px">
       将本库抽取的实体/关系推送到 WeKnora 的 Neo4j 拷贝库，供 WeKnora 知识图谱使用。
     </p>
 
@@ -9,19 +9,19 @@
     <el-row :gutter="16" class="stats-row">
       <el-col :span="8">
         <el-card shadow="never" class="stat-card">
-          <div class="stat-num" style="color:#4a7fa5">{{ graphStats.entity_dict.pending }}</div>
+          <div class="stat-num" style="color:var(--dp-info)">{{ graphStats.entity_dict.pending }}</div>
           <div class="stat-label">entity_dict 待同步</div>
         </el-card>
       </el-col>
       <el-col :span="8">
         <el-card shadow="never" class="stat-card">
-          <div class="stat-num" style="color:#0e9e8e">{{ graphStats.entities.pushed }}</div>
+          <div class="stat-num" style="color:var(--dp-success-dark)">{{ graphStats.entities.pushed }}</div>
           <div class="stat-label">实体 已推送</div>
         </el-card>
       </el-col>
       <el-col :span="8">
         <el-card shadow="never" class="stat-card">
-          <div class="stat-num" style="color:#c0392b">{{ graphStats.relations.pending }}</div>
+          <div class="stat-num" style="color:var(--dp-danger-dark)">{{ graphStats.relations.pending }}</div>
           <div class="stat-label">关系 待推送</div>
         </el-card>
       </el-col>
@@ -50,8 +50,8 @@
       <template #header>推送详情</template>
       <el-row :gutter="12">
         <el-col :span="8" v-for="item in graphDetailCards" :key="item.title">
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#606266">{{ item.title }}</div>
-          <div style="font-size:12px;color:#909399;line-height:1.8">
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--dp-text-regular)">{{ item.title }}</div>
+          <div style="font-size:12px;color:var(--dp-text-secondary);line-height:1.8">
             <span v-for="s in item.statuses" :key="s.label" style="margin-right:12px">
               {{ s.label }}: <strong :style="{ color: s.color }">{{ s.value }}</strong>
             </span>
@@ -83,25 +83,25 @@ const graphDetailCards = computed(() => [
   {
     title: 'entity_dict 镜像表',
     statuses: [
-      { label: '待同步', value: graphStats.value.entity_dict.pending, color: '#4a7fa5' },
-      { label: '已同步', value: graphStats.value.entity_dict.synced, color: '#0e9e8e' },
-      { label: '失败', value: graphStats.value.entity_dict.failed, color: '#c0392b' },
+      { label: '待同步', value: graphStats.value.entity_dict.pending, color: 'var(--dp-info)' },
+      { label: '已同步', value: graphStats.value.entity_dict.synced, color: 'var(--dp-success-dark)' },
+      { label: '失败', value: graphStats.value.entity_dict.failed, color: 'var(--dp-danger-dark)' },
     ],
   },
   {
     title: '抽取实体',
     statuses: [
-      { label: '待推送', value: graphStats.value.entities.pending, color: '#4a7fa5' },
-      { label: '已推送', value: graphStats.value.entities.pushed, color: '#0e9e8e' },
-      { label: '失败', value: graphStats.value.entities.failed, color: '#c0392b' },
+      { label: '待推送', value: graphStats.value.entities.pending, color: 'var(--dp-info)' },
+      { label: '已推送', value: graphStats.value.entities.pushed, color: 'var(--dp-success-dark)' },
+      { label: '失败', value: graphStats.value.entities.failed, color: 'var(--dp-danger-dark)' },
     ],
   },
   {
     title: '抽取关系',
     statuses: [
-      { label: '待推送', value: graphStats.value.relations.pending, color: '#4a7fa5' },
-      { label: '已推送', value: graphStats.value.relations.pushed, color: '#0e9e8e' },
-      { label: '失败', value: graphStats.value.relations.failed, color: '#c0392b' },
+      { label: '待推送', value: graphStats.value.relations.pending, color: 'var(--dp-info)' },
+      { label: '已推送', value: graphStats.value.relations.pushed, color: 'var(--dp-success-dark)' },
+      { label: '失败', value: graphStats.value.relations.failed, color: 'var(--dp-danger-dark)' },
     ],
   },
 ])
@@ -169,7 +169,7 @@ onMounted(() => {
   border-radius: 12px;
 }
 .stat-num { font-size: 28px; font-weight: 700; }
-.stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
+.stat-label { font-size: 12px; color: var(--dp-text-secondary); margin-top: 4px; }
 .filter-card {
   margin-bottom: 16px;
   border-radius: 12px;
