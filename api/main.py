@@ -16,9 +16,12 @@ app = FastAPI(
 
 @app.on_event("startup")
 def _startup_recovery():
-    """启动时回退崩溃残留的 queued/processing → pending。"""
+    """启动时清空 DB 残留状态 + Redis 残留队列，完全重置为干净状态。"""
     from db.repository import reset_stale_extractions
+    from core_engine.task_queue import clear_extraction_redis
+
     reset_stale_extractions()
+    clear_extraction_redis()
 
 # ── CORS（前端本地开发需要）──────────────────────────────────────────────
 app.add_middleware(

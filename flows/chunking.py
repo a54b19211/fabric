@@ -9,12 +9,19 @@
 """
 import re
 from dataclasses import dataclass
+from loguru import logger
 
 CHUNK_MAX_CHARS = 6000   # 单块最大字符数
 MEMORY_MAX_CHARS = 800   # 记忆摘要最大字符数
 TABLE_BATCH_ROWS = 50    # 表格分块每批最大行数
 
 _TABLE_SEPARATOR = re.compile(r'^\|[-| :]+\|$')  # Markdown 表格分隔符行
+
+
+def _normalize_table_row(row: str) -> str:
+    """去除 Markdown 表格行中每个单元格的填充空格，大幅减少宽表的字符浪费。"""
+    cells = [c.strip() for c in row.split("|")]
+    return "| " + " | ".join(cells[1:-1]) + " |"
 
 
 @dataclass
@@ -107,9 +114,9 @@ def _extract_table_header(text: str) -> tuple[str, list[str]]:
     if not table_lines:
         return "", lines
 
-    header = table_lines[0]
+    header = _normalize_table_row(table_lines[0])
     # 跳过分隔符行（如 |---|---|）
-    data_lines = [l for l in table_lines[1:] if not _TABLE_SEPARATOR.match(l.strip())]
+    data_lines = [_normalize_table_row(l) for l in table_lines[1:] if not _TABLE_SEPARATOR.match(l.strip())]
     return header, data_lines
 
 
@@ -137,6 +144,12 @@ def chunk_table(text: str) -> list[tuple[str, str]]:
     if current_rows:
         batches.append((header, "\n".join(current_rows)))
 
+    avg_rows = len(data_lines) / len(batches) if batches else 0
+    logger.info(
+        f"[Chunking] 表格分块: {len(data_lines)}行 → {len(batches)}块 "
+        f"({avg_rows:.0f}行/块), 表头{len(header)}字符, "
+        f"数据行均长{sum(len(l) for l in data_lines[:100]) / min(100, len(data_lines)):.0f}字符"
+    )
     return batches
 
 
@@ -174,7 +187,7 @@ def split_document(text: str) -> list[Chunk]:
 
     if _is_table_heavy(text):
         batches = chunk_table(text)
-        return [
+        chunks = [
             Chunk(
                 text=rows,
                 chunk_index=i,
@@ -184,8 +197,11 @@ def split_document(text: str) -> list[Chunk]:
             )
             for i, (header, rows) in enumerate(batches)
         ]
+        logger.info(f"[Chunking] 表格型分块: {len(chunks)} 块, 首块表头 {len(batches[0][0]) if batches else 0} 字符")
+        return chunks
     else:
         raw_chunks = chunk_article(text)
+        logger.info(f"[Chunking] 文章型分块: {len(raw_chunks)} 块, 总字符 {sum(len(c) for c in raw_chunks)}")
         if len(raw_chunks) == 1:
             return [Chunk(text=raw_chunks[0], chunk_index=0, total_chunks=1)]
         return [

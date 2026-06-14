@@ -122,7 +122,7 @@ class RedisTaskQueue:
 
     def enqueue(self, task: Task) -> None:
         from flows.extraction_rq_job import extraction_job
-        self._q.enqueue(extraction_job, task.uuid, job_timeout=7200)  # 10 分钟超时
+        self._q.enqueue(extraction_job, task.uuid, job_timeout=18000)  # 10 分钟超时
 
     def dequeue(self, timeout: float = 1.0) -> Optional[Task]:
         # RQ worker 进程自己从 Redis 取任务，不经过这个方法
@@ -139,7 +139,6 @@ class RedisTaskQueue:
         try:
             from rq.registry import StartedJobRegistry
             registry = StartedJobRegistry("extraction", connection=self._q.connection)
-            # 超过 30 分钟没完成的视为已丢失，重新入队
             stuck_ids = registry.get_job_ids()
             recovered = 0
             for job_id in stuck_ids:
@@ -147,7 +146,7 @@ class RedisTaskQueue:
                     job = self._q.fetch_job(job_id)
                     if job is not None:
                         registry.remove(job, delete_job=True)
-                        self._q.enqueue(job.func, *job.args, **job.kwargs, job_timeout=7200)
+                        self._q.enqueue(job.func, *job.args, **job.kwargs, job_timeout=18000)
                         recovered += 1
                 except Exception:
                     pass
@@ -157,6 +156,35 @@ class RedisTaskQueue:
         except Exception as e:
             logger.warning(f"[TaskQueue] 恢复未完成任务失败: {e}")
             return []
+
+    def clear_all(self) -> int:
+        """
+        清空 Redis 中 extraction 队列的所有任务及 StartedJobRegistry。
+        服务重启时调用，配合 reset_stale_extractions() 实现完全重置。
+        返回清除的任务数。
+        """
+        try:
+            from rq.registry import StartedJobRegistry
+            # 1. 清空队列中排队的 job
+            count = self._q.count
+            self._q.empty()
+            # 2. 清理 StartedJobRegistry 中的残留
+            registry = StartedJobRegistry("extraction", connection=self._q.connection)
+            stuck_ids = registry.get_job_ids()
+            for job_id in stuck_ids:
+                try:
+                    job = self._q.fetch_job(job_id)
+                    if job is not None:
+                        registry.remove(job, delete_job=True)
+                except Exception:
+                    pass
+            total = count + len(stuck_ids)
+            if total:
+                logger.info(f"[TaskQueue] 已清空 Redis 队列: {total} 个任务 (queue={count}, started={len(stuck_ids)})")
+            return total
+        except Exception as e:
+            logger.warning(f"[TaskQueue] 清空队列失败: {e}")
+            return 0
 
     def shutdown(self) -> None:
         pass  # RQ worker 进程独立管理，不需要 Python 侧关闭
@@ -172,6 +200,61 @@ class RedisTaskQueue:
 
 _queue_instance: Optional[TaskQueue] = None
 _queue_lock = threading.Lock()
+
+
+def has_active_extraction_workers() -> bool:
+    """检测 Redis 中是否有活跃的 rq worker（用于判断是 reload 还是真正重启）。"""
+    from config.settings import APP
+    if APP.TASK_QUEUE_BACKEND != "redis":
+        return False
+    try:
+        from redis import Redis
+        conn = Redis.from_url(APP.REDIS_URL)
+        # rq worker 在 Redis 中以 rq:worker:<name> 形式注册
+        worker_keys = conn.keys("rq:worker:*")
+        for key in worker_keys:
+            worker_info = conn.hgetall(key)
+            # 有 worker 且出生时间距现在 > 3 秒（排除刚启动的自身）
+            birth = worker_info.get(b"birth", b"")
+            if birth:
+                import time
+                birth_time = float(birth.decode())
+                if time.time() - birth_time > 3:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def clear_extraction_redis() -> int:
+    """启动时清空 Redis 中 extraction 队列及 StartedJobRegistry（独立于单例）。"""
+    from config.settings import APP
+    if APP.TASK_QUEUE_BACKEND != "redis":
+        return 0
+    try:
+        from redis import Redis
+        from rq import Queue as RQQueue
+        from rq.registry import StartedJobRegistry
+        conn = Redis.from_url(APP.REDIS_URL)
+        q = RQQueue("extraction", connection=conn)
+        count = q.count
+        q.empty()
+        registry = StartedJobRegistry("extraction", connection=conn)
+        stuck_ids = registry.get_job_ids()
+        for job_id in stuck_ids:
+            try:
+                job = q.fetch_job(job_id)
+                if job is not None:
+                    registry.remove(job, delete_job=True)
+            except Exception:
+                pass
+        total = count + len(stuck_ids)
+        if total:
+            logger.info(f"[Startup] 已清空 Redis: {total} 个残留任务 (queue={count}, started={len(stuck_ids)})")
+        return total
+    except Exception as e:
+        logger.warning(f"[Startup] 清空 Redis 失败: {e}")
+        return 0
 
 
 def get_task_queue() -> TaskQueue:
