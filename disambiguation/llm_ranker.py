@@ -34,7 +34,7 @@ def _build_rich_name(entity_name: str, entity_data: dict | None) -> str:
         name_en = entity_data.get("name_en", "").strip()
         if name_en:
             parts.append(name_en)
-        for alias in entity_data.get("aliases", []):
+        for alias in (entity_data.get("aliases") or []):
             a = str(alias).strip()
             if a and a not in parts:
                 parts.append(a)
@@ -51,7 +51,7 @@ def _build_rich_text(candidate: CandidateEntity) -> str:
     cd_name_en = canonical.get("name_en", "").strip()
     if cd_name_en:
         parts.append(cd_name_en)
-    for alias in canonical.get("aliases", []):
+    for alias in (canonical.get("aliases") or []):
         a = str(alias).strip()
         if a and a not in parts:
             parts.append(a)

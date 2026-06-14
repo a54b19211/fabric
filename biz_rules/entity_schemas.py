@@ -229,12 +229,20 @@ def validate_entity_data(entity_type: str, raw: dict) -> dict:
     """
     model_cls = ENTITY_SCHEMA_MAP.get(entity_type)
     if model_cls is None:
-        return raw
+        return _sanitize_entity_data(raw)
     try:
         return model_cls(**raw).model_dump()
     except Exception as e:
         logger.warning(f"[Schema] entity_type={entity_type} 校验失败，保留原始数据: {e}")
-        return raw
+        return _sanitize_entity_data(raw)
+
+
+def _sanitize_entity_data(data: dict) -> dict:
+    """防止 LLM 返回 null 值导致下游 for 循环迭代 None。"""
+    for key in ("aliases",):
+        if key in data and data[key] is None:
+            data[key] = []
+    return data
 
 
 def get_entity_schema_description(entity_type: str) -> str:

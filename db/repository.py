@@ -247,32 +247,36 @@ def update_extraction_status(
         )
 
 
-def reset_stale_extractions() -> int:
+def reset_stale_extractions(max_age_minutes: int = 0) -> int:
     """
-    服务启动时调用：将残留的 queued / processing 重置为 pending。
-    返回重置的文档数量。
+    将残留的 queued / processing 重置为 pending。
 
-    适用场景：Worker 进程崩溃后，队列中的任务已丢失，
-    但 DB 仍显示 queued/processing，需要回退到 pending 以便重新入队。
+    max_age_minutes:
+      - 0（默认）：重置所有，启动时使用
+      - > 0：只重置 updated_at 超过该时间的文档，运行时使用
+
+    适用场景：Worker 超时/崩溃后，RQ 已丢弃任务但 DB 仍显示 queued/processing。
     """
+    from datetime import datetime, timedelta, timezone
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
             return 0
-        result = (
-            session.query(Document)
-            .filter(
-                Document.extraction_status.in_(["queued", "processing"]),
-                Document.is_deleted == False,
-            )
-            .update(
-                {"extraction_status": "pending", "extraction_error": "服务重启，状态回退"},
-                synchronize_session=False,
-            )
+        q = session.query(Document).filter(
+            Document.extraction_status.in_(["queued", "processing"]),
+            Document.is_deleted == False,
+        )
+        if max_age_minutes > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+            q = q.filter(Document.updated_at < cutoff)
+
+        result = q.update(
+            {"extraction_status": "pending", "extraction_error": "任务超时/服务重启，状态回退"},
+            synchronize_session=False,
         )
         if result:
-            logger.info(f"[DB] reset_stale_extractions: {result} 篇回退 pending")
+            logger.info(f"[DB] reset_stale_extractions(max_age={max_age_minutes}m): {result} 篇回退 pending")
         return result
 
 
@@ -1836,7 +1840,7 @@ def add_aliases_no_embedding(
     data_name_en = (entity_data.get("name_en") or "").strip()
     if data_name_en:
         names_to_add.add(data_name_en)
-    for alias in entity_data.get("aliases", []):
+    for alias in (entity_data.get("aliases") or []):
         alias_str = str(alias).strip()
         if alias_str:
             names_to_add.add(alias_str)
@@ -2376,7 +2380,7 @@ def _write_aliases_with_embedding(
     data_name_en = entity_data.get("name_en", "").strip()
     if data_name_en:
         names_to_add.add(data_name_en)
-    for alias in entity_data.get("aliases", []):
+    for alias in (entity_data.get("aliases") or []):
         alias_str = str(alias).strip()
         if alias_str:
             names_to_add.add(alias_str)

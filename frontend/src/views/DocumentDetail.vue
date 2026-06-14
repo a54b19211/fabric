@@ -145,7 +145,7 @@ async function load() {
 async function triggerExtract() {
   triggering.value = true
   try {
-    await triggerExtraction([uuid])
+    await triggerExtraction({ uuids: [uuid] })
     ElMessage.success('已触发抽取，请稍后刷新查看状态')
     await load()
   } finally {

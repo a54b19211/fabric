@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 
-from api.schemas.request import ExtractionTriggerRequest
+from api.schemas.request import ExtractionTriggerRequest, PendingExtractRequest
 from api.schemas.response import (
     ExtractionTriggerResponse, ExtractionStatusResponse, ExtractionStatsResponse,
     WorkerStatsResponse, WorkerItem, ReExtractResponse,
@@ -62,15 +62,20 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                     )
                     uuids_to_run = valid_uuids
             else:
-                # 只查 UUID，raw_content 非空过滤直接在 DB 完成
+                # 按来源/类型筛选 pending 文档
+                filters = [
+                    Document.extraction_status == "pending",
+                    Document.is_deleted == False,
+                    Document.raw_content != "",
+                    Document.raw_content.isnot(None),
+                ]
+                if body.source_site:
+                    filters.append(Document.source_site == body.source_site)
+                if body.doc_type:
+                    filters.append(Document.doc_type == body.doc_type)
                 pending = (
                     session.query(Document.uuid)
-                    .filter(
-                        Document.extraction_status == "pending",
-                        Document.is_deleted == False,
-                        Document.raw_content != "",
-                        Document.raw_content.isnot(None),
-                    )
+                    .filter(*filters)
                     .limit(body.limit)
                     .all()
                 )
@@ -100,6 +105,57 @@ def trigger_extraction(body: ExtractionTriggerRequest):
         except Exception as e:
             logger.error(f"[Extraction] 提交抽取任务失败: {e}")
             raise HTTPException(status_code=500, detail=f"抽取任务提交失败: {e}")
+
+    return ExtractionTriggerResponse(
+        triggered=count,
+        message=f"已提交 {count} 篇文档到抽取队列",
+    )
+
+
+@router.post("/trigger/pending", response_model=ExtractionTriggerResponse)
+def trigger_pending_extraction(body: PendingExtractRequest):
+    """
+    按数量批量抽取 pending 文档。前端输入条数，后端筛 pending → 标记 queued → 入队。
+
+    不传 source_site/doc_type = 全站 pending 文档。
+    """
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        filters = [
+            Document.extraction_status == "pending",
+            Document.is_deleted == False,
+            Document.raw_content != "",
+            Document.raw_content.isnot(None),
+        ]
+        if body.source_site:
+            filters.append(Document.source_site == body.source_site)
+        if body.doc_type:
+            filters.append(Document.doc_type == body.doc_type)
+
+        rows = (
+            session.query(Document.uuid)
+            .filter(*filters)
+            .limit(body.count)
+            .all()
+        )
+        uuids = [r.uuid for r in rows]
+
+        if uuids:
+            session.query(Document).filter(
+                Document.uuid.in_(uuids),
+            ).update(
+                {"extraction_status": "queued", "extraction_error": ""},
+                synchronize_session=False,
+            )
+
+        count = len(uuids)
+        logger.info(f"[Extraction] pending 批量入队: {count} 篇")
+
+    if count > 0:
+        from flows.extraction_flow import run_extraction_for_uuids
+        run_extraction_for_uuids(uuids)
 
     return ExtractionTriggerResponse(
         triggered=count,
@@ -171,6 +227,22 @@ def get_worker_stats():
     except Exception as e:
         logger.error(f"[API] Worker 状态查询失败: {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.post("/reset-stale")
+def reset_stale_extractions_api(max_age_minutes: int = 30):
+    """
+    将长时间卡在 queued/processing 的文档重置为 pending。
+    max_age_minutes: 只重置超过此时间（分钟）的任务，默认 30 分钟。
+    """
+    from db.repository import reset_stale_extractions
+    try:
+        count = reset_stale_extractions(max_age_minutes=max_age_minutes)
+        logger.info(f"[API] 已重置 {count} 篇卡住的文档")
+        return {"reset_count": count, "message": f"已重置 {count} 篇文档到 pending"}
+    except Exception as e:
+        logger.error(f"[API] 重置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/db-pool")

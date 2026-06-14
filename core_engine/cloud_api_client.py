@@ -337,7 +337,7 @@ def build_embedding_text(
         if name_en and name_en != entity_name:
             parts.append(f"英文名: {name_en}")
 
-        aliases = entity_data.get("aliases", [])
+        aliases = entity_data.get("aliases") or []
         if aliases:
             parts.append(f"别名: {', '.join(str(a) for a in aliases[:5])}")
 

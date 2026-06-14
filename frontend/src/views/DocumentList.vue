@@ -53,7 +53,11 @@
             <el-icon><Refresh /></el-icon>重置
           </el-button>
           <el-button type="warning" @click="batchTrigger" :loading="triggering" :disabled="pendingSelectedCount === 0">
-            批量触发抽取 ({{ pendingSelectedCount }})
+            选中抽取 ({{ pendingSelectedCount }})
+          </el-button>
+          <el-input-number v-model="batchCount" :min="1" :max="5000" :step="100" style="width:150px" />
+          <el-button type="success" plain @click="batchTriggerByCount" :loading="triggeringByCount">
+            批量抽取
           </el-button>
           <el-button type="warning" @click="batchRecrawl" :loading="batchRecrawling" :disabled="selectedUuids.length === 0">
             批量重爬 ({{ selectedUuids.length }})
@@ -150,16 +154,16 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getDocuments, recrawlDocument, batchRecrawlDocuments, type DocumentItem } from '@/api/documents'
-import { triggerExtraction, getExtractionStats, type ExtractionStats } from '@/api/extraction'
+import { triggerExtraction, getExtractionStats, triggerPendingExtraction, type ExtractionStats } from '@/api/extraction'
 import { relativeTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
 
-const SITES = ['nmpa','cde','fda_press','fda_drug_safety',
-  'fda_api_drug_label','fda_api_enforcement','chictr','clinicaltrials',
-  'pubmed','drugbank','hkex','fiercepharma','phirda_policy','phirda_industry',
-  'phirda_rd','phirda_healthcare_reform','roche']
+const SITES = ['nmpa','cde','cde_zdyz','cde_xxgk',
+  'fda_press','fda_drug_safety','fda_api_drug_label','fda_api_enforcement',
+  'chictr','clinicaltrials','pubmed','drugbank','hkex','fiercepharma',
+  'phirda_policy','phirda_industry','phirda_rd','phirda_healthcare_reform','roche']
 
 const rows = ref<DocumentItem[]>([])
 const total = ref(0)
@@ -167,6 +171,8 @@ const page = ref(Number(route.query.page) || 1)
 const pageSize = ref(Number(route.query.pageSize) || 20)
 const loading = ref(false)
 const triggering = ref(false)
+const triggeringByCount = ref(false)
+const batchCount = ref(100)
 const recrawlingUuids = ref<Set<string>>(new Set())
 const dateRange = ref<[string, string] | null>(
   route.query.date_from && route.query.date_to
@@ -250,7 +256,7 @@ async function loadStats() {
 }
 
 async function triggerOne(uuid: string) {
-  await triggerExtraction([uuid])
+  await triggerExtraction({ uuids: [uuid] })
   ElMessage.success('已触发抽取')
   loadData()
   loadStats()
@@ -274,13 +280,36 @@ async function batchTrigger() {
   }
   triggering.value = true
   try {
-    const res = await triggerExtraction(selectedUuids.value)
+    const res = await triggerExtraction({ uuids: selectedUuids.value })
     ElMessage.success(res.message)
     clearSelection()
     loadData()
     loadStats()
   } finally {
     triggering.value = false
+  }
+}
+
+async function batchTriggerByCount() {
+  const source = filters.value.source_site || undefined
+  const dtype = (filters.value as any).doc_type || undefined
+  try {
+    await ElMessageBox.confirm(
+      `确认批量抽取 ${batchCount.value} 篇？\n来源站点: ${source || '全部'}\n文档类型: ${dtype || '全部'}`,
+      '确认批量抽取',
+      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  triggeringByCount.value = true
+  try {
+    const res = await triggerPendingExtraction({ count: batchCount.value, source_site: source, doc_type: dtype })
+    ElMessage.success(res.message)
+    loadData()
+    loadStats()
+  } finally {
+    triggeringByCount.value = false
   }
 }
 

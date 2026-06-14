@@ -5,7 +5,16 @@ from pydantic import BaseModel, Field, validator
 
 class ExtractionTriggerRequest(BaseModel):
     uuids: list[str] = Field(default_factory=list)
-    limit: int = Field(default=10, ge=1, le=500, description="最多处理 500 篇文档")
+    source_site: Optional[str] = Field(default=None, description="按来源站筛选 pending 文档")
+    doc_type: Optional[str] = Field(default=None, description="按文档类型筛选")
+    limit: int = Field(default=10, ge=1, le=5000, description="单次最多篇数")
+
+
+class PendingExtractRequest(BaseModel):
+    """按数量批量抽取 pending 文档（纯数量驱动，不传 UUID 列表）。"""
+    count: int = Field(default=100, ge=1, le=5000, description="抽取数量")
+    source_site: Optional[str] = Field(default=None, description="按来源站筛选")
+    doc_type: Optional[str] = Field(default=None, description="按文档类型筛选")
 
 
 class ReviewActionRequest(BaseModel):

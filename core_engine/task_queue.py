@@ -122,7 +122,7 @@ class RedisTaskQueue:
 
     def enqueue(self, task: Task) -> None:
         from flows.extraction_rq_job import extraction_job
-        self._q.enqueue(extraction_job, task.uuid)
+        self._q.enqueue(extraction_job, task.uuid, job_timeout=7200)  # 10 分钟超时
 
     def dequeue(self, timeout: float = 1.0) -> Optional[Task]:
         # RQ worker 进程自己从 Redis 取任务，不经过这个方法
@@ -147,7 +147,7 @@ class RedisTaskQueue:
                     job = self._q.fetch_job(job_id)
                     if job is not None:
                         registry.remove(job, delete_job=True)
-                        self._q.enqueue(job.func, *job.args, **job.kwargs)
+                        self._q.enqueue(job.func, *job.args, **job.kwargs, job_timeout=7200)
                         recovered += 1
                 except Exception:
                     pass
