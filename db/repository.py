@@ -989,6 +989,10 @@ def resolve_merge(
             operator=reviewer,
             trigger_source="resolve_merge",
         )
+
+        # 回写 canonical_data → entity_data
+        _sync_canonical_to_extracted(session, merge.target_dict_id)
+
         logger.info(f"[DB] resolve_merge: merge_id={merge_id} resolution={resolution}")
 
 
@@ -1007,6 +1011,7 @@ def batch_resolve_merges(
             return {"success": False, "error": "数据库未连接"}
 
         resolved_count = 0
+        affected_dict_ids = set()
         for dec in decisions:
             merge_id = dec["merge_id"]
             resolution = dec["resolution"]
@@ -1034,6 +1039,7 @@ def batch_resolve_merges(
                     canonical[merge.field_name] = new_val
                     entity.canonical_data = canonical
                     entity.canonical_updated_at = datetime.now(timezone.utc)
+                    affected_dict_ids.add(merge.target_dict_id)
             elif resolution == "keep_existing":
                 pass
             elif resolution == "custom" and resolved_value is not None:
@@ -1047,6 +1053,7 @@ def batch_resolve_merges(
                     canonical[merge.field_name] = resolved_value
                     entity.canonical_data = canonical
                     entity.canonical_updated_at = datetime.now(timezone.utc)
+                    affected_dict_ids.add(merge.target_dict_id)
 
             resolved_count += 1
             _write_operation_log(
@@ -1058,6 +1065,9 @@ def batch_resolve_merges(
                 operator=reviewer,
                 trigger_source="batch_resolve_merges",
             )
+
+        for _dict_id in affected_dict_ids:
+            _sync_canonical_to_extracted(session, _dict_id)
 
         session.commit()
         logger.info(f"[DB] batch_resolve_merges: resolved {resolved_count} conflicts")
@@ -2079,6 +2089,7 @@ def _do_insert_extraction_result(
     # ── Phase 3: 合并数据到已有实体 ───────────────────────────────
     merge_count = 0
     alias_count = 0
+    merged_dict_ids: set[int] = set()
     for i, existing_id in merged_id_map.items():
         existing_ent = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == existing_id
@@ -2095,15 +2106,14 @@ def _do_insert_extraction_result(
         merge_auto, merge_conflict = process_entity_merge(
             session, dict_id, existing_id, new_entity_data, source_site,
         )
-        # 只同步 canonical_data 中新增/变更的字段到 extracted_entities，不整体覆盖
-        # 避免清掉 extracted_entities 独有的元数据（如 _disambig）
-        if merge_auto > 0:
-            entity_dict = session.query(EntityDict).filter(EntityDict.id == dict_id).first()
-            if entity_dict and entity_dict.canonical_data:
-                existing = existing_ent.entity_data or {}
-                for key, val in entity_dict.canonical_data.items():
-                    if val is not None and key not in existing:
-                        existing[key] = val  # 仅补入新字段，不覆盖已有
+
+        # 交叉验证：第二次被命中 → 实体自动通过
+        if existing_ent.review_status == "pending":
+            existing_ent.review_status = "auto_approved"
+            logger.info(
+                f"[DB] auto_approve: entity_id={existing_id} dict_id={dict_id} "
+                f"'{existing_ent.entity_name}' 交叉验证自动通过"
+            )
 
         # 重置图同步状态，让更新推送到 WeKnora/Neo4j
         if existing_ent.weknora_graph_status == "pushed":
@@ -2130,6 +2140,8 @@ def _do_insert_extraction_result(
             alias_count += added
 
         merge_count += 1
+        if dict_id:
+            merged_dict_ids.add(dict_id)
         logger.info(
             f"[DB] 实体合并: index={i} name='{entity_name}' "
             f"→ extracted_entities.id={existing_id} dict_id={dict_id} "
@@ -2150,9 +2162,30 @@ def _do_insert_extraction_result(
             f"[DB] merge 阶段完成: {merge_count} 个实体, "
             f"{alias_count} 个新别名"
         )
+        # 统一回写 canonical_data → entity_data（仅 approved/auto_approved）
+        for _dict_id in merged_dict_ids:
+            _sync_canonical_to_extracted(session, _dict_id)
 
     # ── Phase 4: 写关系（下标 → final_id_map）─────────────────────
+    # 查询当前文档已有关系，去重
+    existing_relations = set()
+    if relations:
+        for er in (
+            session.query(
+                EntityRelation.from_entity_id,
+                EntityRelation.to_entity_id,
+                EntityRelation.relation_type,
+            )
+            .filter(
+                EntityRelation.source_doc_uuid == source_doc_uuid,
+                EntityRelation.is_deleted == False,
+            )
+            .all()
+        ):
+            existing_relations.add((er.from_entity_id, er.to_entity_id, er.relation_type))
+
     rel_objs = []
+    skipped_dups = 0
     for rel in relations:
         from_idx = rel.get("from_entity_idx")
         to_idx = rel.get("to_entity_idx")
@@ -2175,6 +2208,13 @@ def _do_insert_extraction_result(
             )
             continue
 
+        # 去重：同文档同 (from, to, type) 已存在则跳过
+        dup_key = (from_db_id, to_db_id, rel["relation_type"])
+        if dup_key in existing_relations:
+            skipped_dups += 1
+            continue
+
+        existing_relations.add(dup_key)  # 防止批次内重复
         rel_objs.append(EntityRelation(
             source_doc_uuid=source_doc_uuid,
             source_site=source_site,
@@ -2200,6 +2240,12 @@ def _do_insert_extraction_result(
                           "source_doc_uuid": rel_obj.source_doc_uuid, "source_site": rel_obj.source_site},
                 trigger_source="_do_insert_extraction_result",
             )
+
+    if skipped_dups:
+        logger.info(
+            f"[DB] 关系去重: 跳过 {skipped_dups} 条重复关系 "
+            f"(doc={source_doc_uuid})"
+        )
 
     # ── Phase 5: 更新文档抽取状态 ──────────────────────────────────
     doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
@@ -2499,6 +2545,47 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
     return len(duplicates)
 
 
+def _sync_canonical_to_extracted(session, dict_id: int) -> int:
+    """将 entity_dict.canonical_data 回写到所有已审批的 extracted_entities 行。"""
+    entity_dict = session.query(EntityDict).filter(EntityDict.id == dict_id).first()
+    if entity_dict is None or not entity_dict.canonical_data:
+        return 0
+
+    rows = (
+        session.query(ExtractedEntity)
+        .filter(
+            ExtractedEntity.dict_id == dict_id,
+            ExtractedEntity.review_status.in_(["approved", "auto_approved"]),
+            ExtractedEntity.is_deleted == False,
+        )
+        .all()
+    )
+
+    if not rows:
+        return 0
+
+    cd = dict(entity_dict.canonical_data or {})
+    count = 0
+    for ent in rows:
+        ed = dict(ent.entity_data or {})
+        changed = False
+        for k, v in cd.items():
+            if v is not None and ed.get(k) != v:
+                ed[k] = v
+                changed = True
+        if changed:
+            ent.entity_data = ed
+            count += 1
+
+    if count:
+        logger.info(
+            f"[DB] _sync_canonical_to_extracted: dict_id={dict_id} "
+            f"synced {count}/{len(rows)} rows, {len(cd)} canonical fields"
+        )
+
+    return count
+
+
 def approve_entity_with_alias_writeback(
     entity_id: int,
     reviewer: str,
@@ -2658,6 +2745,9 @@ def approve_entity_with_alias_writeback(
                 f"[DB] merge: entity_id={entity_id} dict_id={ent.dict_id} "
                 f"auto_merged={merge_auto} conflicts={merge_conflict}"
             )
+
+        # 回写 canonical_data → entity_data（实体刚获批）
+        _sync_canonical_to_extracted(session, ent.dict_id)
 
         # 去重同 dict_id 的其他实体（保留当前审核通过的这一条）
         if ent.dict_id:

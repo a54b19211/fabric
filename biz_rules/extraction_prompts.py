@@ -52,6 +52,9 @@
   DEVELOPED_BY          TCMFormula → Company
   CONTAINS              TCMFormula → Compound   {content_pct}
   TARGETS               Compound → Target       {mechanism, evidence_level("体外"/"动物"/"临床")}
+
+  # 药物制剂维度
+  CONTAINS              Drug → Drug             {content_pct}  -- 药物制剂含有活性成分（双向关系：反向遍历即"是XX的活性成分"）
 """
 
 import json
@@ -123,6 +126,7 @@ Indication→Indication SUBTYPE_OF | —                                | is_cor
 Policy→X AFFECTS                | impact_direction, start_date       | impact_scope
 TCMFormula→Company DEVELOPED_BY | —                                 | —
 TCMFormula→Compound CONTAINS    | —                                 | content_pct
+Drug→Drug CONTAINS              | content_pct                        | —
 Drug→SafetyEvent RELATED_TO     | —                                 | —
 Company→RecallEvent RELATED_TO  | —                                 | —
 Drug→RecallEvent RELATED_TO     | —                                 | —
@@ -223,6 +227,21 @@ _COMMON_EXTRACTION_RULES = """
 
 ### 7. 置信度（禁止全标 0.9+）
 - 0.9-1.0: 原文明确提及 | 0.7-0.85: 上下文强推断 | 0.5-0.65: 多线索综合 | 0.3-0.45: 间接暗示/存疑
+
+### 8. 药物制剂名拆解 — CONTAINS 关系（双向）
+- 中文药品名常以「片/胶囊/注射液/颗粒/口服液/滴丸/栓剂/软膏/分散片/缓释片/肠溶片/咀嚼片」等剂型后缀结尾
+- 识别出剂型后缀后，必须将活性成分也独立抽取为一个 Drug 实体
+- 制剂 Drug（含剂型后缀）→ 活性成分 Drug（去掉剂型后缀）: CONTAINS，content_pct 可填
+- 例：文档中出现「酚酞片」→ 两个 Drug 实体:
+  * Drug「酚酞片」(entity_name 保留剂型后缀)
+  * Drug「酚酞」(entity_name 去掉剂型后缀，作为活性成分)
+  * 关系: 酚酞片 -[CONTAINS]-> 酚酞
+- 例：「阿莫西林胶囊」→ Drug「阿莫西林胶囊」-[CONTAINS]-> Drug「阿莫西林」
+- 例：「紫杉醇注射液」→ Drug「紫杉醇注射液」-[CONTAINS]-> Drug「紫杉醇」
+- 活性成分如果已在 entities 数组中出现过，直接引用已有下标，不要重复创建
+- 复方制剂（如「氨酚伪麻片」）不要拆解——中文复方制剂名多为缩写，LLM 无法可靠映射到具体活性成分
+- 关系是双向的：图谱中反向遍历 CONTAINS 即可查询「某活性成分被哪些制剂使用」
+- 注意：不要将「葡萄糖注射液」「氯化钠注射液」「注射用水」等辅料/溶媒拆为药品实体
 """
 
 _EMPTY_RESULT_GUIDANCE = """
@@ -364,7 +383,7 @@ def get_nmpa_extraction_prompt(text: str) -> str:
 - 政策/通告/指导原则 → Policy（policy_type="审批改革"/"监管规范"/"鼓励政策"）
 - Drug：INN通用名优先，批准文号（国药准字H/Z/S/J...）和登记号（Y开头）填入 registration_number
 - ApprovalEvent：批准类型（NDA/BLA/补充申请/再注册）、批准日期
-- 关系重点：Company-[DEVELOPS]->Drug | Drug-[HAS_APPROVAL]->ApprovalEvent | Policy-[AFFECTS]->Drug/Company | Drug-[RELATED_TO]->SafetyEvent | Company-[RELATED_TO]->RecallEvent
+- 关系重点：Company-[DEVELOPS]->Drug | Drug-[HAS_APPROVAL]->ApprovalEvent | Policy-[AFFECTS]->Drug/Company | Drug-[RELATED_TO]->SafetyEvent | Company-[RELATED_TO]->RecallEvent | Drug（制剂）-[CONTAINS]->Drug（活性成分）
 
 {_CDE_TABLE_FEWSHOT}
 
@@ -415,7 +434,7 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
 - RecallEvent：recall_class(I/II/III)、recall_scope(零售/批发/用户级)
 - Policy：政策公告或执法文件
 - 不抽取: 辅料为Compound | Advisory Committee 纪要 | 同药不同剂型重复创建
-- 关系重点：Company-[DEVELOPS]->Drug | Drug-[HAS_APPROVAL]->ApprovalEvent | Drug-[RELATED_TO]->SafetyEvent | Company-[RELATED_TO]->RecallEvent | Policy-[AFFECTS]->Drug/Company
+- 关系重点：Company-[DEVELOPS]->Drug | Drug-[HAS_APPROVAL]->ApprovalEvent | Drug-[RELATED_TO]->SafetyEvent | Company-[RELATED_TO]->RecallEvent | Policy-[AFFECTS]->Drug/Company | Drug（制剂）-[CONTAINS]->Drug（活性成分）
 
 ## 文档内容
 {text}
