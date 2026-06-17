@@ -7,6 +7,7 @@
   - 幂等性：upsert 基于 uuid ON CONFLICT
   - Session 管理：使用 db/session.py 提供的 get_session()
 """
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -38,6 +39,13 @@ _SOURCE_PRIORITY: dict[str, int] = {
 _ARRAY_FIELDS = frozenset({"aliases", "types", "innovation_labels", "categories", "atc_codes", "synonyms"})
 # 快照字段：时间新的覆盖旧的（值本身是 dict，含 timestamp key）
 _SNAPSHOT_FIELDS = frozenset({"market_cap", "price", "stock_price"})
+
+# 制剂后缀：entity_name 以此结尾时，不写入 entity_name 的子串作为 alias
+_FORMULATION_SUFFIX = re.compile(
+    r'(片|颗粒|试剂|胶囊|注射液|分散片|缓释片|肠溶片|滴丸|口服液'
+    r'|糖浆|软胶囊|咀嚼片|泡腾片|注射用|冻干|混悬液|滴眼液'
+    r'|软膏|乳膏|凝胶|栓剂|气雾剂|喷雾剂|贴剂|洗剂|搽剂)$'
+)
 
 
 # ── 操作日志 ───────────────────────────────────────────────────────────
@@ -1589,19 +1597,17 @@ def get_merge_logs(limit: int = 50, include_rolled_back: bool = True) -> list[di
 def lookup_alias(name: str, entity_type: str, session=None) -> Optional[int]:
     """
     精确匹配别名表。
-    在 entity_aliases 中查找 name 完全匹配且对应 entity_dict.entity_type 匹配的记录。
+    在 entity_aliases 中查找 name 完全匹配（同 entity_type）。
     命中返回 dict_id，未命中返回 None。
     session 可选：传入则复用，不传则自开（向后兼容）。
     """
     def _query(sess):
         result = (
             sess.query(EntityAlias.dict_id)
-            .join(EntityDict, EntityAlias.dict_id == EntityDict.id)
             .filter(
                 func.lower(EntityAlias.name) == name.lower(),
+                EntityAlias.entity_type == entity_type,
                 EntityAlias.is_deleted == False,
-                EntityDict.entity_type == entity_type,
-                EntityDict.is_deleted == False,
             )
             .first()
         )
@@ -1689,7 +1695,7 @@ def search_similar_entities(
         return _query(sess)
 
 
-def add_aliases(dict_id: int, aliases: list[tuple[str, str, bool]]) -> None:
+def add_aliases(dict_id: int, entity_type: str, aliases: list[tuple[str, str, bool]]) -> None:
     """
     添加别名（幂等，已存在则跳过）。
     aliases: [(name, lang, is_canonical), ...]
@@ -1702,7 +1708,8 @@ def add_aliases(dict_id: int, aliases: list[tuple[str, str, bool]]) -> None:
         for name, lang, is_canonical in aliases:
             exists = (
                 session.query(EntityAlias)
-                .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name)
+                .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name,
+                        EntityAlias.is_deleted == False)
                 .first()
             )
             if exists is None:
@@ -1711,6 +1718,7 @@ def add_aliases(dict_id: int, aliases: list[tuple[str, str, bool]]) -> None:
                     name=name,
                     lang=lang or "",
                     is_canonical=bool(is_canonical),
+                    entity_type=entity_type,
                 )
                 session.add(alias)
                 session.flush()
@@ -1786,6 +1794,7 @@ def get_entity_with_aliases(dict_id: int) -> dict | None:
 def add_alias_with_embedding(
     dict_id: int,
     name: str,
+    entity_type: str = "",
     lang: str = "",
     is_canonical: bool = False,
     embedding: list[float] | None = None,
@@ -1800,7 +1809,8 @@ def add_alias_with_embedding(
         if session is None:
             return
         exists = session.query(EntityAlias).filter(
-            EntityAlias.dict_id == dict_id, EntityAlias.name == name
+            EntityAlias.dict_id == dict_id, EntityAlias.name == name,
+            EntityAlias.is_deleted == False,
         ).first()
         if exists is not None:
             return
@@ -1810,6 +1820,7 @@ def add_alias_with_embedding(
             name=name,
             lang=lang or "",
             is_canonical=bool(is_canonical),
+            entity_type=entity_type,
         )
         session.add(alias)
         session.flush()
@@ -1829,78 +1840,6 @@ def add_alias_with_embedding(
                       "has_embedding": bool(embedding)},
             trigger_source="add_alias_with_embedding",
         )
-
-
-def add_aliases_no_embedding(
-    session, dict_id: int, entity_type: str, entity_name: str, entity_data: dict,
-) -> int:
-    """
-    写实体别名到 entity_aliases，同时生成 name_embedding。
-    优先使用锁外预生成的 _embeddings 缓存，未命中才实时调 API。
-    已存在则跳过（幂等）。返回新增条数。
-    """
-    from core_engine.cloud_api_client import generate_embedding
-    from sqlalchemy import text as _text
-
-    names_to_add: set[str] = set()
-    names_to_add.add(entity_name.strip())
-    data_name = (entity_data.get("name") or "").strip()
-    if data_name:
-        names_to_add.add(data_name)
-    data_name_en = (entity_data.get("name_en") or "").strip()
-    if data_name_en:
-        names_to_add.add(data_name_en)
-    for alias in (entity_data.get("aliases") or []):
-        alias_str = str(alias).strip()
-        if alias_str:
-            names_to_add.add(alias_str)
-
-    embeddings_cache: dict[str, list[float]] = entity_data.pop("_embeddings", {}) or {}
-
-    added = 0
-    for name in names_to_add:
-        if not name:
-            continue
-        exists = (
-            session.query(EntityAlias)
-            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name, EntityAlias.is_deleted == False)
-            .first()
-        )
-        if exists is not None:
-            continue
-        alias = EntityAlias(
-            dict_id=dict_id,
-            name=name,
-            lang="zh" if any('一' <= c <= '鿿' for c in name) else "en",
-            is_canonical=(name == (entity_data.get("name") or "")),
-        )
-        session.add(alias)
-        session.flush()
-
-        try:
-            embedding = embeddings_cache.get(name) or generate_embedding(name)
-            if embedding:
-                vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
-                session.execute(
-                    _text(
-                        "UPDATE entity_aliases SET name_embedding = "
-                        "CAST(:vec AS vector) WHERE id = :id"
-                    ),
-                    {"vec": vec_str, "id": alias.id},
-                )
-        except Exception as e:
-            logger.warning(f"[DB] alias '{name}' embedding 生成失败: {e}")
-
-        _write_operation_log(
-            session, "insert", "entity_aliases", alias.id,
-            business_action="alias_sync",
-            description=f"添加别名(消歧): '{name}' dict_id={dict_id}",
-            details={"dict_id": dict_id, "name": name, "entity_type": entity_type,
-                      "is_canonical": (name == (entity_data.get("name") or ""))},
-            trigger_source="add_aliases_no_embedding",
-        )
-        added += 1
-    return added
 
 
 # ── 提取结果写入前：实体合并辅助函数 ─────────────────────────────────
@@ -2043,6 +1982,7 @@ def _do_insert_extraction_result(
                 new_dict_id = _create_entity_dict_from_extraction(
                     session, entity_name, entity_type, entity_data,
                     source_site=source_site, is_verified=False,
+                    source_doc_uuid=source_doc_uuid,
                 )
                 if new_dict_id:
                     dict_id = new_dict_id
@@ -2088,7 +2028,6 @@ def _do_insert_extraction_result(
 
     # ── Phase 3: 合并数据到已有实体 ───────────────────────────────
     merge_count = 0
-    alias_count = 0
     merged_dict_ids: set[int] = set()
     for i, existing_id in merged_id_map.items():
         existing_ent = session.query(ExtractedEntity).filter(
@@ -2100,6 +2039,8 @@ def _do_insert_extraction_result(
 
         rec = entities[i]
         dict_id = rec.get("dict_id")
+        entity_name = rec.get("entity_name", "")
+        entity_type = rec.get("entity_type", "")
         new_entity_data = rec.get("entity_data", {}) or {}
 
         # 合并 entity_data → process_entity_merge 写入 entity_dict.canonical_data
@@ -2128,24 +2069,12 @@ def _do_insert_extraction_result(
                 + new_source
             )[:2000]
 
-        # 回写新别名（同步生成 embedding）
-        dict_id = rec["dict_id"]
-        entity_name = rec.get("entity_name", "")
-        entity_type = rec.get("entity_type", "")
-        added = 0
-        if dict_id:
-            added = add_aliases_no_embedding(
-                session, dict_id, entity_type, entity_name, new_entity_data,
-            )
-            alias_count += added
-
         merge_count += 1
         if dict_id:
             merged_dict_ids.add(dict_id)
         logger.info(
             f"[DB] 实体合并: index={i} name='{entity_name}' "
-            f"→ extracted_entities.id={existing_id} dict_id={dict_id} "
-            f"aliases_added={added}"
+            f"→ extracted_entities.id={existing_id} dict_id={dict_id}"
         )
         _write_operation_log(
             session, "update", "extracted_entities", existing_id,
@@ -2153,14 +2082,13 @@ def _do_insert_extraction_result(
             description=f"merge 实体: name='{entity_name}' type={entity_type} → id={existing_id} dict_id={dict_id}",
             details={"entity_name": entity_name, "entity_type": entity_type,
                       "dict_id": dict_id, "merge_auto": merge_auto, "merge_conflict": merge_conflict,
-                      "source_site": source_site, "aliases_added": added},
+                      "source_site": source_site},
             trigger_source="_do_insert_extraction_result",
         )
 
     if merge_count:
         logger.info(
-            f"[DB] merge 阶段完成: {merge_count} 个实体, "
-            f"{alias_count} 个新别名"
+            f"[DB] merge 阶段完成: {merge_count} 个实体"
         )
         # 统一回写 canonical_data → entity_data（仅 approved/auto_approved）
         for _dict_id in merged_dict_ids:
@@ -2346,6 +2274,7 @@ def _create_entity_dict_from_extraction(
     entity_data: dict,
     source_site: str = "",
     is_verified: bool = True,
+    source_doc_uuid: str = "",
 ) -> int | None:
     """
     从抽取实体创建 entity_dict 记录，返回 dict_id。
@@ -2402,7 +2331,8 @@ def _create_entity_dict_from_extraction(
         trigger_source="_create_entity_dict_from_extraction",
     )
     # 写入 alias（embedding 已在锁外预生成，从 entity_data._embeddings 缓存读取）
-    _write_aliases_with_embedding(session, entity.id, entity_type, entity_name, entity_data)
+    _write_aliases_with_embedding(session, entity.id, entity_type, entity_name, entity_data,
+                                  source_doc_uuid=source_doc_uuid)
     logger.info(f"[DB] entity_dict 创建成功: dict_id={entity.id}")
     return entity.id
 
@@ -2413,6 +2343,7 @@ def _write_aliases_with_embedding(
     entity_type: str,
     entity_name: str,
     entity_data: dict,
+    source_doc_uuid: str = "",
 ) -> int:
     """将 entity_name + entity_data 中的名称写为 entity_aliases，附带 embedding。返回新增条数。"""
     from core_engine.cloud_api_client import generate_embedding
@@ -2440,22 +2371,47 @@ def _write_aliases_with_embedding(
     for name in names_to_add:
         if not name:
             continue
+        # 制剂后缀实体：不写入 entity_name 的子串作为 alias（如 "氯雷他定片" ← "氯雷他定"）
+        if (_FORMULATION_SUFFIX.search(entity_name)
+                and name != entity_name and name in entity_name):
+            logger.info(f"[DB] alias '{name}' 是 entity_name '{entity_name}' 的子串，跳过")
+            continue
         exists = (
             session.query(EntityAlias)
-            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name)
+            .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name,
+                    EntityAlias.is_deleted == False)
             .first()
         )
         if exists is not None:
             logger.debug(f"[DB] alias 已存在: '{name}' dict_id={dict_id}，跳过")
             continue
 
-        embedding = embeddings_cache.get(name) or generate_embedding(name)
+        # 跨 dict_id 冲突检查：该 name 已属于其他实体则跳过
+        conflict = session.query(EntityAlias).filter(
+            EntityAlias.dict_id != dict_id,
+            EntityAlias.name == name,
+            EntityAlias.entity_type == entity_type,
+            EntityAlias.is_deleted == False,
+        ).first()
+        if conflict is not None:
+            logger.info(
+                f"[DB] alias '{name}' 已属于 dict_id={conflict.dict_id}"
+                f" (entity_type={entity_type})，跳过不写入 dict_id={dict_id}"
+            )
+            continue
+
+        try:
+            embedding = embeddings_cache.get(name) or generate_embedding(name)
+        except Exception as e:
+            logger.warning(f"[DB] alias '{name}' embedding 生成失败: {e}")
+            embedding = None
 
         alias = EntityAlias(
             dict_id=dict_id,
             name=name,
             lang="zh" if any('一' <= c <= '鿟' for c in name) else "en",
             is_canonical=(name == entity_data.get("name", "")),
+            entity_type=entity_type,
         )
         session.add(alias)
         session.flush()
@@ -2470,13 +2426,29 @@ def _write_aliases_with_embedding(
         else:
             logger.warning(f"[DB] alias '{name}' embedding 生成失败")
         added += 1
+
+    if added and source_doc_uuid:
+        names_written = [n for n in names_to_add if n]  # 所有写入的候选名
+        _write_operation_log(
+            session, "insert", "entity_aliases", None,
+            business_action="alias_sync",
+            description=f"LLM抽取别名: entity='{entity_name}' type={entity_type} dict_id={dict_id} aliases={names_written}",
+            details={
+                "source_doc_uuid": source_doc_uuid,
+                "entity_name": entity_name,
+                "entity_type": entity_type,
+                "dict_id": dict_id,
+                "aliases_written": names_written,
+            },
+            trigger_source="_write_aliases_with_embedding",
+        )
     return added
 
 
 def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) -> int:
     """
     审核通过后去重：同 dict_id 下保留 keeper_id，其余软删除。
-    迁移数据：entity_name → alias，entity_data → process_entity_merge，
+    迁移数据：entity_data → process_entity_merge，
     关系重定向到 keeper_id。冲突进 merge_queue 不阻塞去重。
     """
     duplicates = (
@@ -2493,19 +2465,13 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
         return 0
 
     for dup in duplicates:
-        # a. entity_name → alias
-        if dup.entity_name:
-            add_aliases_no_embedding(
-                session, dict_id, dup.entity_type, dup.entity_name, dup.entity_data or {},
-            )
-
-        # b. entity_data → process_entity_merge（冲突进 merge_queue）
+        # a. entity_data → process_entity_merge（冲突进 merge_queue）
         if dup.entity_data:
             process_entity_merge(
                 session, dict_id, keeper_id, dict(dup.entity_data), dup.source_site or "",
             )
 
-        # c. EntityRelation 重定向到 keeper_id
+        # b. EntityRelation 重定向到 keeper_id
         affected_rels = (
             session.query(EntityRelation)
             .filter(
@@ -2520,10 +2486,10 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
             if rel.to_entity_id == dup.id:
                 rel.to_entity_id = keeper_id
 
-        # d. 软删除
+        # c. 软删除
         dup.is_deleted = True
 
-        # e. review log
+        # d. review log
         _write_review_log(
             session, "entity", dup.id, "dedup_merge", "system",
             f"merged into entity {keeper_id} (dict_id={dict_id})",
@@ -2531,7 +2497,7 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
             {"is_deleted": True, "merged_into": keeper_id},
         )
 
-        # f. operation log
+        # e. operation log
         _write_operation_log(
             session, "update", "extracted_entities", dup.id,
             business_action="dedup",
@@ -2594,7 +2560,7 @@ def approve_entity_with_alias_writeback(
     force_new: bool = False,
 ) -> None:
     """
-    审核通过实体，回写别名 + embedding 到 entity_dict。
+    审核通过实体，合并 entity_data 到 canonical_data。
     优先级：force_new > dict_id > ent.dict_id > 创建新 entity_dict
     - force_new=True → 忽略一切，以新实体创建
     - dict_id 不为 None → 审核员指定了目标 dict_id
@@ -2671,6 +2637,7 @@ def approve_entity_with_alias_writeback(
                 entity_type=ent.entity_type,
                 entity_data=entity_data,
                 source_site=ent.source_site or "",
+                source_doc_uuid=ent.source_doc_uuid or "",
             )
             if new_id:
                 target_dict_id = new_id
@@ -2720,21 +2687,6 @@ def approve_entity_with_alias_writeback(
                     logger.info(f"[DB] approve: 孤儿 entity_dict {old_dict_id} 已软删除")
 
             session.flush()
-
-        # 回写别名
-        added = _write_aliases_with_embedding(
-            session, ent.dict_id, ent.entity_type, ent.entity_name, entity_data,
-        )
-        if added:
-            logger.info(f"[DB] alias write-back: entity_id={entity_id} dict_id={ent.dict_id} added {added} aliases")
-            _write_operation_log(
-                session, "insert", "entity_aliases", None,
-                business_action="alias_sync",
-                description=f"审核后别名回写: dict_id={ent.dict_id} name='{ent.entity_name}' added={added}",
-                details={"dict_id": ent.dict_id, "entity_name": ent.entity_name, "aliases_added": added},
-                operator=reviewer,
-                trigger_source="approve_entity_with_alias_writeback",
-            )
 
         # 合并 entity_data 到 canonical_data
         merge_auto, merge_conflict = process_entity_merge(
@@ -2856,8 +2808,7 @@ def batch_approve_entities(
         if count == 0:
             return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
         
-        # 批量更新（含 writeback）
-        alias_count = 0
+        # 批量更新
         for ent in entities:
             before = ent.review_status
             ent.review_status = "approved"
@@ -2876,16 +2827,13 @@ def batch_approve_entities(
                     entity_type=ent.entity_type,
                     entity_data=entity_data,
                     source_site=ent.source_site or "",
+                    source_doc_uuid=ent.source_doc_uuid or "",
                 )
                 if dict_id:
                     ent.dict_id = dict_id
                     session.flush()
 
             if dict_id:
-                added = _write_aliases_with_embedding(
-                    session, dict_id, ent.entity_type, ent.entity_name, entity_data,
-                )
-                alias_count += added
                 process_entity_merge(
                     session, dict_id, ent.id, entity_data, ent.source_site or "",
                 )
@@ -2894,14 +2842,14 @@ def batch_approve_entities(
         _write_operation_log(
             session, "update", "extracted_entities", None,
             business_action="approve",
-            description=f"批量审核通过: {count} 个实体, {alias_count} 个别名回写",
-            details={"count": count, "aliases_written": alias_count,
+            description=f"批量审核通过: {count} 个实体",
+            details={"count": count,
                       "source_doc_uuid": source_doc_uuid, "entity_type": entity_type,
                       "source_site": source_site, "reviewer": reviewer, "note": note},
             operator=reviewer,
             trigger_source="batch_approve_entities",
         )
-        logger.info(f"[DB] batch_approve_entities: {count} entities approved, {alias_count} aliases written")
+        logger.info(f"[DB] batch_approve_entities: {count} entities approved")
         return {"success": True, "message": f"成功批量通过 {count} 个实体", "count": count}
 
 

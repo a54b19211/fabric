@@ -123,8 +123,11 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
     name           TEXT        NOT NULL,
     lang           TEXT        DEFAULT '', -- zh/en/other
     is_canonical   BOOLEAN     DEFAULT FALSE,
+    entity_type    TEXT        DEFAULT '', -- entity_dict.entity_type 冗余
     name_embedding vector(1536),           -- 名称向量，用于消歧向量检索
-    is_deleted     BOOLEAN     NOT NULL DEFAULT FALSE
+    is_deleted     BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at     TIMESTAMPTZ DEFAULT now(),
+    updated_at     TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_name_dict ON entity_aliases(name, dict_id);

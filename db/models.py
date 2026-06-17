@@ -119,7 +119,10 @@ class EntityAlias(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)           # 名称本身
     lang: Mapped[str] = mapped_column(Text, default="")               # zh/en/other
     is_canonical: Mapped[bool] = mapped_column(Boolean, default=False) # 是否标准名
+    entity_type: Mapped[str] = mapped_column(Text, default="")        # entity_dict.entity_type 冗余，加速查询
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 # ── 6. extracted_entities ─────────────────────────────────────

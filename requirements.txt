@@ -40,3 +40,8 @@ uvicorn[standard]>=0.29.0    # ASGI 服务器
 rq>=2.0                      # Redis Queue，任务持久化
 redis>=5.0                   # Redis Python 客户端
 
+# --- 测试 ---
+pytest>=8.0                  # 测试框架
+pytest-cov>=5.0              # 覆盖率报告
+pytest-mock>=3.14            # mock 工具
+
