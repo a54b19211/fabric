@@ -1,15 +1,22 @@
 # -*- coding: utf-8 -*-
 """文档查询接口"""
-from fastapi import APIRouter, HTTPException, Query
+import hashlib
+import uuid as _uuid
+from typing import List
+
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from loguru import logger
 
 from api.schemas.request import RecrawlRequest, BatchRecrawlRequest
 from api.schemas.response import (
     DocumentListResponse, DocumentDetailResponse,
     DocumentItem, AttachmentItem, RecrawlResponse, BatchRecrawlResponse,
+    UploadResponse, UploadItem, BatchUploadResponse,
 )
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
+from db.repository import upsert_document
+from biz_rules.schemas import MetadataEnvelope, ProvenanceInfo, ConfidenceInfo
 from sqlalchemy import func as sqlfunc
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -301,3 +308,125 @@ def batch_recrawl_documents(body: BatchRecrawlRequest):
         skipped=len(skipped),
         message=msg,
     )
+
+
+@router.post("/upload", response_model=UploadResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    source_site: str = Form(default=""),
+):
+    """上传本地 Markdown 文件到文档库。
+
+    流程：
+      1. 校验文件类型为 .md
+      2. 读取文件内容，用 SHA256 生成 UUID5（幂等）
+      3. 从第一个 # 标题提取 title，fallback 用文件名
+      4. 构建 MetadataEnvelope 调用 upsert_document
+    """
+    if not file.filename or not file.filename.lower().endswith(".md"):
+        raise HTTPException(status_code=400, detail="仅支持 .md 文件")
+
+    try:
+        content = await file.read()
+    except Exception as e:
+        logger.error(f"[API] 读取上传文件失败: {e}")
+        raise HTTPException(status_code=400, detail=f"读取文件失败: {str(e)}")
+
+    raw_content = content.decode("utf-8", errors="replace")
+    if not raw_content.strip():
+        raise HTTPException(status_code=400, detail="文件内容为空")
+
+    filename = file.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    uuid_str, title = _ingest_md_content(raw_content, filename, source_site)
+
+    logger.info(f"[API] 文档上传成功: uuid={uuid_str}, title={title}")
+    return UploadResponse(
+        success=True,
+        uuid=uuid_str,
+        title=title,
+        message="上传成功",
+    )
+
+
+@router.post("/upload/batch", response_model=BatchUploadResponse)
+async def batch_upload_documents(
+    files: List[UploadFile] = File(...),
+    source_site: str = Form(default=""),
+):
+    """批量上传本地 Markdown 文件到文档库。"""
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少选择一个文件")
+
+    results: list[UploadItem] = []
+    for file in files:
+        item = UploadItem(filename=file.filename or "")
+        try:
+            if not file.filename or not file.filename.lower().endswith(".md"):
+                item.error = "仅支持 .md 文件"
+                results.append(item)
+                continue
+
+            content = await file.read()
+            raw_content = content.decode("utf-8", errors="replace")
+            if not raw_content.strip():
+                item.error = "文件内容为空"
+                results.append(item)
+                continue
+
+            filename = file.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            uuid_str, title = _ingest_md_content(raw_content, filename, source_site)
+
+            item.uuid = uuid_str
+            item.title = title
+            item.success = True
+        except Exception as e:
+            logger.error(f"[API] 批量上传失败: {file.filename} | {e}")
+            item.error = str(e)
+        results.append(item)
+
+    succeeded = sum(1 for r in results if r.success)
+    failed = len(results) - succeeded
+    logger.info(f"[API] 批量上传完成: total={len(results)}, succeeded={succeeded}, failed={failed}")
+    return BatchUploadResponse(
+        total=len(results),
+        succeeded=succeeded,
+        failed=failed,
+        items=results,
+    )
+
+
+def _ingest_md_content(raw_content: str, filename: str, source_site: str) -> tuple[str, str]:
+    """处理单篇 md 内容：生成 UUID、写入数据库。返回 (uuid, title)。"""
+    title = filename
+    for line in raw_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            title = stripped[2:].strip()
+            break
+
+    content_hash = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+    doc_uuid = str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"local_md:{content_hash}"))
+
+    envelope = MetadataEnvelope(
+        uuid=doc_uuid,
+        title=title,
+        raw_content=raw_content,
+        provenance=ProvenanceInfo(
+            source_url="",
+            source_site=source_site,
+            local_file_path=filename,
+        ),
+        confidence=ConfidenceInfo(score=1.0, reason="本地手动上传"),
+        parse_method="local_upload",
+        status="AUTO_PROCESSED",
+        doc_type="",
+        language="",
+    )
+
+    try:
+        upsert_document(envelope)
+    except Exception as e:
+        logger.error(f"[API] 上传文档写入失败: {doc_uuid} | {e}")
+        raise HTTPException(status_code=500, detail=f"写入失败: {str(e)}")
+
+    return doc_uuid, title

@@ -65,9 +65,50 @@
           <el-button type="success" @click="batchReview" :disabled="doneSelectedCount === 0">
             批量审核 ({{ doneSelectedCount }})
           </el-button>
+          <el-button type="primary" plain @click="uploadDialogVisible = true">
+            <el-icon><Upload /></el-icon>上传 MD
+          </el-button>
         </el-form-item>
       </el-form>
     </el-card>
+
+    <!-- 上传对话框 -->
+    <el-dialog v-model="uploadDialogVisible" title="上传本地 Markdown 文件" width="540px" :close-on-click-modal="false">
+      <el-form label-width="100px">
+        <el-form-item label="选择文件">
+          <el-upload
+            ref="uploadRef"
+            :auto-upload="false"
+            multiple
+            accept=".md,.markdown"
+            @change="onUploadChange"
+            @remove="onUploadRemove"
+            drag
+          >
+            <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+            <div class="el-upload__text">拖拽 .md 文件到此处，或点击选择（支持多选）</div>
+          </el-upload>
+        </el-form-item>
+        <el-form-item label="来源站点">
+          <el-select v-model="uploadSourceSite" clearable filterable allow-create placeholder="可选（默认留空，支持自定义输入）" style="width:100%">
+            <el-option v-for="s in SITES" :key="s" :label="s" :value="s" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="uploadResults.length > 0" label="上传结果">
+          <div class="upload-results">
+            <el-tag v-for="r in uploadResults" :key="r.filename" :type="r.success ? 'success' : 'danger'" size="small" style="margin:2px">
+              {{ r.filename }} {{ r.success ? '✓' : '✗ ' + r.error }}
+            </el-tag>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="uploadDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="doUpload" :loading="uploading" :disabled="uploadFiles.length === 0">
+          上传 ({{ uploadFiles.length }})
+        </el-button>
+      </template>
+    </el-dialog>
 
     <!-- 数据表格 -->
     <el-card shadow="never">
@@ -152,8 +193,8 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh } from '@element-plus/icons-vue'
-import { getDocuments, recrawlDocument, batchRecrawlDocuments, type DocumentItem } from '@/api/documents'
+import { Search, Refresh, Upload, UploadFilled } from '@element-plus/icons-vue'
+import { getDocuments, recrawlDocument, batchRecrawlDocuments, uploadDocument, batchUploadDocuments, type DocumentItem } from '@/api/documents'
 import { triggerExtraction, getExtractionStats, triggerPendingExtraction, type ExtractionStats } from '@/api/extraction'
 import { relativeTime } from '@/utils/time'
 
@@ -184,6 +225,58 @@ const stats = ref<ExtractionStats>({ pending: 0, queued: 0, processing: 0, done:
 const selectedUuids = ref<string[]>([])
 const batchRecrawling = ref(false)
 const tableRef = ref<any>(null)
+
+// 上传相关
+const uploadDialogVisible = ref(false)
+const uploadSourceSite = ref('')
+const uploading = ref(false)
+const uploadRef = ref<any>(null)
+const uploadFiles = ref<File[]>([])
+const uploadResults = ref<{ filename: string; success: boolean; error: string }[]>([])
+
+function onUploadChange(_file: any, fileList: any[]) {
+  uploadFiles.value = fileList.map((f: any) => f.raw).filter((f: File) => f.name.endsWith('.md') || f.name.endsWith('.markdown'))
+}
+
+function onUploadRemove(_file: any, fileList: any[]) {
+  uploadFiles.value = fileList.map((f: any) => f.raw).filter((f: File) => f.name.endsWith('.md') || f.name.endsWith('.markdown'))
+}
+
+async function doUpload() {
+  const files = uploadFiles.value
+  if (files.length === 0) {
+    ElMessage.warning('请先选择文件')
+    return
+  }
+  uploading.value = true
+  uploadResults.value = []
+  try {
+    const source = uploadSourceSite.value || undefined
+    let res: any
+    if (files.length === 1) {
+      res = await uploadDocument(files[0], source)
+      uploadResults.value = [{ filename: files[0].name, success: res.success, error: '' }]
+    } else {
+      res = await batchUploadDocuments(files, source)
+      uploadResults.value = res.items
+    }
+    const failedCount = uploadResults.value.filter(r => !r.success).length
+    if (failedCount === 0) {
+      ElMessage.success(`全部上传成功 (${uploadResults.value.length} 篇)`)
+      uploadDialogVisible.value = false
+      uploadRef.value?.clearFiles()
+      uploadFiles.value = []
+      uploadSourceSite.value = ''
+      uploadResults.value = []
+    } else {
+      ElMessage.warning(`${uploadResults.value.length - failedCount} 成功 / ${failedCount} 失败`)
+    }
+    loadData()
+    loadStats()
+  } finally {
+    uploading.value = false
+  }
+}
 
 const filters = ref({
   source_site: (route.query.source_site as string) || '',
@@ -455,5 +548,10 @@ onUnmounted(() => {
   margin: 0;
   padding: 4px 8px;
   font-size: 12px;
+}
+.upload-results {
+  max-height: 150px;
+  overflow-y: auto;
+  line-height: 1.8;
 }
 </style>
