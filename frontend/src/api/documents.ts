@@ -35,6 +35,9 @@ export interface DocumentListParams {
   date_to?: string
 }
 
+export const getSourceSites = () =>
+  http.get<any, { sites: string[] }>('/documents/sites')
+
 export const getDocuments = (params: DocumentListParams) =>
   http.get<any, { total: number; page: number; page_size: number; items: DocumentItem[] }>(
     '/documents', { params }

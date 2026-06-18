@@ -15,7 +15,7 @@
       <el-form inline>
         <el-form-item label="来源站点">
           <el-select v-model="filters.source_site" clearable placeholder="全部" style="width:140px">
-            <el-option v-for="s in SITES" :key="s" :label="s" :value="s" />
+            <el-option v-for="s in sites" :key="s" :label="s" :value="s" />
           </el-select>
         </el-form-item>
         <el-form-item label="文档状态">
@@ -91,7 +91,7 @@
         </el-form-item>
         <el-form-item label="来源站点">
           <el-select v-model="uploadSourceSite" clearable filterable allow-create placeholder="可选（默认留空，支持自定义输入）" style="width:100%">
-            <el-option v-for="s in SITES" :key="s" :label="s" :value="s" />
+            <el-option v-for="s in sites" :key="s" :label="s" :value="s" />
           </el-select>
         </el-form-item>
         <el-form-item v-if="uploadResults.length > 0" label="上传结果">
@@ -194,17 +194,14 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Upload, UploadFilled } from '@element-plus/icons-vue'
-import { getDocuments, recrawlDocument, batchRecrawlDocuments, uploadDocument, batchUploadDocuments, type DocumentItem } from '@/api/documents'
+import { getDocuments, recrawlDocument, batchRecrawlDocuments, uploadDocument, batchUploadDocuments, getSourceSites, type DocumentItem } from '@/api/documents'
 import { triggerExtraction, getExtractionStats, triggerPendingExtraction, type ExtractionStats } from '@/api/extraction'
 import { relativeTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
 
-const SITES = ['nmpa','cde','cde_zdyz','cde_xxgk',
-  'fda_press','fda_drug_safety','fda_api_drug_label','fda_api_enforcement',
-  'chictr','clinicaltrials','pubmed','drugbank','hkex','fiercepharma',
-  'phirda_policy','phirda_industry','phirda_rd','phirda_healthcare_reform','roche']
+const sites = ref<string[]>([])
 
 const rows = ref<DocumentItem[]>([])
 const total = ref(0)
@@ -494,6 +491,7 @@ watch(() => stats.value.queued + stats.value.processing, (v) => {
 })
 
 onMounted(() => {
+  getSourceSites().then(r => sites.value = r.sites)
   loadData(); loadStats()
   timeTimer = setInterval(() => timeTick.value++, 10000)
 })

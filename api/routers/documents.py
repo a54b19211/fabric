@@ -22,6 +22,23 @@ from sqlalchemy import func as sqlfunc
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
+@router.get("/sites")
+def get_source_sites():
+    """返回 documents 表中所有去重后的 source_site，前端筛选下拉用。"""
+    with get_session() as session:
+        if session is None:
+            return {"sites": []}
+        rows = (
+            session.query(Document.source_site)
+            .filter(Document.is_deleted == False, Document.source_site != "")
+            .distinct()
+            .order_by(Document.source_site)
+            .all()
+        )
+        sites = [r[0] for r in rows if r[0]]
+        return {"sites": sites}
+
+
 @router.get("", response_model=DocumentListResponse)
 def list_documents(
     page: int = Query(1, ge=1),
