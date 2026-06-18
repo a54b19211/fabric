@@ -153,7 +153,26 @@ class WeKnoraGraphClient:
         return result
 
 
-    # ── 5. 文档同步（全文上传） ──────────────────────────────────────────
+    # ── 5. 知识库校验 ─────────────────────────────────────────────────
+
+    def validate_knowledge_base(self, kb_id: str) -> dict:
+        """验证知识库 ID 是否有效。返回 WeKnora API 响应中的 data 字段。"""
+        url = f"{self._base_url}/api/v1/knowledge-bases/{kb_id}"
+        try:
+            resp = httpx.get(url, headers=self._headers, timeout=15.0)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("success"):
+                raise RuntimeError(f"知识库不存在或无权访问: {kb_id}")
+            return data.get("data", {})
+        except httpx.HTTPStatusError as e:
+            logger.error(f"[WeKnoraGraph] 校验知识库失败 HTTP {e.response.status_code}: {e.response.text[:300]}")
+            raise RuntimeError(f"知识库 ID 无效 ({kb_id})：WeKnora 返回 {e.response.status_code}")
+        except Exception as e:
+            logger.error(f"[WeKnoraGraph] 校验知识库请求失败: {e}")
+            raise
+
+    # ── 6. 文档同步（全文上传） ──────────────────────────────────────────
 
     def upload_document(self, title: str, content: str, metadata: dict, kb_id: str = "") -> str:
         """

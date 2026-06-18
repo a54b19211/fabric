@@ -347,18 +347,27 @@ def get_pending_extraction(limit: int = 100) -> list[dict]:
         ]
 
 
-def get_pending_weknora_sync(limit: int = 100) -> list[dict]:
+def get_pending_weknora_sync(limit: int = 100, offset: int = 0, source_site: str = "") -> tuple[list[dict], int]:
     """
     查询 weknora_sync_status=pending 且 is_deleted=False 的文档。
     返回字段：uuid, title, source_site, raw_content, publish_date,
              source_url, parent_uuid, doc_type, language, confidence_score,
              parse_method, crawl_timestamp
+    返回 (rows, total)。
     """
     from db.session import get_session
 
     with get_session() as session:
         if session is None:
-            return []
+            return [], 0
+        filters = [
+            Document.weknora_sync_status == "pending",
+            Document.is_deleted == False,
+        ]
+        if source_site:
+            filters.append(Document.source_site == source_site)
+        base_q = session.query(Document).filter(*filters)
+        total = base_q.count()
         rows = (
             session.query(
                 Document.uuid,
@@ -374,14 +383,13 @@ def get_pending_weknora_sync(limit: int = 100) -> list[dict]:
                 Document.parse_method,
                 Document.crawl_timestamp,
             )
-            .filter(
-                Document.weknora_sync_status == "pending",
-                Document.is_deleted == False,
-            )
+            .filter(*filters)
+            .order_by(Document.id.desc())
+            .offset(offset)
             .limit(limit)
             .all()
         )
-        return [
+        rows_out = [
             {
                 "uuid": r.uuid,
                 "title": r.title,
@@ -398,6 +406,7 @@ def get_pending_weknora_sync(limit: int = 100) -> list[dict]:
             }
             for r in rows
         ]
+        return rows_out, total
 
 
 # ═══════════════════════════════════════════════════════════════════════

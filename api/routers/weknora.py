@@ -1,4 +1,6 @@
 """WeKnora 同步接口 — 文档同步 + 图数据同步"""
+import threading
+
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
@@ -76,8 +78,12 @@ def _sync_one_document(uuid: str, kb_id: str = "") -> tuple[bool, str]:
 
 
 @router.get("/pending", response_model=WeknoraPendingResponse)
-def get_pending(limit: int = Query(100, ge=1, le=500)):
-    """待同步文档列表查询"""
+def get_pending(
+    limit: int = Query(20, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    source_site: str = Query("", description="按来源站点过滤，留空则查全部"),
+):
+    """待同步文档列表查询（分页）"""
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit 必须在 1-500 之间")
 
@@ -87,7 +93,7 @@ def get_pending(limit: int = Query(100, ge=1, le=500)):
             raise HTTPException(status_code=503, detail="数据库未连接")
 
     try:
-        rows = get_pending_weknora_sync(limit=limit)
+        rows, total = get_pending_weknora_sync(limit=limit, offset=offset, source_site=source_site)
         items = [
             WeknoraPendingItem(
                 uuid=r["uuid"] or "",
@@ -98,8 +104,8 @@ def get_pending(limit: int = Query(100, ge=1, le=500)):
             for r in rows
         ]
 
-        logger.info(f"[API] 待同步文档查询: limit={limit}, total={len(items)}")
-        return WeknoraPendingResponse(total=len(items), items=items)
+        logger.info(f"[API] 待同步文档查询: limit={limit}, offset={offset}, total={total}, returned={len(items)}")
+        return WeknoraPendingResponse(total=total, items=items)
 
     except Exception as e:
         logger.error(f"[API] 待同步文档查询失败: {e}")
@@ -111,6 +117,13 @@ def sync_single(uuid: str, kb_id: str = Query("", description="目标知识库 I
     """手动触发单篇文档同步到 WeKnora。"""
     if not uuid or not uuid.strip():
         raise HTTPException(status_code=400, detail="uuid 不能为空")
+
+    # 若用户指定了知识库 ID，先校验是否存在
+    if kb_id:
+        try:
+            get_weknora_graph_client().validate_knowledge_base(kb_id)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     try:
         success, msg = _sync_one_document(uuid, kb_id)
@@ -131,27 +144,40 @@ def sync_single(uuid: str, kb_id: str = Query("", description="目标知识库 I
 
 
 @router.post("/sync-batch", response_model=WeknoraBatchResponse)
-def sync_batch(body: WeknoraBatchRequest, kb_id: str = Query("", description="目标知识库 ID，留空用 .env 配置")):
+def sync_batch(
+    body: WeknoraBatchRequest,
+    kb_id: str = Query("", description="目标知识库 ID，留空用 .env 配置"),
+    source_site: str = Query("", description="按来源站点过滤同步"),
+):
     """批量同步 pending 文档到 WeKnora。"""
     if body.limit < 1 or body.limit > 500:
         raise HTTPException(status_code=400, detail="limit 必须在 1-500 之间")
 
-    try:
-        rows = get_pending_weknora_sync(limit=body.limit)
-        success_count = 0
-        for row in rows:
-            try:
-                _sync_one_document(row["uuid"], kb_id)
-                success_count += 1
-            except Exception as e:
-                logger.error(f"[API] 批量同步失败 {row['uuid']}: {e}")
-                try:
-                    update_weknora_sync_status(row["uuid"], "failed")
-                except Exception as se:
-                    logger.warning(f"[API] 批量同步-更新状态失败 uuid={row['uuid']}: {se}")
+    # 若用户指定了知识库 ID，先校验是否存在
+    if kb_id:
+        try:
+            get_weknora_graph_client().validate_knowledge_base(kb_id)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
-        logger.info(f"[API] WeKnora 批量同步完成: {success_count}/{len(rows)}")
-        return WeknoraBatchResponse(triggered=success_count)
+    try:
+        rows, _ = get_pending_weknora_sync(limit=body.limit, offset=0, source_site=source_site)
+        if not rows:
+            return WeknoraBatchResponse(triggered=0)
+
+        uuids = [r["uuid"] for r in rows]
+
+        def _bg_sync():
+            for row in rows:
+                try:
+                    _sync_one_document(row["uuid"], kb_id)
+                except Exception as e:
+                    logger.error(f"[API] 后台同步失败 {row['uuid']}: {e}")
+
+        threading.Thread(target=_bg_sync, daemon=True).start()
+
+        logger.info(f"[API] WeKnora 批量同步已入后台: {len(uuids)} 篇")
+        return WeknoraBatchResponse(triggered=len(uuids))
 
     except Exception as e:
         logger.error(f"[API] WeKnora 批量同步失败: {e}")
