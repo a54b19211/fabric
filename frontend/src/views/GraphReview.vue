@@ -2,7 +2,7 @@
   <div class="graph-review" v-loading="loading">
     <div class="graph-toolbar">
       <div class="toolbar-left">
-        <el-input v-model="filterName" placeholder="搜索实体名..." clearable size="small" style="width:160px" class="local-filter" />
+        <el-input v-model="filterName" placeholder="搜索实体名...回车聚焦" clearable size="small" style="width:160px" class="local-filter" @keyup.enter="onSearchEnter" @input="onSearchInput" @clear="onSearchClear" />
         <el-select v-model="filterEntityTypes" multiple collapse-tags placeholder="实体类型" clearable size="small" style="width:180px" @change="debouncedReloadGraph">
           <el-option v-for="t in entityTypeOptions" :key="t" :label="t" :value="t" />
         </el-select>
@@ -14,11 +14,15 @@
           <el-option label="已通过" value="approved" />
           <el-option label="自动通过" value="auto_approved" />
         </el-select>
+        <el-input-number v-model="filterLimit" :min="10" :max="2000" :step="100" size="small" style="width:120px" @change="debouncedReloadGraph" />
       </div>
       <div class="toolbar-right">
         <span class="node-count">节点: {{ visibleNodeCount }} / {{ nodes.length }} | 边: {{ visibleEdgeCount }} / {{ edges.length }}</span>
         <template v-if="focusNodeId !== null">
           <el-tag size="small" type="warning" closable @close="focusNodeId = null">邻接: {{ focusNodeName }}</el-tag>
+          <el-select v-model="neighborTypeFilter" size="small" placeholder="邻接类型" clearable style="width:130px" multiple collapse-tags>
+            <el-option v-for="t in entityTypeOptions" :key="t" :label="t" :value="t" />
+          </el-select>
           <el-button size="small" @click="focusNodeId = null">返回全局</el-button>
         </template>
         <el-button size="small" type="success" @click="batchApproveSelected" :disabled="selectedNodeIds.size === 0">&#x2713; 通过 ({{ selectedNodeIds.size }})</el-button>
@@ -43,10 +47,21 @@
         <span class="slider-label">置信度≥</span>
         <el-slider v-model="filterMinConf" :min="0" :max="1" :step="0.05" size="small" style="width:100px" class="local-filter" :show-tooltip="true" />
       </div>
+      <el-select v-model="filterTraversal" size="small" style="width:100px" class="local-filter" @change="debouncedReloadGraph">
+        <el-option label="BFS 展开" value="bfs" />
+        <el-option label="度数排序" value="degree" />
+      </el-select>
+      <template v-if="filterTraversal === 'bfs'">
+        <span class="slider-label">跳数</span>
+        <el-input-number v-model="filterMaxDepth" :min="1" :max="10" size="small" style="width:80px" @change="debouncedReloadGraph" />
+      </template>
+      <el-select v-model="highlightTypeFilter" size="small" placeholder="高亮类型" clearable style="width:150px" class="local-filter" multiple collapse-tags>
+        <el-option v-for="t in entityTypeOptions" :key="t" :label="t" :value="t" />
+      </el-select>
     </div>
 
     <div class="graph-main">
-      <div ref="cyContainerRef" class="cy-container" />
+      <div ref="graphContainerRef" class="graph-container" />
       <div class="graph-legend">
         <span class="legend-item"><span class="dot pending"></span>待审核</span>
         <span class="legend-item"><span class="dot approved"></span>已通过</span>
@@ -54,7 +69,20 @@
         <span class="legend-sep">|</span>
         <span class="legend-item">虚线=待审核 实线=已通过</span>
       </div>
-      <div class="graph-tip">点击节点查看详情 | Shift+多选 | Ctrl+框选 | 滚轮缩放 | 中键平移</div>
+      <div class="graph-tip">点击节点飞入聚焦 | 点击空白返回全局 | Shift+多选 | 滚轮缩放</div>
+      <div class="graph-zoom-slider">
+        <span class="zoom-label">🔍</span>
+        <el-slider
+          v-model="sliderZoom"
+          :min="0"
+          :max="100"
+          :step="1"
+          size="small"
+          style="width:160px"
+          @input="onZoomSliderChange"
+        />
+        <span class="zoom-value">{{ currentZoom.toFixed(2) }}x</span>
+      </div>
     </div>
 
     <el-drawer v-model="showDetailPanel" title="实体详情" size="420px" direction="rtl" @close="detailNode = null">
@@ -88,6 +116,9 @@
             </template>
             <template v-else-if="Array.isArray(val)">
               <el-input v-model="editableData[key]" :placeholder="'逗号分隔:' + val.join(',')" />
+            </template>
+            <template v-else-if="typeof val === 'boolean'">
+              <el-switch v-model="editableData[key]" />
             </template>
             <template v-else>
               <el-input v-model="editableData[key]" type="textarea" :rows="2" />
@@ -170,7 +201,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import cytoscape, { type Core, type EventObject } from 'cytoscape'
+import G6, { Graph as G6Graph } from '@antv/g6'
 import {
   getReviewGraph,
   approveEntity, rejectEntity,
@@ -195,6 +226,10 @@ function debouncedApplyFilters(delay = 120) {
   localFilterTimer = setTimeout(() => applyFiltersToGraph(), delay)
 }
 
+let suppressApplyFilter = false
+let globalPositionCache: Record<string, { x: number; y: number }> = {}
+let focusNodePos: { x: number; y: number } | null = null
+
 // ── 数据状态 ────────────────────────────────────────────────────────────
 
 const loading = ref(false)
@@ -211,11 +246,92 @@ const filterEntityTypes = ref<string[]>([])
 const filterSourceSite = ref('')
 const filterReviewStatus = ref<string[]>(['pending', 'approved'])
 const filterDocUuid = ref('')
+const filterLimit = ref(500)
+const filterTraversal = ref('bfs')
+const filterMaxDepth = ref(3)
 
 // ── 本地筛选 ────────────────────────────────────────────────────────────
 const filterName = ref('')
+
+function matchSearchNodes(): number[] {
+  const q = filterName.value.trim().toLowerCase()
+  if (!q) return []
+  return nodes.value
+    .filter(n => n.entity_name.toLowerCase().includes(q))
+    .map(n => n.id)
+}
+
+function onSearchInput() {
+  if (!graph) return
+  const matchIds = new Set(matchSearchNodes().map(String))
+  const savedData = graph.save() as any
+  for (const nd of (savedData.nodes || [])) {
+    const item = graph.findById(nd.id)
+    if (!item) continue
+    const isMatch = matchIds.has(nd.id)
+    if (isMatch) {
+      item.setState('searchDim', false)
+      item.setState('searchMatch', true)
+    } else {
+      item.setState('searchMatch', false)
+      item.setState('searchDim', true)
+    }
+  }
+}
+
+function onSearchClear() {
+  if (!graph) return
+  const savedData = graph.save() as any
+  for (const nd of (savedData.nodes || [])) {
+    const item = graph.findById(nd.id)
+    if (!item) continue
+    item.setState('searchMatch', false)
+    item.setState('searchDim', false)
+  }
+}
+
+function onSearchEnter() {
+  const matchIds = matchSearchNodes()
+  if (matchIds.length === 0) {
+    ElMessage.warning('未找到匹配实体')
+    return
+  }
+  const match = nodes.value.find(n => n.id === matchIds[0])!
+  // 清除搜索高亮
+  onSearchClear()
+  // 与点击节点效果一致：打开详情 + 聚焦放大
+  detailNode.value = match
+  showDetailPanel.value = true
+  focusNodeId.value = match.id
+  filterName.value = ''
+}
+
+function applyTypeHighlight() {
+  if (!graph) return
+  const typeSet = new Set(highlightTypeFilter.value)
+  const savedData = graph.save() as any
+  for (const nd of (savedData.nodes || [])) {
+    const item = graph.findById(nd.id)
+    if (!item) continue
+    const ndData = nodes.value.find(n => String(n.id) === nd.id)
+    const isMatch = ndData && typeSet.has(ndData.entity_type)
+    if (typeSet.size === 0) {
+      item.setState('typeHighlight', false)
+      item.setState('typeDim', false)
+    } else if (isMatch) {
+      item.setState('typeDim', false)
+      item.setState('typeHighlight', true)
+    } else {
+      item.setState('typeHighlight', false)
+      item.setState('typeDim', true)
+    }
+  }
+}
+
 const focusNodeId = ref<number | null>(null)
-const filterIsolated = ref('all')
+const neighborTypeFilter = ref<string[]>([])
+const highlightTypeFilter = ref<string[]>([])
+const filterIsolated = ref('hide')
 const filterVerified = ref('all')
 const filterMinConf = ref(0)
 
@@ -249,16 +365,14 @@ const visibleNodeIds = computed(() => {
 
   if (neighborSet.value !== null) {
     result = new Set([...result].filter(id => neighborSet.value!.has(id)))
-  }
-
-  if (filterName.value.trim()) {
-    const q = filterName.value.trim().toLowerCase()
-    result = new Set(
-      [...result].filter(id => {
-        const n = nodes.value.find(nd => nd.id === id)
-        return n?.entity_name.toLowerCase().includes(q)
-      })
-    )
+    if (neighborTypeFilter.value.length > 0) {
+      const typeSet = new Set(neighborTypeFilter.value)
+      result = new Set([...result].filter(id => {
+        if (id === focusNodeId.value) return true
+        const nd = nodes.value.find(n => n.id === id)
+        return nd && typeSet.has(nd.entity_type)
+      }))
+    }
   }
 
   if (filterIsolated.value === 'hide') {
@@ -345,224 +459,420 @@ const relatedEdges = computed(() =>
     : []
 )
 
-// ── Cytoscape ────────────────────────────────────────────────────────────
+// ── G6 图谱引擎 ──────────────────────────────────────────────────────────
 
-const cyContainerRef = ref<HTMLDivElement | null>(null)
-let cy: Core | null = null
+const graphContainerRef = ref<HTMLDivElement | null>(null)
+let graph: G6Graph | null = null
 
-function nodeCssClass(status: string): string {
-  if (status === 'approved' || status === 'auto_approved') return 'approved'
-  if (status === 'rejected') return 'rejected'
-  return 'pending'
+const MIN_ZOOM = 0.05
+const MAX_ZOOM = 1
+const ZOOM_RATIO = MAX_ZOOM / MIN_ZOOM // 20
+
+function sliderToZoom(s: number): number {
+  return MIN_ZOOM * Math.pow(ZOOM_RATIO, s / 100)
+}
+function zoomToSlider(z: number): number {
+  return 100 * Math.log(z / MIN_ZOOM) / Math.log(ZOOM_RATIO)
 }
 
-function transformToCyData(nodes: GraphNode[], edges: GraphEdge[]) {
+const sliderZoom = ref(zoomToSlider(0.25))
+const currentZoom = ref(0.25)
+let zoomFromSlider = false
+
+function onZoomSliderChange(val: number) {
+  if (!graph) return
+  const z = sliderToZoom(val)
+  currentZoom.value = z
+  zoomFromSlider = true
+  graph.zoomTo(z)
+  setTimeout(() => { zoomFromSlider = false }, 100)
+}
+
+function statusColor(status: string): string {
+  if (status === 'approved' || status === 'auto_approved') return '#00ff88'
+  if (status === 'rejected') return '#ff3366'
+  return '#ffaa00'
+}
+
+function transformToG6Data(nodes: GraphNode[], edges: GraphEdge[]) {
   const nodeIdSet = new Set(nodes.map(n => n.id))
 
   return {
-    nodes: nodes.map(n => ({
-      data: {
+    nodes: nodes.map(n => {
+      const fill = statusColor(n.review_status)
+      return {
         id: String(n.id),
-        label: (n.is_verified ? '✓ ' : '') + (n.entity_name || '').slice(0, 14),
+        label: n.entity_name || '',
+        type: 'circle',
+        size: 55 + (n.confidence_score || 0) * 30,
+        style: {
+          fill,
+          stroke: 'rgba(255,255,255,0.85)',
+          lineWidth: 2.5,
+          shadowColor: fill,
+          shadowBlur: 22,
+          shadowOffsetX: 0,
+          shadowOffsetY: 0,
+          cursor: 'pointer',
+        },
+        labelCfg: {
+          position: 'top',
+          offset: 8,
+          style: {
+            fill: '#e8e8f0',
+            fontSize: 13,
+            fontWeight: 600,
+            shadowColor: 'rgba(0,0,0,0.9)',
+            shadowBlur: 6,
+          },
+        },
         entity_type: n.entity_type,
         entity_name: n.entity_name,
         review_status: n.review_status,
         confidence_score: n.confidence_score,
         is_verified: n.is_verified,
-        source_doc_uuid: n.source_doc_uuid,
-        source_site: n.source_site,
-        dict_id: n.dict_id,
-        entity_data: n.entity_data,
-      },
-      classes: nodeCssClass(n.review_status),
-    })),
+      }
+    }),
     edges: edges
       .filter(e => nodeIdSet.has(e.from_entity_id!) && nodeIdSet.has(e.to_entity_id!))
       .map(e => ({
-        data: {
-          id: String(e.id),
-          source: String(e.from_entity_id),
-          target: String(e.to_entity_id),
-          relation_type: e.relation_type,
-          review_status: e.review_status,
-          relation_props: e.relation_props,
-          source_doc_uuid: e.source_doc_uuid,
+        id: 'E' + e.id,
+        source: String(e.from_entity_id),
+        target: String(e.to_entity_id),
+        style: {
+          stroke: e.review_status === 'approved' ? '#00e676' :
+                  e.review_status === 'rejected' ? '#ff3366' : '#ffaa00',
+          lineWidth: e.review_status === 'rejected' ? 1.2 : 2.2,
+          lineDash: e.review_status === 'approved' ? undefined :
+                    (e.review_status === 'rejected' ? [6, 4] : [10, 6]),
+          endArrow: {
+            path: 'M 0 0 L 6 -4 L 6 4 Z',
+            fill: e.review_status === 'approved' ? '#00e676' :
+                  e.review_status === 'rejected' ? '#ff3366' : '#ffaa00',
+          },
+          opacity: e.review_status === 'rejected' ? 0.3 : 0.7,
         },
-        classes: nodeCssClass(e.review_status),
+        review_status: e.review_status,
       })),
   }
 }
 
-const cyStyles = [
-  { selector: 'node', style: {
-    'shape': 'ellipse',
-    'label': 'data(label)',
-    'text-valign': 'bottom',
-    'text-halign': 'center',
-    'font-size': '11px',
-    'font-family': 'system-ui, -apple-system, sans-serif',
-    'color': '#303133',
-    'text-margin-y': 5,
-    'text-max-width': '110px',
-    'text-wrap': 'ellipsis',
-    'border-width': 2.5,
-    'border-color': '#ffffff',
-    'width': 'mapData(confidence_score, 0, 1, 28, 48)',
-    'height': 'mapData(confidence_score, 0, 1, 28, 48)',
-    'background-opacity': 0.9,
-    'transition-property': 'background-color, border-color, border-width, border-opacity',
-    'transition-duration': 180,
-  }},
-  { selector: 'node.pending', style: {
-    'background-color': '#f0a841',
-    'background-blacken': -0.08,
-  }},
-  { selector: 'node.approved', style: {
-    'background-color': '#14b8a6',
-    'background-blacken': -0.08,
-  }},
-  { selector: 'node.rejected', style: {
-    'background-color': '#e85d75',
-    'background-blacken': -0.08,
-  }},
-  { selector: 'node:selected', style: {
-    'border-color': '#3b82f6',
-    'border-width': 4,
-    'border-opacity': 1,
-    'shadow-color': '#3b82f6',
-    'shadow-blur': 16,
-    'shadow-opacity': 0.45,
-    'shadow-offset-x': 0,
-    'shadow-offset-y': 0,
-  }},
-  { selector: 'node:active', style: {
-    'border-color': '#60a5fa',
-    'border-width': 3,
-    'border-opacity': 0.9,
-    'overlay-opacity': 0.12,
-    'overlay-color': '#3b82f6',
-    'overlay-padding': 8,
-  }},
-  { selector: 'edge', style: {
-    'width': 1.6,
-    'curve-style': 'bezier',
-    'target-arrow-shape': 'triangle',
-    'arrow-scale': 0.8,
-    'line-opacity': 0.7,
-    'transition-property': 'line-color, line-style, width, line-opacity',
-    'transition-duration': 180,
-  }},
-  { selector: 'edge.pending', style: {
-    'line-color': '#f0a841',
-    'line-style': 'dashed',
-    'line-dash-pattern': [6, 4],
-    'target-arrow-color': '#f0a841',
-  }},
-  { selector: 'edge.approved', style: {
-    'line-color': '#14b8a6',
-    'line-style': 'solid',
-    'target-arrow-color': '#14b8a6',
-  }},
-  { selector: 'edge.rejected', style: {
-    'line-color': '#e85d75',
-    'line-style': 'dashed',
-    'line-dash-pattern': [4, 4],
-    'target-arrow-color': '#e85d75',
-    'line-opacity': 0.4,
-  }},
-  { selector: 'edge:selected', style: {
-    'width': 3,
-    'line-opacity': 1,
-  }},
-]
+const G6_NODE_BASE_SIZE = 55
 
-const layoutOptions = {
-  name: 'cose',
-  nodeRepulsion: 800000,
-  edgeElasticity: 0.45,
-  idealEdgeLength: 220,
-  gravity: 0.1,
-  numIter: 2000,
-  initialTemp: 300,
-  coolingFactor: 0.97,
-  refresh: 20,
-  animate: 'during' as const,
-  animationDuration: 1000,
-  fit: true,
-  padding: 80,
-  randomize: false,
-  nodeDimensionsIncludeLabels: true,
+const G6_NODE_SIZE = 70
+
+const g6LayoutOptions = {
+  type: 'force2' as const,
+  animate: false,
+  maxIteration: 300,
+  nodeStrength: 1800,
+  linkDistance: 360,
+  edgeStrength: 200,
+  gravity: 10,
+  damping: 0.9,
+  minMovement: 0.5,
+  preventOverlap: true,
+  nodeSize: G6_NODE_SIZE,
+  nodeSpacing: 30,
 }
 
-function initCy(container: HTMLDivElement): Core {
-  return cytoscape({
+function initGraph(container: HTMLDivElement): G6Graph {
+  const graph = new G6Graph({
     container,
-    style: cyStyles as any,
-    boxSelectionEnabled: false,
-    autounselectify: false,
-    selectionType: 'additive',
-    layout: layoutOptions as any,
-    minZoom: 0.2,
-    maxZoom: 3,
-    wheelSensitivity: 0.6,
-    styleEnabled: true,
+    width: container.clientWidth,
+    height: container.clientHeight,
+    animate: false,
+    minZoom: 0.05,
+    maxZoom: 100,
+    defaultNode: {
+      type: 'circle',
+      size: 55,
+      style: {
+        fill: '#ffaa00',
+        stroke: 'rgba(255,255,255,0.85)',
+        lineWidth: 2.5,
+        shadowColor: 'rgba(0, 212, 255, 0.35)',
+        shadowBlur: 18,
+        shadowOffsetX: 0,
+        shadowOffsetY: 0,
+      },
+      labelCfg: {
+        position: 'top',
+        offset: 8,
+        style: {
+          fill: '#e8e8f0',
+          fontSize: 13,
+          fontWeight: 600,
+          shadowColor: 'rgba(0,0,0,0.9)',
+          shadowBlur: 6,
+        },
+      },
+    },
+    defaultEdge: {
+      type: 'cubic',
+      style: {
+        stroke: '#4a7fc4',
+        lineWidth: 2.0,
+        lineDash: [8, 4],
+        endArrow: {
+          path: 'M 0 0 L 8 -5 L 8 5 Z',
+          fill: '#4a7fc4',
+        },
+        opacity: 0.65,
+      },
+    },
+    nodeStateStyles: {
+      selected: {
+        stroke: '#00e5ff',
+        lineWidth: 5,
+        shadowColor: 'rgba(0, 229, 255, 0.9)',
+        shadowBlur: 50,
+        shadowOffsetX: 0,
+        shadowOffsetY: 0,
+      },
+      hover: {
+        stroke: '#40d8ff',
+        lineWidth: 5,
+        shadowColor: 'rgba(64, 216, 255, 0.7)',
+        shadowBlur: 36,
+        shadowOffsetX: 0,
+        shadowOffsetY: 0,
+      },
+      searchMatch: {
+        shadowColor: 'rgba(255, 255, 255, 0.95)',
+        shadowBlur: 40,
+        lineWidth: 5,
+        stroke: '#ffffff',
+      },
+      searchDim: {
+        opacity: 0.1,
+      },
+      typeHighlight: {
+        shadowColor: 'rgba(0, 229, 255, 0.8)',
+        shadowBlur: 35,
+        lineWidth: 4,
+        stroke: '#00e5ff',
+      },
+      typeDim: {
+        opacity: 0.18,
+      },
+    },
+    edgeStateStyles: {
+      selected: { stroke: '#00e5ff', lineWidth: 3.5, opacity: 1 },
+      hover: { stroke: '#40d8ff', lineWidth: 3, opacity: 0.9 },
+    },
+    modes: {
+      default: [
+        { type: 'drag-canvas', enableOptimize: true },
+        { type: 'zoom-canvas', enableOptimize: true },
+        'drag-node',
+        {
+          type: 'click-select',
+          multiple: true,
+        },
+        {
+          type: 'brush-select',
+          trigger: 'ctrl',
+        },
+      ],
+    },
   })
+
+  return graph
 }
 
-function applyFiltersToGraph() {
-  if (!cy) return
+function applyFocusMode() {
+  const focusIdStr = String(focusNodeId.value!)
   const visSet = visibleNodeIds.value
-  const visEdgeIds = new Set(visibleEdges.value.map(e => e.id))
+  const visIdStrs = new Set([...visSet].map(String))
 
-  cy.batch(() => {
-    cy!.nodes().forEach(n => {
-      n.style('display', visSet.has(Number(n.id())) ? 'element' : 'none')
-    })
-    cy!.edges().forEach(e => {
-      e.style('display', visEdgeIds.has(Number(e.id())) ? 'element' : 'none')
-    })
-  })
+  // 收集可见边的 id
+  const visibleEdgeIds = new Set<string>()
+  for (const e of edges.value) {
+    if (visSet.has(e.from_entity_id!) && visSet.has(e.to_entity_id!)) {
+      visibleEdgeIds.add('E' + e.id)
+    }
+  }
+
+  // show/hide nodes
+  const savedData = graph!.save() as any
+  for (const nd of (savedData.nodes || [])) {
+    const item = graph!.findById(nd.id)
+    if (!item) continue
+    if (visIdStrs.has(nd.id)) {
+      if (item.get('visible') === false) item.show()
+    } else {
+      if (item.get('visible') !== false) item.hide()
+    }
+  }
+
+  // show/hide edges
+  for (const ed of (savedData.edges || [])) {
+    const item = graph!.findById(ed.id)
+    if (!item) continue
+    if (visibleEdgeIds.has(ed.id)) {
+      if (item.get('visible') === false) item.show()
+    } else {
+      if (item.get('visible') !== false) item.hide()
+    }
+  }
+  // 视口聚焦
+  const focusItem = graph!.findById(focusIdStr)
+  if (focusItem) {
+    const pos = focusItem.getModel()
+    const savedForCheck = graph!.save() as any
+    const fromSave = (savedForCheck.nodes || []).find((n: any) => n.id === focusIdStr)
+
+    const gx = fromSave?.x ?? pos.x
+    const gy = fromSave?.y ?? pos.y
+
+    zoomFromSlider = true
+    currentZoom.value = 0.7
+    sliderZoom.value = Math.round(zoomToSlider(0.7))
+
+    const group = graph!.get('group')
+    const startM = group.getMatrix()
+    const startZoom = startM[0] as number
+    const startTx = startM[6] as number
+    const startTy = startM[7] as number
+    const w = graph!.getWidth()
+    const h = graph!.getHeight()
+    const targetZoom = 0.7
+    const targetTx = w / 2 - targetZoom * gx!
+    const targetTy = h / 2 - targetZoom * gy!
+
+    group.animate(function(ratio: number) {
+      // ease-out-back with stronger overshoot — "dive into globe" feel
+      const c1 = 1.5
+      const c3 = c1 + 1
+      const t = ratio >= 1 ? 1 : 1 + c3 * Math.pow(ratio - 1, 3) + c1 * Math.pow(ratio - 1, 2)
+      const z = startZoom + (targetZoom - startZoom) * t
+      const tx = startTx + (targetTx - startTx) * t
+      const ty = startTy + (targetTy - startTy) * t
+      group.setMatrix([z, 0, 0, 0, z, 0, tx, ty, 1])
+    }, 700)
+
+    const nc = graph!.getCanvasByPoint(gx!, gy!)
+
+    setTimeout(() => {
+      zoomFromSlider = false
+    }, 400)
+  }
+  nextTick(() => applyTypeHighlight())
 }
 
-function wireCyEvents() {
-  if (!cy) return
+async function applyFiltersToGraph() {
+  if (!graph) return
+  if (suppressApplyFilter) { suppressApplyFilter = false; return }
+  const mode = focusNodeId.value !== null ? 'FOCUS' : 'GLOBAL'
+  // ── FOCUS 模式：show/hide 控制可见性，不触发 changeData，避免自动布局 ──
+  if (mode === 'FOCUS' && focusNodeId.value !== null) {
+    return applyFocusMode()
+  }
 
-  cy.on('tap', 'node', (evt: EventObject) => {
-    const node = evt.target
-    const nodeId = Number(node.id())
-    const nodeData = nodes.value.find(n => n.id === nodeId)
-    if (!nodeData) return
+  // ── GLOBAL 模式：changeData 全量渲染 ──
+  // 保存当前位置（从当前 graph 数据）
+  const currentData = graph.save() as any
+  const posMap: Record<string, { x: number; y: number }> = {}
+  for (const nd of (currentData.nodes || [])) {
+    if (nd.x != null) posMap[nd.id] = { x: nd.x, y: nd.y }
+  }
+  const visSet = visibleNodeIds.value
+  const visibleNodes = nodes.value.filter(n => visSet.has(n.id))
+  const visibleEdges = edges.value.filter(
+    e => visSet.has(e.from_entity_id!) && visSet.has(e.to_entity_id!)
+  )
+  const data = transformToG6Data(visibleNodes, visibleEdges)
 
-    if ((evt.originalEvent as MouseEvent)?.shiftKey) {
-      // Shift+click: cytoscape handles multi-select natively with selectionType:'additive'
-      // Sync our selectedNodeIds with cy selection
-      syncSelectionFromCy()
-    } else {
+  // 恢复位置
+  let skipLayout = false
+  if (Object.keys(globalPositionCache).length > 0) {
+    let restoredCount = 0
+    for (const nd of data.nodes as any[]) {
+      const saved = globalPositionCache[nd.id]
+      if (saved) {
+        nd.x = saved.x
+        nd.y = saved.y
+        restoredCount++
+      }
+    }
+    if (restoredCount >= data.nodes.length * 0.85) {
+      skipLayout = true
+    }
+  }
+  if (!skipLayout) {
+    for (const nd of data.nodes as any[]) {
+      const saved = posMap[nd.id]
+      if (saved) {
+        nd.x = saved.x
+        nd.y = saved.y
+      }
+    }
+  }
+  graph.changeData(data)
+  nextTick(() => applyTypeHighlight())
+  // GLOBAL 模式下 changeData 后确保所有 item 可见（FOCUS 模式可能隐藏过）
+  const allItems = graph.save() as any
+  for (const nd of (allItems.nodes || [])) {
+    const item = graph.findById(nd.id)
+    if (item && item.get('visible') === false) item.show()
+  }
+  for (const ed of (allItems.edges || [])) {
+    const item = graph.findById(ed.id)
+    if (item && item.get('visible') === false) item.show()
+  }
+  if (visibleNodes.length > 100 && !skipLayout) {
+    graph.updateLayout(g6LayoutOptions)
+    await graph.layout()
+    const updatedData = graph.save() as any
+    for (const nd of (updatedData.nodes || [])) {
+      if (nd.x != null) globalPositionCache[nd.id] = { x: nd.x, y: nd.y }
+    }
+  }
+
+  if (visibleNodes.length > 100) {
+    graph.fitView()
+    graph.zoomTo(0.25)
+    currentZoom.value = 0.25
+    sliderZoom.value = Math.round(zoomToSlider(0.25))
+  }
+}
+
+function wireGraphEvents() {
+  if (!graph) return
+
+  // 节点单击 → 飞入放大 + 邻接筛选
+  graph.on('node:click', (evt: any) => {
+    const nodeItem = evt.item
+    if (!nodeItem) return
+    const model = nodeItem.getModel()
+    const nodeId = model.id
+    if (!nodeId) return
+
+    if (evt.originalEvent?.shiftKey) {
+      nextTick(() => syncSelectionFromGraph())
+      return
+    }
+
+    const nodeData = nodes.value.find(n => String(n.id) === nodeId)
+    if (nodeData) {
       detailNode.value = nodeData
       showDetailPanel.value = true
     }
-  })
 
-  cy.on('tap', (evt: EventObject) => {
-    if (evt.target === cy) {
-      selectedNodeIds.clear()
+    focusNodeId.value = Number(nodeId)
+    if (model.x != null) {
+      focusNodePos = { x: model.x, y: model.y }
     }
+    if (localFilterTimer) clearTimeout(localFilterTimer)
+    localFilterTimer = setTimeout(() => applyFiltersToGraph(), 30)
   })
 
-  cy.on('boxend', () => {
-    syncSelectionFromCy()
-  })
-
-  cy.on('boxend', () => {
-    syncSelectionFromCy()
-  })
-
-  cy.on('select unselect', () => {
-    syncSelectionFromCy()
-  })
-
-  cy.on('dbltap', 'node', (evt: EventObject) => {
-    const nodeId = Number(evt.target.id())
+  // 双击 → 钻入文档
+  graph.on('node:dblclick', (evt: any) => {
+    const nodeItem = evt.item
+    if (!nodeItem) return
+    const nodeId = Number(nodeItem.getModel().id)
     const nodeData = nodes.value.find(n => n.id === nodeId)
     if (nodeData?.source_doc_uuid) {
       filterDocUuid.value = nodeData.source_doc_uuid
@@ -570,75 +880,77 @@ function wireCyEvents() {
     }
   })
 
-  cy.on('zoom', () => {
-    updateLabelVisibility()
-  })
-}
+  // 双击空白 → 返回全局
+  graph.on('canvas:dblclick', () => {
+    focusNodeId.value = null
+    focusNodePos = null
+    neighborTypeFilter.value = []
 
-function updateLabelVisibility() {
-  if (!cy) return
-  const zoom = cy.zoom()
-  const showLabel = zoom > 0.8
-  const fontSize = zoom > 1.5 ? '11px' : zoom > 0.8 ? '9px' : '0px'
-  cy.nodes().style({
-    'font-size': fontSize,
-    'text-opacity': showLabel ? 1 : 0,
-  })
-}
-
-function rerunLayout() {
-  if (!cy) return
-
-  // 计算可见节点数量
-  const visibleCount = cy.nodes().filter(n => n.style('display') !== 'none').length
-  const isLarge = visibleCount > 50
-
-  // 先随机化位置，确保节点不重叠
-  const nodes = cy.nodes()
-  const box = cy.container()?.getBoundingClientRect()
-  const w = box ? box.width : 800
-  const h = box ? box.height : 600
-
-  nodes.forEach((n, i) => {
-    const angle = (2 * Math.PI * i) / nodes.length
-    const radius = Math.min(w, h) * 0.35
-    n.position({
-      x: w / 2 + radius * Math.cos(angle),
-      y: h / 2 + radius * Math.sin(angle),
-    })
+    if (localFilterTimer) clearTimeout(localFilterTimer)
+    localFilterTimer = setTimeout(() => applyFiltersToGraph(), 30)
   })
 
-  // 执行力导向布局，用固定的大数值确保节点充分展开
-  cy.layout({
-    name: 'cose',
-    nodeRepulsion: 2000000,
-    edgeElasticity: 0.5,
-    idealEdgeLength: 300,
-    gravity: 0.05,
-    numIter: 3000,
-    initialTemp: 500,
-    coolingFactor: 0.98,
-    refresh: 30,
-    animate: 'during' as const,
-    animationDuration: 2000,
-    fit: true,
-    padding: 120,
-    randomize: false,
-    nodeDimensionsIncludeLabels: true,
-  } as any).run()
+  graph.on('nodestatechange', () => {
+    syncSelectionFromGraph()
+  })
 
-  // 布局完成后更新标签可见性
-  setTimeout(() => {
-    updateLabelVisibility()
-  }, 2200)
+  graph.on('viewportchange', () => {
+    if (!zoomFromSlider) {
+      const z = graph!.getZoom()
+      currentZoom.value = Math.round(z * 100) / 100
+      sliderZoom.value = Math.round(zoomToSlider(z))
+    }
+  })
+
 }
 
-function syncSelectionFromCy() {
-  if (!cy) return
+async function rerunLayout() {
+  if (!graph) return
+
+  const visSet = visibleNodeIds.value
+  const data = graph.save() as any
+  const w = graph.getWidth()
+  const h = graph.getHeight()
+  const visibleIds = [...visSet].map(String)
+  const centerX = w / 2
+  const centerY = h / 2
+  const radius = Math.min(w, h) * 0.35
+
+  // 圆形散开可见节点
+  let idx = 0
+  for (const nd of (data.nodes || [])) {
+    if (nd.id && visSet.has(Number(nd.id))) {
+      const angle = (2 * Math.PI * idx) / visibleIds.length
+      nd.x = centerX + radius * Math.cos(angle)
+      nd.y = centerY + radius * Math.sin(angle)
+      idx++
+    }
+  }
+
+  graph.changeData(data)
+
+  graph.updateLayout({
+    type: 'force2',
+    animate: false,
+    maxIteration: 200,
+    nodeStrength: 1200,
+    linkDistance: 280,
+    edgeStrength: 200,
+    preventOverlap: true,
+    nodeSize: G6_NODE_SIZE,
+    nodeSpacing: 30,
+  })
+  graph.layout()
+}
+
+function syncSelectionFromGraph() {
+  if (!graph) return
   selectedNodeIds.clear()
-  cy.nodes(':selected').forEach(n => {
-    selectedNodeIds.add(Number(n.id()))
-  })
+  const selected = graph.findAllByState('node', 'selected')
+  for (const item of selected) {
+    const model = item.getModel()
+    selectedNodeIds.add(Number(model.id))
+  }
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────────────
@@ -652,39 +964,32 @@ function getNodeName(id: number | null): string {
 // ── 数据加载 ────────────────────────────────────────────────────────────
 
 async function reloadGraph() {
+  if (!graph) {
+    console.warn('Graph instance not ready')
+    return
+  }
+  
   loading.value = true
   try {
-    const params: any = {
-      review_status: filterReviewStatus.value.join(','),
-      limit: 500,
-      include_relations: true,
-    }
-    if (filterEntityTypes.value.length) params.entity_types = filterEntityTypes.value.join(',')
-    if (filterSourceSite.value) params.source_site = filterSourceSite.value
-    if (filterDocUuid.value) params.source_doc_uuid = filterDocUuid.value
-
+    const params: any = { /* 你的参数 */ }
     const graphRes = await getReviewGraph(params)
+    
+    // 更新本地数据
     nodes.value = graphRes.nodes
     edges.value = graphRes.edges
-
-    entityTypeOptions.value = graphRes.entity_types || []
-    siteOptions.value = graphRes.source_sites || []
-
-    detailNode.value = null
-    Object.keys(editableData).forEach(k => delete editableData[k])
-    selectedNodeIds.clear()
-    focusNodeId.value = null
-
-    await nextTick()
-
-    if (cy) {
-      const data = transformToCyData(nodes.value, edges.value)
-      cy.elements().remove()
-      cy.add(data.nodes)
-      cy.add(data.edges)
-      cy.layout(layoutOptions as any).run()
-      updateLabelVisibility()
-    }
+    
+    //  使用 changeData
+    const data = transformToG6Data(nodes.value, edges.value)
+    graph.changeData(data)
+    
+    // 重新布局并适配视图
+    graph.updateLayout(g6LayoutOptions)
+    graph.layout()
+    graph.fitView()
+    graph.zoomTo(0.25)
+  } catch (err) {
+    console.error('重载数据失败:', err)
+    ElMessage.error('数据重载失败')
   } finally {
     loading.value = false
   }
@@ -709,11 +1014,14 @@ function updateNodeStatus(id: number, status: string) {
   if (node) node.review_status = status
   if (detailNode.value?.id === id) detailNode.value.review_status = status
 
-  if (cy) {
-    const ele = cy.getElementById(String(id))
-    if (ele.length) {
-      ele.removeClass('pending approved rejected').addClass(nodeCssClass(status))
-      ele.data('review_status', status)
+  if (graph) {
+    const color = statusColor(status)
+    const item = graph.findById(String(id))
+    if (item) {
+      graph.updateItem(item, {
+        style: { fill: color },
+        review_status: status,
+      })
     }
   }
 }
@@ -723,11 +1031,13 @@ async function doApproveRelation(id: number) {
   const edge = edges.value.find(e => e.id === id)
   if (edge) edge.review_status = 'approved'
 
-  if (cy) {
-    const ele = cy.getElementById(String(id))
-    if (ele.length) {
-      ele.removeClass('pending approved rejected').addClass('approved')
-      ele.data('review_status', 'approved')
+  if (graph) {
+    const item = graph.findById('E' + id)
+    if (item) {
+      graph.updateItem(item, {
+        style: { stroke: '#00ff88', lineDash: undefined, opacity: 0.7 },
+        review_status: 'approved',
+      })
     }
   }
   ElMessage.success('关系已通过')
@@ -738,11 +1048,13 @@ async function doRejectRelation(id: number) {
   const edge = edges.value.find(e => e.id === id)
   if (edge) edge.review_status = 'rejected'
 
-  if (cy) {
-    const ele = cy.getElementById(String(id))
-    if (ele.length) {
-      ele.removeClass('pending approved rejected').addClass('rejected')
-      ele.data('review_status', 'rejected')
+  if (graph) {
+    const item = graph.findById('E' + id)
+    if (item) {
+      graph.updateItem(item, {
+        style: { stroke: '#ff3366', lineDash: [6, 4], opacity: 0.35 },
+        review_status: 'rejected',
+      })
     }
   }
   ElMessage.warning('关系已拒绝')
@@ -826,51 +1138,91 @@ function statusLabel(s: string): string {
 }
 
 function onResize() {
-  if (cy && cyContainerRef.value) {
-    const { width, height } = cyContainerRef.value.getBoundingClientRect()
+  if (graph && graphContainerRef.value) {
+    const { width, height } = graphContainerRef.value.getBoundingClientRect()
     if (width > 0 && height > 0) {
-      cy.resize().fit(undefined, 30)
+      graph.changeSize(width, height)
     }
   }
 }
 
-function onKeyDown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && !e.repeat) {
-    cy?.boxSelectionEnabled(true)
-  }
-}
-
-function onKeyUp(e: KeyboardEvent) {
-  if (!e.ctrlKey && !e.metaKey) {
-    cy?.boxSelectionEnabled(false)
-  }
-}
-
 onMounted(async () => {
-  await Promise.all([reloadGraph(), loadMergeQueue()])
-
+  await loadMergeQueue()
   await nextTick()
-  if (cyContainerRef.value && !cy) {
-    cy = initCy(cyContainerRef.value)
-    wireCyEvents()
-    const data = transformToCyData(nodes.value, edges.value)
-    cy.add(data.nodes)
-    cy.add(data.edges)
-    cy.layout(layoutOptions as any).run()
+  
+  // 1. 先确保容器存在且 graph 未初始化
+  if (graphContainerRef.value && !graph) {
+    try {
+      // 2. 创建 graph 实例
+      graph = initGraph(graphContainerRef.value)
+      wireGraphEvents()
+      
+      // 3. 获取数据
+      loading.value = true
+      const params: any = {
+        review_status: filterReviewStatus.value.join(','),
+        limit: filterLimit.value,
+        include_relations: true,
+        traversal: filterTraversal.value,
+        max_depth: filterMaxDepth.value,
+      }
+      if (filterEntityTypes.value.length) params.entity_types = filterEntityTypes.value.join(',')
+      if (filterSourceSite.value) params.source_site = filterSourceSite.value
+      if (filterDocUuid.value) params.source_doc_uuid = filterDocUuid.value
+
+      const graphRes = await getReviewGraph(params)
+
+      // 4. 更新数据（阻止 watch 触发 applyFiltersToGraph）
+      suppressApplyFilter = true
+      nodes.value = graphRes.nodes
+      edges.value = graphRes.edges
+      entityTypeOptions.value = graphRes.entity_types || []
+      siteOptions.value = graphRes.source_sites || []
+
+      // 5. 初始渲染
+      const data = transformToG6Data(nodes.value, edges.value)
+      graph.read(data)
+
+      // 6. 布局 + 视图
+      graph.updateLayout(g6LayoutOptions)
+      await graph.layout()
+
+      graph.fitView()
+      graph.zoomTo(0.25)
+      currentZoom.value = 0.25
+      sliderZoom.value = Math.round(zoomToSlider(0.25))
+
+      // 7. 填充位置缓存
+      const posData = graph.save() as any
+      for (const nd of (posData.nodes || [])) {
+        if (nd.x != null) globalPositionCache[nd.id] = { x: nd.x, y: nd.y }
+      }
+      
+    } catch (err) {
+      console.error('初始化图谱失败:', err)
+      ElMessage.error('图谱初始化失败')
+    } finally {
+      loading.value = false
+    }
   }
-
+  
   window.addEventListener('resize', onResize)
-
-  document.addEventListener('keydown', onKeyDown)
-  document.addEventListener('keyup', onKeyUp)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
-  document.removeEventListener('keydown', onKeyDown)
-  document.removeEventListener('keyup', onKeyUp)
-  cy?.destroy()
-  cy = null
+  if (graph) {
+    graph.destroy()
+    graph = null
+  }
+})
+
+watch(focusNodeId, (val) => {
+  if (val === null) neighborTypeFilter.value = []
+})
+
+watch(highlightTypeFilter, () => {
+  applyTypeHighlight()
 })
 
 watch([visibleNodeIds, visibleEdges], () => {
@@ -918,9 +1270,14 @@ watch(detailNode, (node) => {
   background: var(--dp-muted-bg-secondary);
 }
 
-.cy-container {
+.graph-container {
   position: absolute;
   inset: 0;
+  background-color: #0a0f1e;
+  background-image:
+    linear-gradient(rgba(0, 212, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.08) 1px, transparent 1px);
+  background-size: 48px 48px;
 }
 
 .graph-legend {
@@ -959,6 +1316,29 @@ watch(detailNode, (node) => {
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   z-index: 2;
   pointer-events: none;
+}
+.graph-zoom-slider {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(10, 14, 30, 0.85);
+  padding: 4px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  z-index: 2;
+}
+.zoom-label { font-size: 14px; }
+.zoom-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: #00d4ff;
+  min-width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .field-value { font-weight: 500; }

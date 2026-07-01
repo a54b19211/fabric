@@ -187,6 +187,8 @@ export const getReviewGraph = (params: {
   source_doc_uuid?: string
   include_relations?: boolean
   limit?: number
+  traversal?: string
+  max_depth?: number
 }) => http.get<any, GraphResponse>('/review/graph', { params })
 
 // ── 仪表盘统计 ──────────────────────────────────────────────────────────
