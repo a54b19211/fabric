@@ -33,7 +33,7 @@
             <el-button type="primary" @click="batchSyncBySelect" :loading="batching" :disabled="selectedUuids.length === 0">
               选中同步 ({{ selectedUuids.length }})
             </el-button>
-            <el-input-number v-model="batchCount" :min="1" :max="5000" :step="100" style="width:150px" />
+            <el-input-number v-model="batchCount" :min="1" :step="100" style="width:150px" />
             <el-button type="success" plain @click="batchSyncByCount" :loading="batchingByCount">
               批量同步
             </el-button>

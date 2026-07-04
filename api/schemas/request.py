@@ -57,7 +57,7 @@ class BatchRejectRelationsRequest(BaseModel):
 
 
 class WeknoraBatchRequest(BaseModel):
-    limit: int = Field(default=100, ge=1, le=500, description="最多处理 500 篇文档")
+    limit: int = Field(default=100, ge=1, description="单次同步文档数量上限")
 
 
 class RecrawlRequest(BaseModel):

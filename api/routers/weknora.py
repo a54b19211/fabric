@@ -1,4 +1,5 @@
 """WeKnora 同步接口 — 文档同步 + 图数据同步"""
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from fastapi import APIRouter, HTTPException, Query
@@ -46,35 +47,60 @@ def _build_source_metadata(doc: dict) -> dict:
     return {k: v for k, v in meta.items() if v not in ("", [], None, 0.0)}
 
 
+BATCH_SIZE = 50
+MAX_CONCURRENCY = 5
+
+
+def _sync_one_row(row: dict, kb_id: str = "") -> tuple[str, bool, str]:
+    """同步单行（dict）到 WeKnora，不再查 DB。返回 (uuid, success, message)。"""
+    uuid = row.get("uuid", "")
+    title = row.get("title") or uuid
+    content = row.get("raw_content") or ""
+    if not content.strip():
+        return uuid, False, f"文档内容为空: {uuid}"
+
+    metadata = _build_source_metadata({
+        "uuid": uuid,
+        "parent_uuid": row.get("parent_uuid", ""),
+        "doc_type": row.get("doc_type", ""),
+        "source_site": row.get("source_site", ""),
+        "source_url": row.get("source_url", ""),
+        "publish_date": row.get("publish_date", ""),
+        "language": row.get("language", ""),
+        "confidence_score": row.get("confidence_score", 0.0),
+        "parse_method": row.get("parse_method", ""),
+        "crawl_timestamp": str(row.get("crawl_timestamp") or ""),
+    })
+    client = get_weknora_graph_client()
+    weknora_id = client.upload_document(title, content, metadata, kb_id)
+    update_weknora_sync_status(uuid, "synced")
+    return uuid, True, weknora_id or "synced"
+
+
 def _sync_one_document(uuid: str, kb_id: str = "") -> tuple[bool, str]:
-    """同步单篇文档到 WeKnora。返回 (success, message)。"""
+    """同步单篇文档到 WeKnora（单条接口用，需查 DB）。返回 (success, message)。"""
     from db.repository import get_document_by_uuid
 
     doc = get_document_by_uuid(uuid)
     if doc is None:
         return False, f"文档不存在: {uuid}"
 
-    title = doc.title or uuid
-    content = doc.raw_content or ""
-    if not content.strip():
-        return False, f"文档内容为空: {uuid}"
-
-    metadata = _build_source_metadata({
-        "uuid": doc.uuid or "",
-        "parent_uuid": doc.parent_uuid or "",
-        "doc_type": doc.doc_type or "",
-        "source_site": doc.source_site or "",
-        "source_url": doc.source_url or "",
-        "publish_date": doc.publish_date or "",
-        "language": doc.language or "",
-        "confidence_score": doc.confidence_score or 0.0,
-        "parse_method": doc.parse_method or "",
-        "crawl_timestamp": str(doc.crawl_timestamp) if doc.crawl_timestamp else "",
-    })
-    client = get_weknora_graph_client()
-    weknora_id = client.upload_document(title, content, metadata, kb_id)
-    update_weknora_sync_status(uuid, "synced")
-    return True, weknora_id or "synced"
+    row = {
+        "uuid": doc.uuid,
+        "title": doc.title,
+        "raw_content": doc.raw_content,
+        "parent_uuid": doc.parent_uuid,
+        "doc_type": doc.doc_type,
+        "source_site": doc.source_site,
+        "source_url": doc.source_url,
+        "publish_date": doc.publish_date,
+        "language": doc.language,
+        "confidence_score": doc.confidence_score,
+        "parse_method": doc.parse_method,
+        "crawl_timestamp": doc.crawl_timestamp,
+    }
+    _, success, msg = _sync_one_row(row, kb_id)
+    return success, msg
 
 
 @router.get("/pending", response_model=WeknoraPendingResponse)
@@ -149,11 +175,10 @@ def sync_batch(
     kb_id: str = Query("", description="目标知识库 ID，留空用 .env 配置"),
     source_site: str = Query("", description="按来源站点过滤同步"),
 ):
-    """批量同步 pending 文档到 WeKnora。"""
-    if body.limit < 1 or body.limit > 500:
-        raise HTTPException(status_code=400, detail="limit 必须在 1-500 之间")
+    """批量同步 pending 文档到 WeKnora。后端内部自动分批，前端只管传总量。"""
+    if body.limit < 1:
+        raise HTTPException(status_code=400, detail="limit 必须 >= 1")
 
-    # 若用户指定了知识库 ID，先校验是否存在
     if kb_id:
         try:
             get_weknora_graph_client().validate_knowledge_base(kb_id)
@@ -161,23 +186,41 @@ def sync_batch(
             raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        rows, _ = get_pending_weknora_sync(limit=body.limit, offset=0, source_site=source_site)
+        # 先取第一页确定有数据
+        rows, total = get_pending_weknora_sync(limit=min(body.limit, BATCH_SIZE), offset=0, source_site=source_site)
         if not rows:
             return WeknoraBatchResponse(triggered=0)
 
-        uuids = [r["uuid"] for r in rows]
+        total_to_sync = min(body.limit, total)
+        logger.info(f"[API] WeKnora 批量同步: 请求 {body.limit} 篇, pending 共 {total} 篇, 实际同步 {total_to_sync} 篇")
 
         def _bg_sync():
-            for row in rows:
-                try:
-                    _sync_one_document(row["uuid"], kb_id)
-                except Exception as e:
-                    logger.error(f"[API] 后台同步失败 {row['uuid']}: {e}")
+            synced = 0
+            offset = 0
+            while offset < total_to_sync:
+                batch_rows, _ = get_pending_weknora_sync(
+                    limit=min(BATCH_SIZE, total_to_sync - offset),
+                    offset=offset, source_site=source_site,
+                )
+                if not batch_rows:
+                    break
+
+                with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
+                    futures = {pool.submit(_sync_one_row, row, kb_id): row for row in batch_rows}
+                    for future in as_completed(futures):
+                        try:
+                            uuid, success, msg = future.result()
+                            if success:
+                                synced += 1
+                        except Exception as e:
+                            logger.error(f"[API] 后台同步异常: {e}")
+
+                offset += len(batch_rows)
+
+            logger.info(f"[API] WeKnora 批量同步完成: {synced}/{total_to_sync}")
 
         threading.Thread(target=_bg_sync, daemon=True).start()
-
-        logger.info(f"[API] WeKnora 批量同步已入后台: {len(uuids)} 篇")
-        return WeknoraBatchResponse(triggered=len(uuids))
+        return WeknoraBatchResponse(triggered=total_to_sync)
 
     except Exception as e:
         logger.error(f"[API] WeKnora 批量同步失败: {e}")
@@ -217,7 +260,7 @@ def get_stats():
 # 图数据同步（entity_dict / entities / relations → WeKnora → Neo4j）
 # ═══════════════════════════════════════════════════════════════════════════
 
-BATCH_SIZE = 200
+GRAPH_BATCH_SIZE = 200
 
 
 def _do_sync_entity_dict(kb_id: str = "") -> tuple[int, int, str]:
@@ -234,8 +277,8 @@ def _do_sync_entity_dict(kb_id: str = "") -> tuple[int, int, str]:
     total_pushed = 0
     total_failed = 0
 
-    for i in range(0, len(rows), BATCH_SIZE):
-        batch = rows[i:i + BATCH_SIZE]
+    for i in range(0, len(rows), GRAPH_BATCH_SIZE):
+        batch = rows[i:i + GRAPH_BATCH_SIZE]
         batch_ids = [row["id"] for row in batch]
         try:
             result = client.batch_upsert_entity_dict(batch)
@@ -245,7 +288,7 @@ def _do_sync_entity_dict(kb_id: str = "") -> tuple[int, int, str]:
         except Exception as batch_error:
             total_failed += len(batch)
             batch_mark_entity_dict_failed(batch_ids, str(batch_error))
-            logger.error(f"[API] entity_dict 批次 {i // BATCH_SIZE + 1} 失败: {batch_error}")
+            logger.error(f"[API] entity_dict 批次 {i // GRAPH_BATCH_SIZE + 1} 失败: {batch_error}")
 
     logger.info(f"[API] entity_dict 同步完成: pushed={total_pushed}, failed={total_failed}")
 
@@ -284,10 +327,10 @@ def _do_sync_entities(kb_id: str) -> tuple[int, int, str]:
     total_pushed = 0
     total_failed = 0
 
-    for i in range(0, len(entities), BATCH_SIZE):
-        batch = entities[i:i + BATCH_SIZE]
+    for i in range(0, len(entities), GRAPH_BATCH_SIZE):
+        batch = entities[i:i + GRAPH_BATCH_SIZE]
         batch_ids = [ent["id"] for ent in batch]
-        logger.info(f"[API] 批次 {i // BATCH_SIZE + 1}/{(len(entities) - 1) // BATCH_SIZE + 1}: {len(batch)} 条, ids={batch_ids[:5]}{'...' if len(batch_ids) > 5 else ''}")
+        logger.info(f"[API] 批次 {i // GRAPH_BATCH_SIZE + 1}/{(len(entities) - 1) // BATCH_SIZE + 1}: {len(batch)} 条, ids={batch_ids[:5]}{'...' if len(batch_ids) > 5 else ''}")
         try:
             result = client.batch_upsert_entities(batch, kb_id)
             logger.info(f"[API] WeKnora 响应: {result}")
@@ -297,7 +340,7 @@ def _do_sync_entities(kb_id: str) -> tuple[int, int, str]:
         except Exception as batch_error:
             total_failed += len(batch)
             batch_mark_entity_weknora_graph_failed(batch_ids, str(batch_error))
-            logger.error(f"[API] 批次 {i // BATCH_SIZE + 1} 推送失败: {batch_error}")
+            logger.error(f"[API] 批次 {i // GRAPH_BATCH_SIZE + 1} 推送失败: {batch_error}")
 
     logger.info(f"[API] sync-entities 完成: pushed={total_pushed}, failed={total_failed}")
     return total_pushed, total_failed, f"同步完成: pushed={total_pushed}, failed={total_failed}"
@@ -317,8 +360,8 @@ def _do_sync_relations(kb_id: str) -> tuple[int, int, str]:
     total_pushed = 0
     total_failed = 0
 
-    for i in range(0, len(relations), BATCH_SIZE):
-        batch = relations[i:i + BATCH_SIZE]
+    for i in range(0, len(relations), GRAPH_BATCH_SIZE):
+        batch = relations[i:i + GRAPH_BATCH_SIZE]
         batch_ids = [rel["id"] for rel in batch]
         try:
             result = client.batch_upsert_relations(batch, kb_id)
@@ -328,7 +371,7 @@ def _do_sync_relations(kb_id: str) -> tuple[int, int, str]:
         except Exception as batch_error:
             total_failed += len(batch)
             batch_mark_relation_weknora_graph_failed(batch_ids, str(batch_error))
-            logger.error(f"[API] 关系图批次 {i // BATCH_SIZE + 1} 失败: {batch_error}")
+            logger.error(f"[API] 关系图批次 {i // GRAPH_BATCH_SIZE + 1} 失败: {batch_error}")
 
     logger.info(f"[API] 关系图同步完成: pushed={total_pushed}, failed={total_failed}")
     return total_pushed, total_failed, f"同步完成: pushed={total_pushed}, failed={total_failed}"
