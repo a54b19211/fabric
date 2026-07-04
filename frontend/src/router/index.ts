@@ -38,6 +38,12 @@ const router = createRouter({
       meta: { title: '图谱审核' },
     },
     {
+      path: '/entity-merge',
+      name: 'EntityMerge',
+      component: () => import('@/views/EntityMerge.vue'),
+      meta: { title: '实体消歧' },
+    },
+    {
       path: '/review/merge-workbench',
       name: 'MergeWorkbench',
       component: () => import('@/views/MergeWorkbench.vue'),
@@ -50,6 +56,12 @@ const router = createRouter({
       meta: { title: '属性冲突处理' },
     },
     {
+      path: '/review/identity-merge',
+      name: 'IdentityMergeProposals',
+      component: () => import('@/views/IdentityMergeProposals.vue'),
+      meta: { title: '身份合并提案' },
+    },
+    {
       path: '/neo4j',
       name: 'Neo4j',
       component: () => import('@/views/Neo4jManager.vue'),
@@ -60,6 +72,18 @@ const router = createRouter({
       name: 'Weknora',
       component: () => import('@/views/WeknoraManager.vue'),
       meta: { title: 'WeKnora 知识库同步' },
+    },
+    {
+      path: '/agent',
+      name: 'AutoReview',
+      component: () => import('@/views/AutoReviewDashboard.vue'),
+      meta: { title: '自动审核' },
+    },
+    {
+      path: '/agent/document-review',
+      name: 'DocumentReview',
+      component: () => import('@/views/DocumentReview.vue'),
+      meta: { title: '文档审核' },
     },
   ],
 })

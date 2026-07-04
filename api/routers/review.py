@@ -30,6 +30,8 @@ from api.schemas.response import (
     MergeEntitiesResponse,
     RollbackMergeResponse,
     MergeLogItem, MergeLogListResponse,
+    IdentityMergeProposalItem, IdentityMergeProposalListResponse,
+    IdentityMergeProposalResolveRequest,
 )
 from db.repository import (
     approve_entity_with_alias_writeback,
@@ -43,6 +45,7 @@ from db.repository import (
     search_entity_dicts, compare_entities,
     merge_entities, rollback_merge,
     get_merge_logs,
+    get_identity_merge_proposals, resolve_identity_merge_proposal,
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation, EntityDict
@@ -1012,3 +1015,80 @@ def list_merge_logs(limit: int = Query(50, ge=1, le=200)):
     except Exception as e:
         logger.error(f"[API] 合并日志查询失败: {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+# ── 身份合并提案 ───────────────────────────────────────────────────────────
+
+@router.get("/identity-merge-proposals", response_model=IdentityMergeProposalListResponse)
+def list_identity_merge_proposals(
+    status: str = Query("pending", description="pending | approved | rejected"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """查询身份合并提案列表。Agent D 判断 extracted_entity 应链接到 entity_dict 时创建。"""
+    try:
+        items = get_identity_merge_proposals(status=status, limit=limit)
+        return IdentityMergeProposalListResponse(
+            total=len(items),
+            items=[IdentityMergeProposalItem(**d) for d in items],
+        )
+    except Exception as e:
+        logger.error(f"[API] 身份合并提案查询失败: {e}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.post("/identity-merge-proposals/{proposal_id}/approve", response_model=ReviewActionResponse)
+def approve_identity_merge_proposal(proposal_id: int, body: IdentityMergeProposalResolveRequest):
+    """批准身份合并提案：确认链接 extracted_entity → entity_dict。"""
+    try:
+        # 先获取提案详情
+        proposals = get_identity_merge_proposals(status="pending", limit=500)
+        proposal = next((p for p in proposals if p["id"] == proposal_id), None)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="提案不存在或已处理")
+
+        # 执行链接：approve entity 到目标 dict
+        approve_entity_with_alias_writeback(
+            proposal["source_entity_id"],
+            reviewer=body.reviewer,
+            note=f"Agent 身份合并确认。{body.note}".strip(),
+            dict_id=proposal["target_dict_id"],
+            force_new=False,
+        )
+
+        # 标记提案为 approved
+        resolve_identity_merge_proposal(proposal_id, "approved", body.reviewer, body.note)
+
+        logger.info(
+            f"[API] 身份合并提案已批准: proposal_id={proposal_id} "
+            f"entity_id={proposal['source_entity_id']} → dict_id={proposal['target_dict_id']}"
+        )
+        return ReviewActionResponse(success=True, message="已链接实体并批准提案")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 身份合并提案批准失败: proposal_id={proposal_id} | {e}")
+        raise HTTPException(status_code=500, detail=f"批准失败: {str(e)}")
+
+
+@router.post("/identity-merge-proposals/{proposal_id}/reject", response_model=ReviewActionResponse)
+def reject_identity_merge_proposal(proposal_id: int, body: IdentityMergeProposalResolveRequest):
+    """拒绝身份合并提案：实体保持 pending，提案标记为 rejected。"""
+    try:
+        proposals = get_identity_merge_proposals(status="pending", limit=500)
+        proposal = next((p for p in proposals if p["id"] == proposal_id), None)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="提案不存在或已处理")
+
+        # 标记提案为 rejected（实体本身保持 pending，等后续处理）
+        resolve_identity_merge_proposal(proposal_id, "rejected", body.reviewer, body.note)
+
+        logger.info(
+            f"[API] 身份合并提案已拒绝: proposal_id={proposal_id} "
+            f"entity_id={proposal['source_entity_id']}"
+        )
+        return ReviewActionResponse(success=True, message="已拒绝提案")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 身份合并提案拒绝失败: proposal_id={proposal_id} | {e}")
+        raise HTTPException(status_code=500, detail=f"拒绝失败: {str(e)}")

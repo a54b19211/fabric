@@ -19,6 +19,7 @@ from db.models import (
     EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
     CrawlLog, ReviewLog,
     EntityMergeQueue, EntityMergeLog,
+    EntityIdentityMergeProposal,
     OperationLog,
 )
 
@@ -744,6 +745,221 @@ def process_entity_merge(
         )
 
     return auto_count, conflict_count
+
+
+def create_identity_merge_proposal(
+    source_entity_id: int,
+    target_dict_id: int,
+    agent_reason: str = "",
+    agent_confidence: float = 0.0,
+    agent_run_id: str = "",
+) -> int | None:
+    """写入身份合并提案到 entity_identity_merge_proposal，供人工审核确认。
+
+    将 extracted_entity（source_entity_id）和 target entity_dict 的完整快照
+    分别存入 source_entity_snapshot 和 target_dict_snapshot。
+
+    Returns:
+        proposal_id，失败返回 None
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return None
+
+        source_ent = session.query(ExtractedEntity).filter(
+            ExtractedEntity.id == source_entity_id,
+            ExtractedEntity.is_deleted == False,
+        ).first()
+        if source_ent is None:
+            logger.warning(f"[DB] create_identity_merge_proposal: source_entity {source_entity_id} 不存在")
+            return None
+
+        target_dict = session.query(EntityDict).filter(
+            EntityDict.id == target_dict_id,
+            EntityDict.is_deleted == False,
+        ).first()
+        if target_dict is None:
+            logger.warning(f"[DB] create_identity_merge_proposal: target_dict {target_dict_id} 不存在")
+            return None
+
+        target_aliases = [
+            a.name for a in session.query(EntityAlias).filter(
+                EntityAlias.dict_id == target_dict_id,
+                EntityAlias.is_deleted == False,
+            ).all()
+        ]
+
+        source_snapshot = {
+            "entity_name": source_ent.entity_name or "",
+            "entity_type": source_ent.entity_type or "",
+            "entity_data": {k: v for k, v in (source_ent.entity_data or {}).items()
+                           if not k.startswith("_")},
+            "source_site": source_ent.source_site or "",
+            "source_doc_uuid": source_ent.source_doc_uuid or "",
+            "source_text": (source_ent.source_text or "")[:500],
+        }
+
+        target_snapshot = {
+            "canonical_name": (target_dict.canonical_data or {}).get("name", ""),
+            "entity_type": target_dict.entity_type or "",
+            "aliases": target_aliases,
+            "source_site": target_dict.canonical_source or "",
+            "is_verified": bool(target_dict.is_verified),
+            "key_fields": {
+                k: v for k, v in (target_dict.canonical_data or {}).items()
+                if k in ("cas_number", "unii", "atc_code", "stock_code", "approval_number",
+                         "pubchem_cid", "drugbank_id", "nct_number")
+            },
+        }
+
+        proposal = EntityIdentityMergeProposal(
+            source_entity_id=source_entity_id,
+            target_dict_id=target_dict_id,
+            source_entity_snapshot=source_snapshot,
+            target_dict_snapshot=target_snapshot,
+            agent_run_id=agent_run_id,
+            agent_reason=agent_reason,
+            agent_confidence=agent_confidence,
+            status="pending",
+        )
+        session.add(proposal)
+        session.flush()
+        proposal_id = proposal.id
+
+        _write_operation_log(
+            session, "insert", "entity_identity_merge_proposal", proposal_id,
+            business_action="disambiguate",
+            description=(
+                f"Agent 身份合并提案: {source_ent.entity_name} → "
+                f"dict_id={target_dict_id} confidence={agent_confidence:.2f}"
+            ),
+            details={
+                "source_entity_id": source_entity_id,
+                "target_dict_id": target_dict_id,
+                "agent_run_id": agent_run_id,
+                "agent_confidence": agent_confidence,
+            },
+            trigger_source="create_identity_merge_proposal",
+        )
+
+        logger.info(
+            f"[DB] 身份合并提案已创建: proposal_id={proposal_id} "
+            f"{source_ent.entity_name} → dict_id={target_dict_id}"
+        )
+        return proposal_id
+
+
+def get_identity_merge_proposals(status: str = "pending", limit: int = 100) -> list[dict]:
+    """查询身份合并提案列表。
+
+    Args:
+        status: pending | approved | rejected，默认 pending
+        limit: 返回数量上限
+
+    Returns:
+        提案列表，每项包含双方快照和 Agent 决策信息
+    """
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return []
+
+        rows = (
+            session.query(EntityIdentityMergeProposal)
+            .filter(EntityIdentityMergeProposal.status == status)
+            .order_by(EntityIdentityMergeProposal.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+        return [
+            {
+                "id": r.id,
+                "source_entity_id": r.source_entity_id,
+                "target_dict_id": r.target_dict_id,
+                "source_entity_snapshot": r.source_entity_snapshot or {},
+                "target_dict_snapshot": r.target_dict_snapshot or {},
+                "agent_run_id": r.agent_run_id,
+                "agent_reason": r.agent_reason,
+                "agent_confidence": r.agent_confidence,
+                "status": r.status,
+                "reviewer": r.reviewer,
+                "review_note": r.review_note,
+                "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else "",
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in rows
+        ]
+
+
+def resolve_identity_merge_proposal(
+    proposal_id: int,
+    status: str,
+    reviewer: str = "",
+    note: str = "",
+) -> bool:
+    """批准或拒绝身份合并提案。
+
+    Args:
+        proposal_id: 提案 ID
+        status: approved | rejected
+        reviewer: 审核人
+        note: 备注
+
+    Returns:
+        是否成功
+    """
+    from db.session import get_session
+
+    if status not in ("approved", "rejected"):
+        logger.warning(f"[DB] resolve_identity_merge_proposal: 无效状态 {status}")
+        return False
+
+    with get_session() as session:
+        if session is None:
+            return False
+
+        proposal = session.query(EntityIdentityMergeProposal).filter(
+            EntityIdentityMergeProposal.id == proposal_id,
+        ).first()
+        if proposal is None:
+            logger.warning(f"[DB] resolve_identity_merge_proposal: proposal {proposal_id} 不存在")
+            return False
+        if proposal.status != "pending":
+            logger.warning(f"[DB] resolve_identity_merge_proposal: proposal {proposal_id} 状态为 {proposal.status}")
+            return False
+
+        proposal.status = status
+        proposal.reviewer = reviewer
+        proposal.review_note = note
+        proposal.reviewed_at = datetime.now(timezone.utc)
+
+        _write_operation_log(
+            session,
+            "update",
+            "entity_identity_merge_proposal",
+            proposal_id,
+            business_action="review",
+            description=(
+                f"身份合并提案 {status}: "
+                f"{proposal.source_entity_snapshot.get('entity_name', '')} "
+                f"→ dict_id={proposal.target_dict_id}"
+            ),
+            details={
+                "proposal_id": proposal_id,
+                "status": status,
+                "reviewer": reviewer,
+                "note": note,
+            },
+            operator=reviewer,
+            trigger_source="resolve_identity_merge_proposal",
+        )
+
+        logger.info(f"[DB] 身份合并提案已{status}: proposal_id={proposal_id}")
+        return True
 
 
 def get_pending_merges(limit: int = 50) -> dict:
@@ -2190,6 +2406,9 @@ def _do_insert_extraction_result(
         doc.extraction_status = "done"
         doc.extracted_at = datetime.now(timezone.utc)
 
+    from db.review_lifecycle import recalc_document_state
+    recalc_document_state(session, source_doc_uuid)
+
     final_ids = [final_id_map.get(i) for i in range(n)]
     logger.info(
         f"[DB] 抽取结果入库: doc={source_doc_uuid} "
@@ -2253,6 +2472,8 @@ def approve_entity(id: int, reviewer: str, note: str = "") -> None:
             operator=reviewer,
             trigger_source="approve_entity",
         )
+        from db.review_lifecycle import recalc_document_state
+        recalc_document_state(session, ent.source_doc_uuid)
 
 
 def _extract_external_ids(entity_type: str, entity_data: dict) -> dict:
@@ -2517,6 +2738,14 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
         )
 
     session.flush()
+
+    # 去重软删除后重算受影响文档的计数
+    affected_docs = {dup.source_doc_uuid for dup in duplicates if dup.source_doc_uuid}
+    if affected_docs:
+        from db.review_lifecycle import recalc_document_state
+        for doc_uuid in affected_docs:
+            recalc_document_state(session, doc_uuid)
+
     return len(duplicates)
 
 
@@ -2620,6 +2849,8 @@ def approve_entity_with_alias_writeback(
             operator=reviewer,
             trigger_source="approve_entity_with_alias_writeback",
         )
+        from db.review_lifecycle import recalc_document_state
+        recalc_document_state(session, ent.source_doc_uuid)
 
         logger.info(
             f"[DB] approve_entity_with_alias_writeback: entity_id={entity_id} "
@@ -2747,6 +2978,8 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
             operator=reviewer,
             trigger_source="reject_entity",
         )
+        from db.review_lifecycle import recalc_document_state
+        recalc_document_state(session, ent.source_doc_uuid)
 
         # 级联拒绝所有关联此实体的 pending 关系
         affected_relations = (
@@ -2858,6 +3091,9 @@ def batch_approve_entities(
             operator=reviewer,
             trigger_source="batch_approve_entities",
         )
+        from db.review_lifecycle import recalc_document_state
+        for doc_uuid in {ent.source_doc_uuid for ent in entities if ent.source_doc_uuid}:
+            recalc_document_state(session, doc_uuid)
         logger.info(f"[DB] batch_approve_entities: {count} entities approved")
         return {"success": True, "message": f"成功批量通过 {count} 个实体", "count": count}
 
@@ -2917,6 +3153,9 @@ def batch_reject_entities(
             operator=reviewer,
             trigger_source="batch_reject_entities",
         )
+        from db.review_lifecycle import recalc_document_state
+        for doc_uuid in {ent.source_doc_uuid for ent in entities if ent.source_doc_uuid}:
+            recalc_document_state(session, doc_uuid)
         return {"success": True, "message": f"成功批量拒绝 {count} 个实体", "count": count}
 
 
@@ -3513,7 +3752,11 @@ def _rerank_candidates(
             timeout=30,
         )
         resp.raise_for_status()
-        items = resp.json().get("results", [])
+        data = resp.json()
+        if isinstance(data, list):
+            items = data
+        else:
+            items = data.get("results", [])
         scores: dict[int, float] = {}
         for item in items:
             idx = item.get("index")
@@ -3534,6 +3777,9 @@ def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
     查询审核通过且 weknora_graph_status='pending' 的实体。
     返回字段：id, entity_type, entity_name, entity_data, source_site,
              confidence_score, review_status, is_deleted
+    entity_data 中额外注入：
+      - name: 与 entity_name 相同
+      - name_aliases: 从 entity_aliases 查到的别名列表
     """
     from db.session import get_session
 
@@ -3551,20 +3797,39 @@ def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
         if limit > 0:
             query = query.limit(limit)
         rows = query.all()
-        return [
-            {
+
+        # 批量查 aliases
+        dict_ids = {r.dict_id for r in rows if r.dict_id}
+        alias_map: dict[int, list[str]] = {}
+        if dict_ids:
+            alias_rows = (
+                session.query(EntityAlias)
+                .filter(
+                    EntityAlias.dict_id.in_(dict_ids),
+                    EntityAlias.is_deleted == False,
+                )
+                .all()
+            )
+            for a in alias_rows:
+                alias_map.setdefault(a.dict_id, []).append(a.name)
+
+        result = []
+        for r in rows:
+            entity_data = dict(r.entity_data or {})
+            entity_data["name"] = r.entity_name or ""
+            entity_data["name_aliases"] = alias_map.get(r.dict_id, [])
+            result.append({
                 "id": r.id,
                 "dict_id": r.dict_id,
                 "entity_type": r.entity_type,
                 "entity_name": r.entity_name,
-                "entity_data": r.entity_data or {},
+                "entity_data": entity_data,
                 "source_site": r.source_site or "",
                 "confidence_score": r.confidence_score or 0.0,
                 "review_status": r.review_status,
                 "is_deleted": r.is_deleted,
-            }
-            for r in rows
-        ]
+            })
+        return result
 
 
 def mark_entity_weknora_graph_pushed(entity_id: int) -> None:
@@ -3988,6 +4253,9 @@ def reset_document_for_recrawl(uuid: str) -> None:
             doc.extraction_error = ""
             doc.extraction_model = ""
             doc.extracted_at = None
+
+        from db.review_lifecycle import recalc_document_state
+        recalc_document_state(session, uuid)
 
         _write_operation_log(
             session, "update", "documents", doc.id if doc else None,

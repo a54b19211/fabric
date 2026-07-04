@@ -40,6 +40,12 @@ uvicorn[standard]>=0.29.0    # ASGI 服务器
 rq>=2.0                      # Redis Queue，任务持久化
 redis>=5.0                   # Redis Python 客户端
 
+# --- Agent 自动审核 ---
+langgraph>=0.2.0             # Agent 图编排 (StateGraph)
+langchain-core>=0.3.0        # 消息类型 + 工具基类
+langchain-openai>=0.2.0      # ChatOpenAI（复用 DashScope 端点）
+duckduckgo-search>=6.0.0     # 联网搜索工具
+
 # --- 测试 ---
 pytest>=8.0                  # 测试框架
 pytest-cov>=5.0              # 覆盖率报告

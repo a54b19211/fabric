@@ -122,6 +122,7 @@
                   <el-button size="small" type="success" @click="doApproveEntity(ent.id)">&#x2713; 通过</el-button>
                   <el-button v-if="ent.disambig?.status && ent.disambig.status !== 'new_entity'" size="small" type="primary" @click="doApproveEntityAsNew(ent.id)">新实体</el-button>
                   <el-button size="small" type="danger" @click="doRejectEntity(ent.id)">&#x2717; 拒绝</el-button>
+
                 </div>
                 <span v-else :class="['badge', ent.review_status === 'approved' ? 'badge-emerald' : 'badge-red']" style="margin-top:6px">
                   {{ ent.review_status === 'approved' ? '已通过' : '已拒绝' }}
@@ -193,6 +194,7 @@ import {
   batchApproveRelations, batchRejectRelations,
   type EntityItem, type RelationItem,
 } from '@/api/review'
+
 
 const route = useRoute()
 const router = useRouter()
@@ -511,5 +513,6 @@ onMounted(() => {
   cursor: pointer;
   user-select: none;
 }
+
 .field-details-summary:hover { color: var(--dp-foreground); }
 </style>

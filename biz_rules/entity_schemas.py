@@ -67,7 +67,8 @@ class IndicationEntity(BaseModel):
     name_en: str = Field(default="", description="英文名；若 entity_name 为英文则直接填入；若中文则翻译为英文")
     aliases: list[str] = Field(default_factory=list, description="别名")
     icd_code: str = Field(default="", description="ICD编码")
-    category: str = Field(default="", description="肿瘤/心血管/神经/内分泌/感染/免疫/罕见病/消化")
+    category: str = Field(default="", description="治疗领域：肿瘤/心血管/神经/内分泌/感染/免疫/罕见病/消化")
+    entity_category: str = Field(default="indication", description="实体语义类型：disease（独立疾病名称，如流行病学报道中的病名）或 indication（药物批准/声称治疗的适应症）")
     is_rare: bool = Field(default=False, description="是否罕见病")
 
 

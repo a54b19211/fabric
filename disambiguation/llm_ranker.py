@@ -99,7 +99,11 @@ def rank_with_reranker(
             timeout=30,
         )
         resp.raise_for_status()
-        results = resp.json().get("results", [])
+        data = resp.json()
+        if isinstance(data, list):
+            results = data
+        else:
+            results = data.get("results", [])
     except Exception as e:
         logger.error(f"[Reranker] 调用失败: {e}")
         return DisambiguationResult(

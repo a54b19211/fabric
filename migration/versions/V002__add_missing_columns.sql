@@ -3,10 +3,6 @@
 -- 适用于：数据库由 V001 之前的版本建立，缺少部分字段
 -- ============================================================
 
--- extracted_entities 补充 neo4j_node_id 字段
-ALTER TABLE extracted_entities
-    ADD COLUMN IF NOT EXISTS neo4j_node_id TEXT DEFAULT '';
-
 -- documents 补充 raw_content 字段（如果也缺的话）
 ALTER TABLE documents
     ADD COLUMN IF NOT EXISTS raw_content TEXT DEFAULT '';

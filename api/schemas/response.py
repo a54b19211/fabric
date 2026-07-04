@@ -266,6 +266,34 @@ class MergeQueueListResponse(BaseModel):
     groups: list[MergeQueueGroup]
 
 
+# ── 身份合并提案 ─────────────────────────────────────────────────────────
+
+class IdentityMergeProposalItem(BaseModel):
+    id: int
+    source_entity_id: int
+    target_dict_id: int
+    source_entity_snapshot: dict = {}
+    target_dict_snapshot: dict = {}
+    agent_run_id: str = ""
+    agent_reason: str = ""
+    agent_confidence: float = 0.0
+    status: str = "pending"
+    reviewer: str = ""
+    review_note: str = ""
+    reviewed_at: str = ""
+    created_at: str = ""
+
+
+class IdentityMergeProposalListResponse(BaseModel):
+    total: int = 0
+    items: list[IdentityMergeProposalItem] = []
+
+
+class IdentityMergeProposalResolveRequest(BaseModel):
+    reviewer: str = "审核员"
+    note: str = ""
+
+
 # ── WeKnora Graph Sync ──────────────────────────────────────────────────
 
 class GraphSyncResponse(BaseModel):

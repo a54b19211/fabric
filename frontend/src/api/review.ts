@@ -209,6 +209,41 @@ export interface ReviewStats {
 export const getReviewStats = () =>
   http.get<any, ReviewStats>('/review/stats')
 
+// ── 身份合并提案 ────────────────────────────────────────────────────────
+
+export interface IdentityMergeProposal {
+  id: number
+  source_entity_id: number
+  target_dict_id: number
+  source_entity_snapshot: Record<string, any>
+  target_dict_snapshot: Record<string, any>
+  agent_run_id: string
+  agent_reason: string
+  agent_confidence: number
+  status: string
+  reviewer: string
+  review_note: string
+  reviewed_at: string
+  created_at: string
+}
+
+export const getIdentityMergeProposals = (status = 'pending', limit = 100) =>
+  http.get<any, { total: number; items: IdentityMergeProposal[] }>('/review/identity-merge-proposals', {
+    params: { status, limit },
+  })
+
+export const approveIdentityMergeProposal = (proposalId: number, reviewer: string, note = '') =>
+  http.post<any, { success: boolean; message?: string }>(
+    `/review/identity-merge-proposals/${proposalId}/approve`,
+    { reviewer, note },
+  )
+
+export const rejectIdentityMergeProposal = (proposalId: number, reviewer: string, note = '') =>
+  http.post<any, { success: boolean; message?: string }>(
+    `/review/identity-merge-proposals/${proposalId}/reject`,
+    { reviewer, note },
+  )
+
 // ── 元数据编辑 ──────────────────────────────────────────────────────────
 
 export const patchEntity = (id: number, entityData: Record<string, any>) =>

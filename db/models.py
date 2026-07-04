@@ -10,7 +10,7 @@ SQLAlchemy ORM 模型 —— 与 db/schema.sql 保持一致（v3）
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Text, Float, BigInteger, Boolean, DateTime, func
+from sqlalchemy import String, Text, Float, Integer, BigInteger, Boolean, DateTime, func
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -51,6 +51,8 @@ class Document(Base):
     extraction_model: Mapped[str] = mapped_column(Text, default="")
     extraction_error: Mapped[str] = mapped_column(Text, default="")
     extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    pending_entity_count: Mapped[int] = mapped_column(Integer, default=0)   # 待审核实体数，review_lifecycle 自动维护
+    total_entity_count: Mapped[int] = mapped_column(Integer, default=0)     # 文档实体总数，review_lifecycle 自动维护
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -64,8 +66,8 @@ class DocExtra(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     uuid: Mapped[str] = mapped_column(Text, nullable=False, unique=True)  # 与 documents.uuid 对应
-    source_site: Mapped[str] = mapped_column(Text, default="")
-    extra: Mapped[dict] = mapped_column(JSONB, default=dict)
+    source_site: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    extra: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -111,7 +113,11 @@ class EntityDict(Base):
 # ── 5. entity_aliases ─────────────────────────────────────────
 
 class EntityAlias(Base):
-    """实体别名查找表，所有名称打平到这里，消歧只需查一列。"""
+    """实体别名查找表，所有名称打平到这里，消歧只需查一列。
+
+    name_embedding 列（pgvector）由 db/schema.sql 和 V001 定义，
+    所有向量读写通过原始 SQL（repository.py），不在此模型字段中声明。
+    """
     __tablename__ = "entity_aliases"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -187,12 +193,12 @@ class CrawlLog(Base):
     __tablename__ = "crawl_log"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    site_key: Mapped[str] = mapped_column(Text, default="")            # nmpa/cde/pubmed/...
+    site_key: Mapped[str] = mapped_column(Text, nullable=False, default="")  # nmpa/cde/pubmed/...
     task_type: Mapped[str] = mapped_column(Text, default="")           # full/incremental
     status: Mapped[str] = mapped_column(Text, default="running")       # running/success/failed
-    total_count: Mapped[int] = mapped_column(default=0)
-    passed_count: Mapped[int] = mapped_column(default=0)
-    failed_count: Mapped[int] = mapped_column(default=0)
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    passed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
     crawl_config_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)  # 配置快照
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -268,7 +274,28 @@ class EntityMergeLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-# ── 12. operation_log ──────────────────────────────────────────
+# ── 12. entity_identity_merge_proposal ─────────────────────────
+
+class EntityIdentityMergeProposal(Base):
+    """身份合并提案：Agent D 判断 extracted_entity 应链接到 entity_dict，提交人工审核。"""
+    __tablename__ = "entity_identity_merge_proposal"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source_entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_dict_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_entity_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    target_dict_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    agent_run_id: Mapped[str] = mapped_column(Text, default="")
+    agent_reason: Mapped[str] = mapped_column(Text, default="")
+    agent_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(Text, default="pending")  # pending | approved | rejected
+    reviewer: Mapped[str] = mapped_column(Text, default="")
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── 13. operation_log ──────────────────────────────────────────
 
 class OperationLog(Base):
     """操作日志：记录所有数据库写操作的审计追踪。"""
