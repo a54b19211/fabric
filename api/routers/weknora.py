@@ -52,11 +52,12 @@ MAX_CONCURRENCY = 5
 
 
 def _sync_one_row(row: dict, kb_id: str = "") -> tuple[str, bool, str]:
-    """同步单行（dict）到 WeKnora，不再查 DB。返回 (uuid, success, message)。"""
+    """同步单行（dict）到 WeKnora，不再查 DB。返回 (uuid, success, message)。失败时自动标 failed。"""
     uuid = row.get("uuid", "")
     title = row.get("title") or uuid
     content = row.get("raw_content") or ""
     if not content.strip():
+        update_weknora_sync_status(uuid, "failed")
         return uuid, False, f"文档内容为空: {uuid}"
 
     metadata = _build_source_metadata({
@@ -71,10 +72,14 @@ def _sync_one_row(row: dict, kb_id: str = "") -> tuple[str, bool, str]:
         "parse_method": row.get("parse_method", ""),
         "crawl_timestamp": str(row.get("crawl_timestamp") or ""),
     })
-    client = get_weknora_graph_client()
-    weknora_id = client.upload_document(title, content, metadata, kb_id)
-    update_weknora_sync_status(uuid, "synced")
-    return uuid, True, weknora_id or "synced"
+    try:
+        client = get_weknora_graph_client()
+        weknora_id = client.upload_document(title, content, metadata, kb_id)
+        update_weknora_sync_status(uuid, "synced")
+        return uuid, True, weknora_id or "synced"
+    except Exception as e:
+        update_weknora_sync_status(uuid, "failed")
+        return uuid, False, str(e)
 
 
 def _sync_one_document(uuid: str, kb_id: str = "") -> tuple[bool, str]:
