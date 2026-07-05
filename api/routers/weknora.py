@@ -196,11 +196,9 @@ def sync_batch(
 
         def _bg_sync():
             synced = 0
-            offset = 0
-            while offset < total_to_sync:
+            while synced < total_to_sync:
                 batch_rows, _ = get_pending_weknora_sync(
-                    limit=min(BATCH_SIZE, total_to_sync - offset),
-                    offset=offset, source_site=source_site,
+                    limit=BATCH_SIZE, offset=0, source_site=source_site,
                 )
                 if not batch_rows:
                     break
@@ -214,8 +212,6 @@ def sync_batch(
                                 synced += 1
                         except Exception as e:
                             logger.error(f"[API] 后台同步异常: {e}")
-
-                offset += len(batch_rows)
 
             logger.info(f"[API] WeKnora 批量同步完成: {synced}/{total_to_sync}")
 
@@ -264,35 +260,29 @@ GRAPH_BATCH_SIZE = 200
 
 
 def _do_sync_entity_dict(kb_id: str = "") -> tuple[int, int, str]:
-    """将 entity_dict 推送到 WeKnora 镜像表，并自动初始化 PrimeKG 副本。"""
-    with get_session() as session:
-        if session is None:
-            return 0, 0, "数据库未连接"
-
-    rows = get_entity_dict_for_weknora(limit=0)
-    if not rows:
-        return 0, 0, "无待同步数据"
-
+    """将 entity_dict 推送到 WeKnora 镜像表，并自动初始化 PrimeKG 副本。内部自动分页。"""
     client = get_weknora_graph_client()
     total_pushed = 0
     total_failed = 0
 
-    for i in range(0, len(rows), GRAPH_BATCH_SIZE):
-        batch = rows[i:i + GRAPH_BATCH_SIZE]
-        batch_ids = [row["id"] for row in batch]
+    while True:
+        rows = get_entity_dict_for_weknora(limit=GRAPH_BATCH_SIZE)
+        if not rows:
+            break
+
+        batch_ids = [row["id"] for row in rows]
         try:
-            result = client.batch_upsert_entity_dict(batch)
+            result = client.batch_upsert_entity_dict(rows)
             upserted = result.get("data", {}).get("upserted", 0)
             total_pushed += upserted
             batch_mark_entity_dict_synced(batch_ids)
         except Exception as batch_error:
-            total_failed += len(batch)
+            total_failed += len(rows)
             batch_mark_entity_dict_failed(batch_ids, str(batch_error))
-            logger.error(f"[API] entity_dict 批次 {i // GRAPH_BATCH_SIZE + 1} 失败: {batch_error}")
+            logger.error(f"[API] entity_dict 批次失败: {batch_error}")
 
     logger.info(f"[API] entity_dict 同步完成: pushed={total_pushed}, failed={total_failed}")
 
-    # 自动初始化 PrimeKG 副本
     if kb_id and total_pushed > 0:
         try:
             _, _, init_msg = _do_init_copies(kb_id)
@@ -312,66 +302,52 @@ def _do_init_copies(kb_id: str) -> tuple[int, int, str]:
 
 
 def _do_sync_entities(kb_id: str) -> tuple[int, int, str]:
-    """将审核通过的抽取实体推送到 WeKnora graph_entities。返回 (pushed, failed, message)。"""
-    with get_session() as session:
-        if session is None:
-            return 0, 0, "数据库未连接"
-
-    entities = get_entities_for_weknora_graph(limit=0)
-    logger.info(f"[API] sync-entities 查询到 {len(entities)} 条待推送实体")
-    if not entities:
-        return 0, 0, "无待同步实体"
-
+    """将审核通过的抽取实体推送到 WeKnora graph_entities。内部自动分页。"""
     client = get_weknora_graph_client()
-    logger.info(f"[API] WeKnoraGraph target: base_url={client._base_url}, kb_id={client._kb_id}")
     total_pushed = 0
     total_failed = 0
 
-    for i in range(0, len(entities), GRAPH_BATCH_SIZE):
-        batch = entities[i:i + GRAPH_BATCH_SIZE]
-        batch_ids = [ent["id"] for ent in batch]
-        logger.info(f"[API] 批次 {i // GRAPH_BATCH_SIZE + 1}/{(len(entities) - 1) // BATCH_SIZE + 1}: {len(batch)} 条, ids={batch_ids[:5]}{'...' if len(batch_ids) > 5 else ''}")
+    while True:
+        entities = get_entities_for_weknora_graph(limit=GRAPH_BATCH_SIZE)
+        if not entities:
+            break
+
+        batch_ids = [ent["id"] for ent in entities]
         try:
-            result = client.batch_upsert_entities(batch, kb_id)
-            logger.info(f"[API] WeKnora 响应: {result}")
+            result = client.batch_upsert_entities(entities, kb_id)
             pushed = result.get("data", {}).get("upserted", 0)
             total_pushed += pushed
             batch_mark_entity_weknora_graph_pushed(batch_ids)
         except Exception as batch_error:
-            total_failed += len(batch)
+            total_failed += len(entities)
             batch_mark_entity_weknora_graph_failed(batch_ids, str(batch_error))
-            logger.error(f"[API] 批次 {i // GRAPH_BATCH_SIZE + 1} 推送失败: {batch_error}")
+            logger.error(f"[API] sync-entities 批次失败: {batch_error}")
 
     logger.info(f"[API] sync-entities 完成: pushed={total_pushed}, failed={total_failed}")
     return total_pushed, total_failed, f"同步完成: pushed={total_pushed}, failed={total_failed}"
 
 
 def _do_sync_relations(kb_id: str) -> tuple[int, int, str]:
-    """将审核通过的抽取关系推送到 WeKnora graph_relations。返回 (pushed, failed, message)。"""
-    with get_session() as session:
-        if session is None:
-            return 0, 0, "数据库未连接"
-
-    relations = get_relations_for_weknora_graph(limit=0)
-    if not relations:
-        return 0, 0, "无待同步关系"
-
+    """将审核通过的抽取关系推送到 WeKnora graph_relations。内部自动分页。"""
     client = get_weknora_graph_client()
     total_pushed = 0
     total_failed = 0
 
-    for i in range(0, len(relations), GRAPH_BATCH_SIZE):
-        batch = relations[i:i + GRAPH_BATCH_SIZE]
-        batch_ids = [rel["id"] for rel in batch]
+    while True:
+        relations = get_relations_for_weknora_graph(limit=GRAPH_BATCH_SIZE)
+        if not relations:
+            break
+
+        batch_ids = [rel["id"] for rel in relations]
         try:
-            result = client.batch_upsert_relations(batch, kb_id)
+            result = client.batch_upsert_relations(relations, kb_id)
             pushed = result.get("data", {}).get("upserted", 0)
             total_pushed += pushed
             batch_mark_relation_weknora_graph_pushed(batch_ids)
         except Exception as batch_error:
-            total_failed += len(batch)
+            total_failed += len(relations)
             batch_mark_relation_weknora_graph_failed(batch_ids, str(batch_error))
-            logger.error(f"[API] 关系图批次 {i // GRAPH_BATCH_SIZE + 1} 失败: {batch_error}")
+            logger.error(f"[API] sync-relations 批次失败: {batch_error}")
 
     logger.info(f"[API] 关系图同步完成: pushed={total_pushed}, failed={total_failed}")
     return total_pushed, total_failed, f"同步完成: pushed={total_pushed}, failed={total_failed}"

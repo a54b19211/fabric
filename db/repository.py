@@ -3379,7 +3379,7 @@ def batch_reject_relations(
 # 8. WeKnora 图同步状态接口
 # ═══════════════════════════════════════════════════════════════════════
 
-def get_entity_dict_for_weknora(limit: int = 500) -> list[dict]:
+def get_entity_dict_for_weknora(limit: int = 500, offset: int = 0) -> list[dict]:
     """
     查询 weknora_sync_status='pending' 且 is_deleted=False 且 is_verified=True 的 entity_dict 行。
     未审核实体不推送 WeKnora，避免前端出现不完整数据。
@@ -3400,6 +3400,8 @@ def get_entity_dict_for_weknora(limit: int = 500) -> list[dict]:
         )
         if limit:
             q = q.limit(limit)
+        if offset:
+            q = q.offset(offset)
         rows = q.all()
         return [
             {
@@ -3772,7 +3774,7 @@ def _rerank_candidates(
         return fallback
 
 
-def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
+def get_entities_for_weknora_graph(limit: int = 500, offset: int = 0) -> list[dict]:
     """
     查询审核通过且 weknora_graph_status='pending' 的实体。
     返回字段：id, entity_type, entity_name, entity_data, source_site,
@@ -3796,6 +3798,8 @@ def get_entities_for_weknora_graph(limit: int = 500) -> list[dict]:
         )
         if limit > 0:
             query = query.limit(limit)
+        if offset > 0:
+            query = query.offset(offset)
         rows = query.all()
 
         # 批量查 aliases
@@ -3889,7 +3893,7 @@ def batch_mark_entity_weknora_graph_failed(entity_ids: list[int], error: str = "
             logger.warning(f"[DB] 批量标记实体 graph failed: {len(entity_ids)} 条")
 
 
-def get_relations_for_weknora_graph(limit: int = 500) -> list[dict]:
+def get_relations_for_weknora_graph(limit: int = 500, offset: int = 0) -> list[dict]:
     """
     查询审核通过且 weknora_graph_status='pending' 的关系。
     JOIN 两端实体以获取 dict_id。
@@ -3924,6 +3928,8 @@ def get_relations_for_weknora_graph(limit: int = 500) -> list[dict]:
         )
         if limit > 0:
             query = query.limit(limit)
+        if offset > 0:
+            query = query.offset(offset)
         rows = query.all()
         return [
             {
