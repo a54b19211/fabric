@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 import json
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import text, func
 
 from db.session import get_session
+from db.models import AgentRun
 
 
 def save_agent_run(
@@ -26,34 +27,26 @@ def save_agent_run(
     """插入一条 Agent 运行记录。返回新记录的 id。"""
     try:
         with get_session() as session:
-            result = session.execute(
-                text("""
-                    INSERT INTO agent_run (run_id, agent_type, target_id, status,
-                                           decision, reason, confidence, steps,
-                                           entity_name, document_title, document_uuid, batch_id, started_at)
-                    VALUES (:run_id, :agent_type, :target_id, 'completed',
-                            :decision, :reason, :confidence, :steps,
-                            :entity_name, :document_title, :document_uuid, :batch_id, :started_at)
-                    RETURNING id
-                """),
-                {
-                    "run_id": run_id,
-                    "agent_type": agent_type,
-                    "target_id": target_id,
-                    "decision": decision or "",
-                    "reason": reason or "",
-                    "confidence": confidence,
-                    "steps": json.dumps(steps or [], ensure_ascii=False),
-                    "entity_name": entity_name or "",
-                    "document_title": document_title or "",
-                    "document_uuid": document_uuid or "",
-                    "batch_id": batch_id or "",
-                    "started_at": datetime.now(timezone.utc),
-                },
+            if session is None:
+                return 0
+            run = AgentRun(
+                run_id=run_id,
+                agent_type=agent_type,
+                target_id=target_id,
+                status="completed",
+                decision=decision or "",
+                reason=reason or "",
+                confidence=confidence,
+                steps=steps or [],
+                entity_name=entity_name or "",
+                document_title=document_title or "",
+                document_uuid=document_uuid or "",
+                batch_id=batch_id or "",
+                started_at=datetime.now(timezone.utc),
             )
-            session.commit()
-            row = result.fetchone()
-            return row[0] if row else 0
+            session.add(run)
+            session.flush()
+            return run.id
     except Exception as e:
         logger.error(f"[agent_run_repo] 保存失败: {e}")
         return 0
@@ -64,13 +57,15 @@ def update_agent_run(run_id: str, **kwargs):
     if not kwargs:
         return
     try:
-        sets = ", ".join(f"{k} = :{k}" for k in kwargs)
         with get_session() as session:
-            session.execute(
-                text(f"UPDATE agent_run SET {sets} WHERE run_id = :run_id"),
-                {"run_id": run_id, **kwargs},
-            )
-            session.commit()
+            if session is None:
+                return
+            run = session.query(AgentRun).filter(AgentRun.run_id == run_id).first()
+            if run is None:
+                return
+            for k, v in kwargs.items():
+                if hasattr(run, k):
+                    setattr(run, k, v)
     except Exception as e:
         logger.error(f"[agent_run_repo] 更新失败: {e}")
 
@@ -81,18 +76,14 @@ def update_agent_run_batch(run_ids: list[str], batch_id: str, document_uuid: str
         return
     try:
         with get_session() as session:
-            ids_str = ", ".join(f":id_{i}" for i in range(len(run_ids)))
-            params = {f"id_{i}": rid for i, rid in enumerate(run_ids)}
-            params["batch_id"] = batch_id
-            params["document_uuid"] = document_uuid
-            session.execute(
-                text(
-                    f"UPDATE agent_run SET batch_id = :batch_id, document_uuid = :document_uuid "
-                    f"WHERE run_id IN ({ids_str})"
-                ),
-                params,
+            if session is None:
+                return
+            session.query(AgentRun).filter(
+                AgentRun.run_id.in_(run_ids)
+            ).update(
+                {"batch_id": batch_id, "document_uuid": document_uuid},
+                synchronize_session=False,
             )
-            session.commit()
     except Exception as e:
         logger.error(f"[agent_run_repo] 批量更新失败: {e}")
 
@@ -101,13 +92,12 @@ def get_agent_run(run_id: str) -> dict | None:
     """查询单条运行记录。"""
     try:
         with get_session() as session:
-            row = session.execute(
-                text("SELECT * FROM agent_run WHERE run_id = :run_id"),
-                {"run_id": run_id},
-            ).fetchone()
-            if row is None:
+            if session is None:
                 return None
-            return _row_to_dict(row)
+            run = session.query(AgentRun).filter(AgentRun.run_id == run_id).first()
+            if run is None:
+                return None
+            return _run_to_dict(run)
     except Exception as e:
         logger.error(f"[agent_run_repo] 查询失败: {e}")
         return None
@@ -122,31 +112,22 @@ def list_agent_runs(
     """分页查询运行记录。"""
     try:
         with get_session() as session:
-            conditions = []
-            params = {}
+            if session is None:
+                return [], 0
+            q = session.query(AgentRun)
             if agent_type:
-                conditions.append("agent_type = :agent_type")
-                params["agent_type"] = agent_type
+                q = q.filter(AgentRun.agent_type == agent_type)
             if target_id:
-                conditions.append("target_id = :target_id")
-                params["target_id"] = target_id
+                q = q.filter(AgentRun.target_id == target_id)
 
-            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-            total = session.execute(
-                text(f"SELECT COUNT(*) FROM agent_run {where}"), params
-            ).scalar()
-
-            rows = session.execute(
-                text(
-                    f"SELECT * FROM agent_run {where} "
-                    f"ORDER BY created_at DESC "
-                    f"OFFSET :offset LIMIT :limit"
-                ),
-                {**params, "offset": (page - 1) * page_size, "limit": page_size},
-            ).fetchall()
-
-            return ([_row_to_dict(r) for r in rows], total)
+            total = q.count()
+            rows = (
+                q.order_by(AgentRun.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+            return ([_run_to_dict(r) for r in rows], total)
     except Exception as e:
         logger.error(f"[agent_run_repo] 列表查询失败: {e}")
         return ([], 0)
@@ -156,6 +137,8 @@ def list_runs_by_document(page: int = 1, page_size: int = 20) -> tuple[list[dict
     """按文档分组查询实体审核运行记录。返回聚合后的文档级列表。"""
     try:
         with get_session() as session:
+            if session is None:
+                return [], 0
             # 先按 document_uuid 分组计数
             count_sql = """
                 SELECT COUNT(DISTINCT COALESCE(NULLIF(document_uuid, ''), 'no-doc-' || target_id::text))
@@ -225,16 +208,18 @@ def get_runs_for_document(document_uuid: str) -> list[dict]:
     """查询指定文档下所有实体/关系审核运行记录（含完整 steps）。"""
     try:
         with get_session() as session:
-            rows = session.execute(
-                text("""
-                    SELECT * FROM agent_run
-                    WHERE agent_type IN ('entity_review', 'relation_review')
-                      AND document_uuid = :doc_uuid
-                    ORDER BY created_at DESC
-                """),
-                {"doc_uuid": document_uuid},
-            ).fetchall()
-            return [_row_to_dict(r) for r in rows]
+            if session is None:
+                return []
+            rows = (
+                session.query(AgentRun)
+                .filter(
+                    AgentRun.agent_type.in_(["entity_review", "relation_review"]),
+                    AgentRun.document_uuid == document_uuid,
+                )
+                .order_by(AgentRun.created_at.desc())
+                .all()
+            )
+            return [_run_to_dict(r) for r in rows]
     except Exception as e:
         logger.error(f"[agent_run_repo] 文档查询失败: {e}")
         return []
@@ -244,6 +229,8 @@ def count_pending_entities(document_uuid: str) -> int:
     """获取指定文档下 pending 状态的实体数量。"""
     try:
         with get_session() as session:
+            if session is None:
+                return 0
             from db.models import ExtractedEntity
             count = (
                 session.query(ExtractedEntity.id)
@@ -264,19 +251,21 @@ def get_agent_stats() -> dict:
     """Agent 运行统计。"""
     try:
         with get_session() as session:
-            rows = session.execute(
-                text("""
-                    SELECT agent_type, decision, COUNT(*) as cnt
-                    FROM agent_run
-                    WHERE status = 'completed'
-                    GROUP BY agent_type, decision
-                """)
-            ).fetchall()
+            if session is None:
+                return {}
+            rows = (
+                session.query(
+                    AgentRun.agent_type,
+                    AgentRun.decision,
+                    func.count(AgentRun.id),
+                )
+                .filter(AgentRun.status == "completed")
+                .group_by(AgentRun.agent_type, AgentRun.decision)
+                .all()
+            )
             stats = {}
             for agent_type, decision, cnt in rows:
-                if agent_type not in stats:
-                    stats[agent_type] = {}
-                stats[agent_type][decision] = cnt
+                stats.setdefault(agent_type, {})[decision] = cnt
             return stats
     except Exception as e:
         logger.error(f"[agent_run_repo] 统计失败: {e}")
@@ -307,6 +296,8 @@ def list_documents_with_entities(
     """分页列出有实体的文档，含审核状态。status 可选: pending / reviewed。返回 (items, total)。"""
     try:
         with get_session() as session:
+            if session is None:
+                return [], 0
             base_sql = """
                 SELECT
                     d.uuid, d.title, d.source_site, d.doc_type, d.created_at,
@@ -379,8 +370,18 @@ def _compute_doc_review_status(pending: int, total: int, doc_uuid: str = "") -> 
     return "reviewed"
 
 
+def _run_to_dict(run: AgentRun) -> dict:
+    """将 AgentRun ORM 对象转为 dict。"""
+    d = {c.name: getattr(run, c.name) for c in AgentRun.__table__.columns}
+    for key in ("started_at", "completed_at", "created_at"):
+        val = d.get(key)
+        if isinstance(val, datetime):
+            d[key] = val.isoformat()
+    return d
+
+
 def _row_to_dict(row) -> dict:
-    """将 SQLAlchemy Row 转为 dict。"""
+    """将原生 SQL Row 转为 dict。"""
     d = dict(row._mapping)
     for key in ("steps",):
         val = d.get(key)

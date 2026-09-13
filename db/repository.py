@@ -1628,7 +1628,7 @@ def merge_entities(
         # ── 6a. 写 entity_merge_log ─────────────────────────────
         after = {
             "keeper_dict_id": keeper_dict_id,
-            "canonical_data": filtered_cd,
+            "canonical_data": merged_cd,
             "absorbed_dict_ids": absorbed_dict_ids,
         }
         merge_log = EntityMergeLog(
@@ -1862,26 +1862,25 @@ def search_similar_entities(
     """
     def _query(sess):
         try:
-            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
-            sql = text("""
-                SELECT
-                    ea.dict_id,
-                    ea.name,
-                    1 - (ea.name_embedding <=> CAST(:vec AS vector)) AS similarity_score,
-                    ed.canonical_data
-                FROM entity_aliases ea
-                JOIN entity_dict ed ON ea.dict_id = ed.id
-                WHERE ea.is_deleted = FALSE
-                  AND ed.is_deleted = FALSE
-                  AND ed.entity_type = :entity_type
-                  AND ea.name_embedding IS NOT NULL
-                ORDER BY ea.name_embedding <=> CAST(:vec AS vector)
-                LIMIT :top_k
-            """)
-            rows = sess.execute(
-                sql,
-                {"vec": vec_str, "entity_type": entity_type, "top_k": top_k},
-            ).fetchall()
+            dist = EntityAlias.name_embedding.cosine_distance(embedding)
+            rows = (
+                sess.query(
+                    EntityAlias.dict_id,
+                    EntityAlias.name,
+                    (1 - dist).label("similarity_score"),
+                    EntityDict.canonical_data,
+                )
+                .join(EntityDict, EntityAlias.dict_id == EntityDict.id)
+                .filter(
+                    EntityAlias.is_deleted == False,
+                    EntityDict.is_deleted == False,
+                    EntityDict.entity_type == entity_type,
+                    EntityAlias.name_embedding.isnot(None),
+                )
+                .order_by(dist)
+                .limit(top_k)
+                .all()
+            )
             all_dict_ids = [r.dict_id for r in rows]
             alias_rows = (
                 sess.query(EntityAlias.dict_id, EntityAlias.name)
@@ -2026,7 +2025,7 @@ def add_alias_with_embedding(
 ) -> None:
     """
     添加别名并附带 embedding 向量。
-    别名已存在则跳过；embedding 通过 raw SQL 写入（ORM 未映射该列）。
+    别名已存在则跳过。
     """
     from db.session import get_session
 
@@ -2046,16 +2045,10 @@ def add_alias_with_embedding(
             lang=lang or "",
             is_canonical=bool(is_canonical),
             entity_type=entity_type,
+            name_embedding=embedding,
         )
         session.add(alias)
         session.flush()
-
-        if embedding:
-            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
-            session.execute(
-                text("UPDATE entity_aliases SET name_embedding = CAST(:vec AS vector) WHERE id = :id"),
-                {"vec": vec_str, "id": alias.id},
-            )
 
         _write_operation_log(
             session, "insert", "entity_aliases", alias.id,
@@ -2642,16 +2635,12 @@ def _write_aliases_with_embedding(
             lang="zh" if any('一' <= c <= '鿟' for c in name) else "en",
             is_canonical=(name == entity_data.get("name", "")),
             entity_type=entity_type,
+            name_embedding=embedding,
         )
         session.add(alias)
         session.flush()
 
         if embedding:
-            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
-            session.execute(
-                text("UPDATE entity_aliases SET name_embedding = CAST(:vec AS vector) WHERE id = :id"),
-                {"vec": vec_str, "id": alias.id},
-            )
             logger.debug(f"[DB] alias '{name}' written with embedding dims={len(embedding)}")
         else:
             logger.warning(f"[DB] alias '{name}' embedding 生成失败")
@@ -3589,7 +3578,6 @@ def find_candidate_dicts_for_review(
     """
     from db.session import get_session
     from core_engine.cloud_api_client import generate_embedding
-    from sqlalchemy import text as _text
 
     entity_data = entity_data or {}
 
@@ -3618,23 +3606,21 @@ def find_candidate_dicts_for_review(
         # 2. 向量召回（top_k * 2 给 reranker 留余量）
         embedding = generate_embedding(entity_name)
         if embedding:
-            vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
             try:
-                sql = _text("""
-                    SELECT ea.dict_id, ea.name
-                    FROM entity_aliases ea
-                    JOIN entity_dict ed ON ea.dict_id = ed.id
-                    WHERE ea.is_deleted = FALSE
-                      AND ed.is_deleted = FALSE
-                      AND ed.entity_type = :entity_type
-                      AND ea.name_embedding IS NOT NULL
-                    ORDER BY ea.name_embedding <=> CAST(:vec AS vector)
-                    LIMIT :limit
-                """)
-                vector_rows = session.execute(
-                    sql,
-                    {"vec": vec_str, "entity_type": entity_type, "limit": top_k * 2},
-                ).fetchall()
+                dist = EntityAlias.name_embedding.cosine_distance(embedding)
+                vector_rows = (
+                    session.query(EntityAlias.dict_id, EntityAlias.name)
+                    .join(EntityDict, EntityAlias.dict_id == EntityDict.id)
+                    .filter(
+                        EntityAlias.is_deleted == False,
+                        EntityDict.is_deleted == False,
+                        EntityDict.entity_type == entity_type,
+                        EntityAlias.name_embedding.isnot(None),
+                    )
+                    .order_by(dist)
+                    .limit(top_k * 2)
+                    .all()
+                )
                 for row in vector_rows:
                     if row.dict_id not in raw_results:
                         raw_results[row.dict_id] = {

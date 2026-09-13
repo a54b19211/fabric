@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.mutable import MutableDict
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -115,8 +116,7 @@ class EntityDict(Base):
 class EntityAlias(Base):
     """实体别名查找表，所有名称打平到这里，消歧只需查一列。
 
-    name_embedding 列（pgvector）由 db/schema.sql 和 V001 定义，
-    所有向量读写通过原始 SQL（repository.py），不在此模型字段中声明。
+    name_embedding 列（pgvector, vector(1024)）由 db/schema.sql 和 V001 定义。
     """
     __tablename__ = "entity_aliases"
 
@@ -126,6 +126,7 @@ class EntityAlias(Base):
     lang: Mapped[str] = mapped_column(Text, default="")               # zh/en/other
     is_canonical: Mapped[bool] = mapped_column(Boolean, default=False) # 是否标准名
     entity_type: Mapped[str] = mapped_column(Text, default="")        # entity_dict.entity_type 冗余，加速查询
+    name_embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(1024), nullable=True)  # 名称向量（bge-m3, 1024 维）
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -312,3 +313,27 @@ class OperationLog(Base):
     process: Mapped[str] = mapped_column(Text, default="")                      # 进程源: backend / crawler / worker
     trigger_source: Mapped[str] = mapped_column(Text, default="")               # 触发源函数名或 API path
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── 14. agent_run ─────────────────────────────────────────────
+
+class AgentRun(Base):
+    """Agent 自动审核运行记录（无软删除、无 updated_at，与其它表不同）。"""
+    __tablename__ = "agent_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)  # SERIAL
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    agent_type: Mapped[str] = mapped_column(String(32), nullable=False)  # entity_review | relation_review | conflict_resolution | semantic_match | entity_merge
+    target_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # entity_id / relation_id / merge_id / dict_id
+    status: Mapped[str] = mapped_column(String(16), default="completed")  # queued | running | completed | failed | escalated
+    decision: Mapped[str] = mapped_column(String(32), default="")  # approved | rejected | keep_existing | accept_new | custom | escalated | error
+    reason: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    steps: Mapped[list] = mapped_column(JSONB, default=list)  # [{step, type: ai|tool, tool_name?, content}]
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    entity_name: Mapped[str] = mapped_column(String(512), default="")     # V010
+    document_title: Mapped[str] = mapped_column(String(512), default="")  # V010
+    document_uuid: Mapped[str] = mapped_column(String(64), default="")    # V011
+    batch_id: Mapped[str] = mapped_column(String(64), default="")         # V011

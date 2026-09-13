@@ -143,8 +143,9 @@ def disambiguate(
         if reranker_result.status == STATUS_CANDIDATE_MATCHED:
             return reranker_result
 
-        # Reranker 不确定 → 暂跳过 Step 6 LLM 兜底，直接返回 ambiguous
-        # （LLM 调用 ~3-5s 会显著拉长锁持有时间）
+        # Reranker 不确定 → 暂禁用 Step 6 LLM 兜底，直接返回 ambiguous
+        # （决策：Step6 后续降级为分级路由的中置信度复核，避免全量 LLM 兜底的延迟。
+        #   注：原注释「拉长锁持有时间」是过时认知，消歧实际在锁外执行，真实代价是延迟。）
         if reranker_result.status == STATUS_AMBIGUOUS:
             # llm_result = rank_with_llm(
             #     entity_name=entity_name,

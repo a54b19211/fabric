@@ -264,6 +264,7 @@ def extract_single_document(
     all_entities_per_chunk: list[list[dict]] = []
     all_relations_per_chunk: list[list[dict]] = []
     accumulated_entities: list[dict] = []   # 用于生成记忆摘要
+    llm_failed_chunks = 0                    # LLM 调用失败（返回空）的块数
 
     for chunk in chunks:
         # 注入记忆上下文
@@ -278,6 +279,7 @@ def extract_single_document(
         raw_result = _call_llm_for_chunk(chunk, source_site)
         if not raw_result:
             logger.warning(f"[Extraction] 第 {chunk.chunk_index + 1} 块 LLM 返回空，跳过")
+            llm_failed_chunks += 1
             all_entities_per_chunk.append([])
             all_relations_per_chunk.append([])
             continue
@@ -300,9 +302,13 @@ def extract_single_document(
     )
 
     if not entities:
-        logger.warning(f"[Extraction] 未抽取到任何实体: {doc_uuid}")
-        update_extraction_status(doc_uuid, "done", model=APP.EXTRACTION_MODEL_NAME)
-        return True  # 不算失败，文档可能确实没有可抽取的实体
+        if llm_failed_chunks >= len(chunks):
+            error = "LLM 不可用（所有块调用失败/返回空）"
+        else:
+            error = "未抽取到任何实体（LLM 返回空，需排查）"
+        logger.warning(f"[Extraction] {error}: {doc_uuid}")
+        update_extraction_status(doc_uuid, "failed", error=error)
+        return False  # 0 实体视为抽取失败，暴露问题而非静默标 done
 
     # 4. 消歧（DB 事务内但锁外执行，可并行，可包含慢 API 调用）
     for ent in entities:

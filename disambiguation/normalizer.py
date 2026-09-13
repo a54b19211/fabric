@@ -107,7 +107,8 @@ def generate_candidate_names(
         _add(entity_data.get("name", ""))
         _add(entity_data.get("name_en", ""))
         for alias in (entity_data.get("aliases") or []):
-            _add(str(alias))
+            if alias is not None:
+                _add(str(alias))
 
     norm = normalize_name(entity_name, entity_type)
     _add(norm)

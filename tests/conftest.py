@@ -1,6 +1,12 @@
 """
 tests/ 共享 fixtures —— 所有 mock，不连接数据库。
 """
+import sys
+from pathlib import Path
+
+# 将项目根目录加入 sys.path，确保测试能 import 项目模块（disambiguation/、db/ 等）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pytest
 from unittest.mock import MagicMock, patch
 
