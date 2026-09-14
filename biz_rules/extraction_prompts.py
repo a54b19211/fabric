@@ -71,6 +71,16 @@ def _sanitize_metadata(value: str) -> str:
 
 _ALL_ENTITY_TYPES = list(ENTITY_SCHEMA_MAP.keys())  # 所有 16 种实体类型，各来源统一可见
 
+
+def _entity_types_excluding(excluded: set[str]) -> list[str]:
+    """白名单收敛：返回排除指定类型后的实体类型列表。"""
+    return [t for t in _ALL_ENTITY_TYPES if t not in excluded]
+
+
+# 白名单收敛（保守版）：仅砍确定无关类型，其余等样本累计再扩；核心消歧类型永不排除。
+_CLINICAL_TRIAL_EXCLUDED = {"Policy", "ApprovalEvent"}   # 临床试验注册信息不含监管审批/政策
+_FDA_DRUG_LABEL_EXCLUDED = {"DealEvent", "TCMFormula"}   # 药品说明书不含交易/中药方剂
+
 # ── 关系类型白名单 ──────────────────────────────────────────────────────
 VALID_RELATION_TYPES = {
     # 公司维度
@@ -395,7 +405,8 @@ def get_nmpa_extraction_prompt(text: str) -> str:
 
 def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
     """FDA 监管公告：全类型可见，子源调整重点"""
-    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
+    excluded = _FDA_DRUG_LABEL_EXCLUDED if "drug_label" in sub_source else set()
+    entity_section = _build_entity_type_section(_entity_types_excluding(excluded))
     sub_guidance = ""
 
     if "drug_label" in sub_source:
@@ -444,7 +455,7 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
 
 def get_clinical_trial_extraction_prompt(text: str) -> str:
     """ChiCTR / ClinicalTrials 临床试验：重点抽取 ClinicalTrial、Drug、Company、Indication、TrialIndication"""
-    entity_section = _build_entity_type_section(_ALL_ENTITY_TYPES)
+    entity_section = _build_entity_type_section(_entity_types_excluding(_CLINICAL_TRIAL_EXCLUDED))
     return f"""你是临床试验信息提取专家。请从以下临床试验注册信息中抽取图谱实体和关系。
 
 上方列出了全部支持的实体类型，请严格从上方列表中选择，不得使用列表之外的实体类型。

@@ -74,7 +74,7 @@ def _call_llm_for_chunk(chunk, source_site: str) -> dict:
             prompt=prompt,
             system_prompt=ENTITY_EXTRACTION_SYSTEM_PROMPT,
             use_extraction_model=True,
-            stream=True,
+            stream=False,
         )
         return result or {}
     except Exception as e:
