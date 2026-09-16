@@ -1662,6 +1662,9 @@ def merge_entities(
             trigger_source="merge_entities",
         )
 
+        # ── 7. 级联重算：合并后 keeper alias 集合扩大，重算历史 step_none 实体
+        _cascade_recompute_stale_entities(session, keeper_dict_id)
+
         session.commit()
 
         logger.info(
@@ -2078,6 +2081,101 @@ def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
         .order_by(ExtractedEntity.id.asc())
         .first()
     )
+
+
+# ── 字典更新级联重算（状态陈旧修复）──────────────────────────────────
+
+def _is_stale_step_none(ent: ExtractedEntity) -> bool:
+    """判断实体是否停留在「历史 step_none」：消歧结果仍为未匹配。"""
+    if (ent.confidence_reason or "") == "no match in any step":
+        return True
+    disambig = (ent.entity_data or {}).get("_disambig") or {}
+    return disambig.get("match_step") == "step_none"
+
+
+def _refresh_step_metadata(ent: ExtractedEntity, dict_id: int) -> None:
+    """刷新实体消歧元数据为「别名精确命中」，清除 step_none 陈旧状态。"""
+    ent.confidence_reason = "stale_recompute: alias exact match"
+    ent.confidence_score = 0.95
+    ed = dict(ent.entity_data or {})
+    disambig = dict(ed.get("_disambig") or {})
+    disambig["match_step"] = "step2_exact_alias"
+    disambig["status"] = "auto_matched"
+    disambig["dict_id"] = dict_id
+    ed["_disambig"] = disambig
+    ent.entity_data = ed
+
+
+def _cascade_recompute_stale_entities(session, dict_id: int) -> int:
+    """
+    dict 合并/审核通过后，级联重算历史 step_none 实体（状态陈旧修复）。
+
+    背景：历史抽取时 step_none 的实体创建了占位 dict；当该占位 dict 被合并/
+    审核归并到权威 dict（或权威 dict 新增同名 alias）后，这些历史实体的
+    dict_id / match_step 仍停留在「未匹配」，未跟随字典更新。
+
+    本函数把「entity_name 精确命中目标 dict 的 alias、且仍处于历史 step_none」
+    的 pending 实体重定向到目标 dict，并刷新 match_step 为 step2_exact_alias。
+    返回归位数量。
+    """
+    target = (
+        session.query(EntityDict)
+        .filter(EntityDict.id == dict_id, EntityDict.is_deleted == False)
+        .first()
+    )
+    if target is None:
+        return 0
+
+    alias_names = [
+        row[0]
+        for row in session.query(EntityAlias.name)
+        .filter(EntityAlias.dict_id == dict_id, EntityAlias.is_deleted == False)
+        .all()
+    ]
+    lower_names = {n.lower() for n in alias_names if n and n.strip()}
+    if not lower_names:
+        return 0
+
+    candidates = (
+        session.query(ExtractedEntity)
+        .filter(
+            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.review_status == "pending",
+            ExtractedEntity.entity_type == target.entity_type,
+            func.lower(ExtractedEntity.entity_name).in_(lower_names),
+        )
+        .all()
+    )
+
+    recomputed = 0
+    for ent in candidates:
+        if not _is_stale_step_none(ent):
+            continue
+
+        old_dict_id = ent.dict_id
+        ent.dict_id = dict_id
+        _refresh_step_metadata(ent, dict_id)
+        recomputed += 1
+
+        _write_operation_log(
+            session, "update", "extracted_entities", ent.id,
+            business_action="stale_recompute",
+            description=(
+                f"级联重算: name='{ent.entity_name}' type={ent.entity_type} "
+                f"dict_id {old_dict_id} → {dict_id}（别名精确命中）"
+            ),
+            details={"entity_name": ent.entity_name, "entity_type": ent.entity_type,
+                      "old_dict_id": old_dict_id, "new_dict_id": dict_id},
+            trigger_source="_cascade_recompute_stale_entities",
+        )
+
+    if recomputed:
+        logger.info(
+            f"[DB] _cascade_recompute_stale_entities: dict_id={dict_id} "
+            f"重算 {recomputed} 条历史 step_none 实体"
+        )
+
+    return recomputed
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2939,6 +3037,9 @@ def approve_entity_with_alias_writeback(
                     f"removed {deduped} duplicates"
                 )
 
+            # 级联重算：审核通过后 dict 权威化/alias 迁移，重算历史 step_none 实体
+            _cascade_recompute_stale_entities(session, ent.dict_id)
+
 
 def reject_entity(id: int, reviewer: str, note: str = "") -> None:
     """审核拒绝实体，同时级联拒绝关联的 pending 关系，写 review_log。"""
@@ -3040,6 +3141,7 @@ def batch_approve_entities(
             return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
         
         # 批量更新
+        affected_dict_ids: set[int] = set()
         for ent in entities:
             before = ent.review_status
             ent.review_status = "approved"
@@ -3068,6 +3170,11 @@ def batch_approve_entities(
                 process_entity_merge(
                     session, dict_id, ent.id, entity_data, ent.source_site or "",
                 )
+                affected_dict_ids.add(dict_id)
+
+        # 级联重算：批量审核通过后，重算受影响 dict 的历史 step_none 实体
+        for _dict_id in affected_dict_ids:
+            _cascade_recompute_stale_entities(session, _dict_id)
 
         session.commit()
         _write_operation_log(

@@ -22,6 +22,7 @@
   # 药物维度
   TARGETS               Drug → Target           {mechanism("激动剂"/"拮抗剂"/"抑制剂"/"降解剂"/"调节剂"), binding_affinity}
   TREATS                Drug → Indication       {phase, phase_date, region, status}
+  CAUSES                Drug → Indication       {—}  -- 药物导致不良反应/禁忌症（与 TREATS 语义相反）
   IN_TRIAL              Drug → ClinicalTrial
   HAS_APPROVAL          Drug → ApprovalEvent
 
@@ -87,7 +88,7 @@ VALID_RELATION_TYPES = {
     "DEVELOPS", "PARTICIPATES_IN", "INVESTED_IN", "SUBSIDIARY_OF",
     "SPONSORS", "ISSUES", "APPROVES", "PARTICIPATES_IN_PROJECT",
     # 药物维度
-    "TARGETS", "TREATS", "IN_TRIAL", "HAS_APPROVAL",
+    "TARGETS", "TREATS", "CAUSES", "IN_TRIAL", "HAS_APPROVAL",
     # 交易维度
     "HAS_ITEM", "INVOLVES_DRUG",
     # 合作开发项目
@@ -122,6 +123,7 @@ Company→DevProject PARTICIPATES_IN_PROJECT | role                    | contrib
 Drug→Target TARGETS             | mechanism                         | binding_affinity
 Compound→Target TARGETS         | mechanism, evidence_level          | —
 Drug→Indication TREATS          | —                                 | phase, phase_date, region, status
+Drug→Indication CAUSES          | —                                 | —  -- 不良反应/禁忌症（与 TREATS 相反）
 TCMFormula→Indication TREATS    | —                                 | phase, phase_date, region, status
 Drug→Trial IN_TRIAL             | —                                 | —
 Drug→ApprovalEvent HAS_APPROVAL | —                                 | —
@@ -413,7 +415,9 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
         sub_guidance = """
 ## 子源特化：FDA Drug Label（药品说明书）
 - 优先 Drug + Indication + Target
-- 从说明书中提取完整适应症列表、靶点信息、用法用量"""
+- 从说明书中提取完整适应症列表、靶点信息、用法用量
+- 不良反应（Adverse Reactions）章节的疾病/症状 → 抽 Indication 实体（疾病本体），关系 Drug -[CAUSES]-> Indication；禁止把这些疾病/症状抽成 SafetyEvent
+- SafetyEvent 只用于黑框警告（Boxed Warning）/安全警示这类「事件」，entity_name=药品名+事件类型，禁止用疾病名作 entity_name"""
     elif "drug_safety" in sub_source:
         sub_guidance = """
 ## 子源特化：FDA Drug Safety Communication
@@ -475,6 +479,7 @@ def get_clinical_trial_extraction_prompt(text: str) -> str:
 - Drug：试验药物名称（INN名）和/或研发代号，多个药物组合时各自拆分
 - Company：申办方/合作方/CRO，name 用官方全称
 - Indication：目标疾病/适应症，使用标准疾病名（非自定义缩写）
+- 不良事件（Adverse Events / Serious Adverse Events）列表中的疾病/症状 → 抽 Indication 实体（疾病本体），关系 Drug -[CAUSES]-> Indication；禁止把这些疾病/症状抽成 SafetyEvent
 - TrialIndication：试验中每条适应症 arm 创建一条（含人群描述、治疗线次、phase、status）
 - Target：如试验为靶向治疗/免疫治疗，提取对应靶点（含生物标志物检测条件）
 - 关系重点：

@@ -52,8 +52,8 @@
           <el-button @click="resetFilters">
             <el-icon><Refresh /></el-icon>重置
           </el-button>
-          <el-button type="warning" @click="batchTrigger" :loading="triggering" :disabled="pendingSelectedCount === 0">
-            选中抽取 ({{ pendingSelectedCount }})
+          <el-button type="warning" @click="batchTrigger" :loading="triggering" :disabled="extractableSelectedCount === 0">
+            选中抽取 ({{ extractableSelectedCount }})
           </el-button>
           <el-input-number v-model="batchCount" :min="1" :max="5000" :step="100" style="width:150px" />
           <el-button type="success" plain @click="batchTriggerByCount" :loading="triggeringByCount">
@@ -154,7 +154,7 @@
             <div class="action-btns">
               <el-button size="small" plain @click="$router.push({ path: `/documents/${row.uuid}`, query: $route.query })">查看</el-button>
               <el-button
-                v-if="row.extraction_status === 'pending'"
+                v-if="row.extraction_status === 'pending' || row.extraction_status === 'failed'"
                 size="small"
                 type="primary"
                 @click="triggerOne(row.uuid)"
@@ -281,8 +281,8 @@ const filters = ref({
   extraction_status: (route.query.extraction_status as string) || '',
 })
 
-const pendingSelectedCount = computed(() =>
-  rows.value.filter(r => selectedUuids.value.includes(r.uuid) && r.extraction_status === 'pending').length
+const extractableSelectedCount = computed(() =>
+  rows.value.filter(r => selectedUuids.value.includes(r.uuid) && (r.extraction_status === 'pending' || r.extraction_status === 'failed')).length
 )
 
 const doneSelectedCount = computed(() => {
@@ -364,13 +364,16 @@ function handleSelectionChange(selection: DocumentItem[]) {
 }
 
 async function batchTrigger() {
-  if (selectedUuids.value.length === 0) {
-    ElMessage.warning('请先选择需要触发抽取的文档')
+  const extractable = rows.value
+    .filter(r => selectedUuids.value.includes(r.uuid) && (r.extraction_status === 'pending' || r.extraction_status === 'failed'))
+    .map(r => r.uuid)
+  if (extractable.length === 0) {
+    ElMessage.warning('请先选择 pending 或 failed 状态的文档')
     return
   }
   triggering.value = true
   try {
-    const res = await triggerExtraction({ uuids: selectedUuids.value })
+    const res = await triggerExtraction({ uuids: extractable })
     ElMessage.success(res.message)
     clearSelection()
     loadData()
