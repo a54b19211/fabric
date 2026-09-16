@@ -361,11 +361,23 @@ _CT_GOV_FEWSHOT = """
 """
 
 # ── 实体类型 + 字段说明（动态生成，供 prompt 引用）──────────────────────
+_DRUG_BOUNDARY = """  ⚠️ Drug 边界约束（重要）：
+  - Drug 仅指「有明确药理作用的药品」（化学药/生物制品/中药），INN 通用名优先
+  - 以下**不是 Drug**，不得抽为 Drug 实体：
+    · 医疗器械（导管/支架/螺钉/植入物/球囊/缝线/手术导航系统等）
+    · 体外诊断试剂（检测试剂盒/试纸/校准品等）
+    · 化妆品（染发剂/防晒霜/爽肤水/面膜/口红等）
+    · 牙科/骨科材料（树脂/骨水泥/合金粉末等）
+  - 上述实体属「本系统暂不覆盖的类型」，跳过不抽取"""
+
+
 def _build_entity_type_section(entity_types: list[str]) -> str:
     lines = ["## 支持的实体类型及字段说明"]
     for et in entity_types:
         lines.append(f"\n### {et}")
         lines.append(get_entity_schema_description(et))
+        if et == "Drug":
+            lines.append(_DRUG_BOUNDARY)
     return "\n".join(lines)
 
 
