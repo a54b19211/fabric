@@ -303,12 +303,17 @@ def extract_single_document(
 
     if not entities:
         if llm_failed_chunks >= len(chunks):
+            # LLM 完全不可用 → 真失败
             error = "LLM 不可用（所有块调用失败/返回空）"
-        else:
-            error = "未抽取到任何实体（LLM 返回空，需排查）"
-        logger.warning(f"[Extraction] {error}: {doc_uuid}")
-        update_extraction_status(doc_uuid, "failed", error=error)
-        return False  # 0 实体视为抽取失败，暴露问题而非静默标 done
+            logger.warning(f"[Extraction] {error}: {doc_uuid}")
+            update_extraction_status(doc_uuid, "failed", error=error)
+            return False
+        # LLM 正常响应但文档中无目标实体（如化妆品/器械文档，Drug 边界收紧后正确抽空）
+        # 与 failed 区分：这是「抽取成功但无需求实体」，不是失败，单独入 no_entity
+        error = "抽取成功但无目标实体"
+        logger.info(f"[Extraction] {error}: {doc_uuid}（no_entity）")
+        update_extraction_status(doc_uuid, "no_entity", error=error)
+        return True
 
     # 4. 消歧（DB 事务内但锁外执行，可并行，可包含慢 API 调用）
     for ent in entities:

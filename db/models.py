@@ -48,7 +48,7 @@ class Document(Base):
     # regulatory_notice/drug_recall/drug_label/clinical_trial/literature/industry_news/company_announcement/policy
     language: Mapped[str] = mapped_column(Text, default="")      # zh/en
     weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")   # pending/synced/failed
-    extraction_status: Mapped[str] = mapped_column(Text, default="pending")     # pending/queued/processing/done/failed
+    extraction_status: Mapped[str] = mapped_column(Text, default="pending")     # pending/queued/processing/done/failed/no_entity
     extraction_model: Mapped[str] = mapped_column(Text, default="")
     extraction_error: Mapped[str] = mapped_column(Text, default="")
     extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

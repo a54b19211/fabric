@@ -6,6 +6,7 @@ export interface ExtractionStats {
   processing: number
   done: number
   failed: number
+  no_entity: number
 }
 
 export const triggerExtraction = (params: {

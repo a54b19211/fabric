@@ -77,6 +77,7 @@ class ExtractionStatsResponse(BaseModel):
     processing: int
     done: int
     failed: int
+    no_entity: int
 
 
 # ── Review ─────────────────────────────────────────────────────────────

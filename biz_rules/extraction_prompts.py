@@ -429,6 +429,7 @@ def get_fda_extraction_prompt(text: str, sub_source: str = "") -> str:
 - 优先 Drug + Indication + Target
 - 从说明书中提取完整适应症列表、靶点信息、用法用量
 - 不良反应（Adverse Reactions）章节的疾病/症状 → 抽 Indication 实体（疾病本体），关系 Drug -[CAUSES]-> Indication；禁止把这些疾病/症状抽成 SafetyEvent
+- 抗感染药适应症边界：适应症写成「[病原体]引起的感染」时（如 "infections caused by Streptococcus pneumoniae"），Indication 的 entity_name 取**感染病名**（如 "Streptococcal Pneumonia"），不取病原体名；病原体（细菌/病毒/真菌等微生物，含 species / ATCC 菌株号）不是 Indication，禁止以病原体名作 Indication 的 entity_name
 - SafetyEvent 只用于黑框警告（Boxed Warning）/安全警示这类「事件」，entity_name=药品名+事件类型，禁止用疾病名作 entity_name"""
     elif "drug_safety" in sub_source:
         sub_guidance = """

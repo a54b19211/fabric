@@ -1,14 +1,19 @@
 <template>
   <div>
     <!-- 抽取状态统计卡片 -->
-    <el-row :gutter="16" class="stats-row">
-      <el-col :span="6" v-for="s in statCards" :key="s.label">
-        <el-card shadow="never" class="stat-card clickable-card" :class="{ 'active-card': filters.extraction_status === s.filterValue }" @click="filterByCard(s.filterValue)">
-          <div class="stat-num" :style="{ color: s.color }">{{ s.value }}</div>
-          <div class="stat-label">{{ s.label }}</div>
-        </el-card>
-      </el-col>
-    </el-row>
+    <div class="stats-row">
+      <el-card
+        v-for="s in statCards"
+        :key="s.label"
+        shadow="never"
+        class="stat-card clickable-card"
+        :class="{ 'active-card': filters.extraction_status === s.filterValue }"
+        @click="filterByCard(s.filterValue)"
+      >
+        <div class="stat-num" :style="{ color: s.color }">{{ s.value }}</div>
+        <div class="stat-label">{{ s.label }}</div>
+      </el-card>
+    </div>
 
     <!-- 筛选栏 -->
     <el-card shadow="never" class="filter-card">
@@ -32,6 +37,7 @@
             <el-option label="processing" value="processing" />
             <el-option label="done" value="done" />
             <el-option label="failed" value="failed" />
+            <el-option label="no_entity" value="no_entity" />
           </el-select>
         </el-form-item>
         <el-form-item label="发布日期">
@@ -217,7 +223,7 @@ const dateRange = ref<[string, string] | null>(
     ? [route.query.date_from as string, route.query.date_to as string]
     : null
 )
-const stats = ref<ExtractionStats>({ pending: 0, queued: 0, processing: 0, done: 0, failed: 0 })
+const stats = ref<ExtractionStats>({ pending: 0, queued: 0, processing: 0, done: 0, failed: 0, no_entity: 0 })
 
 const selectedUuids = ref<string[]>([])
 const batchRecrawling = ref(false)
@@ -298,6 +304,7 @@ const statCards = computed(() => [
   { label: '抽取中', value: stats.value.processing, color: 'var(--dp-warning)', filterValue: 'processing' },
   { label: '已完成', value: stats.value.done, color: 'var(--dp-primary)', filterValue: 'done' },
   { label: '失败', value: stats.value.failed, color: 'var(--dp-danger)', filterValue: 'failed' },
+  { label: '无实体', value: stats.value.no_entity, color: '#94a3b8', filterValue: 'no_entity' },
 ])
 
 function syncToUrl() {
@@ -472,7 +479,7 @@ const docStatusType = (s: string) =>
   ({ AUTO_PROCESSED: 'success', PENDING_REVIEW: 'warning', REVIEWED: 'info' }[s] ?? '')
 
 const extractionStatusType = (s: string) =>
-  ({ pending: 'info', queued: '', processing: 'warning', done: 'success', failed: 'danger' }[s] ?? '')
+  ({ pending: 'info', queued: '', processing: 'warning', done: 'success', failed: 'danger', no_entity: 'info' }[s] ?? '')
 
 const formatTime = (iso: string | null) => {
   timeTick.value
@@ -505,8 +512,14 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.stats-row { margin-bottom: 16px; }
+.stats-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+}
 .stat-card {
+  flex: 1 1 0;
+  min-width: 0;
   text-align: center;
   padding: 8px 0;
   border-radius: var(--dp-radius-xl);
@@ -522,8 +535,21 @@ onUnmounted(() => {
 .clickable-card.active-card {
   border: 2px solid var(--dp-primary) !important;
 }
-.stat-num { font-size: 28px; font-weight: 700; }
-.stat-label { font-size: 12px; color: var(--dp-text-secondary); margin-top: 4px; }
+.stat-num {
+  font-size: 28px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-label {
+  font-size: 12px;
+  color: var(--dp-text-secondary);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .filter-card {
   margin-bottom: 16px;
   border-radius: var(--dp-radius-xl);

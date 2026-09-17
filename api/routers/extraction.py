@@ -184,6 +184,7 @@ def get_extraction_stats():
                 processing=_count("processing"),
                 done=_count("done"),
                 failed=_count("failed"),
+                no_entity=_count("no_entity"),
             )
 
             logger.info(f"[API] 抽取统计: {stats.json()}")
