@@ -3843,7 +3843,7 @@ def _rerank_candidates(
     try:
         resp = requests.post(
             rerank_url,
-            json={"query": query, "texts": texts},
+            json={"query": query, "documents": texts},
             timeout=30,
         )
         resp.raise_for_status()
