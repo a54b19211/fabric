@@ -1,4 +1,5 @@
 """RQ 任务入口 —— Redis 队列模式下 Worker 执行的实际工作单元。"""
+import time
 from loguru import logger
 
 
@@ -12,6 +13,11 @@ def extraction_job(uuid: str) -> bool:
     from db.models import Document
     from db.repository import update_extraction_status
     from flows.extraction_flow import extract_single_document
+    from core_engine.task_queue import is_extraction_paused
+
+    # 暂停时等待，直到恢复（不标记 processing，任务保持排队状态）
+    while is_extraction_paused():
+        time.sleep(2)
 
     logger.info(f"[RQ-Job] 开始: {uuid}")
 

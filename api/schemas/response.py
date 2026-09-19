@@ -229,6 +229,7 @@ class WorkerItem(BaseModel):
 class WorkerStatsResponse(BaseModel):
     num_workers: int
     total_pending: int
+    paused: bool = False
     workers: list[WorkerItem]
 
 

@@ -11,10 +11,11 @@ class ExtractionTriggerRequest(BaseModel):
 
 
 class PendingExtractRequest(BaseModel):
-    """按数量批量抽取 pending 文档（纯数量驱动，不传 UUID 列表）。"""
+    """按数量批量抽取文档（纯数量驱动，不传 UUID 列表），status 支持 pending / failed。"""
     count: int = Field(default=100, ge=1, le=5000, description="抽取数量")
     source_site: Optional[str] = Field(default=None, description="按来源站筛选")
     doc_type: Optional[str] = Field(default=None, description="按文档类型筛选")
+    status: str = Field(default="pending", description="抽取状态筛选：pending / failed")
 
 
 class ReviewActionRequest(BaseModel):

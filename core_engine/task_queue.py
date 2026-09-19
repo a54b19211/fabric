@@ -195,6 +195,40 @@ class RedisTaskQueue:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 暂停/继续标志（Redis 后端专用；memory 后端恒 False）
+# ═══════════════════════════════════════════════════════════════════════
+
+_EXTRACTION_PAUSE_KEY = "zk:extraction:paused"
+
+
+def is_extraction_paused() -> bool:
+    """读取暂停标志。仅 Redis 后端有效，memory 后端恒 False。"""
+    if APP.TASK_QUEUE_BACKEND != "redis":
+        return False
+    try:
+        from redis import Redis
+        conn = Redis.from_url(APP.REDIS_URL)
+        return bool(conn.get(_EXTRACTION_PAUSE_KEY))
+    except Exception:
+        return False
+
+
+def set_extraction_paused(paused: bool) -> None:
+    """设置/清除暂停标志（Redis 后端）。"""
+    if APP.TASK_QUEUE_BACKEND != "redis":
+        return
+    try:
+        from redis import Redis
+        conn = Redis.from_url(APP.REDIS_URL)
+        if paused:
+            conn.set(_EXTRACTION_PAUSE_KEY, "1")
+        else:
+            conn.delete(_EXTRACTION_PAUSE_KEY)
+    except Exception as e:
+        logger.warning(f"[TaskQueue] 设置暂停标志失败: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 工厂函数
 # ═══════════════════════════════════════════════════════════════════════
 

@@ -368,7 +368,13 @@ _DRUG_BOUNDARY = """  ⚠️ Drug 边界约束（重要）：
     · 体外诊断试剂（检测试剂盒/试纸/校准品等）
     · 化妆品（染发剂/防晒霜/爽肤水/面膜/口红等）
     · 牙科/骨科材料（树脂/骨水泥/合金粉末等）
-  - 上述实体属「本系统暂不覆盖的类型」，跳过不抽取"""
+    · 手术/操作类干预（手术、切除术、移植、起搏、导管术、内镜、针灸、康复训练等）
+    · 行为/心理干预（健康教育、心理咨询、运动、瑜伽、认知行为疗法等）
+    · 器械/设备干预（支架、起搏器、植入物、外骨骼、软件、可穿戴设备等）
+    · 膳食/营养干预（维生素补充、膳食强化、营养配方、益生菌、饮食方案等）
+    · 放疗/放射干预（放射治疗、放疗方案等；放射性药物如 Radium-223 除外）
+  - 区分关键：以「是否含具有药理作用的化学/生物/中药活性成分」为准；手术、行为、器械、膳食、放疗等干预手段一律不是 Drug
+  - 上述非 Drug 实体属「本系统暂不覆盖的类型」，跳过不抽取"""
 
 
 def _build_entity_type_section(entity_types: list[str]) -> str:
@@ -490,6 +496,14 @@ def get_clinical_trial_extraction_prompt(text: str) -> str:
 - ClinicalTrial 实体只创建一次，多臂试验不要创建多个同 NCT 的 ClinicalTrial
 - ClinicalTrial：注册号（NCT/CTR 编号，直接填 trial_id）、期别（phase）、状态（status）、样本量（sample_size）、主要终点（primary_endpoint）
 - Drug：试验药物名称（INN名）和/或研发代号，多个药物组合时各自拆分
+
+### 干预措施（interventions）按类型判定 Drug（重要，防污染）
+- ClinicalTrials.gov：原始 JSON 的 armsInterventionsModule.interventions 中，每条干预带 type 字段：
+  * type = DRUG / BIOLOGICAL / COMBINATION_PRODUCT → 抽为 Drug（取干预 name）
+  * type = PROCEDURE / DEVICE / BEHAVIORAL / DIETARY_SUPPLEMENT / RADIATION / DIAGNOSTIC_TEST / GENETIC / OTHER → **不是 Drug**，跳过（本系统不覆盖这些干预类型）
+- ChiCTR：干预措施为「手术/针灸/推拿/康复/运动/心理治疗/放疗/器械」等非药物手段 → 不是 Drug，跳过；仅「化学药/生物制品/中药」抽为 Drug
+- conditionsModule.conditions（或 ChiCTR 的「研究疾病/目标疾病」）是疾病/适应症，抽为 Indication，**严禁抽成 Drug**
+- 忽略文档头部 frontmatter 的 drug_name 字段和正文「研究涉及药物/干预」引导句——它可能是上游映射错误（疾病被错标为药物），一律以原始 JSON 的 interventions.type 和 conditions 为准
 - Company：申办方/合作方/CRO，name 用官方全称
 - Indication：目标疾病/适应症，使用标准疾病名（非自定义缩写）
 - 不良事件（Adverse Events / Serious Adverse Events）列表中的疾病/症状 → 抽 Indication 实体（疾病本体），关系 Drug -[CAUSES]-> Indication；禁止把这些疾病/症状抽成 SafetyEvent

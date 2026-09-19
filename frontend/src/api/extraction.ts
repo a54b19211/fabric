@@ -41,9 +41,20 @@ export const triggerPendingExtraction = (params: {
   count: number
   source_site?: string
   doc_type?: string
+  status?: string
 }) =>
   http.post<any, { triggered: number; message: string }>('/extraction/trigger/pending', {
     count: params.count,
     source_site: params.source_site ?? null,
     doc_type: params.doc_type ?? null,
+    status: params.status ?? 'pending',
   })
+
+export const getWorkerStats = () =>
+  http.get<any, { num_workers: number; total_pending: number; paused: boolean; workers: { worker_id: number; queue_size: number }[] }>('/extraction/workers')
+
+export const pauseExtraction = () =>
+  http.post<any, { paused: boolean; message: string }>('/extraction/pause')
+
+export const resumeExtraction = () =>
+  http.post<any, { paused: boolean; message: string }>('/extraction/resume')

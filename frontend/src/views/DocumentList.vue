@@ -63,10 +63,13 @@
           </el-button>
           <el-input-number v-model="batchCount" :min="1" :max="5000" :step="100" style="width:150px" />
           <el-button type="success" plain @click="batchTriggerByCount" :loading="triggeringByCount">
-            批量抽取
+            {{ filters.extraction_status === 'failed' ? '批量重抽' : '批量抽取' }}
           </el-button>
           <el-button type="warning" @click="batchRecrawl" :loading="batchRecrawling" :disabled="selectedUuids.length === 0">
             批量重爬 ({{ selectedUuids.length }})
+          </el-button>
+          <el-button :type="workerPaused ? 'success' : 'danger'" plain @click="togglePause" :loading="pausing">
+            {{ workerPaused ? '继续抽取' : '暂停抽取' }}
           </el-button>
           <el-button type="success" @click="batchReview" :disabled="doneSelectedCount === 0">
             批量审核 ({{ doneSelectedCount }})
@@ -201,7 +204,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Upload, UploadFilled } from '@element-plus/icons-vue'
 import { getDocuments, recrawlDocument, batchRecrawlDocuments, uploadDocument, batchUploadDocuments, getSourceSites, type DocumentItem } from '@/api/documents'
-import { triggerExtraction, getExtractionStats, triggerPendingExtraction, type ExtractionStats } from '@/api/extraction'
+import { triggerExtraction, getExtractionStats, triggerPendingExtraction, getWorkerStats, pauseExtraction, resumeExtraction, type ExtractionStats } from '@/api/extraction'
 import { relativeTime } from '@/utils/time'
 
 const router = useRouter()
@@ -224,6 +227,8 @@ const dateRange = ref<[string, string] | null>(
     : null
 )
 const stats = ref<ExtractionStats>({ pending: 0, queued: 0, processing: 0, done: 0, failed: 0, no_entity: 0 })
+const workerPaused = ref(false)
+const pausing = ref(false)
 
 const selectedUuids = ref<string[]>([])
 const batchRecrawling = ref(false)
@@ -352,6 +357,31 @@ async function loadStats() {
   stats.value = await getExtractionStats()
 }
 
+async function loadWorkerState() {
+  try {
+    const res = await getWorkerStats()
+    workerPaused.value = res.paused
+  } catch { /* ignore */ }
+}
+
+async function togglePause() {
+  pausing.value = true
+  try {
+    if (workerPaused.value) {
+      await resumeExtraction()
+      ElMessage.success('已继续抽取')
+    } else {
+      await pauseExtraction()
+      ElMessage.success('已暂停抽取')
+    }
+    await loadWorkerState()
+  } catch (e: any) {
+    ElMessage.error('操作失败: ' + (e.message || ''))
+  } finally {
+    pausing.value = false
+  }
+}
+
 async function triggerOne(uuid: string) {
   await triggerExtraction({ uuids: [uuid] })
   ElMessage.success('已触发抽取')
@@ -393,10 +423,13 @@ async function batchTrigger() {
 async function batchTriggerByCount() {
   const source = filters.value.source_site || undefined
   const dtype = (filters.value as any).doc_type || undefined
+  const isFailed = filters.value.extraction_status === 'failed'
+  const status = isFailed ? 'failed' : 'pending'
+  const actionLabel = isFailed ? '批量重抽' : '批量抽取'
   try {
     await ElMessageBox.confirm(
-      `确认批量抽取 ${batchCount.value} 篇？\n来源站点: ${source || '全部'}\n文档类型: ${dtype || '全部'}`,
-      '确认批量抽取',
+      `确认${actionLabel} ${batchCount.value} 篇？\n来源站点: ${source || '全部'}\n文档类型: ${dtype || '全部'}`,
+      `确认${actionLabel}`,
       { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
@@ -404,7 +437,7 @@ async function batchTriggerByCount() {
   }
   triggeringByCount.value = true
   try {
-    const res = await triggerPendingExtraction({ count: batchCount.value, source_site: source, doc_type: dtype })
+    const res = await triggerPendingExtraction({ count: batchCount.value, source_site: source, doc_type: dtype, status })
     ElMessage.success(res.message)
     loadData()
     loadStats()
@@ -502,7 +535,7 @@ watch(() => stats.value.queued + stats.value.processing, (v) => {
 
 onMounted(() => {
   getSourceSites().then(r => sites.value = r.sites)
-  loadData(); loadStats()
+  loadData(); loadStats(); loadWorkerState()
   timeTimer = setInterval(() => timeTick.value++, 10000)
 })
 onUnmounted(() => {

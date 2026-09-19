@@ -115,16 +115,18 @@ def trigger_extraction(body: ExtractionTriggerRequest):
 @router.post("/trigger/pending", response_model=ExtractionTriggerResponse)
 def trigger_pending_extraction(body: PendingExtractRequest):
     """
-    按数量批量抽取 pending 文档。前端输入条数，后端筛 pending → 标记 queued → 入队。
-
-    不传 source_site/doc_type = 全站 pending 文档。
+    按数量批量抽取文档。前端输入条数，后端筛 status → 标记 queued → 入队。
+    status 默认 pending，可传 failed 批量重抽。
+    不传 source_site/doc_type = 全站该状态文档。
     """
     with get_session() as session:
         if session is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
 
+        status = body.status if body.status in ("pending", "failed") else "pending"
+
         filters = [
-            Document.extraction_status == "pending",
+            Document.extraction_status == status,
             Document.is_deleted == False,
             Document.raw_content != "",
             Document.raw_content.isnot(None),
@@ -151,7 +153,7 @@ def trigger_pending_extraction(body: PendingExtractRequest):
             )
 
         count = len(uuids)
-        logger.info(f"[Extraction] pending 批量入队: {count} 篇")
+        logger.info(f"[Extraction] {status} 批量入队: {count} 篇")
 
     if count > 0:
         from flows.extraction_flow import run_extraction_for_uuids
@@ -212,6 +214,7 @@ def get_worker_stats():
         response = WorkerStatsResponse(
             num_workers=manager.num_workers,
             total_pending=manager.total_pending(),
+            paused=manager.is_paused(),
             workers=workers,
         )
         
@@ -228,6 +231,34 @@ def get_worker_stats():
     except Exception as e:
         logger.error(f"[API] Worker 状态查询失败: {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.post("/pause")
+def pause_extraction():
+    """暂停抽取：Worker 完成当前任务后停止消费队列。"""
+    try:
+        from flows.extraction_worker import get_extraction_manager
+        manager = get_extraction_manager()
+        manager.pause()
+        logger.info("[API] 抽取已暂停")
+        return {"paused": True, "message": "已暂停抽取"}
+    except Exception as e:
+        logger.error(f"[API] 暂停抽取失败: {e}")
+        raise HTTPException(status_code=500, detail=f"暂停失败: {str(e)}")
+
+
+@router.post("/resume")
+def resume_extraction():
+    """继续抽取：恢复 Worker 消费队列。"""
+    try:
+        from flows.extraction_worker import get_extraction_manager
+        manager = get_extraction_manager()
+        manager.resume()
+        logger.info("[API] 抽取已继续")
+        return {"paused": False, "message": "已继续抽取"}
+    except Exception as e:
+        logger.error(f"[API] 继续抽取失败: {e}")
+        raise HTTPException(status_code=500, detail=f"继续失败: {str(e)}")
 
 
 @router.post("/reset-stale")

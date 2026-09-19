@@ -43,8 +43,9 @@ _SENTINEL = None  # MemoryWorker 退出哨兵
 class MemoryWorker:
     """持有 queue.Queue 的线程 Worker，与原有行为一致。"""
 
-    def __init__(self, worker_id: int):
+    def __init__(self, worker_id: int, pause_event: threading.Event):
         self.worker_id = worker_id
+        self._pause_event = pause_event
         self._queue: queue.Queue[Optional[ExtractionTask]] = queue.Queue()
         self._thread = threading.Thread(
             target=self._run,
@@ -68,6 +69,7 @@ class MemoryWorker:
 
     def _run(self) -> None:
         while True:
+            self._pause_event.wait()  # 暂停时阻塞在这里，不再消费队列
             task = self._queue.get()
             if task is _SENTINEL:
                 self._queue.task_done()
@@ -136,10 +138,25 @@ class MemoryWorkerManager:
     def __init__(self, num_workers: int = 3):
         if num_workers < 1:
             raise ValueError(f"num_workers 必须 >= 1，当前: {num_workers}")
-        self._workers = [MemoryWorker(i) for i in range(num_workers)]
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # 默认继续（未暂停）
+        self._workers = [MemoryWorker(i, self._pause_event) for i in range(num_workers)]
         self._lock = threading.Lock()
         self._num_workers = num_workers
         logger.info(f"[WorkerManager] Memory 模式，Worker 数量: {num_workers}")
+
+    def pause(self) -> None:
+        """暂停抽取：Worker 完成当前任务后停止消费队列。"""
+        self._pause_event.clear()
+        logger.info("[WorkerManager] 已暂停抽取")
+
+    def resume(self) -> None:
+        """继续抽取：恢复 Worker 消费队列。"""
+        self._pause_event.set()
+        logger.info("[WorkerManager] 已继续抽取")
+
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
 
     def submit(self, task: ExtractionTask) -> int:
         with self._lock:
@@ -166,6 +183,7 @@ class MemoryWorkerManager:
 
     def shutdown(self) -> None:
         logger.info("[WorkerManager] 开始关闭...")
+        self._pause_event.set()  # 先恢复，确保 Worker 能退出阻塞
         for w in self._workers:
             w.shutdown()
         logger.info("[WorkerManager] 所有 Worker 已关闭")
@@ -205,6 +223,22 @@ class RedisWorkerManager:
 
     def stats(self) -> list[dict]:
         return [{"worker_id": 0, "queue_size": self._tq.size()}]
+
+    def pause(self) -> None:
+        """暂停抽取：rq worker 处理任务前检查标志，暂停时等待。"""
+        from core_engine.task_queue import set_extraction_paused
+        set_extraction_paused(True)
+        logger.info("[WorkerManager] 已暂停抽取 (redis)")
+
+    def resume(self) -> None:
+        """继续抽取：清除暂停标志。"""
+        from core_engine.task_queue import set_extraction_paused
+        set_extraction_paused(False)
+        logger.info("[WorkerManager] 已继续抽取 (redis)")
+
+    def is_paused(self) -> bool:
+        from core_engine.task_queue import is_extraction_paused
+        return is_extraction_paused()
 
     def shutdown(self) -> None:
         pass  # RQ worker 进程独立管理
