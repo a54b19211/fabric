@@ -90,7 +90,7 @@ def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = Fa
             use_simple_fetch=site_cfg.get("use_simple_fetch", False),
         ).result()
 
-    parsed = route_webpage.fn(page_data)
+    parsed = route_webpage.fn(page_data, site_key=site_key)
     cookies = page_data.get("cookies", [])
     attachment_links = parsed.get("attachment_links", [])
     merge_attachments = site_cfg.get("merge_attachments", False)

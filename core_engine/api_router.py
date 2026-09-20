@@ -16,6 +16,7 @@ from typing import Iterator
 from loguru import logger
 
 from core_engine.api_client import iter_api_records
+from biz_rules.cleaners.field.date_format import normalize_date
 
 
 def _make_uuid(identifier: str) -> str:
@@ -84,7 +85,7 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
         doc_uuid = _make_uuid(f"{site_key}:{uid_src}")
 
         title = _get_nested(record, field_map.get("title", ""))
-        publish_date = _get_nested(record, field_map.get("publish_date", ""))
+        publish_date = normalize_date(_get_nested(record, field_map.get("publish_date", "")))
         summary = _get_nested(record, field_map.get("summary", ""))
         drug_name = _get_nested(record, field_map.get("drug_name", ""))
         manufacturer = _get_nested(record, field_map.get("manufacturer", ""))

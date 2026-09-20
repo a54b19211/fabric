@@ -15,6 +15,8 @@ from loguru import logger
 from prefect import task
 
 from config.crawler_settings import SITE_PROFILES
+from biz_rules.cleaners import normalize_whitespace, full_to_half
+from core_engine.lineage_tracer import snapshot, record_step
 
 # ── doc_type 映射 ──────────────────────────────────────────────────────────
 _DOC_TYPE_MAP = {
@@ -89,12 +91,18 @@ def _build_frontmatter(parsed_result: dict, doc_type: str, language: str) -> str
 
 
 def _default_clean(parsed_result: dict) -> dict:
-    """通用清洗：去除 markdown 中的多余空行和首尾空白。"""
+    """通用清洗：markdown 做保留换行的空白规范化，结构化字段值做全角转半角+空白规范化。"""
     md = parsed_result.get("markdown", "")
     if md:
-        md = re.sub(r'\n{3,}', '\n\n', md)
-        md = md.strip()
-        parsed_result["markdown"] = md
+        parsed_result["markdown"] = normalize_whitespace(md, preserve_newlines=True)
+
+    structured = parsed_result.get("structured_data")
+    if isinstance(structured, dict):
+        for key in list(structured.keys()):
+            val = structured[key]
+            if isinstance(val, str):
+                structured[key] = full_to_half(normalize_whitespace(val))
+
     return parsed_result
 
 
@@ -143,6 +151,9 @@ def clean_content(parsed_result: dict) -> dict:
     site_key = parsed_result.get("source_site", "")
     cleaner = SITE_PROFILES.get(site_key, {}).get("content_cleaner")
 
+    # 快照关键字段（清洗前），用于记录 clean 步骤血缘
+    before = snapshot(parsed_result)
+
     if cleaner:
         logger.debug(f"[Cleaner] 站点特解清洗: {site_key}")
         try:
@@ -155,5 +166,8 @@ def clean_content(parsed_result: dict) -> dict:
 
     # metadata 注入（所有站点统一执行）
     parsed_result = _inject_metadata(parsed_result)
+
+    # 记录 clean 步骤血缘（对比 before/after）
+    record_step(parsed_result, step="clean", before=before, op="clean")
 
     return parsed_result

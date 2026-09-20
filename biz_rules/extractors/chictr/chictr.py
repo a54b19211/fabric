@@ -1,6 +1,8 @@
 """中国临床试验注册中心（ChiCTR）详情页特解"""
 import re
 
+from biz_rules.cleaners import normalize_whitespace
+
 
 # 字段名到内部 key 的映射（中文标签 → key）
 _FIELD_MAP = {
@@ -39,7 +41,7 @@ _FIELD_MAP = {
 
 
 def _clean(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    return normalize_whitespace(text)
 
 
 def extract_chictr_detail(page) -> dict:

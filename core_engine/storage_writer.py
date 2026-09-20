@@ -82,6 +82,7 @@ def write_to_database(parsed_result: dict) -> dict:
             parent_uuid=parsed_result.get("parent_uuid", ""),
             crawl_timestamp=parsed_result.get("timestamp", ""),
         ),
+        lineage=parsed_result.get("lineage", {}),
         confidence=ConfidenceInfo(
             score=confidence_result["score"],
             reason=confidence_result["reason"],

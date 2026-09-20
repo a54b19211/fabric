@@ -11,6 +11,7 @@ from loguru import logger
 from prefect import task
 
 from config.settings import APP
+from core_engine.lineage_tracer import snapshot, record_step
 
 
 
@@ -36,6 +37,9 @@ def check_quality(parsed_result: dict) -> dict:
     markdown = parsed_result.get("markdown", "")
     structured = parsed_result.get("structured_data", {})
 
+    # 快照关键字段（质检前），用于记录 quality 步骤血缘
+    before = snapshot(parsed_result)
+
     # ---- 检查 1: Markdown 长度 ----
     if len(markdown) < APP.MIN_MARKDOWN_LENGTH:
         issues.append(
@@ -46,6 +50,14 @@ def check_quality(parsed_result: dict) -> dict:
     passed = len(issues) == 0
     parsed_result["quality_passed"] = passed
     parsed_result["quality_issues"] = issues
+
+    # 记录 quality 步骤血缘（含 quality_gate:passed/failed）
+    record_step(
+        parsed_result,
+        step="quality",
+        before=before,
+        op=f"quality_gate:{'passed' if passed else 'failed'}",
+    )
 
     if not passed:
         logger.warning(

@@ -1,6 +1,8 @@
 """国家药品监督管理局（NMPA）详情页特解"""
 import re
 
+from biz_rules.cleaners.field.date_format import normalize_date
+
 
 def _extract_summary(body_text: str, max_len: int = 200) -> str:
     """
@@ -49,9 +51,7 @@ def extract_nmpa_detail(page) -> dict:
     date_els = page.css("meta[name='PubDate']")
     if date_els:
         raw = date_els[0].attrib.get("content", "").strip()
-        m = re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw)
-        if m:
-            result["publish_date"] = m.group()
+        result["publish_date"] = normalize_date(raw)
 
     # 正文：div.wenzhang
     body_els = page.css("div.wenzhang")

@@ -8,6 +8,7 @@
   - Session 管理：使用 db/session.py 提供的 get_session()
 """
 import re
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -118,6 +119,7 @@ def upsert_document(envelope) -> None:
                 reviewer_note=envelope.reviewer_note or "",
                 doc_type=envelope.doc_type or "",
                 language=envelope.language or "",
+                lineage=json.dumps(envelope.lineage or {}, ensure_ascii=False),
                 weknora_sync_status="pending",
                 extraction_status="pending",
             )
@@ -133,6 +135,8 @@ def upsert_document(envelope) -> None:
             doc.parse_method = envelope.parse_method or doc.parse_method
             doc.doc_type = envelope.doc_type or doc.doc_type
             doc.language = envelope.language or doc.language
+            if envelope.lineage:
+                doc.lineage = json.dumps(envelope.lineage, ensure_ascii=False)
             logger.info(f"[DB] 更新文档: {envelope.uuid}")
             is_new = False
 

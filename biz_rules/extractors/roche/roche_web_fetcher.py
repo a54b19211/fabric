@@ -16,6 +16,8 @@ from typing import Iterator, Set
 from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
+from biz_rules.cleaners.field.date_format import normalize_date
+
 
 def _make_uuid(source_url: str) -> str:
     return str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"roche:{source_url}"))
@@ -34,8 +36,8 @@ def _clean_title(title: str) -> str:
     return cleaned.strip() if len(cleaned) >= 5 else title
 
 
-def _extract_date(text: str) -> str:
-    """从文本中提取 'Month DD, YYYY' 格式的日期。"""
+def _extract_raw_date(text: str) -> str:
+    """从文本中提取 'Month DD, YYYY' 格式的原始日期串（不标准化）。"""
     if not text:
         return ""
     m = re.search(
@@ -43,6 +45,11 @@ def _extract_date(text: str) -> str:
         text, flags=re.IGNORECASE
     )
     return m.group(0) if m else ""
+
+
+def _extract_date(text: str) -> str:
+    """从文本中提取 'Month DD, YYYY' 格式的日期并标准化为 YYYY-MM-DD。"""
+    return normalize_date(_extract_raw_date(text))
 
 
 def _is_non_html(url: str) -> bool:
@@ -96,13 +103,14 @@ def _parse_list_page(page, collected_urls: Set[str], year: int, page_num: int) -
         )
         pub_date = ""
         if date_el:
-            pub_date = date_el.attrib.get("datetime", "") or date_el.text or ""
+            pub_date = normalize_date(date_el.attrib.get("datetime", "") or date_el.text or "")
         if not pub_date:
             pub_date = _extract_date(item.get_all_text())
         if not pub_date:
-            pub_date = _extract_date(title)
-            if pub_date:
-                title = title.replace(pub_date, "").strip()
+            raw = _extract_raw_date(title)
+            if raw:
+                pub_date = normalize_date(raw)
+                title = title.replace(raw, "").strip()
 
         articles.append({"title": title, "source_url": href, "publish_date": pub_date})
 

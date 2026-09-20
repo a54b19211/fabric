@@ -191,6 +191,9 @@ class MetadataEnvelope(BaseModel):
     # 血缘信息
     provenance: ProvenanceInfo = Field(default_factory=ProvenanceInfo)
 
+    # 字段级血缘追踪（lineage_tracer 写入的 JSON 结构）
+    lineage: Dict[str, Any] = Field(default_factory=dict, description="字段级血缘追踪记录")
+
     # 置信度
     confidence: ConfidenceInfo = Field(default_factory=ConfidenceInfo)
 

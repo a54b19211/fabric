@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS documents (
     doc_type             TEXT        DEFAULT '',
     -- regulatory_notice/drug_recall/drug_label/clinical_trial/literature/industry_news/company_announcement/policy
     language             TEXT        DEFAULT '',   -- zh/en
+    lineage              TEXT        DEFAULT '',   -- 字段级血缘（JSON 字符串）
     weknora_sync_status  TEXT        DEFAULT 'pending',  -- pending/synced/failed
     extraction_status    TEXT        DEFAULT 'pending',  -- pending/processing/done/failed
     extraction_model     TEXT        DEFAULT '',

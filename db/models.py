@@ -47,6 +47,7 @@ class Document(Base):
     doc_type: Mapped[str] = mapped_column(Text, default="")
     # regulatory_notice/drug_recall/drug_label/clinical_trial/literature/industry_news/company_announcement/policy
     language: Mapped[str] = mapped_column(Text, default="")      # zh/en
+    lineage: Mapped[str] = mapped_column(Text, default="")       # 字段级血缘（JSON 字符串）
     weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")   # pending/synced/failed
     extraction_status: Mapped[str] = mapped_column(Text, default="pending")     # pending/queued/processing/done/failed/no_entity
     extraction_model: Mapped[str] = mapped_column(Text, default="")

@@ -1,6 +1,8 @@
 """Fierce Pharma 详情页特解"""
 import re
 
+from biz_rules.cleaners.field.date_format import normalize_date
+
 
 def extract_fiercepharma_detail(page) -> dict:
     result = {
@@ -30,16 +32,12 @@ def extract_fiercepharma_detail(page) -> dict:
     time_els = page.css("time[datetime]")
     if time_els:
         raw = time_els[0].attrib.get("datetime", "")
-        m = re.search(r"\d{4}-\d{2}-\d{2}", raw)
-        if m:
-            result["publish_date"] = m.group()
+        result["publish_date"] = normalize_date(raw)
     if not result["publish_date"]:
         pub_meta = page.css("meta[property='article:published_time']")
         if pub_meta:
             raw = pub_meta[0].attrib.get("content", "")
-            m = re.search(r"\d{4}-\d{2}-\d{2}", raw)
-            if m:
-                result["publish_date"] = m.group()
+            result["publish_date"] = normalize_date(raw)
 
     # 正文：article 标签，或 div.article-body / div.node-body
     body_el = None

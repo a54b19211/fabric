@@ -1,5 +1,5 @@
 """国家药品审评中心（CDE）详情页特解"""
-import re
+from biz_rules.cleaners.field.date_format import normalize_date
 
 
 def extract_cde_detail(page) -> dict:
@@ -24,13 +24,7 @@ def extract_cde_detail(page) -> dict:
     date_els = page.css("meta[name='PubDate']")
     if date_els:
         raw = date_els[0].attrib.get("content", "").strip()
-        m = re.match(r"(\d{4})(\d{2})(\d{2})$", raw)
-        if m:
-            result["publish_date"] = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-        else:
-            m2 = re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw)
-            if m2:
-                result["publish_date"] = m2.group()
+        result["publish_date"] = normalize_date(raw)
 
     # 正文：div.new_detail_content（新版）或 div.new_detail_content_old（旧版）
     body_els = page.css("div.new_detail_content") or page.css("div.new_detail_content_old")

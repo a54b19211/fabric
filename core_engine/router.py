@@ -21,6 +21,7 @@ from config.crawler_settings import SITE_PROFILES
 from biz_rules.cleaners import remove_extra_whitespace, clean_title
 from core_engine.cloud_api_client import mineru_pdf_to_markdown
 from core_engine.pdf_meta_sniffer import sniff_pdf_metadata
+from core_engine.lineage_tracer import snapshot, record_step
 
 
 def _identify_site(url: str) -> str:
@@ -33,16 +34,24 @@ def _identify_site(url: str) -> str:
     return ""
 
 
+def _record_parse_lineage(parsed_result: dict, op: str = "") -> None:
+    """在 parse 步骤结束时记录关键字段的血缘（输入为空，输出为解析结果）。"""
+    empty_before = {k: "" for k in snapshot(parsed_result)}
+    record_step(parsed_result, step="parse", before=empty_before, op=op)
+
+
 @task(name="route_webpage")
-def route_webpage(page_data: dict) -> dict:
+def route_webpage(page_data: dict, site_key: str = None) -> dict:
     """
     网页解析路由：先尝试特解，特解为空则走通解。
     只提取正文和基本元数据（title/publish_date），不调 LLM。
+
+    site_key 可选：由调用方显式传入，避免 URL 匹配错乱（如 phirda 子站）。
     """
     url = page_data["url"]
     page = page_data["page"]
     doc_uuid = page_data["uuid"]
-    site_key = _identify_site(url)
+    site_key = site_key or _identify_site(url)
 
     result = {
         "uuid": doc_uuid,
@@ -79,6 +88,7 @@ def route_webpage(page_data: dict) -> dict:
             }
             if extracted.get("extra"):
                 result["extra"] = extracted["extra"]
+            _record_parse_lineage(result, op="css_extract")
             return result
         logger.warning(f"[特解] 结果为空，降级通解: {url}")
 
@@ -116,6 +126,7 @@ def route_webpage(page_data: dict) -> dict:
         "summary": "",
     }
 
+    _record_parse_lineage(result, op="trafilatura")
     return result
 
 
@@ -167,4 +178,5 @@ def route_pdf(pdf_info: dict) -> dict:
         "summary": "",
     }
 
+    _record_parse_lineage(result, op="mineru")
     return result

@@ -2,22 +2,17 @@
 import re
 from typing import List, Dict
 
+from biz_rules.cleaners.field.date_format import normalize_date
+
 
 def _extract_date(page) -> str:
     for sel in ["time[datetime]", ".article-date", ".news-date", ".date"]:
         els = page.css(sel)
         if els:
             raw = els[0].attrib.get("datetime", "") or els[0].get_all_text(strip=True)
-            m = re.search(r"\d{4}-\d{2}-\d{2}", raw)
-            if m:
-                return m.group()
-            m2 = re.search(r"(\w+ \d{1,2},\s*\d{4})", raw)
-            if m2:
-                try:
-                    from datetime import datetime
-                    return datetime.strptime(m2.group(1), "%B %d, %Y").strftime("%Y-%m-%d")
-                except ValueError:
-                    pass
+            normalized = normalize_date(raw)
+            if normalized:
+                return normalized
     return ""
 
 

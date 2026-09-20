@@ -42,6 +42,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _extract_year(version: str) -> str:
+    """从版本号 "3.2026" 提取年份 "2026"，提取失败返回空字符串。"""
+    if not version:
+        return ""
+    m = re.search(r"(\d{4})", version)
+    return m.group(1) if m else ""
+
+
 def _parse_rendered_list(page, cat_num: str, category_name: str) -> list[dict]:
     """
     从已渲染的列表页中提取当前分类的指南条目。
@@ -214,6 +222,12 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
                     record["attachment_links"] = detail["attachment_links"]
                     record["parse_method"] = "nccn_css_extract"
                     record["structured_data"] = {
+                        "title": record["title"],
+                        "publish_date": _extract_year(record["version"]),
+                        "category": "临床指南",
+                        "summary": record["title"],
+                        "drug_name": "",
+                        "manufacturer": "",
                         "version": detail["version"],
                         "pdf_url": record["pdf_url"],
                         "category_name": item["category_name"],
@@ -259,6 +273,12 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
                     f"**Source**: {detail_url}\n"
                 )
                 record["structured_data"] = {
+                    "title": item["title"],
+                    "publish_date": _extract_year(item["version"]),
+                    "category": "临床指南",
+                    "summary": item["title"],
+                    "drug_name": "",
+                    "manufacturer": "",
                     "version": item["version"],
                     "category_name": item["category_name"],
                     "guideline_id": item["guideline_id"],

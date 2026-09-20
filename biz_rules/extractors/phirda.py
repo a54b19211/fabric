@@ -1,6 +1,8 @@
 """中国医药创新促进会（PhIRDA）详情页特解"""
 import re
 
+from biz_rules.cleaners.field.date_format import normalize_date
+
 
 def extract_phirda_detail(page) -> dict:
     result = {
@@ -20,9 +22,9 @@ def extract_phirda_detail(page) -> dict:
     # 日期：dl.xq_dl 里的 i 标签
     for i_el in page.css("dl.xq_dl i"):
         raw = i_el.get_all_text(strip=True)
-        m = re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw)
-        if m:
-            result["publish_date"] = m.group()
+        normalized = normalize_date(raw)
+        if normalized:
+            result["publish_date"] = normalized
             break
 
     # 正文：div.xq_con
