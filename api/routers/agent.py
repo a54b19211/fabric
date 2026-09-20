@@ -19,7 +19,7 @@ from db.agent_run_repo import (
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation, Document
-from api.schemas.response import PipelineOverviewResponse, PipelineStage
+from api.schemas.response import PipelineOverviewResponse, PipelineStage, EntityReviewStatsResponse
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -772,14 +772,24 @@ def get_pipeline_overview():
             "SELECT extraction_status, COUNT(*) FROM documents WHERE is_deleted=false GROUP BY extraction_status"
         )).fetchall()
         by = {r[0] or "unknown": r[1] for r in rows}
-        stages.append(PipelineStage(key="extraction", label="抽取", total=sum(by.values()), by_status=by))
+        site_rows = session.execute(text(
+            "SELECT source_site, COUNT(*) FROM documents WHERE is_deleted=false AND extraction_status='pending' "
+            "GROUP BY source_site ORDER BY COUNT(*) DESC"
+        )).fetchall()
+        by_site = {r[0] or "(空)": r[1] for r in site_rows}
+        stages.append(PipelineStage(key="extraction", label="抽取", total=sum(by.values()), by_status=by, by_site=by_site))
 
         # ② 实体审核
         rows = session.execute(text(
             "SELECT review_status, COUNT(*) FROM extracted_entities WHERE is_deleted=false GROUP BY review_status"
         )).fetchall()
         by = {r[0] or "unknown": r[1] for r in rows}
-        stages.append(PipelineStage(key="entity_review", label="实体审核", total=sum(by.values()), by_status=by))
+        site_rows = session.execute(text(
+            "SELECT source_site, COUNT(*) FROM extracted_entities WHERE is_deleted=false AND review_status='pending' "
+            "GROUP BY source_site ORDER BY COUNT(*) DESC"
+        )).fetchall()
+        by_site = {r[0] or "(空)": r[1] for r in site_rows}
+        stages.append(PipelineStage(key="entity_review", label="实体审核", total=sum(by.values()), by_status=by, by_site=by_site))
 
         # ③ 关系审核
         rows = session.execute(text(
@@ -824,3 +834,23 @@ def get_pipeline_overview():
         stages.append(PipelineStage(key="sync", label="同步", total=sum(by.values()), by_status=by))
 
     return PipelineOverviewResponse(stages=stages)
+
+
+@router.get("/entity-review-stats", response_model=EntityReviewStatsResponse)
+def get_entity_review_stats():
+    """实体审核存量统计：待审核实体数 + 已审核实体数。"""
+    from sqlalchemy import text
+
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail="数据库未连接")
+
+        pending = session.execute(text(
+            "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false AND review_status='pending'"
+        )).scalar() or 0
+        reviewed = session.execute(text(
+            "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false "
+            "AND review_status IN ('approved','auto_approved','rejected')"
+        )).scalar() or 0
+
+    return EntityReviewStatsResponse(pending_entities=pending, reviewed_entities=reviewed)

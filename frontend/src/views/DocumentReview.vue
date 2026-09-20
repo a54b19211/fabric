@@ -52,8 +52,8 @@
         <template #empty>
           <div class="table-empty">
             <el-icon :size="48" color="var(--el-text-color-placeholder)"><Document /></el-icon>
-            <p>暂无待审核文档</p>
-            <p class="table-empty-hint">所有文档中的实体和关系都已审核完成</p>
+            <p>暂无含待审实体的文档</p>
+            <p class="table-empty-hint">「待审核」= 文档内存在 review_status=pending 的实体/关系（非文档抽取状态）</p>
           </div>
         </template>
         <el-table-column type="selection" width="40" :selectable="isSelectable" />

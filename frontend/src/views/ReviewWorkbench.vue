@@ -103,8 +103,8 @@
                 <pre class="entity-data">{{ JSON.stringify(ent.entity_data, null, 2) }}</pre>
               </details>
               <div class="card-actions" v-if="ent.review_status === 'pending'">
-                <el-button size="small" type="success" @click="doApproveEntity(ent.id)">&#x2713; 通过</el-button>
-                <el-button v-if="ent.disambig?.status && ent.disambig.status !== 'new_entity'" size="small" type="primary" @click="doApproveEntityAsNew(ent.id)">新实体</el-button>
+                <el-button size="small" type="success" @click="doApproveEntity(ent.id)" title="链接到所选候选；未选候选则保留原消歧结果">&#x2713; 通过（链接候选）</el-button>
+                <el-button v-if="ent.disambig?.status && ent.disambig.status !== 'new_entity'" size="small" type="primary" @click="doApproveEntityAsNew(ent.id)" title="忽略候选，作为新实体写入字典">作为新实体通过</el-button>
                 <el-button size="small" type="danger" @click="doRejectEntity(ent.id)">&#x2717; 拒绝</el-button>
               </div>
               <el-tag v-else size="small" :type="ent.review_status === 'approved' ? 'success' : 'danger'">

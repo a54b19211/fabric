@@ -346,6 +346,7 @@ export interface PipelineStage {
   label: string
   total: number
   by_status: Record<string, number>
+  by_site?: Record<string, number>
 }
 
 export interface PipelineOverview {
@@ -354,3 +355,11 @@ export interface PipelineOverview {
 
 export const getPipelineOverview = () =>
   http.get<any, PipelineOverview>('/agent/pipeline/overview')
+
+export interface EntityReviewStats {
+  pending_entities: number
+  reviewed_entities: number
+}
+
+export const getEntityReviewStats = () =>
+  http.get<any, EntityReviewStats>('/agent/entity-review-stats')

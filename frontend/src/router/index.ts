@@ -47,7 +47,7 @@ const router = createRouter({
       path: '/entity-merge',
       name: 'EntityMerge',
       component: () => import('@/views/EntityMerge.vue'),
-      meta: { title: '实体消歧', description: '对已审核实体执行 Agent 消歧链接' },
+      meta: { title: '实体消歧', description: '精细消歧（Agent D）：对已审核实体执行 LLM 消歧链接；初步消歧（6step 规则+向量+精排）已在抽取时完成' },
     },
     {
       path: '/review/merge-workbench',
@@ -65,7 +65,7 @@ const router = createRouter({
       path: '/review/identity-merge',
       name: 'IdentityMergeProposals',
       component: () => import('@/views/IdentityMergeProposals.vue'),
-      meta: { title: '身份合并提案', description: '人工确认 Agent 生成的身份合并提案' },
+      meta: { title: '身份合并提案', description: '人工确认精细消歧（Agent D）生成的身份合并提案（链接/拒绝/新建）' },
     },
     {
       path: '/neo4j',

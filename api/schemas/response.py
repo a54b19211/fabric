@@ -1,6 +1,6 @@
 """响应体 Pydantic 模型"""
 from typing import Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ErrorResponse(BaseModel):
@@ -443,12 +443,19 @@ class MergeLogListResponse(BaseModel):
 # ── 流程总览 ─────────────────────────────────────────────────────────────
 
 class PipelineStage(BaseModel):
-    """流水线单个阶段：总量 + 各状态分布。"""
+    """流水线单个阶段：总量 + 各状态分布 + 站点分布（可选）。"""
     key: str
     label: str
     total: int
     by_status: dict[str, int]
+    by_site: dict[str, int] = Field(default_factory=dict)
 
 
 class PipelineOverviewResponse(BaseModel):
     stages: list[PipelineStage]
+
+
+class EntityReviewStatsResponse(BaseModel):
+    """实体审核存量统计。"""
+    pending_entities: int
+    reviewed_entities: int

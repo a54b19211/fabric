@@ -1,6 +1,27 @@
 <template>
   <div class="auto-review-dashboard">
+    <!-- 实体审核存量 -->
+    <el-row :gutter="16" class="stats-row">
+      <el-col :span="4">
+        <el-card shadow="hover" class="stat-card">
+          <div class="stat-value" style="color:#E6A23C">{{ entityReviewStats.pending_entities.toLocaleString() }}</div>
+          <div class="stat-label">待审核实体</div>
+          <div class="stat-hint">extracted_entities · review_status=pending</div>
+        </el-card>
+      </el-col>
+      <el-col :span="4">
+        <el-card shadow="hover" class="stat-card">
+          <div class="stat-value" style="color:#67C23A">{{ entityReviewStats.reviewed_entities.toLocaleString() }}</div>
+          <div class="stat-label">已审核实体</div>
+          <div class="stat-hint">approved + auto_approved + rejected</div>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <!-- 统计面板 -->
+    <div class="stats-note">
+      统计口径：全部 Agent 运行记录（实体审核 / 关系审核 / 冲突裁决 / 语义匹配），单位 = 条（一次运行 = 审核一条实体或关系）。其中「转人工」仅来自冲突裁决 / 语义匹配 Agent，实体审核不产生转人工；实体审核「通过」= 作为新实体通过（不链接已有字典），消歧由 Agent D 后续处理。
+    </div>
     <el-row :gutter="16" class="stats-row">
       <el-col :span="4" v-for="stat in statCards" :key="stat.label">
         <el-card shadow="hover" class="stat-card">
@@ -225,6 +246,7 @@ import { ElMessage } from 'element-plus'
 import {
   getAgentRuns, getAgentStats, getDocumentReviewRuns,
   triggerBatchAsync, triggerDocumentReviewAsync,
+  getEntityReviewStats,
   type AgentRunRecord, type DocumentRunSummary,
 } from '@/api/agent'
 import ReasoningTimeline from '@/components/ReasoningTimeline.vue'
@@ -264,6 +286,7 @@ const docRuns = ref<(DocumentRunSummary & { _expanded?: boolean })[]>([])
 
 // 统计
 const stats = ref<Record<string, Record<string, number>>>({})
+const entityReviewStats = ref({ pending_entities: 0, reviewed_entities: 0 })
 const statCards = reactive([
   { label: '总运行', value: 0, color: '#409EFF', key: 'total' },
   { label: '通过/批准', value: 0, color: '#67C23A', key: 'approved' },
@@ -363,6 +386,11 @@ async function loadStats() {
   } catch {
     // ignore
   }
+  try {
+    entityReviewStats.value = await getEntityReviewStats()
+  } catch {
+    // ignore
+  }
 }
 
 function updateStatCards() {
@@ -428,7 +456,7 @@ function agentTypeLabel(type: string) {
 
 function decisionLabel(d: string) {
   const map: Record<string, string> = {
-    approved: '通过',
+    approved: '通过（新建实体）',
     rejected: '拒绝',
     escalated: '转人工',
     keep_existing: '保留现有',
@@ -456,6 +484,13 @@ function decisionType(d: string) {
   margin: 0 auto;
 }
 
+.stats-note {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
 .stats-row {
   margin-bottom: 16px;
 }
@@ -473,6 +508,12 @@ function decisionType(d: string) {
   font-size: 13px;
   color: var(--el-text-color-secondary);
   margin-top: 4px;
+}
+
+.stat-hint {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+  margin-top: 2px;
 }
 
 .toolbar-card {
