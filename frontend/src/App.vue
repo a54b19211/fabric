@@ -15,30 +15,34 @@
         </span>
       </div>
 
-      <!-- 导航菜单 -->
+      <!-- 导航菜单（按工作流分组） -->
       <nav class="sidebar-nav">
-        <router-link
-          v-for="item in navItems"
-          :key="item.path"
-          :to="item.path"
-          class="nav-item"
-          :class="{ active: $route.path === item.path }"
-        >
-          <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
-          <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
-          <!-- 收起时悬浮 tooltip -->
-          <div v-if="collapsed" class="nav-tooltip">{{ item.label }}</div>
-        </router-link>
+        <template v-for="group in navGroups" :key="group.title">
+          <div v-if="!collapsed" class="nav-group-title">{{ group.title }}</div>
+          <div v-else class="nav-group-divider" />
+          <router-link
+            v-for="item in group.items"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :class="{ active: $route.path === item.path }"
+          >
+            <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+            <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
+            <!-- 收起时悬浮 tooltip -->
+            <div v-if="collapsed" class="nav-tooltip">{{ item.label }}</div>
+          </router-link>
+        </template>
       </nav>
     </aside>
 
     <!-- 主内容区：点击任意位置收起侧边栏 -->
     <div class="main-wrapper" @click="collapsed = true">
       <header class="top-header">
-        <el-breadcrumb separator="/">
-          <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
-          <el-breadcrumb-item>{{ $route.meta.title }}</el-breadcrumb-item>
-        </el-breadcrumb>
+        <div class="header-title-row">
+          <h1 class="page-title">{{ $route.meta.title }}</h1>
+          <p class="page-desc">{{ $route.meta.description }}</p>
+        </div>
       </header>
       <main class="main-content">
         <router-view />
@@ -49,22 +53,66 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Document, Connection, Link, Setting, Cpu, Select } from '@element-plus/icons-vue'
+import {
+  Document,
+  Connection,
+  Link,
+  Setting,
+  Cpu,
+  Select,
+  Aim,
+  Switch,
+  FolderOpened,
+  Share,
+  DataAnalysis,
+} from '@element-plus/icons-vue'
 
 // 默认收起，鼠标移入侧边栏展开
 const collapsed = ref(true)
 
-const navItems = [
-  { path: '/documents',              label: '文档列表',     icon: Document },
-  { path: '/graph-review',           label: '图谱审核',     icon: Connection },
-  { path: '/entity-merge',           label: '实体消歧',     icon: Cpu },
-  { path: '/review/merge-workbench', label: '实体身份合并', icon: Link },
-  { path: '/review/field-conflict',  label: '属性冲突处理', icon: Setting },
-  { path: '/review/identity-merge', label: '身份合并提案', icon: Link },
-  { path: '/neo4j',                  label: 'Neo4j 图推送', icon: Connection },
-  { path: '/weknora',                label: 'WeKnora 同步', icon: Connection },
-  { path: '/agent',                  label: '自动审核',     icon: Cpu },
-  { path: '/agent/document-review', label: '文档审核',     icon: Select },
+// 导航按工作流分组：总览 → 采集 → 审核 → 消歧 → 归并 → 同步
+const navGroups = [
+  {
+    title: '总览',
+    items: [
+      { path: '/overview', label: '数据面板', icon: DataAnalysis },
+    ],
+  },
+  {
+    title: '数据采集',
+    items: [
+      { path: '/documents', label: '文档列表', icon: Document },
+    ],
+  },
+  {
+    title: '实体审核',
+    items: [
+      { path: '/agent', label: '自动审核', icon: Cpu },
+      { path: '/agent/document-review', label: '文档审核', icon: Select },
+      { path: '/graph-review', label: '图谱审核', icon: Connection },
+    ],
+  },
+  {
+    title: '消歧链接',
+    items: [
+      { path: '/entity-merge', label: '实体消歧', icon: Aim },
+      { path: '/review/identity-merge', label: '身份合并提案', icon: Link },
+    ],
+  },
+  {
+    title: '实体归并',
+    items: [
+      { path: '/review/merge-workbench', label: '实体身份合并', icon: Switch },
+      { path: '/review/field-conflict', label: '属性冲突处理', icon: Setting },
+    ],
+  },
+  {
+    title: '同步',
+    items: [
+      { path: '/weknora', label: 'WeKnora 同步', icon: FolderOpened },
+      { path: '/neo4j', label: 'Neo4j 图推送', icon: Share },
+    ],
+  },
 ]
 </script>
 
@@ -81,8 +129,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
 /* ── 侧边栏 ── */
 .sidebar {
-  width: 200px;
-  min-width: 200px;
+  width: 210px;
+  min-width: 210px;
   background: var(--dp-sidebar-bg);
   display: flex;
   flex-direction: column;
@@ -131,26 +179,44 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 /* 导航 */
 .sidebar-nav {
   flex: 1;
-  padding: 16px 10px;
+  padding: 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.nav-group-title {
+  font-size: 11px;
+  color: var(--dp-sidebar-nav-inactive);
+  opacity: 0.7;
+  padding: 10px 12px 4px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.nav-group-divider {
+  height: 1px;
+  margin: 6px 12px;
+  background: var(--dp-sidebar-border);
+  flex-shrink: 0;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 13px 14px;
+  padding: 11px 14px;
   border-radius: var(--dp-radius-md);
   color: var(--dp-sidebar-nav-inactive);
   text-decoration: none;
-  font-size: 15px;
+  font-size: 14px;
   white-space: nowrap;
   transition: background 0.15s, color 0.15s;
   position: relative;
   cursor: pointer;
+  flex-shrink: 0;
 }
 .nav-item:hover {
   background: var(--dp-sidebar-nav-hover);
@@ -162,13 +228,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 }
 
 .nav-icon {
-  font-size: 20px;
+  font-size: 18px;
   flex-shrink: 0;
 }
 .nav-label {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 /* 收起时的悬浮 tooltip */
@@ -210,13 +276,30 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 }
 
 .top-header {
-  height: 56px;
+  height: auto;
+  min-height: 68px;
   background: var(--dp-card);
   border-bottom: 1px solid var(--dp-border);
   display: flex;
   align-items: center;
-  padding: 0 24px;
+  padding: 12px 24px;
   flex-shrink: 0;
+}
+.header-title-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.page-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--dp-text-regular);
+  line-height: 1.2;
+}
+.page-desc {
+  font-size: 13px;
+  color: var(--dp-text-secondary);
+  line-height: 1.3;
 }
 
 .main-content {

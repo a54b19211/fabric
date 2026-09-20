@@ -504,6 +504,12 @@ def get_clinical_trial_extraction_prompt(text: str) -> str:
 - ChiCTR：干预措施为「手术/针灸/推拿/康复/运动/心理治疗/放疗/器械」等非药物手段 → 不是 Drug，跳过；仅「化学药/生物制品/中药」抽为 Drug
 - conditionsModule.conditions（或 ChiCTR 的「研究疾病/目标疾病」）是疾病/适应症，抽为 Indication，**严禁抽成 Drug**
 - 忽略文档头部 frontmatter 的 drug_name 字段和正文「研究涉及药物/干预」引导句——它可能是上游映射错误（疾病被错标为药物），一律以原始 JSON 的 interventions.type 和 conditions 为准
+
+### 疫苗/生物制品边界（防疾病名误抽为 Drug）
+- 疫苗试验中，conditions 里的疾病名（如 Measles / Mumps / Rubella / Influenza / COVID-19 等）是「疫苗预防的疾病」，必须抽为 Indication，**严禁抽成 Drug**
+- 只有干预本身（interventions 里 type=BIOLOGICAL 且 name 含 Vaccine/疫苗 的干预，如 MMR Vaccine、Influenza Vaccine）才抽为 Drug
+- 判断关键：以 interventions 的 name 为准——干预名含 Vaccine/疫苗 → Drug；conditions 里的裸疾病名 → Indication
+- 疫苗接种、接种程序本身不是实体，跳过；「MMR Vaccination」这类表述若指疫苗产品可归 Drug，若指接种动作则跳过
 - Company：申办方/合作方/CRO，name 用官方全称
 - Indication：目标疾病/适应症，使用标准疾病名（非自定义缩写）
 - 不良事件（Adverse Events / Serious Adverse Events）列表中的疾病/症状 → 抽 Indication 实体（疾病本体），关系 Drug -[CAUSES]-> Indication；禁止把这些疾病/症状抽成 SafetyEvent

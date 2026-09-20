@@ -438,3 +438,17 @@ class MergeLogItem(BaseModel):
 class MergeLogListResponse(BaseModel):
     total: int
     items: list[MergeLogItem]
+
+
+# ── 流程总览 ─────────────────────────────────────────────────────────────
+
+class PipelineStage(BaseModel):
+    """流水线单个阶段：总量 + 各状态分布。"""
+    key: str
+    label: str
+    total: int
+    by_status: dict[str, int]
+
+
+class PipelineOverviewResponse(BaseModel):
+    stages: list[PipelineStage]

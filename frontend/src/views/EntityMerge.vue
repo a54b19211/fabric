@@ -6,7 +6,10 @@
         <div class="stat-value">{{ stats.total }}</div>
         <div class="stat-label">可消歧实体</div>
       </div>
-      <div class="stat-card" v-for="(count, type) in statsTopTypes" :key="type">
+      <div class="stat-card" v-for="(count, type) in statsTopTypes" :key="type"
+           :class="{ 'type-active': filters.entity_type === type }"
+           style="cursor:pointer"
+           @click="toggleTypeFilter(type)">
         <div class="stat-value">{{ count }}</div>
         <div class="stat-label">{{ type }}</div>
       </div>
@@ -554,6 +557,11 @@ function toggleSourceFilter(site: string) {
   applyFilters()
 }
 
+function toggleTypeFilter(type: string) {
+  filters.entity_type = filters.entity_type === type ? '' : type
+  applyFilters()
+}
+
 function onPageSizeChange() {
   page.value = 1
   loadCandidates()
@@ -781,6 +789,8 @@ onUnmounted(() => {
 }
 .source-label { font-size: 13px; color: var(--dp-text-secondary); margin-right: 4px; }
 .source-active { border-color: var(--dp-primary) !important; color: var(--dp-primary) !important; }
+.type-active { border-color: var(--dp-primary) !important; }
+.type-active .stat-value, .type-active .stat-label { color: var(--dp-primary); }
 
 /* 筛选栏 */
 .filter-bar {

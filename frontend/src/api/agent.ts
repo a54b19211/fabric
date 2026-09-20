@@ -338,3 +338,19 @@ export function streamEntityMerge(
 
   return () => es.close()
 }
+
+// ── 流程总览 ───────────────────────────────────────────
+
+export interface PipelineStage {
+  key: string
+  label: string
+  total: number
+  by_status: Record<string, number>
+}
+
+export interface PipelineOverview {
+  stages: PipelineStage[]
+}
+
+export const getPipelineOverview = () =>
+  http.get<any, PipelineOverview>('/agent/pipeline/overview')
