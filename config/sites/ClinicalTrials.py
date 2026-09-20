@@ -29,10 +29,11 @@ CONFIG = {
 
     "field_map": {
         "title": "protocolSection.identificationModule.briefTitle",
-        "publish_date": "protocolSection.statusModule.startDateStruct.date",
+        "publish_date": "protocolSection.statusModule.lastUpdatePostDateStruct.date",
         "summary": "protocolSection.descriptionModule.briefSummary",
-        "drug_name": "protocolSection.conditionsModule.conditions",
-        "manufacturer": "__const__:ClinicalTrials.gov",  # 常量
+        "drug_name": "drug_names",
+        "manufacturer": "",
+        "category": "__const__:临床试验",
     },
 
     # 可选：如果需要更详细的字段提取

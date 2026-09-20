@@ -7,6 +7,27 @@ import requests
 from typing import Iterator, Dict
 from loguru import logger
 
+# 判定为「药物」的干预类型（其余 PROCEDURE/DEVICE/BEHAVIORAL 等非药物，跳过）
+_DRUG_INTERVENTION_TYPES = {"DRUG", "BIOLOGICAL", "COMBINATION_PRODUCT"}
+
+
+def _extract_drug_names(study: Dict) -> str:
+    """
+    从 armsInterventionsModule.interventions 中按 type 过滤出药物干预，
+    返回以分号拼接的药物名称字符串。
+    """
+    interventions = (
+        study.get("protocolSection", {})
+        .get("armsInterventionsModule", {})
+        .get("interventions", [])
+    )
+    names = [
+        i.get("name", "").strip()
+        for i in interventions
+        if i.get("type") in _DRUG_INTERVENTION_TYPES and i.get("name")
+    ]
+    return "; ".join(names)
+
 
 def fetch_clinicaltrials(api_config: Dict) -> Iterator[Dict]:
     """
@@ -54,6 +75,8 @@ def fetch_clinicaltrials(api_config: Dict) -> Iterator[Dict]:
 
         for study in studies:
             total_records += 1
+            # 预解析：把药物干预名提取到顶层字段，供 field_map 直接映射
+            study["drug_names"] = _extract_drug_names(study)
             yield study
 
         logger.info(f"[ClinicalTrials] 已拉取 {total_records} 条记录")
