@@ -346,7 +346,9 @@ export interface PipelineStage {
   label: string
   total: number
   by_status: Record<string, number>
-  by_site?: Record<string, number>
+  by_site?: Record<string, Record<string, number>>
+  by_match_step?: Record<string, number>
+  by_dict?: Record<string, number>
 }
 
 export interface PipelineOverview {

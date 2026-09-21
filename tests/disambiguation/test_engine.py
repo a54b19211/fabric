@@ -36,8 +36,8 @@ class TestDisambiguateEntities:
         assert entities[0]["dict_id"] == 42
         assert entities[0]["confidence_score"] == 0.95
 
-    def test_other_step_does_not_set_dict_id(self):
-        # Step1/3/5 即使命中，也不写 dict_id
+    def test_step1_strong_id_sets_dict_id(self):
+        # Step1 强 ID 匹配（确定性唯一 ID）也落锤 dict_id
         result = DisambiguationResult(
             status=STATUS_AUTO_MATCHED,
             dict_id=7,
@@ -48,10 +48,26 @@ class TestDisambiguateEntities:
         )
         with patch("disambiguation.engine.disambiguate", return_value=result):
             entities = disambiguate_entities([_entity()])
+        assert entities[0]["dict_id"] == 7
+        assert entities[0]["confidence_score"] == 0.99
+        assert entities[0]["_disambig"]["match_step"] == "step1_strong_id"
+
+    def test_step5_reranker_does_not_set_dict_id(self):
+        # Step3/5 即使命中，也不写 dict_id（只有 Step1 强 ID + Step2 精确匹配落锤）
+        result = DisambiguationResult(
+            status=STATUS_CANDIDATE_MATCHED,
+            dict_id=7,
+            confidence=0.9,
+            match_step="step5_reranker",
+            reason="reranker top1",
+            candidates=[CandidateEntity(dict_id=7, name="候选", match_type="reranker")],
+        )
+        with patch("disambiguation.engine.disambiguate", return_value=result):
+            entities = disambiguate_entities([_entity()])
         assert entities[0]["dict_id"] is None
         # 但结果仍记录在 _disambig 供前端展示
-        assert entities[0]["_disambig"]["status"] == STATUS_AUTO_MATCHED
-        assert entities[0]["_disambig"]["match_step"] == "step1_strong_id"
+        assert entities[0]["_disambig"]["status"] == STATUS_CANDIDATE_MATCHED
+        assert entities[0]["_disambig"]["match_step"] == "step5_reranker"
         assert entities[0]["_disambig"]["candidates"][0]["dict_id"] == 7
 
     def test_empty_name_skipped(self):

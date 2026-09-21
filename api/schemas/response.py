@@ -443,12 +443,14 @@ class MergeLogListResponse(BaseModel):
 # ── 流程总览 ─────────────────────────────────────────────────────────────
 
 class PipelineStage(BaseModel):
-    """流水线单个阶段：总量 + 各状态分布 + 站点分布（可选）。"""
+    """流水线单个阶段：总量 + 各状态分布 + 各状态站点分布 + 消歧 match_step 分布 + 字典现状（可选）。"""
     key: str
     label: str
     total: int
     by_status: dict[str, int]
-    by_site: dict[str, int] = Field(default_factory=dict)
+    by_site: dict[str, dict[str, int]] = Field(default_factory=dict)
+    by_match_step: dict[str, int] = Field(default_factory=dict)
+    by_dict: dict[str, int] = Field(default_factory=dict)
 
 
 class PipelineOverviewResponse(BaseModel):

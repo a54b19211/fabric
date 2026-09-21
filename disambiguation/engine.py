@@ -208,9 +208,9 @@ def disambiguate_entities(entities: list[dict], session=None) -> list[dict]:
                 session=session,
             )
 
-            # 只有 Step 2 别名精确匹配（名称 + entity_type 完全对上）才设定 dict_id
-            # Step 1/3/5 的匹配结果只记入 _disambig.candidates，不直接关联
-            if result.match_step == "step2_exact_alias":
+            # Step 2 别名精确匹配 + Step 1 强 ID 匹配（确定性唯一 ID）才设定 dict_id
+            # Step 3/5 的匹配结果只记入 _disambig.candidates，不直接关联
+            if result.match_step in ("step2_exact_alias", "step1_strong_id"):
                 ent["dict_id"] = result.dict_id
                 logger.info(
                     f"[Disambiguation] dict_id SET: '{name}' type={entity_type} "

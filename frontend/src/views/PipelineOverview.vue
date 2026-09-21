@@ -22,20 +22,47 @@
             </div>
             <span class="bar-count">{{ formatNum(count) }}</span>
             <el-icon
-              v-if="stage.by_site && Object.keys(stage.by_site).length && status === 'pending'"
+              v-if="siteData(stage, status) && Object.keys(siteData(stage, status)!).length"
               class="toggle-arrow"
-              :class="{ expanded: expandedSite === stage.key }"
-              @click="toggleSite(stage.key)"
+              :class="{ expanded: isExpanded(stage.key, status) }"
+              @click="toggleSite(stage.key, status)"
             >
               <ArrowDown />
             </el-icon>
           </div>
         </div>
 
-        <div v-if="expandedSite === stage.key && stage.by_site" class="site-panel">
-          <div class="pie" :style="{ background: conicGradient(stage.by_site) }" />
+        <div v-if="stage.by_match_step && Object.keys(stage.by_match_step).length" class="match-step-panel">
+          <div class="match-step-title">消歧匹配分布</div>
+          <div v-for="(count, step) in stage.by_match_step" :key="step" class="bar-row">
+            <span class="bar-label">{{ matchStepLabel(step) }}</span>
+            <div class="bar-track">
+              <div class="bar-fill" :style="{ width: barWidth(count, stage.total), background: matchStepColor(step) }" />
+            </div>
+            <span class="bar-count">{{ formatNum(count) }}</span>
+          </div>
+        </div>
+
+        <div v-if="stage.by_dict && Object.keys(stage.by_dict).length" class="match-step-panel">
+          <div class="match-step-title">字典现状</div>
+          <div v-for="(count, key) in stage.by_dict" :key="key" class="bar-row">
+            <span class="bar-label">
+              {{ dictLabel(key) }}
+              <el-tooltip v-if="key === 'dict_duplicate_groups'" trigger="click" placement="top" :content="DUPLICATE_EXPLAIN" :show-after="0">
+                <el-icon class="info-icon"><WarningFilled /></el-icon>
+              </el-tooltip>
+            </span>
+            <div class="bar-track">
+              <div class="bar-fill" :style="{ width: barWidth(count, dictTotal(stage.by_dict)), background: dictColor(key) }" />
+            </div>
+            <span class="bar-count">{{ formatNum(count) }}</span>
+          </div>
+        </div>
+
+        <div v-if="expandedSite && expandedSite.key === stage.key && siteData(stage, expandedSite.status)" class="site-panel">
+          <div class="pie" :style="{ background: conicGradient(siteData(stage, expandedSite.status)!) }" />
           <div class="site-legend">
-            <div v-for="(entry, idx) in siteEntries(stage.by_site)" :key="entry[0]" class="legend-row">
+            <div v-for="(entry, idx) in siteEntries(siteData(stage, expandedSite.status)!)" :key="entry[0]" class="legend-row">
               <span class="legend-swatch" :style="{ background: siteColor(idx) }" />
               <span class="legend-label">{{ entry[0] }}</span>
               <span class="legend-count">{{ formatNum(entry[1]) }}</span>
@@ -49,12 +76,12 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ArrowDown } from '@element-plus/icons-vue'
+import { ArrowDown, WarningFilled } from '@element-plus/icons-vue'
 import { getPipelineOverview, type PipelineStage } from '@/api/agent'
 
 const stages = ref<PipelineStage[]>([])
 const loading = ref(false)
-const expandedSite = ref<string | null>(null)
+const expandedSite = ref<{ key: string; status: string } | null>(null)
 
 const STATUS_LABELS: Record<string, string> = {
   pending: '待处理',
@@ -73,12 +100,15 @@ const STATUS_LABELS: Record<string, string> = {
   proposal_approved: '提案通过',
   proposal_rejected: '提案拒绝',
   conflict_pending: '冲突待处理',
-  weknora_pending: '待同步',
-  weknora_synced: '已同步',
-  weknora_failed: '同步失败',
-  graph_pending: '待推送',
-  graph_pushed: '已推送',
-  graph_failed: '推送失败',
+  weknora_pending: '文档待同步',
+  weknora_synced: '文档已同步',
+  weknora_failed: '文档同步失败',
+  graph_entity_pending: '实体待推送',
+  graph_entity_pushed: '实体已推送',
+  graph_entity_failed: '实体推送失败',
+  graph_relation_pending: '关系待推送',
+  graph_relation_pushed: '关系已推送',
+  graph_relation_failed: '关系推送失败',
 }
 
 const SITE_COLORS = [
@@ -105,6 +135,50 @@ function statusColor(key: string) {
   return 'var(--dp-primary)'
 }
 
+const MATCH_STEP_LABELS: Record<string, string> = {
+  step1_strong_id: '强ID匹配',
+  step2_exact_alias: '精确匹配',
+  step3_rule: '类型规则',
+  step5_reranker: 'Reranker精排',
+  step5_reranker_error: '精排失败',
+  step_none: '无候选',
+  none: '无候选',
+}
+
+function matchStepLabel(key: string) {
+  return MATCH_STEP_LABELS[key] ?? key
+}
+
+function matchStepColor(key: string) {
+  if (key === 'step1_strong_id' || key === 'step2_exact_alias') return 'var(--dp-success, #67c23a)'
+  if (key === 'step3_rule') return 'var(--dp-warning)'
+  if (key === 'step5_reranker') return 'var(--dp-primary)'
+  if (key === 'step5_reranker_error') return 'var(--dp-danger)'
+  return 'var(--dp-text-secondary, #909399)'
+}
+
+const DICT_LABELS: Record<string, string> = {
+  dict_verified: '字典实体(PrimeKG)',
+  dict_unverified: '字典实体(抽取)',
+  dict_duplicate_groups: '强ID重复组',
+}
+
+function dictLabel(key: string) {
+  return DICT_LABELS[key] ?? key
+}
+
+function dictColor(key: string) {
+  if (key === 'dict_duplicate_groups') return 'var(--dp-danger)'
+  if (key === 'dict_verified') return 'var(--dp-success, #67c23a)'
+  return 'var(--dp-primary)'
+}
+
+function dictTotal(byDict: Record<string, number>) {
+  return (byDict.dict_verified || 0) + (byDict.dict_unverified || 0)
+}
+
+const DUPLICATE_EXPLAIN = '强ID重复组：同一个权威唯一标识（如 NCT 注册号、CAS 号、股票代码、批准文号）在字典中被拆成了多个实体。说明消歧时本应链接到同一字典实体的记录被误判成了新实体，导致字典层出现重复，需要归并处理。'
+
 function siteColor(index: number) {
   return SITE_COLORS[index % SITE_COLORS.length]
 }
@@ -127,8 +201,20 @@ function conicGradient(bySite: Record<string, number>) {
   return `conic-gradient(${stops.join(', ')})`
 }
 
-function toggleSite(key: string) {
-  expandedSite.value = expandedSite.value === key ? null : key
+function siteData(stage: PipelineStage, status: string): Record<string, number> | null {
+  return stage.by_site?.[status] ?? null
+}
+
+function isExpanded(key: string, status: string) {
+  return expandedSite.value?.key === key && expandedSite.value?.status === status
+}
+
+function toggleSite(key: string, status: string) {
+  if (expandedSite.value?.key === key && expandedSite.value?.status === status) {
+    expandedSite.value = null
+  } else {
+    expandedSite.value = { key, status }
+  }
 }
 
 function barWidth(count: number, total: number) {
@@ -223,11 +309,25 @@ onMounted(load)
 }
 
 .bar-label {
-  width: 72px;
+  width: 110px;
   font-size: 12px;
   color: var(--dp-text-secondary);
   text-align: right;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+}
+
+.info-icon {
+  font-size: 13px;
+  color: var(--dp-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.info-icon:hover {
+  color: var(--dp-warning);
 }
 
 .bar-track {
@@ -264,6 +364,21 @@ onMounted(load)
 }
 .toggle-arrow.expanded {
   transform: rotate(180deg);
+}
+
+.match-step-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--dp-border);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.match-step-title {
+  font-size: 12px;
+  color: var(--dp-text-secondary);
+  font-weight: 600;
 }
 
 .site-panel {

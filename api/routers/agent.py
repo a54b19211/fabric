@@ -773,10 +773,13 @@ def get_pipeline_overview():
         )).fetchall()
         by = {r[0] or "unknown": r[1] for r in rows}
         site_rows = session.execute(text(
-            "SELECT source_site, COUNT(*) FROM documents WHERE is_deleted=false AND extraction_status='pending' "
-            "GROUP BY source_site ORDER BY COUNT(*) DESC"
+            "SELECT extraction_status, source_site, COUNT(*) FROM documents WHERE is_deleted=false "
+            "AND extraction_status IN ('pending','done') "
+            "GROUP BY extraction_status, source_site ORDER BY COUNT(*) DESC"
         )).fetchall()
-        by_site = {r[0] or "(空)": r[1] for r in site_rows}
+        by_site: dict[str, dict[str, int]] = {}
+        for st, site, cnt in site_rows:
+            by_site.setdefault(st, {})[site or "(空)"] = cnt
         stages.append(PipelineStage(key="extraction", label="抽取", total=sum(by.values()), by_status=by, by_site=by_site))
 
         # ② 实体审核
@@ -788,7 +791,7 @@ def get_pipeline_overview():
             "SELECT source_site, COUNT(*) FROM extracted_entities WHERE is_deleted=false AND review_status='pending' "
             "GROUP BY source_site ORDER BY COUNT(*) DESC"
         )).fetchall()
-        by_site = {r[0] or "(空)": r[1] for r in site_rows}
+        by_site = {"pending": {r[0] or "(空)": r[1] for r in site_rows}}
         stages.append(PipelineStage(key="entity_review", label="实体审核", total=sum(by.values()), by_status=by, by_site=by_site))
 
         # ③ 关系审核
@@ -805,9 +808,15 @@ def get_pipeline_overview():
         unlinked = session.execute(text(
             "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false AND dict_id IS NULL"
         )).scalar() or 0
+        match_rows = session.execute(text(
+            "SELECT entity_data->'_disambig'->>'match_step' AS ms, COUNT(*) "
+            "FROM extracted_entities WHERE is_deleted=false GROUP BY ms"
+        )).fetchall()
+        by_match_step = {r[0] or "none": r[1] for r in match_rows}
         stages.append(PipelineStage(
             key="disambiguation", label="消歧链接", total=linked + unlinked,
             by_status={"linked": linked, "unlinked": unlinked},
+            by_match_step=by_match_step,
         ))
 
         # ⑤ 归并
@@ -819,18 +828,46 @@ def get_pipeline_overview():
         )).scalar() or 0
         by = {f"proposal_{r[0] or 'unknown'}": r[1] for r in prop_rows}
         by["conflict_pending"] = conflicts
-        stages.append(PipelineStage(key="merge", label="归并", total=sum(by.values()), by_status=by))
 
-        # ⑥ 同步
+        # 字典现状（entity_dict 总量 + 强 ID 重复组数）
+        dict_rows = session.execute(text(
+            "SELECT is_verified, COUNT(*) FROM entity_dict WHERE is_deleted=false GROUP BY is_verified"
+        )).fetchall()
+        by_dict = {("dict_verified" if r[0] else "dict_unverified"): r[1] for r in dict_rows}
+        dup_groups = session.execute(text(
+            "SELECT COUNT(*) FROM ("
+            "  SELECT entity_type, strong_id FROM ("
+            "    SELECT entity_type, COALESCE("
+            "      external_ids->>'trial_id', external_ids->>'cas_number',"
+            "      external_ids->>'stock_code', external_ids->>'gene_symbol',"
+            "      external_ids->>'approval_number', external_ids->>'doc_number'"
+            "    ) AS strong_id FROM entity_dict WHERE is_deleted=false"
+            "  ) x WHERE strong_id IS NOT NULL AND strong_id != ''"
+            "  GROUP BY entity_type, strong_id HAVING COUNT(*) > 1"
+            ") t"
+        )).scalar() or 0
+        by_dict["dict_duplicate_groups"] = dup_groups
+
+        stages.append(PipelineStage(
+            key="merge", label="归并", total=sum(by.values()),
+            by_status=by, by_dict=by_dict,
+        ))
+
+        # ⑥ 同步（文档同步 + 实体推送 + 关系推送）
         wk_rows = session.execute(text(
             "SELECT weknora_sync_status, COUNT(*) FROM documents WHERE is_deleted=false GROUP BY weknora_sync_status"
         )).fetchall()
-        g_rows = session.execute(text(
+        ent_rows = session.execute(text(
             "SELECT weknora_graph_status, COUNT(*) FROM extracted_entities WHERE is_deleted=false GROUP BY weknora_graph_status"
         )).fetchall()
+        rel_rows = session.execute(text(
+            "SELECT weknora_graph_status, COUNT(*) FROM entity_relations WHERE is_deleted=false GROUP BY weknora_graph_status"
+        )).fetchall()
         by = {f"weknora_{r[0] or 'unknown'}": r[1] for r in wk_rows}
-        for r in g_rows:
-            by[f"graph_{r[0] or 'unknown'}"] = r[1]
+        for r in ent_rows:
+            by[f"graph_entity_{r[0] or 'unknown'}"] = r[1]
+        for r in rel_rows:
+            by[f"graph_relation_{r[0] or 'unknown'}"] = r[1]
         stages.append(PipelineStage(key="sync", label="同步", total=sum(by.values()), by_status=by))
 
     return PipelineOverviewResponse(stages=stages)
