@@ -60,6 +60,21 @@ def remove_html_tags(text: str) -> str:
 from biz_rules.cleaners.field.date_format import normalize_date  # noqa: E402
 
 
+def normalize_publish_date(parsed_result: dict) -> dict:
+    """标准化 publish_date（顶层 + structured_data 同步），返回原 parsed_result。
+
+    无法解析时保留原值，不做覆盖（避免数据丢失）。
+    """
+    raw = parsed_result.get("publish_date", "")
+    normalized = normalize_date(raw)
+    if normalized:
+        parsed_result["publish_date"] = normalized
+        structured = parsed_result.get("structured_data")
+        if isinstance(structured, dict):
+            structured["publish_date"] = normalized
+    return parsed_result
+
+
 def clean_title(title: str) -> str:
     title = remove_html_tags(title)
     title = normalize_whitespace(title)
@@ -83,6 +98,7 @@ __all__ = [
     "remove_extra_whitespace",
     "remove_html_tags",
     "normalize_date",
+    "normalize_publish_date",
     "clean_title",
     "truncate_text",
     "clean_fiercepharma",

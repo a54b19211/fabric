@@ -17,6 +17,7 @@ from loguru import logger
 
 from core_engine.api_client import iter_api_records
 from biz_rules.cleaners.field.date_format import normalize_date
+from core_engine.lineage_tracer import snapshot, record_step
 
 
 def _make_uuid(identifier: str) -> str:
@@ -25,6 +26,12 @@ def _make_uuid(identifier: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _record_parse_lineage(parsed_result: dict, op: str = "") -> None:
+    """在 parse 步骤结束时记录关键字段的血缘（输入为空，输出为解析结果）。"""
+    empty_before = {k: "" for k in snapshot(parsed_result)}
+    record_step(parsed_result, step="parse", before=empty_before, op=op)
 
 
 def _get_nested(record: dict, dotted_key: str) -> str:
@@ -46,6 +53,67 @@ def _get_nested(record: dict, dotted_key: str) -> str:
         else:
             return ""
     return str(val) if val else ""
+
+
+def _extract_extra_value(record: dict, spec) -> object:
+    """按 extra_fields 的规格从原始记录取值。
+
+    支持三种写法：
+      - "a.b.c"：普通点号路径，返回字符串（取不到返回 ""）
+      - {"path": "a.b.c", "type": "list"}：路径指向列表，返回 List[str]
+      - {"path": "a.b.c", "type": "list", "key": "name"}：路径指向 dict 列表，取每项的 key 字段
+      - {"path": "a.b.c", "type": "int"}：解析为整数，失败返回 0
+    """
+    if isinstance(spec, dict):
+        path = spec.get("path", "")
+        vtype = spec.get("type", "str")
+        key = spec.get("key", "")
+    else:
+        path = spec
+        vtype = "str"
+        key = ""
+
+    if not path:
+        if vtype == "int":
+            return 0
+        if vtype == "list":
+            return []
+        return ""
+
+    node = record
+    for part in path.split("."):
+        if isinstance(node, dict):
+            node = node.get(part)
+        elif isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (IndexError, ValueError):
+                node = None
+                break
+        else:
+            node = None
+            break
+        if node is None:
+            break
+
+    if vtype == "list":
+        if not isinstance(node, list):
+            return []
+        if key:
+            return [
+                str(it.get(key, "")).strip()
+                for it in node
+                if isinstance(it, dict) and it.get(key)
+            ]
+        return [str(it) for it in node if it not in (None, "")]
+
+    if vtype == "int":
+        try:
+            return int(node)
+        except (TypeError, ValueError):
+            return 0
+
+    return str(node) if node else ""
 
 
 def _record_to_markdown(record: dict, title: str) -> str:
@@ -74,6 +142,7 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
                 if not record.get("uuid"):
                     src = record.get("source_url", json.dumps(record, sort_keys=True))
                     record["uuid"] = _make_uuid(f"{site_key}:{src}")
+                _record_parse_lineage(record, op=record.get("parse_method", "api"))
                 yield record
                 continue
 
@@ -133,4 +202,12 @@ def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
             if key in record:
                 base_result[key] = record[key]
 
+        # extra_fields：按配置从原始记录抽取来源特有字段，写入 extra（供 doc_extra 落库）
+        extra_fields = profile.get("extra_fields", {})
+        if extra_fields:
+            extra = {k: _extract_extra_value(record, v) for k, v in extra_fields.items()}
+            if extra:
+                base_result["extra"] = extra
+
+        _record_parse_lineage(base_result, op=base_result["parse_method"])
         yield base_result

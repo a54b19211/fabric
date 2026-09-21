@@ -105,6 +105,11 @@ class _AppSettings(BaseSettings):
         return self.DATA_ROOT / "json_envelopes"
 
     @property
+    def LINEAGE_DIR(self) -> Path:
+        """字段级血缘追踪记录目录"""
+        return self.DATA_ROOT / "lineage"
+
+    @property
     def QUARANTINE_DIR(self) -> Path:
         """隔离区——质量不达标的数据暂存"""
         return self.DATA_ROOT / "quarantine"

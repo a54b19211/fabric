@@ -152,7 +152,7 @@ EXTRA_MODEL_MAP: Dict[str, type] = {
     "pubmed": PubmedExtra,
     "hkex": HkexExtra,
     "drugbank": DrugbankExtra,
-    "fda_enforcement": FdaEnforcementExtra,
+    "fda_api_enforcement": FdaEnforcementExtra,
     "fda_drug_safety": FdaDrugSafetyExtra,
     "clinicaltrials": ClinicalTrialsExtra,
 }

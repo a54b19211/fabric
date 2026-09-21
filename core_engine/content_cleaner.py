@@ -15,7 +15,7 @@ from loguru import logger
 from prefect import task
 
 from config.crawler_settings import SITE_PROFILES
-from biz_rules.cleaners import normalize_whitespace, full_to_half
+from biz_rules.cleaners import normalize_whitespace, full_to_half, normalize_publish_date
 from core_engine.lineage_tracer import snapshot, record_step
 
 # ── doc_type 映射 ──────────────────────────────────────────────────────────
@@ -163,6 +163,9 @@ def clean_content(parsed_result: dict) -> dict:
             parsed_result = _default_clean(parsed_result)
     else:
         parsed_result = _default_clean(parsed_result)
+
+    # 日期标准化（所有站点统一执行，覆盖自定义 cleaner 的站点）
+    parsed_result = normalize_publish_date(parsed_result)
 
     # metadata 注入（所有站点统一执行）
     parsed_result = _inject_metadata(parsed_result)

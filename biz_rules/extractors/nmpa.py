@@ -2,6 +2,7 @@
 import re
 
 from biz_rules.cleaners.field.date_format import normalize_date
+from biz_rules.extractors import extract_approval_number, extract_labeled_field
 
 
 def _extract_summary(body_text: str, max_len: int = 200) -> str:
@@ -36,6 +37,7 @@ def extract_nmpa_detail(page) -> dict:
         "body_text": "",
         "summary": "",
         "attachment_links": [],
+        "extra": {},
     }
 
     # 标题：优先 meta ArticleTitle，其次 <title>
@@ -60,6 +62,18 @@ def extract_nmpa_detail(page) -> dict:
         result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
         result["summary"] = _extract_summary(result["body_text"])
+
+    # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
+    body_text = result["body_text"]
+    result["extra"] = {
+        "drug_name": extract_labeled_field(
+            body_text, ("药品名称", "通用名称", "商品名称", "品种名称")
+        ),
+        "approval_number": extract_approval_number(body_text),
+        "manufacturer": extract_labeled_field(
+            body_text, ("生产企业", "生产单位", "企业名称", "申请人")
+        ),
+    }
 
     # 附件：正文区域内的文件链接
     if body_el:

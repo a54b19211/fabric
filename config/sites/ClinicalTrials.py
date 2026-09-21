@@ -36,12 +36,20 @@ CONFIG = {
         "category": "__const__:临床试验",
     },
 
-    # 可选：如果需要更详细的字段提取
+    # 来源特有字段：与 biz_rules/schemas.py 的 ClinicalTrialsExtra 字段一一对应
     "extra_fields": {
-        "status": "protocolSection.statusModule.overallStatus",
-        "phase": "protocolSection.designModule.phaseList",
-        "enrollment": "protocolSection.designModule.enrollmentInfo.count",
-        "completion_date": "protocolSection.statusModule.completionDateStruct.date",
+        "nct_id": "protocolSection.identificationModule.nctId",
+        "study_type": "protocolSection.designModule.studyType",
+        "phase": {"path": "protocolSection.designModule.phases", "type": "list"},
+        "study_status": "protocolSection.statusModule.overallStatus",
+        "enrollment": {"path": "protocolSection.designModule.enrollmentInfo.count", "type": "int"},
+        "study_completion_date": "protocolSection.statusModule.completionDateStruct.date",
+        "primary_completion_date": "protocolSection.statusModule.primaryCompletionDateStruct.date",
+        "sponsor": "protocolSection.sponsorCollaboratorsModule.leadSponsor.name",
+        "collaborators": {"path": "protocolSection.sponsorCollaboratorsModule.collaborators", "type": "list", "key": "name"},
+        "conditions": {"path": "protocolSection.conditionsModule.conditions", "type": "list"},
+        "interventions": {"path": "protocolSection.armsInterventionsModule.interventions", "type": "list", "key": "name"},
+        "arm_groups": {"path": "protocolSection.armsInterventionsModule.armGroups", "type": "list", "key": "label"},
     },
 
     # 爬取控制

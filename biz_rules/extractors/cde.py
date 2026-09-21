@@ -1,5 +1,6 @@
 """国家药品审评中心（CDE）详情页特解"""
 from biz_rules.cleaners.field.date_format import normalize_date
+from biz_rules.extractors import extract_approval_number, extract_labeled_field
 
 
 def extract_cde_detail(page) -> dict:
@@ -9,6 +10,7 @@ def extract_cde_detail(page) -> dict:
         "body_html": "",
         "body_text": "",
         "attachment_links": [],
+        "extra": {},
     }
 
     # 标题：meta ArticleTitle，其次 div.news_detail_title
@@ -32,6 +34,18 @@ def extract_cde_detail(page) -> dict:
     if body_el:
         result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
+
+    # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
+    body_text = result["body_text"]
+    result["extra"] = {
+        "drug_name": extract_labeled_field(
+            body_text, ("药品名称", "通用名称", "商品名称", "品种名称")
+        ),
+        "approval_number": extract_approval_number(body_text),
+        "manufacturer": extract_labeled_field(
+            body_text, ("生产企业", "生产单位", "企业名称", "申请人", "申办方")
+        ),
+    }
 
     # 附件：div.relatedNews 里的链接
     related = page.css("div.relatedNews")

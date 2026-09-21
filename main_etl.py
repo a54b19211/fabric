@@ -61,7 +61,7 @@ logger.add(
 
 # ======================== 确保输出目录存在 ========================
 def _ensure_dirs():
-    for d in [APP.RAW_DIR, APP.MARKDOWN_DIR, APP.JSON_DIR, APP.QUARANTINE_DIR, APP.REVIEW_DIR]:
+    for d in [APP.RAW_DIR, APP.MARKDOWN_DIR, APP.JSON_DIR, APP.QUARANTINE_DIR, APP.REVIEW_DIR, APP.LINEAGE_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 

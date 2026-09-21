@@ -1,7 +1,8 @@
 """
 日期标准化工具。
 
-将各站点 extractor 提取的原始日期字符串统一为 YYYY-MM-DD 格式。
+将各站点 extractor 提取的原始日期字符串统一为标准格式，
+缺失部分不做补零填充（完整日期→YYYY-MM-DD，年月→YYYY-MM，年份→YYYY）。
 覆盖 11+ 种常见日期格式，无法解析时返回空字符串。
 """
 import re
@@ -25,19 +26,30 @@ def _safe_date(year: int, month: int, day: int) -> str:
         return ""
 
 
+def _safe_ym(year: int, month: int) -> str:
+    """构造 YYYY-MM（不含日，不做补零填充），非法月份返回空字符串。"""
+    if 1 <= month <= 12:
+        return f"{year:04d}-{month:02d}"
+    return ""
+
+
 def normalize_date(value) -> str:
     """
     将各种日期字符串标准化为 YYYY-MM-DD。
+    缺失部分不做补零填充，保留原始精度：
+      - 完整日期 → YYYY-MM-DD
+      - 仅年月   → YYYY-MM
+      - 仅年份   → YYYY
 
     支持格式：
       1. 2026-02-05 / 2026/2/5 / 2026.2.5（补零/不补零）
       2. 20260205（紧凑无分隔）
       3. 2026年2月5日（中文全称）
       4. February 5, 2026 / Feb 5, 2026（英文全称/缩写）
-      5. 2026 Feb / 2026-02（PubMed 年月 / 年月，缺日补 01）
+      5. 2026 Feb / 2026-02（PubMed 年月 / 年月，保留年月）
       6. 2026-02-05T10:20:30 / 2026-02-05 10:20:30（带时间戳）
-      7. 2026年2月（中文年月，缺日补 01）
-      8. 2026（纯年份，补 01-01）
+      7. 2026年2月（中文年月，保留年月）
+      8. 2026（纯年份，保留年份）
       9. 05-Feb-2026（英文缩写倒序）
       10. 2026 年 2 月 5 日（带空格中文）
       11. 02/05/2026（美式月/日/年）
@@ -87,6 +99,17 @@ def normalize_date(value) -> str:
         if month:
             return _safe_date(int(m.group(3)), month, int(m.group(1)))
 
+    # 5a. PubMed 年月日：2025 Nov 15
+    m = re.search(
+        r"(\d{4})[-/. ]+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-/. ]+(\d{1,2})(?!\d)",
+        raw,
+        re.IGNORECASE,
+    )
+    if m:
+        month = _MONTHS.get(m.group(2).lower())
+        if month:
+            return _safe_date(int(m.group(1)), month, int(m.group(3)))
+
     # 5. PubMed 年月：2026 Feb
     m = re.search(
         r"(\d{4})[-/. ]+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*",
@@ -96,22 +119,22 @@ def normalize_date(value) -> str:
     if m:
         month = _MONTHS.get(m.group(2).lower())
         if month:
-            return _safe_date(int(m.group(1)), month, 1)
+            return _safe_ym(int(m.group(1)), month)
 
-    # 6. 年月：2026-02 / 2026/2（缺日补 01）
+    # 6. 年月：2026-02 / 2026/2（保留年月）
     m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})", raw)
     if m:
-        return _safe_date(int(m.group(1)), int(m.group(2)), 1)
+        return _safe_ym(int(m.group(1)), int(m.group(2)))
 
     # 7. 中文年月：2026年2月
     m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", raw)
     if m:
-        return _safe_date(int(m.group(1)), int(m.group(2)), 1)
+        return _safe_ym(int(m.group(1)), int(m.group(2)))
 
     # 8. 纯年份：2026
     m = re.fullmatch(r"(\d{4})", raw)
     if m:
-        return _safe_date(int(m.group(1)), 1, 1)
+        return f"{int(m.group(1)):04d}"
 
     # 11. 美式月/日/年：02/05/2026
     m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", raw)

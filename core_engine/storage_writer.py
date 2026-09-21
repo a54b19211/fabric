@@ -21,6 +21,7 @@ from biz_rules.schemas import (
 )
 from biz_rules.source_mapper import calculate_confidence
 from db.repository import upsert_document
+from core_engine.lineage_store import save_lineage
 
 
 @task(name="write_to_database")
@@ -94,6 +95,12 @@ def write_to_database(parsed_result: dict) -> dict:
         doc_type=parsed_result.get("doc_type", ""),
         language=parsed_result.get("language", ""),
     )
+
+    # ── 字段级血缘落盘（data/lineage/<uuid>.json）──
+    try:
+        save_lineage(parsed_result)
+    except Exception as e:
+        logger.warning(f"[Storage] 血缘落盘失败（不影响主流程）: {doc_uuid} | {e}")
 
     # ── 核心：写入数据库 ──
     success = True
