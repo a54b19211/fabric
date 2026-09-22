@@ -13,17 +13,22 @@ from disambiguation.models import (
 
 
 # ── Step 1: 各实体类型的强 ID 字段 ──
+# 只保留「权威唯一 ID」。部分类型的 `id` 字段是抽取层临时生成的占位符、非唯一，
+# 用作强 ID 会误合并不同实体（占位符撞车），故已移除：
+#   Company/id（COMP_xxx 占位符）、Drug/id（internal_xxx 占位符）、
+#   Target/id（target_xxx/INT_xxx 占位符）、Indication/id（拼接串，混 MeSH D 前缀）。
+# Pathway/id 是 Reactome ID（R-HSA-xxx），可靠，保留。
 
 STRONG_ID_FIELDS: dict[str, list[str]] = {
-    "Company":       ["id", "stock_code"],
-    "Drug":          ["id", "cas_number"],
-    "Target":        ["id", "gene_symbol"],
+    "Company":       ["stock_code"],
+    "Drug":          ["cas_number"],
+    "Target":        ["gene_symbol"],
     "ClinicalTrial": ["trial_id"],
     "ApprovalEvent": ["approval_number"],
     "Compound":      ["cas_number"],
     "Policy":        ["doc_number"],
     "Pathway":       ["id"],
-    "Indication":    ["id", "icd_code"],
+    "Indication":    ["icd_code"],
 }
 
 

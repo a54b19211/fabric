@@ -5,6 +5,17 @@
 
 import re
 
+from disambiguation.normalization_rules import (
+    OCR_CORRECTIONS,
+    PROCESSING_PREFIXES,
+    PROCESSING_WHITELIST,
+    DOSAGE_SUFFIXES,
+    DOSAGE_WHITELIST,
+    PROCESSING_ENTITY_TYPES,
+    DOSAGE_ENTITY_TYPES,
+    MIN_CORE_LENGTH,
+)
+
 
 def _fullwidth_to_halfwidth(text: str) -> str:
     """全角字符转半角。"""
@@ -118,3 +129,52 @@ def generate_candidate_names(
         _add(no_suffix)
 
     return names
+
+
+def _apply_ocr_corrections(name: str) -> str:
+    """OCR 纠错：已知错误模式词典替换。只做已知错误，不做字符级全局替换。"""
+    for wrong, right in OCR_CORRECTIONS.items():
+        name = name.replace(wrong, right)
+    return name
+
+
+def _strip_processing_prefix(name: str) -> str:
+    """剥离中药炮制前缀。白名单（保护前缀）优先；核心名长度 ≥ MIN_CORE_LENGTH 才剥。"""
+    for protected in PROCESSING_WHITELIST:
+        if name.startswith(protected):
+            return name
+    for prefix in PROCESSING_PREFIXES:
+        if name.startswith(prefix) and len(name) - len(prefix) >= MIN_CORE_LENGTH:
+            return name[len(prefix):]
+    return name
+
+
+def _strip_dosage_suffix(name: str) -> str:
+    """剥离剂型后缀。长后缀优先；白名单（保护后缀）优先；核心名长度 ≥ MIN_CORE_LENGTH 才剥。"""
+    for protected in DOSAGE_WHITELIST:
+        if name.endswith(protected):
+            return name
+    for suffix in DOSAGE_SUFFIXES:
+        if name.endswith(suffix) and len(name) - len(suffix) >= MIN_CORE_LENGTH:
+            return name[:-len(suffix)]
+    return name
+
+
+def normalize_for_alignment(entity_name: str, entity_type: str = "") -> str:
+    """
+    对齐导向规范化（4.1）：剥离修饰成分、恢复核心名，生成 normalized_name 对齐辅助键。
+
+    - OCR 纠错（全类型）
+    - 炮制前缀剥离（Drug / TCMFormula）
+    - 剂型后缀剥离（Drug / Compound）
+
+    返回核心名；无剥离时返回去除首尾空白后的原 name。
+    注意：返回值是「对齐辅助键」，不覆盖原文 entity_name；按设计仅用于 Step4 向量召回。
+    """
+    name = entity_name.strip()
+    name = _apply_ocr_corrections(name)
+    if entity_type in PROCESSING_ENTITY_TYPES:
+        name = _strip_processing_prefix(name)
+    if entity_type in DOSAGE_ENTITY_TYPES:
+        name = _strip_dosage_suffix(name)
+    return name

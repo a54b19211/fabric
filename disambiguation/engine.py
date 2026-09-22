@@ -19,7 +19,7 @@ from disambiguation.models import (
     STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED,
     STATUS_NEW_ENTITY, STATUS_AMBIGUOUS,
 )
-from disambiguation.normalizer import generate_candidate_names
+from disambiguation.normalizer import generate_candidate_names, normalize_for_alignment
 from disambiguation.rules import match_strong_id, match_by_entity_rules
 from disambiguation.llm_ranker import rank_with_reranker, rank_with_llm
 
@@ -40,6 +40,11 @@ def disambiguate(
 
     # ── Step 0: 名称规范化 ────────────────────────────────────────
     candidate_names = generate_candidate_names(entity_name, entity_type, entity_data)
+
+    # ── Step 0.5: 对齐导向规范化（4.1，仅作向量召回辅助键）──────────
+    normalized_name = normalize_for_alignment(entity_name, entity_type)
+    if normalized_name and normalized_name != entity_name:
+        entity_data["normalized_name"] = normalized_name
 
     # ── Step 1: 强 ID 匹配 ────────────────────────────────────────
     result = match_strong_id(entity_type, entity_data, session=session)
@@ -107,6 +112,10 @@ def disambiguate(
     name_en = (entity_data or {}).get("name_en", "").strip()
     if name_en and name_en.lower() != entity_name.lower():
         _recall_with_name(name_en, match_type="vector_en")
+
+    if normalized_name and normalized_name.lower() != entity_name.lower() \
+            and normalized_name.lower() != name_en.lower():
+        _recall_with_name(normalized_name, match_type="vector_normalized")
 
     if vector_candidates:
         logger.info(
@@ -191,7 +200,8 @@ def disambiguate_entities(entities: list[dict], session=None) -> list[dict]:
     for ent in entities:
         name = ent.get("entity_name", "")
         entity_type = ent.get("entity_type", "")
-        entity_data = ent.get("entity_data", {})
+        entity_data = ent.get("entity_data") or {}
+        ent["entity_data"] = entity_data
         source_text = ent.get("source_text", "")
         source_site = ent.get("source_site", "")
 

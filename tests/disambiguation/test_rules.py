@@ -22,6 +22,17 @@ class TestStrongIdFields:
     def test_unknown_type_absent(self):
         assert "DealItem" not in STRONG_ID_FIELDS
 
+    def test_placeholder_id_removed(self):
+        # 占位符 id 字段已移除，防止 Step1 误落锤（COMP_xxx/internal_xxx/target_xxx/拼接串）
+        assert "id" not in STRONG_ID_FIELDS["Company"]
+        assert "id" not in STRONG_ID_FIELDS["Drug"]
+        assert "id" not in STRONG_ID_FIELDS["Target"]
+        assert "id" not in STRONG_ID_FIELDS["Indication"]
+
+    def test_pathway_id_kept(self):
+        # Pathway 的 id 是 Reactome ID（R-HSA-xxx），可靠保留
+        assert "id" in STRONG_ID_FIELDS["Pathway"]
+
 
 class TestMatchStrongId:
     def test_hit(self):
