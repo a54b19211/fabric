@@ -138,11 +138,16 @@ function statusColor(key: string) {
 const MATCH_STEP_LABELS: Record<string, string> = {
   step1_strong_id: '强ID匹配',
   step2_exact_alias: '精确匹配',
-  step3_rule: '类型规则',
+  step3_company_rule: '类型规则',
+  step3_drug_cas: '类型规则',
+  step3_drug_id: '类型规则',
+  step3_target_rule: '类型规则',
   step5_reranker: 'Reranker精排',
   step5_reranker_error: '精排失败',
-  step_none: '无候选',
-  none: '无候选',
+  step6_llm: 'LLM兜底',
+  step6_llm_error: 'LLM兜底失败',
+  step_none: '无匹配·新实体',
+  none: '未消歧',
 }
 
 function matchStepLabel(key: string) {
@@ -151,9 +156,9 @@ function matchStepLabel(key: string) {
 
 function matchStepColor(key: string) {
   if (key === 'step1_strong_id' || key === 'step2_exact_alias') return 'var(--dp-success, #67c23a)'
-  if (key === 'step3_rule') return 'var(--dp-warning)'
-  if (key === 'step5_reranker') return 'var(--dp-primary)'
-  if (key === 'step5_reranker_error') return 'var(--dp-danger)'
+  if (key.startsWith('step3_')) return 'var(--dp-warning)'
+  if (key === 'step5_reranker' || key === 'step6_llm') return 'var(--dp-primary)'
+  if (key === 'step5_reranker_error' || key === 'step6_llm_error') return 'var(--dp-danger)'
   return 'var(--dp-text-secondary, #909399)'
 }
 
