@@ -17,6 +17,8 @@ from disambiguation.models import (
 # 用作强 ID 会误合并不同实体（占位符撞车），故已移除：
 #   Company/id（COMP_xxx 占位符）、Drug/id（internal_xxx 占位符）、
 #   Target/id（target_xxx/INT_xxx 占位符）、Indication/id（拼接串，混 MeSH D 前缀）。
+# Policy/doc_number 也已移除：「年份+第N号」跨机构/跨文种不唯一、标准号有正文
+#   vs 修改单/解读衍生文档、还有 JGXX 占位符，88% 重复是文号撞车假重复。
 # Pathway/id 是 Reactome ID（R-HSA-xxx），可靠，保留。
 
 STRONG_ID_FIELDS: dict[str, list[str]] = {
@@ -26,7 +28,6 @@ STRONG_ID_FIELDS: dict[str, list[str]] = {
     "ClinicalTrial": ["trial_id"],
     "ApprovalEvent": ["approval_number"],
     "Compound":      ["cas_number"],
-    "Policy":        ["doc_number"],
     "Pathway":       ["id"],
     "Indication":    ["icd_code"],
 }

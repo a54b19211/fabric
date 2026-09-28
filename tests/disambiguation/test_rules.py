@@ -33,6 +33,10 @@ class TestStrongIdFields:
         # Pathway 的 id 是 Reactome ID（R-HSA-xxx），可靠保留
         assert "id" in STRONG_ID_FIELDS["Pathway"]
 
+    def test_policy_doc_number_removed(self):
+        # Policy/doc_number 跨机构/跨文种不唯一 + JGXX 占位符，已移除
+        assert "Policy" not in STRONG_ID_FIELDS
+
 
 class TestMatchStrongId:
     def test_hit(self):
