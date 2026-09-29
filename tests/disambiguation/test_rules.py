@@ -27,7 +27,9 @@ class TestStrongIdFields:
         assert "id" not in STRONG_ID_FIELDS["Company"]
         assert "id" not in STRONG_ID_FIELDS["Drug"]
         assert "id" not in STRONG_ID_FIELDS["Target"]
-        assert "id" not in STRONG_ID_FIELDS["Indication"]
+        # Indication 已于 2026-09-28 整体移出强 ID（icd_code 粒度不足），
+        # 此处用 .get 兼容：即使该类型不再有强 ID 字段，占位符 id 也不应复活
+        assert "id" not in STRONG_ID_FIELDS.get("Indication", [])
 
     def test_pathway_id_kept(self):
         # Pathway 的 id 是 Reactome ID（R-HSA-xxx），可靠保留
@@ -36,6 +38,12 @@ class TestStrongIdFields:
     def test_policy_doc_number_removed(self):
         # Policy/doc_number 跨机构/跨文种不唯一 + JGXX 占位符，已移除
         assert "Policy" not in STRONG_ID_FIELDS
+
+    def test_indication_icd_code_removed(self):
+        # Indication/icd_code 是分类码，粒度粗于疾病实体：
+        # 实测 C49.9 下挂着 4 种不同癌症（皮肤纤维肉瘤 / 腺泡状软组织肉瘤 /
+        # 软组织黏液软骨肉瘤 / 恶性间叶肿瘤）。同一 ICD 码不能推出同一疾病，已移除。
+        assert "Indication" not in STRONG_ID_FIELDS
 
 
 class TestMatchStrongId:

@@ -20,6 +20,11 @@ from disambiguation.models import (
 # Policy/doc_number 也已移除：「年份+第N号」跨机构/跨文种不唯一、标准号有正文
 #   vs 修改单/解读衍生文档、还有 JGXX 占位符，88% 重复是文号撞车假重复。
 # Pathway/id 是 Reactome ID（R-HSA-xxx），可靠，保留。
+# Indication/icd_code 已移除（2026-09-28）：ICD 是「分类码」，粒度远粗于疾病实体，
+#   同一 ICD 码 ⟹ 同一疾病不成立（反向才成立）。实测 C49.9（结缔组织和软组织恶性
+#   肿瘤，部位未特指）下挂着 4 种完全不同的癌症：Dermatofibrosarcoma、
+#   Sarcoma Alveolar Soft Part、Chondrosarcoma Extraskeletal Myxoid、
+#   Malignant mesenchymal tumor。属「粒度不足」，与 doc_number 的「撞车」是不同根因。
 
 STRONG_ID_FIELDS: dict[str, list[str]] = {
     "Company":       ["stock_code"],
@@ -29,7 +34,6 @@ STRONG_ID_FIELDS: dict[str, list[str]] = {
     "ApprovalEvent": ["approval_number"],
     "Compound":      ["cas_number"],
     "Pathway":       ["id"],
-    "Indication":    ["icd_code"],
 }
 
 

@@ -851,9 +851,8 @@ def get_pipeline_overview():
             "    UNION ALL"
             "    SELECT 'Company', external_ids->>'stock_code'"
             "      FROM entity_dict WHERE is_deleted=false AND entity_type='Company' AND external_ids ? 'stock_code'"
-            "    UNION ALL"
-            "    SELECT 'Indication', external_ids->>'icd_code'"
-            "      FROM entity_dict WHERE is_deleted=false AND entity_type='Indication' AND external_ids ? 'icd_code'"
+            # 注：Indication/icd_code 已于 2026-09-28 移出强 ID（分类码粒度不足），
+            #     此统计须与 disambiguation/rules.py:STRONG_ID_FIELDS 保持一致。
             "    UNION ALL"
             "    SELECT 'Pathway', external_ids->>'id'"
             "      FROM entity_dict WHERE is_deleted=false AND entity_type='Pathway' AND external_ids ? 'id'"
