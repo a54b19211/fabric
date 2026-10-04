@@ -19,7 +19,7 @@
               placeholder="输入实体名搜索..."
               clearable
               @keyup.enter="onSearch"
-              @clear="searchResults = []"
+              @clear="clearSearch"
             >
               <template #append>
                 <el-button @click="onSearch" :loading="searching">搜索</el-button>
@@ -309,10 +309,13 @@ const searched = ref(false)
 const searchResults = ref<SearchEntityItem[]>([])
 
 // ── 选择 ──
-const selectedIds = ref<Set<number>>(new Set())
-const selectedList = computed(() => {
-  return searchResults.value.filter(r => selectedIds.value.has(r.dict_id))
-})
+// 已选实体自持一份快照，不依赖 searchResults。
+// 否则清空搜索框（searchResults=[]）或发起新一轮搜索（结果被覆盖）时，
+// 已勾选项的实体详情会丢失，跨多轮筛选挑选条目将无法进行。
+const selectedEntities = ref<Map<number, SearchEntityItem>>(new Map())
+
+const selectedIds = computed(() => new Set(selectedEntities.value.keys()))
+const selectedList = computed(() => Array.from(selectedEntities.value.values()))
 
 // ── 对比 ──
 const comparing = ref(false)
@@ -386,26 +389,38 @@ async function onSearch() {
   }
 }
 
+// 仅清空搜索框：只重置搜索区，已选实体保留在 selectedEntities 中不受影响
+function clearSearch() {
+  searchResults.value = []
+  searched.value = false
+}
+
 function toggleSelect(item: SearchEntityItem) {
-  const ids = new Set(selectedIds.value)
-  if (ids.has(item.dict_id)) {
-    ids.delete(item.dict_id)
+  const m = new Map(selectedEntities.value)
+  if (m.has(item.dict_id)) {
+    m.delete(item.dict_id)
   } else {
-    if (ids.size >= 10) {
+    if (m.size >= 10) {
       ElMessage.warning('最多选择 10 个实体')
       return
     }
-    ids.add(item.dict_id)
+    m.set(item.dict_id, item)
   }
-  selectedIds.value = ids
+  selectedEntities.value = m
 }
 
 function removeSelected(dictId: number) {
-  const ids = new Set(selectedIds.value)
-  ids.delete(dictId)
-  selectedIds.value = ids
+  const m = new Map(selectedEntities.value)
+  m.delete(dictId)
+  selectedEntities.value = m
   if (keeperDictId.value === dictId) {
     keeperDictId.value = 0
+  }
+  // 已选实体不足 2 个时，旧的对比结果已与当前选择不一致，
+  // 继续展示会导致按过期的 keeper / 实体集合执行合并。
+  if (m.size < 2 && compareResult.value) {
+    compareResult.value = null
+    Object.keys(fieldDecisions).forEach(k => delete fieldDecisions[k])
   }
 }
 
@@ -481,7 +496,7 @@ async function onMerge() {
 
     // 清空状态
     compareResult.value = null
-    selectedIds.value = new Set()
+    selectedEntities.value = new Map()
     searchResults.value = []
     searched.value = false
     searchQuery.value = ''
