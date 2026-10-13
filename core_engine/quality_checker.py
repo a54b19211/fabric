@@ -65,9 +65,19 @@ def _score_accuracy(p: dict) -> float:
     sd = p.get("structured_data") or {}
     if isinstance(sd, dict) and len(sd) > 0:
         score += 0.3
-    # 标识符对齐命中（T3 产物）作为准确性信号
-    ar = p.get("authority_resolution") or {}
-    if ar.get("resolved_value"):
+    # 标识符对齐命中（T3 产物）作为准确性信号。
+    # 注意：T3/T6 实际写入的是 authority_resolutions（复数，按药名索引的 dict），
+    # 单数 authority_resolution 仅作兼容保留。
+    ars = p.get("authority_resolutions")
+    if isinstance(ars, dict) and ars:
+        aligned = any(
+            isinstance(v, dict) and bool(v.get("resolved_value"))
+            for v in ars.values()
+        )
+    else:
+        ar = p.get("authority_resolution") or {}
+        aligned = bool(isinstance(ar, dict) and ar.get("resolved_value"))
+    if aligned:
         score += 0.2
     return min(score, 1.0)
 
@@ -93,14 +103,20 @@ def _score_timeliness(p: dict) -> float:
 
 
 def _score_authority(p: dict) -> float:
-    """权威性：复用 T3 修复后的来源置信度（DOI/期刊/官方站点）。"""
+    """权威性：复用 T3 修复后的来源置信度（DOI/期刊/官方站点）。
+
+    DOI / 期刊名在真实 ETL 中由 router 写入 parsed_result["sniffed_meta"]
+    （storage_writer 计算置信度时亦从此取值），故优先读 sniffed_meta /
+    metadata，顶层同名字段仅作兜底，避免权威性维度恒为无信号基线 0.3。
+    """
     try:
         from biz_rules.source_mapper import calculate_confidence
 
+        meta = p.get("sniffed_meta") or p.get("metadata") or {}
         r = calculate_confidence(
             source_url=p.get("source_url") or "",
-            doi=p.get("doi"),
-            journal_name=p.get("journal_name"),
+            doi=p.get("doi") or meta.get("doi"),
+            journal_name=p.get("journal_name") or meta.get("journal_name"),
         )
         return float(r.get("score", 0.3))
     except Exception:

@@ -117,3 +117,58 @@ def test_high_quality_doc():
     assert res["quality_passed"] is True
     assert res["quality_level"] == "高"
     assert res["quality_score"] >= 0.80
+
+
+def test_authority_reads_sniffed_meta():
+    """权威性维度须读到 sniffed_meta 里的 DOI/期刊（真实 ETL 存放位置）。
+
+    修复前仅读顶层 doi/journal_name，导致带 DOI+期刊的文档权威性恒为
+    无信号基线 0.3，高质量文档被系统性低估。
+    """
+    p = _base_parsed(
+        title="临床研究报告",
+        structured_data={"drug": "阿司匹林"},
+        sniffed_meta={
+            "doi": "10.1234/roche2024",
+            "journal_name": "Journal of Unrelated Studies",  # 非白名单 → 0.75
+        },
+        publish_date="2024-05-01",
+    )
+    dims = _score_dimensions(p)
+    assert dims["authority"] == 0.75        # 修复前为 0.3
+    res = check_quality.fn(p)
+    assert res["quality_level"] == "高"      # 修复前为"中"
+
+
+def test_accuracy_credits_identifier_alignment():
+    """准确性维度须认可 T3 对齐成果（authority_resolutions 复数 dict）。
+
+    修复前读单数 authority_resolution，而 T3/T6 写入的是复数
+    authority_resolutions，导致"+0.2 对齐命中"加分永不触发（封顶 0.8）。
+    """
+    base = _base_parsed(structured_data={"drug": "阿司匹林"})
+    assert _score_dimensions(base)["accuracy"] == 0.8   # 无对齐：0.5 + 0.3
+
+    aligned = _base_parsed(
+        structured_data={"drug": "阿司匹林"},
+        authority_resolutions={
+            "阿司匹林": {  # T3/T6 实际写入形态：{药名: 五元组}
+                "found": True,
+                "std_id": "2244",
+                "resolved_value": "Aspirin",
+                "confidence": 0.9,
+            }
+        },
+    )
+    assert _score_dimensions(aligned)["accuracy"] == 1.0  # 0.5 + 0.3 + 0.2
+
+
+def test_accuracy_ignores_missed_alignment():
+    """对齐未命中（resolved_value 为空）时不应给准确性加分。"""
+    p = _base_parsed(
+        structured_data={"drug": "未知成分"},
+        authority_resolutions={
+            "未知成分": {"found": False, "resolved_value": "", "confidence": 0.0}
+        },
+    )
+    assert _score_dimensions(p)["accuracy"] == 0.8
