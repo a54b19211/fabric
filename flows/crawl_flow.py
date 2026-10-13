@@ -33,6 +33,7 @@ from core_engine.excel_parser import route_excel
 from core_engine.content_cleaner import clean_content
 from core_engine.quality_checker import check_quality, quarantine_data
 from core_engine.storage_writer import write_to_database
+from core_engine.transform_pipeline import apply_l3_normalization, apply_identifier_alignment
 from db.repository import (
     get_document_by_uuid,
     reset_document_for_recrawl,
@@ -176,9 +177,11 @@ def fetch_and_parse_attachments(
     retries=0,
 )
 def process_and_store(parsed: dict) -> dict:
-    """清洗 → 质检 → 写库，返回写库结果。"""
+    """清洗 → L3归一 → 标识符对齐 → 质检 → 写库，返回写库结果。"""
     cleaned = clean_content.fn(parsed)
-    checked = check_quality.fn(cleaned)
+    normalized = apply_l3_normalization.fn(cleaned)
+    aligned = apply_identifier_alignment.fn(normalized)
+    checked = check_quality.fn(aligned)
     if checked["quality_passed"]:
         return write_to_database.fn(checked)
     else:

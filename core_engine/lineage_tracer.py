@@ -36,7 +36,7 @@ from biz_rules.schemas import EXTRA_MODEL_MAP
 STANDARD_FIELDS: Tuple[str, ...] = ("title", "publish_date", "category", "summary")
 
 # 加工步骤顺序（用于排序/定位）
-STEP_ORDER: Tuple[str, ...] = ("parse", "clean", "normalize", "quality")
+STEP_ORDER: Tuple[str, ...] = ("parse", "clean", "normalize", "align", "quality")
 
 
 def get_tracked_fields(
