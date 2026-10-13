@@ -116,9 +116,9 @@ def calculate_confidence(
     if doi:
         score = 0.7
         reason = f"提取到 DOI: {doi}"
-        # 如果同时有期刊名（但不在白名单），稍微加分
+        # 同时有期刊名（非白名单）：信号更完整，作为独立加分项（不降分）
         if journal_name:
-            score = 0.65
+            score = 0.75
             reason += f"，期刊: {journal_name}"
         return {
             "level": "B",
