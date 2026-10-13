@@ -58,6 +58,11 @@ def remove_html_tags(text: str) -> str:
 # normalize_date 统一收敛到 field/date_format.py，避免重复定义。
 # 此处保留导出以兼容旧的 from biz_rules.cleaners import normalize_date 用法。
 from biz_rules.cleaners.field.date_format import normalize_date  # noqa: E402
+from biz_rules.cleaners.normalizer_l3 import (  # noqa: E402
+    normalize_l3,
+    normalize_synonym,
+    normalize_unit_expression,
+)
 
 
 def normalize_publish_date(parsed_result: dict) -> dict:
@@ -103,4 +108,7 @@ __all__ = [
     "truncate_text",
     "clean_fiercepharma",
     "clean_clinical_trial",
+    "normalize_l3",
+    "normalize_synonym",
+    "normalize_unit_expression",
 ]
