@@ -52,8 +52,8 @@ class TestUnitConversion:
         "raw,expected",
         [
             ("500 mg", "0.5 g"),
-            ("100μg", "0.1 mg"),
-            ("100 ug", "0.1 mg"),
+            ("100μg", "0.0001 g"),
+            ("100 ug", "0.0001 g"),
             ("2 g", "2 g"),
             ("0.5 L", "0.5 L"),
             ("1000 ml", "1 L"),
@@ -83,7 +83,7 @@ class TestNormalizeL3:
         assert normalize_l3("500 mg", field_type="dosage") == "0.5 g"
 
     def test_chinese_field_type_routes_to_unit(self):
-        assert normalize_l3("100μg", field_type="浓度") == "0.1 mg"
+        assert normalize_l3("100μg", field_type="浓度") == "0.0001 g"
 
     def test_unknown_drug_no_match_returns_original(self):
         # 默认走同义词路径，未命中 → 原值

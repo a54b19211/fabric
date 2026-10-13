@@ -6,8 +6,8 @@ L1 结构层（编码/空白/类型）与 L2 值域层（日期/枚举）由其�
 
 1. 同义词归一：别名 / 商品名 → 标准通用名
    （如 阿司匹林 / Aspirin / 乙酰水杨酸 → 阿司匹林）
-2. 单位换算：浓度 / 剂量单位标量归一
-   （μg→mg、mg→g、mL→L 等，统一收敛到标准单位）
+2. 单位换算：浓度 / 剂量单位**级联**归一
+   （ng→μg→mg→g、mL→L 等，一路收敛到标准单位：质量→g、体积→L）
 
 设计原则（与前期探索性原型对齐）：
 - 未命中映射时**返回原值**，绝不覆盖或丢弃原始数据；
@@ -81,9 +81,11 @@ def normalize_synonym(raw_value: str) -> str:
 
 def normalize_unit_expression(raw_value: str) -> str:
     """
-    单位换算：把「数值 + 单位」表达式归一为标准单位。
+    单位换算：把「数值 + 单位」表达式级联归一为标准单位。
 
-    形如 "500 mg" / "0.5g" / "100μg" → 返回 "0.5 g" / "0.5 g" / "0.1 mg"。
+    形如 "500 mg" / "0.5g" / "100μg" → 返回 "0.5 g" / "0.5 g" / "0.0001 g"。
+    换算会一路级联收敛到标准单位（质量→g、体积→L），例如
+    μg→mg→g、mL→L，确保同一物理量落到同一字符串表示。
     无法解析（无数字 / 单位不在表内）时返回原值。
     """
     import re
@@ -97,10 +99,14 @@ def normalize_unit_expression(raw_value: str) -> str:
     unit = m.group(2).lower()
     if unit not in _UNIT_MAP:
         return raw_value
-    target, factor = _UNIT_MAP[unit]
-    converted = num * factor
+    # 级联换算：反复套用 _UNIT_MAP，直到收敛到标准单位
+    # （质量→g、体积→L；如 μg→mg→g，mL→L）
+    while unit in _UNIT_MAP and _UNIT_MAP[unit][0] != unit:
+        target, factor = _UNIT_MAP[unit]
+        num = num * factor
+        unit = target
     # :g 格式避免 0.5000000001 这类浮点噪音
-    return f"{converted:g} {target}"
+    return f"{num:g} {unit}"
 
 
 def normalize_l3(raw_value: str, field_type: str = "drug_name") -> str:
