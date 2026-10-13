@@ -19,6 +19,7 @@ from biz_rules.schemas import (
     AttachmentInfo,
     validate_extra,
 )
+from biz_rules.document_validator import validate_document
 from biz_rules.source_mapper import calculate_confidence
 from db.repository import upsert_document
 from core_engine.lineage_store import save_lineage
@@ -102,6 +103,15 @@ def write_to_database(parsed_result: dict) -> dict:
     except Exception as e:
         logger.warning(f"[Storage] 血缘落盘失败（不影响主流程）: {doc_uuid} | {e}")
 
+    # ── 文档级结构化校验（T5：落库前契约检查 + 违规计数，非阻断）──
+    doc_report = validate_document(envelope.model_dump())
+    if doc_report.violation_count > 0:
+        logger.warning(
+            f"[Storage] 文档级校验发现 {doc_report.violation_count} 处违规: {doc_uuid}"
+        )
+        for _v in doc_report.violations:
+            logger.warning(f"  - {_v['field']} [{_v['rule']}]: {_v['message']}")
+
     # ── 核心：写入数据库 ──
     success = True
     try:
@@ -123,6 +133,7 @@ def write_to_database(parsed_result: dict) -> dict:
         "status": status,
         "confidence_score": confidence_result["score"],
         "success": success,
+        "violation_count": doc_report.violation_count,
     }
 
 
