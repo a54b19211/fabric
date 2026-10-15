@@ -47,7 +47,7 @@ const router = createRouter({
       path: '/entity-merge',
       name: 'EntityMerge',
       component: () => import('@/views/EntityMerge.vue'),
-      meta: { title: '实体消歧', description: '精细消歧（Agent D）：对已审核实体执行 LLM 消歧链接；初步消歧（6step 规则+向量+精排）已在抽取时完成' },
+      meta: { title: '实体消歧', description: '精细消歧（Agent D）：对已审核实体执行消歧链接；初步消歧（强ID匹配 / 精确别名 / 类型规则 / 向量召回+Reranker 精排）已在抽取时完成' },
     },
     {
       path: '/review/merge-workbench',

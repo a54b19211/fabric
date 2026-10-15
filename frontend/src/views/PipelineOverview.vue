@@ -34,13 +34,44 @@
 
         <div v-if="stage.by_match_step && Object.keys(stage.by_match_step).length" class="match-step-panel">
           <div class="match-step-title">消歧匹配分布</div>
-          <div v-for="(count, step) in stage.by_match_step" :key="step" class="bar-row">
-            <span class="bar-label">{{ matchStepLabel(step) }}</span>
-            <div class="bar-track">
-              <div class="bar-fill" :style="{ width: barWidth(count, stage.total), background: matchStepColor(step) }" />
+          <template v-for="row in matchStepRows(stage.by_match_step)" :key="row.step">
+            <!-- 可折叠集合（step3 类型规则） -->
+            <div
+              v-if="row.children"
+              class="bar-row bar-group"
+              @click="toggleMatchGroup(row.step)"
+            >
+              <span class="bar-label group-toggle">
+                <el-icon class="caret" :class="{ expanded: isMatchGroupExpanded(row.step) }"><ArrowDown /></el-icon>
+                {{ row.label }}
+              </span>
+              <div class="bar-track">
+                <div class="bar-fill" :style="{ width: barWidth(row.count, stage.total), background: matchStepColor(row.step) }" />
+              </div>
+              <span class="bar-count">{{ formatNum(row.count) }}</span>
             </div>
-            <span class="bar-count">{{ formatNum(count) }}</span>
-          </div>
+            <!-- 展开后的具体实体类型 -->
+            <div
+              v-for="child in (row.children || [])"
+              v-show="row.children && isMatchGroupExpanded(row.step)"
+              :key="child.step"
+              class="bar-row bar-child"
+            >
+              <span class="bar-label">{{ child.label }}</span>
+              <div class="bar-track">
+                <div class="bar-fill" :style="{ width: barWidth(child.count, stage.total), background: matchStepColor(child.step) }" />
+              </div>
+              <span class="bar-count">{{ formatNum(child.count) }}</span>
+            </div>
+            <!-- 普通类型行 -->
+            <div v-if="!row.children" class="bar-row">
+              <span class="bar-label">{{ row.label }}</span>
+              <div class="bar-track">
+                <div class="bar-fill" :style="{ width: barWidth(row.count, stage.total), background: matchStepColor(row.step) }" />
+              </div>
+              <span class="bar-count">{{ formatNum(row.count) }}</span>
+            </div>
+          </template>
         </div>
 
         <div v-if="stage.by_dict && Object.keys(stage.by_dict).length" class="match-step-panel">
@@ -117,7 +148,7 @@ const SITE_COLORS = [
 ]
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
-  disambiguation: 'dict_id 命中率 = 初步消歧（6step，抽取时）+ 精细消歧（Agent D，审核后）两段累积结果',
+  disambiguation: 'dict_id 命中率 = 初步消歧（强ID匹配 / 精确别名 / 类型规则 / 向量召回+Reranker 精排，抽取时）+ 精细消歧（Agent D，审核后）两段累积结果',
 }
 
 function stageDesc(key: string) {
@@ -150,8 +181,86 @@ const MATCH_STEP_LABELS: Record<string, string> = {
   none: '未消歧',
 }
 
+// step3 类型规则合并为可折叠集合：展开后展示具体匹配的实体类型
+const STEP3_CHILDREN: { key: string; label: string }[] = [
+  { key: 'step3_company_rule', label: '公司 Company' },
+  { key: 'step3_drug_cas', label: '药物 CAS 号' },
+  { key: 'step3_drug_id', label: '药物 ID' },
+  { key: 'step3_target_rule', label: '靶点基因 Target' },
+]
+
+// 按消歧管线阶段排序（step1 → step2 → step3集合 → step5 → 兜底），
+// 即使后端无某类数据也占位显示（数量 0），避免展示错乱、误导阅读。
+// 注：step6_llm（LLM兜底）已按课题设计禁用并降级为分级路由（第6章），不再作为活跃阶段展示，故不在此固定顺序中。
+const MATCH_STEP_ORDER: string[] = [
+  'step1_strong_id',
+  'step2_exact_alias',
+  'step3_group',
+  'step5_reranker',
+  'step5_reranker_error',
+  'step_none',
+  'none',
+]
+
 function matchStepLabel(key: string) {
   return MATCH_STEP_LABELS[key] ?? key
+}
+
+type MatchStepRow = {
+  step: string
+  label: string
+  count: number
+  children?: { step: string; label: string; count: number }[]
+}
+
+// 将 by_match_step（后端无序对象）转为按管线阶段有序的数组；
+// step3_* 聚合为一个可折叠「类型规则」组（展开列出具体实体类型），其余类型即使数量 0 也占位
+function matchStepRows(
+  byMatchStep: Record<string, number> | undefined,
+): MatchStepRow[] {
+  const src = byMatchStep ?? {}
+  const rows: MatchStepRow[] = []
+  for (const key of MATCH_STEP_ORDER) {
+    if (key === 'step3_group') {
+      const children = STEP3_CHILDREN.map((c) => ({
+        step: c.key,
+        label: `${c.key} · ${c.label}`,
+        count: src[c.key] ?? 0,
+      }))
+      rows.push({
+        step: 'step3',
+        label: 'step3 · 类型规则',
+        count: children.reduce((s, c) => s + c.count, 0),
+        children,
+      })
+    } else {
+      rows.push({
+        step: key,
+        label: `${key} · ${matchStepLabel(key)}`,
+        count: src[key] ?? 0,
+      })
+    }
+  }
+  // 后端返回但不在预定义顺序中的新键追加到末尾
+  const known = new Set([
+    ...MATCH_STEP_ORDER.filter((k) => k !== 'step3_group'),
+    ...STEP3_CHILDREN.map((c) => c.key),
+  ])
+  for (const k of Object.keys(src)) {
+    if (!known.has(k)) {
+      rows.push({ step: k, label: `${k} · ${matchStepLabel(k)}`, count: src[k] })
+    }
+  }
+  return rows
+}
+
+// step3 类型规则集合的展开/折叠状态（同一时刻仅展开一个）
+const expandedMatchGroup = ref<string | null>(null)
+function isMatchGroupExpanded(step: string) {
+  return expandedMatchGroup.value === step
+}
+function toggleMatchGroup(step: string) {
+  expandedMatchGroup.value = expandedMatchGroup.value === step ? null : step
 }
 
 function matchStepColor(key: string) {
@@ -325,6 +434,34 @@ onMounted(load)
   gap: 3px;
 }
 
+.bar-group {
+  cursor: pointer;
+  user-select: none;
+}
+.bar-group:hover .bar-label {
+  color: var(--dp-text-primary, #303133);
+}
+.group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.caret {
+  transition: transform 0.2s ease;
+  transform: rotate(-90deg);
+  color: var(--dp-text-secondary);
+}
+.caret.expanded {
+  transform: rotate(0deg);
+}
+.bar-child {
+  padding-left: 20px;
+}
+.bar-child .bar-label {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
 .info-icon {
   font-size: 13px;
   color: var(--dp-text-secondary);
@@ -384,6 +521,11 @@ onMounted(load)
   font-size: 12px;
   color: var(--dp-text-secondary);
   font-weight: 600;
+}
+
+/* 匹配分布标签带 match_step 前缀，需更宽以免截断 */
+.match-step-panel .bar-label {
+  width: 185px;
 }
 
 .site-panel {
