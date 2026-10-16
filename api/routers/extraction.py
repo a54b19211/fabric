@@ -197,7 +197,10 @@ def get_extraction_stats():
             raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
 
 
-@router.get("/workers", response_model=WorkerStatsResponse)
+@router.get(
+    "/workers", response_model=WorkerStatsResponse,
+    responses={500: {"description": "队列状态读取失败"}, 503: {"description": "队列依赖未就绪"}},
+)
 def get_worker_stats():
     """查询 WorkerManager 各 Worker 的队列状态。"""
     try:
@@ -221,19 +224,15 @@ def get_worker_stats():
         logger.info(f"[API] Worker 状态查询: workers={response.num_workers}, pending={response.total_pending}")
         return response
         
-    except ImportError as e:
-        logger.error(f"[API] WorkerManager 未初始化: {e}")
-        return WorkerStatsResponse(
-            num_workers=0,
-            total_pending=0,
-            workers=[],
-        )
-    except Exception as e:
-        logger.error(f"[API] Worker 状态查询失败: {e}")
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+    except ImportError:
+        logger.error("[API] WorkerManager 依赖未就绪")
+        raise HTTPException(status_code=503, detail="任务队列依赖未就绪，请联系维护人") from None
+    except Exception:
+        logger.error("[API] Worker 状态查询失败")
+        raise HTTPException(status_code=500, detail="无法读取任务队列状态，请联系维护人") from None
 
 
-@router.post("/pause")
+@router.post("/pause", responses={500: {"description": "暂停操作失败，不能确认已暂停"}})
 def pause_extraction():
     """暂停抽取：Worker 完成当前任务后停止消费队列。"""
     try:
@@ -242,12 +241,12 @@ def pause_extraction():
         manager.pause()
         logger.info("[API] 抽取已暂停")
         return {"paused": True, "message": "已暂停抽取"}
-    except Exception as e:
-        logger.error(f"[API] 暂停抽取失败: {e}")
-        raise HTTPException(status_code=500, detail=f"暂停失败: {str(e)}")
+    except Exception:
+        logger.error("[API] 暂停抽取失败")
+        raise HTTPException(status_code=500, detail="暂停失败，请核对任务队列状态后重试") from None
 
 
-@router.post("/resume")
+@router.post("/resume", responses={500: {"description": "恢复操作失败，不能确认已恢复"}})
 def resume_extraction():
     """继续抽取：恢复 Worker 消费队列。"""
     try:
@@ -256,25 +255,21 @@ def resume_extraction():
         manager.resume()
         logger.info("[API] 抽取已继续")
         return {"paused": False, "message": "已继续抽取"}
-    except Exception as e:
-        logger.error(f"[API] 继续抽取失败: {e}")
-        raise HTTPException(status_code=500, detail=f"继续失败: {str(e)}")
+    except Exception:
+        logger.error("[API] 继续抽取失败")
+        raise HTTPException(status_code=500, detail="恢复失败，请核对任务队列状态后重试") from None
 
 
-@router.post("/reset-stale")
+@router.post(
+    "/reset-stale", status_code=409,
+    responses={409: {"description": "尚未核实任务失活，拒绝批量重置"}},
+)
 def reset_stale_extractions_api(max_age_minutes: int = 30):
-    """
-    将长时间卡在 queued/processing 的文档重置为 pending。
-    max_age_minutes: 只重置超过此时间（分钟）的任务，默认 30 分钟。
-    """
-    from db.repository import reset_stale_extractions
-    try:
-        count = reset_stale_extractions(max_age_minutes=max_age_minutes)
-        logger.info(f"[API] 已重置 {count} 篇卡住的文档")
-        return {"reset_count": count, "message": f"已重置 {count} 篇文档到 pending"}
-    except Exception as e:
-        logger.error(f"[API] 重置失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """保留旧入口；单凭经过时间无法区分失活任务与仍在运行的长任务。"""
+    raise HTTPException(
+        status_code=409,
+        detail="尚无法核实任务是否失活，未修改任何任务。请先核对 Worker 和队列状态。",
+    )
 
 
 @router.get("/db-pool")

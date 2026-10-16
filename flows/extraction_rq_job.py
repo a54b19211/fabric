@@ -16,8 +16,18 @@ def extraction_job(uuid: str) -> bool:
     from core_engine.task_queue import is_extraction_paused
 
     # 暂停时等待，直到恢复（不标记 processing，任务保持排队状态）
-    while is_extraction_paused():
-        time.sleep(2)
+    try:
+        while is_extraction_paused():
+            time.sleep(2)
+    except Exception:
+        # 读取失败时不开始抽取，并让 RQ 保留失败记录。
+        try:
+            update_extraction_status(
+                uuid, "failed", error="无法读取暂停状态，抽取尚未开始，请核对后重试",
+            )
+        except Exception:
+            logger.error("[RQ-Job] 暂停状态读取失败，且未能保存任务失败状态")
+        raise
 
     logger.info(f"[RQ-Job] 开始: {uuid}")
 

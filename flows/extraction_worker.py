@@ -198,15 +198,9 @@ class RedisWorkerManager:
 
     def __init__(self):
         from core_engine.task_queue import get_task_queue
-        from db.repository import update_extraction_status
         self._tq = get_task_queue()
         self._num_workers = APP.EXTRACTION_CONCURRENCY
-        # Redis 层恢复：重入队 StartedJobRegistry 中丢失的 job
-        stuck = self._tq.recover_pending()
-        if stuck:
-            for task in stuck:
-                update_extraction_status(task.uuid, "pending", error="Worker 超时/崩溃，已重新入队")
-            logger.info(f"[WorkerManager] 恢复 {len(stuck)} 个未完成任务")
+        # 查询状态也会创建管理对象；不能据此认定在途任务已失活。
         logger.info(f"[WorkerManager] Redis 模式，需启动 {self._num_workers} 个 rq worker 进程")
 
     def submit(self, task: ExtractionTask) -> int:

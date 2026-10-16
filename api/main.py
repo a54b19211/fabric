@@ -15,15 +15,8 @@ app = FastAPI(
 
 
 @app.on_event("startup")
-def _startup_recovery():
-    """启动时清空 DB 残留状态 + Redis 残留队列，完全重置为干净状态。"""
-    from db.repository import reset_stale_extractions
-    from core_engine.task_queue import clear_extraction_redis
-
-    reset_stale_extractions()
-    clear_extraction_redis()
-
-    # 注册 review_status 直写防护监听器
+def _register_review_listeners():
+    """API 重启时 Worker 可能仍在执行，不能清理队列或重置任务。"""
     import db.review_listeners  # noqa: F401
 
 # ── CORS（前端本地开发需要）──────────────────────────────────────────────
