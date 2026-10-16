@@ -2,6 +2,10 @@
 
 面向药学领域的数据采集与处理流水线，支持网页爬取、本地 PDF 批量解析、AI 结构化提取、质量门控与人工审核回灌。
 
+## 版本使用
+
+本地开发和运行统一使用 `dev`。已验证的任务保护 `4e7ba15` 与研究读取 `9ab8bd4` 已归入主线，临时分支已删除；其他学生分支保留，本轮未推送远端。正常修改按任务提交，不按版本或日期另开交付分支。回退查提交记录和已有标签，不把旧版另留成一套主代码。
+
 ---
 
 ## 环境要求
@@ -126,8 +130,8 @@ python feedback_ingest.py --csv /data/review/pending_review_20240315.csv
 
 ## 抽取服务的运行保护（2026-10-16）
 
-本次修复基于 `9bb63b89`，分支为 `fix/zktest-task-safety`。保留原来的
-`dev` 分支和服务器配置，不改数据库结构，不重跑历史资料。
+本次修复基于 `9bb63b89`，提交为 `4e7ba15`，现已归入本地 `dev`。
+服务器配置保留，不改数据库结构，不重跑历史资料。
 
 | 修改位置 | 行为变化 |
 |---|---|
@@ -169,8 +173,7 @@ Redis 不可连接的情况。专业抽取使用明确的测试替身，不调�
 `release/zktest-task-safety-20261016`。可以在独立副本中撤销这一个修复提交：
 
 ```bash
-git switch -c revert/zktest-task-safety release/zktest-task-safety-20261016
-git revert release/zktest-task-safety-20261016
+git revert --no-commit 4e7ba15
 ```
 
 **不要在仍运行着 `uvicorn --reload` 的目录直接执行回退。** 原版本启动会
