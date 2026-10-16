@@ -179,5 +179,73 @@ git revert release/zktest-task-safety-20261016
 queued/processing 记录。确认没有未处理任务后，才能切回基线并按原方式启动。
 无法确认时保留保护修复，先处理任务，不直接启动旧版本。
 
+## 既有临床登记的有界研究读取
+
+此能力只读取本库中标记为 `clinicaltrials`、未软删除的既有记录；不触发采集、
+实体抽取、审核或下游同步，也不新增数据库表或队列。数据生产部分由徐子雯维护，
+雷达怎样提出问题、派生追加查询和组织调查由雷达组维护。
+
+### 按标题字面词组检索
+
+在获准的测试机本地执行，例如：
+
+```bash
+curl --fail-with-body --get http://127.0.0.1:8100/api/research/documents/search \
+  --data-urlencode 'terms=BCMA' --data-urlencode 'terms=myeloma' \
+  --data-urlencode 'limit=6'
+```
+
+`terms` 必填，1 至 5 个词组，每个去除首尾空白后不超过 128 字符；所有词组都须在
+同一标题中按不区分大小写的字面子串匹配。`%`、`_` 和反斜杠按字面处理，不是通配符。
+`limit` 默认 6、最大 20。返回范围固定为 `title_literal_and_current_db`，
+按内部 `id` 升序选取，额外读一条判断 `has_more`，不做总数统计或跨页读取。
+`has_more=true` 说明本次截断；空结果只说明本库本次标题条件未命中，不代表领域中不存在。
+接口不搜索正文、同义词或任意自然语言含义，不保证一组结果对应全来源覆盖。
+
+### 读取选中记录的原始字段投影
+
+将检索返回的 UUID 代入：
+
+```bash
+curl --fail-with-body http://127.0.0.1:8100/api/research/documents/<uuid>
+```
+
+返回 `source_url`、原样 `publish_date_raw`、采集/建库/更新时间及 `observed_at`。
+这些时间分别保留，不把建库、采集或本次读取时间当首次公开时间。
+ClinicalTrials 旧 `publish_date` 的语义有问题，仅原样保留，不用于推断试验开始时间。
+
+`projection.version=clinicaltrials.protocol.v1` 只识别已知 Markdown“原始数据”附录中
+唯一的 `protocolSection` JSON。`projection.text` 是原样 JSON 切片，
+`locator.start/end` 是在原 `raw_content` 中的 Unicode 字符下标，
+`document_sha256` 是完整 `raw_content` 的 UTF-8 哈希。
+`facts` 提供注册号、原始标题/摘要、疾病、干预名称和类型、阶段、登记状态、停止原因，
+以及首次公开、最后更新、开始和完成等来源日期结构；`field_paths` 给出原始 JSON 路径。
+日期精度与 ACTUAL/ESTIMATED 原样保留。缺字段为 `null`，真实空数组保留为 `[]`。
+不使用旧叙述里可能错误的“药物”和“开始日期”，不修改落盘内容，也不全库回填。
+
+原始片段缺失、重复、JSON 损坏或字段不符合已知结构时，返回文档但明确
+`projection.status=unavailable`、`reason`，不编造空事实。顶层 `hasResults` 不在
+本投影内，缺少结果信息不能填成 `false`，也不能从 COMPLETED 推出已有公开结果。
+TERMINATED、WITHDRAWN、SUSPENDED 是登记状态，不能自动认定疗效或安全失败。
+
+### 预算、访问范围和检查
+
+查询事务只读，每条数据库语句限时 3 秒；单篇原文超过 2 MiB 返回 413。
+查询失败或超时返回 503，不伪装成成功空列表；来源不符、删除或不存在的记录返回 404。
+来源标记筛选不是用户身份验证。本接口沿用现有测试机访问安排，不代表已实现多单位
+身份、私有资料隔离或新的公网发布能力。当前只供获准研究客户端有界读取。
+
+```bash
+python -m pytest -q tests/test_clinical_research.py
+```
+
+测试使用合成材料，覆盖原文定位、字段和日期语义、字面转义、有界 PostgreSQL 查询构造、
+坏格式及失败响应。测试中的数据库执行是替身；真实 PostgreSQL 和现场限时查询须在
+代码交叉审查后由负责人验证。没有用 SQLite 代替 PostgreSQL，也不以请求成功证明研究价值。
+
+本批只增加独立只读路由及投影，不改变原列表、详情、清洗、Worker 或数据结构。
+回退本批独立提交后保留原始数据和已有运行保护；不要倒退到移除运行保护前的旧版本。
+API 使用 reload 时，切代码前由负责人安排停启；无需因本批改动重启 Data-Fabric Worker。
+
 Git 撤销的是代码。本次不需要恢复旧数据库，也不能用旧数据库或 Redis 快照
 覆盖新产生的业务数据。配置、数据和未跟踪文件保持原样；不使用强制重置或清理命令。
