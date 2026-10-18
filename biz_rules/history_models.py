@@ -254,13 +254,59 @@ def archive_manifest_hash(records: list[ArchiveRecord]) -> str:
     )
 
 
+class FetchContinuation(Model):
+    scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cursor: str = Field(min_length=1, max_length=4000)
+    read_count: int = Field(ge=0, le=100000000)
+
+
 class FetchRequest(Model):
-    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc"]
+    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc", "who_don"]
     query: str = Field(min_length=1, max_length=500)
     source_record_ids: list[str] = Field(default_factory=list, max_length=100)
     max_records: int = Field(default=10, ge=1, le=100)
     max_pages: int = Field(default=3, ge=1, le=10)
     deadline_seconds: int = Field(default=60, ge=5, le=120)
+    updated_since: datetime | None = None
+    updated_until: datetime | None = None
+    continuation: FetchContinuation | None = None
+
+    def scope_hash(self):
+        return sha256(
+            canonical(
+                {
+                    "source_id": self.source_id,
+                    "query": self.query,
+                    "source_record_ids": self.source_record_ids,
+                    "updated_since": self.updated_since.isoformat()
+                    if self.updated_since
+                    else None,
+                    "updated_until": self.updated_until.isoformat()
+                    if self.updated_until
+                    else None,
+                }
+            )
+        )
+
+    @model_validator(mode="after")
+    def fixed_scope(self):
+        for value in (self.updated_since, self.updated_until):
+            if value is not None:
+                utc(value)
+        if (
+            self.updated_since
+            and self.updated_until
+            and self.updated_since > self.updated_until
+        ):
+            raise ValueError("来源更新窗口顺序错误")
+        if self.source_id != "who_don" and (self.updated_since or self.updated_until):
+            raise ValueError("此来源尚不支持更新窗口参数")
+        if self.continuation is not None:
+            if self.source_id not in {"europe_pmc", "who_don"}:
+                raise ValueError("此来源尚不支持连续分页")
+            if self.continuation.scope_hash != self.scope_hash():
+                raise ValueError("续页必须绑定原查询范围及固定时间窗")
+        return self
 
 
 class Coverage(Model):

@@ -151,6 +151,10 @@ def _validate_derived(conn, run, item, now, proof):
     from biz_rules.history_sources import parse_json
     from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, LegacyDocument
 
+    if run["source_id"] == "external_archive":
+        data = parse_json(item.raw_content)
+        if data.get("schema_version") == "datafabric.observation.v1":
+            return _validate_observation(conn, run, data, now)
     if run["source_id"] not in DERIVED_SOURCES:
         return set()
     if proof.kind != "unverified" or proof.available_at is not None:
@@ -265,6 +269,53 @@ def _validate_derived(conn, run, item, now, proof):
         item.merged_at is not None and item.merged_at > now for item in bundle.redirects
     ):
         raise HistoryError("future_graph_merge", "源身份合并时间晚于本次服务器采用")
+    return dependencies
+
+
+def _validate_observation(conn, run, data, now):
+    from biz_rules.observations import (
+        native_json,
+        observation,
+        same_series,
+        validate_bound_values,
+    )
+
+    value = observation(data)
+    dependencies = set()
+    for purpose, ref in (("basis", value.basis.ref), ("supersedes", value.supersedes)):
+        if ref is None:
+            continue
+        _source(conn, ref.source_id)
+        row = conn.execute(
+            text("""
+            SELECT payload FROM history_versions WHERE source_id=:source
+              AND source_record_id=:native AND version_id=:version AND is_demo=:demo
+              AND first_seen_at<=:now
+        """),
+            {
+                "source": ref.source_id,
+                "native": ref.source_record_id,
+                "version": ref.version_id,
+                "demo": run["is_demo"],
+                "now": now,
+            },
+        ).scalar_one_or_none()
+        if row is None or row["raw_sha256"] != ref.raw_sha256:
+            raise HistoryError(
+                "observation_ref_mismatch", "观测引用与同空间冻结版本不一致"
+            )
+        try:
+            original = native_json(row["raw_content"])
+            if purpose == "basis":
+                validate_bound_values(value, original)
+            elif not same_series(value, observation(original)):
+                raise ValueError("修订不能替换不同对象或口径")
+        except ValueError:
+            raise HistoryError(
+                "observation_binding_mismatch", "观测值、口径或修订引用与原件不一致"
+            ) from None
+        if ref.source_id != run["source_id"]:
+            dependencies.add(ref.source_id)
     return dependencies
 
 
@@ -761,7 +812,7 @@ def create_fetch(request: FetchRequest, key: str):
             request.source_id,
             False,
             "fetch",
-            request.model_dump(mode="json"),
+            request.model_dump(mode="json", exclude_none=True),
             key,
             "公开有界检索：" + request.query,
         )
@@ -818,6 +869,8 @@ def finish_fetch(run_id, attempt, batch):
                 "source_total",
             )
         }
+        if batch.get("next_continuation") is not None:
+            coverage["next_continuation"] = batch["next_continuation"]
         coverage.update(
             mode="bounded_public_query",
             limitations=[
@@ -1187,6 +1240,7 @@ def list_records(
         items, used_bytes = [], 0
         for row in rows[:limit]:
             record = HistoryRecord.model_validate(row["payload"])
+            _check_observation_visibility(conn, record, mode, cutoff)
             record_bytes = len(record.model_dump_json().encode())
             if used_bytes + record_bytes > MAX_RESPONSE_BYTES:
                 break
@@ -1297,6 +1351,7 @@ def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
                 "version_not_found", "该版本在当前许可、范围或截止时间下不可见", 404
             )
         record = HistoryRecord.model_validate(row["payload"])
+        _check_observation_visibility(conn, record, mode, cutoff)
         if record.record_kind == "graph":
             _check_graph_document_visibility(conn, record, mode, cutoff)
         return record
@@ -1378,6 +1433,39 @@ def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
             else None,
             "scope": "committed_adoptions_not_source_change_feed",
         }
+
+
+def _check_observation_visibility(conn, record, mode, cutoff):
+    if record.parser_version != "datafabric.observation.projection.v0.1":
+        return
+    from biz_rules.history_sources import parse_json
+    from biz_rules.observations import observation
+
+    item = observation(parse_json(record.raw_content))
+    for ref in (item.basis.ref, item.supersedes):
+        if ref is None:
+            continue
+        _derived_mode(ref.source_id, mode)
+        _source(conn, ref.source_id)
+        original = conn.execute(
+            text(
+                "SELECT payload FROM history_versions WHERE source_id=:source AND source_record_id=:native "
+                "AND version_id=:version AND is_demo=:demo AND " + _eligibility(mode)
+            ),
+            {
+                "source": ref.source_id,
+                "native": ref.source_record_id,
+                "version": ref.version_id,
+                "demo": record.is_demo,
+                "cutoff": _cutoff(cutoff),
+            },
+        ).scalar_one_or_none()
+        if original is None or original["raw_sha256"] != ref.raw_sha256:
+            raise HistoryError(
+                "observation_basis_not_visible",
+                "观测所引原件在同一许可、模式和截止时间下不可见",
+                404,
+            )
 
 
 def _check_graph_document_visibility(conn, record, mode, cutoff):

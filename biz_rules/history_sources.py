@@ -68,6 +68,20 @@ SOURCE_CATALOG = {
             "PMID/DOI跨库复用不是新独立研究；正文另核许可",
         ],
     },
+    "who_don": {
+        "name": "WHO Disease Outbreak News",
+        "business_types": ["population_need"],
+        "acquisition_channel": "public_api",
+        "access": "public_metadata",
+        "license_url": "https://www.who.int/about/policies/publishing/copyright",
+        "history_coverage": "本地采用后版本；当前公告API不提供过去原件资格",
+        "native_id": "WHO原生Id（DonId单独保留）",
+        "read_scope": "明确LastModified时间窗内DON公告、原文和发布元数据",
+        "limitations": [
+            "DON是选择性公告，不是全球疫情全量；零公告不证明没有暴发",
+            "发布/更新日期不是暴发开始；不从叙述推病例数、发病率或专业确认",
+        ],
+    },
     "legacy_documents": {
         "name": "已授权旧文档的精确冻结桥",
         "business_types": ["trials_pipeline", "regulatory", "literature"],
@@ -106,13 +120,19 @@ SOURCE_CATALOG = {
     },
     "external_archive": {
         "name": "受控历史归档",
-        "business_types": ["trials_pipeline", "regulatory", "literature"],
+        "business_types": [
+            "trials_pipeline",
+            "regulatory",
+            "literature",
+            "corporate_finance",
+            "population_need",
+        ],
         "acquisition_channel": "institutional_upload",
         "access": "controlled_import",
         "license_url": None,
         "history_coverage": "按每个明确声明/审核包记录，不承诺现有十年档案",
         "native_id": "归档原站ID；demo和真实资料隔离",
-        "read_scope": "固定trial/program/outcome/document原件结构与定位",
+        "read_scope": "固定trial/program/outcome/document原件及同口径metric/event声明/字段绑定；不提供专业真实性判断",
         "limitations": [
             "普通导入未审核；不能倒填本地首次见到时间",
             "映射只接纳有出处审核，不做唐蔚雯负责的消歧",
@@ -260,6 +280,22 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
     data = parse_json(item.raw_content)
+    if source_id == "who_don":
+        from biz_rules.who_don import project_who
+
+        return project_who(item, data)
+    if (
+        source_id == "external_archive"
+        and data.get("schema_version") == "datafabric.observation.v1"
+    ):
+        from biz_rules.observations import project_observation
+
+        try:
+            return project_observation(item, data)
+        except ValueError:
+            raise HistoryError(
+                "invalid_observation", "观测值、期间或口径不符合固定契约"
+            ) from None
     if source_id in {"legacy_documents", "reviewed_graph", "primekg_graph"}:
         from biz_rules.reviewed_graph import project_graph_record
 
@@ -619,13 +655,21 @@ def _raw_array_items(text: str, path: list[str]):
 
 def read_public(request: FetchRequest) -> dict:
     """返回真实完成/截断/失败及已读原件。HTTP异常绝不伪装EOF。"""
+    if request.source_id == "who_don":
+        from biz_rules.who_don import read_who
+
+        return read_who(request)
     records, seen, requests_count, source_total = [], {}, 0, None
     exhausted, error, stop = False, None, "record_budget"
     began = time.monotonic()
     max_bytes = 8 * 1024 * 1024
     bytes_read = 0
     cursor = "*" if request.source_id == "europe_pmc" else None
-    previous_cursors = set()
+    if request.continuation:
+        cursor = request.continuation.cursor
+    consumed = request.continuation.read_count if request.continuation else 0
+    next_continuation = None
+    previous_cursors = {cursor} if cursor else set()
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
             for page in range(request.max_pages):
@@ -768,7 +812,8 @@ def read_public(request: FetchRequest) -> dict:
                             "invalid_source_pagination",
                             "Europe PMC缺可信命中总数，不能确认EOF",
                         )
-                    exhausted = len(records) >= source_total
+                    consumed += len(page_items)
+                    exhausted = consumed >= source_total
                     if not exhausted and (
                         not page_items or not next_cursor or next_cursor == cursor
                     ):
@@ -784,6 +829,16 @@ def read_public(request: FetchRequest) -> dict:
                 if not page_items and not exhausted:
                     raise HistoryError(
                         "unexpected_empty_page", "来源仍有后续标记但返回空页"
+                    )
+                if request.source_id == "europe_pmc":
+                    next_continuation = (
+                        None
+                        if exhausted
+                        else {
+                            "scope_hash": request.scope_hash(),
+                            "cursor": next_cursor,
+                            "read_count": consumed,
+                        }
                     )
                 if exhausted:
                     stop = "upstream_exhausted"
@@ -824,6 +879,7 @@ def read_public(request: FetchRequest) -> dict:
         "requests": requests_count,
         "bytes": bytes_read,
         "source_total": source_total,
+        "next_continuation": next_continuation if not error else None,
     }
 
 

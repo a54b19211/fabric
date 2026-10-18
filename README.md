@@ -549,3 +549,51 @@ python -m pytest -q tests/integration_publication.py tests/integration_history.p
 退到不能消费新collected原件的客户端时先停其新来源消费，其他旧来源按原许可运行。
 
 当前单条ArchiveRecord.raw_content须同时满足1,048,576字符及1MiB UTF-8字节预算，外层冻结包装也计入预算。明确超限保存publication_record_too_large及字段/上限/单位，结构校验失败保存publication_input_invalid；两者保留原待办和旧版、标blocked并至少1小时后核对重试，同文档后继不越过，其他文档继续处理。大原件需按证据定位分块或通过已有原件存储扩展接入；当前不自动截断、不冒称已经处理成功。
+
+
+## 长期专题所需的连续来源与健康信息
+
+原采集写入仍通过原事务待办发表，雷达不用读源数据库。库存补录在原控制记录内按已许可的 source_site 轮转，各站保留固定 max_id、独立游标和完成状态；每轮总预算由 --backfill-batch-size 限制，不乘来源数。旧全局水位只在同一许可站点清单内迁移。这里的完成只表示最初冻结库存已遍历，不代表原站全量或持续抓取正常。
+
+百万级源表先独立建立 keyset 索引，不能在应用启动或大事务里做。必须提供原先显式的 DATAFABRIC_PUBLICATION_DATABASE_URL；命令不读取默认 APP 数据库：
+
+~~~bash
+python -m migration.publication --site-index
+# 仅回退本次索引，保留资料、待办和已捕获版本
+python -m migration.publication --drop-site-index
+~~~
+
+GET /api/history/source-health?source_id=clinicaltrials 使用原读取令牌及当前来源许可，分别返回：真实 crawl_log 中的 scoped 检查/成功/失败（没有记录就是 unknown）、发表器心跳和该源未完成待办数、按站库存进度、固定刷新任务。不会返回原配置或异常正文。日志里的 success、空 changes、发表器 idle、库存 EOF 都不证明原站完整或领域平静。
+
+WHO DON 的官方公开 OData 已实际只读验证可达；who_don 保留原生 Id/DonId、公告发布/更新时间、完整响应原件和字段 JSON pointer。正文独立规范 HTML。DON 是选择性公告，公告发布日期不是暴发开始，不从叙述猜病例数或发病率。CDC 此环境只读请求曾返回403，未接入；SEC 仍缺明确发行人队列与合法 User-Agent 配置，未接入。现有 ClinicalTrials 库存继续沿原收集器，不另开全库重复采集。
+
+连续刷新复用现 publisher 循环和原 history RQ，不新增服务/队列。服务器显式设置以下 JSON 到 DATAFABRIC_HISTORY_WATCHES（默认 []，不开额外抓取）；同时把来源加入 DATAFABRIC_HISTORY_SOURCE_ALLOWLIST，并运行 python -m migration.history 注册目录。以下只是受限范围，不是所有疫情/论文：
+
+~~~json
+[
+  {
+    "id": "who-recent",
+    "request": {"source_id":"who_don","query":"*","max_records":5,"max_pages":1,"deadline_seconds":30},
+    "cadence_seconds":3600,
+    "lookback_days":30
+  },
+  {
+    "id": "epmc-bcma-updates",
+    "request": {"source_id":"europe_pmc","query":"BCMA AND myeloma","max_records":10,"max_pages":1,"deadline_seconds":30},
+    "cadence_seconds":3600,
+    "lookback_days":30
+  }
+]
+~~~
+
+WHO 每轮固定最近窗口和截止，按 (LastModified,Id) keyset 续页；Europe PMC 为固定主题附加官方 UPDATE_DATE 日期窗，再续原生 cursor。这是数据库更新日，不用首次发表日代替，以便看到旧文更正。完整 query/时间窗/续页在原控制行保存，页读完才前进，EOF 后再开始下轮重叠刷新；长时间停机/来源事后倒填超出窗口仍是缺口，不宣称完整连续监测。公开 API 也不是事务快照，complete=false 始终保留；EOF 只是当轮查询结束。固定抓取 run 永远是真实非demo，不能把真实 WHO/论文改为教学资料。
+
+未知提交先核固定回执，原RQ任务已不活动才能恢复。失败、许可撤回或低磁盘保留续页并在健康信息显示；已有真实原件不丢失。首次收到时间仍由服务器生成，当前抓取不自动取得历史证明。修改 watch 查询/窗口策略时应使用新明确 id 开始新范围，不就地修改活动游标。
+
+外部同口径观测仍用现 /api/history/archives 的 external_archive、record_kind=document，原件固定为 datafabric.observation.v1，模型见 biz_rules/observations.py。仅支持 metric / event：来源对象ID、指标定义版本、十进制区间/单位、地域/人群、半开期间、reported/estimated/target、可空分母、原生时间、active/withdrawn 和完整 supersedes 引用。未知不补零；未来 reported 期间不当已发生。没有真实商业/病例数据时只能保存明确的教学或声明输入，不能展示为真实业务指标。
+
+basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份已采用原件的完整版本/哈希及严格 JSON pointer 对应，不能引用另一 observation 循环自证。数值按十进制原精度比较。只有服务端校验成功才能发表 datafabric.observation.projection.v0.1；字面绑定不等于真实性、独立性、因果、专业评价或口径可比。读取时继续核对当前来源许可及同模式/截止时间下的原件资格。修订须保持对象/指标定义/单位/地区/人群口径，期间可真实纠正；旧版本和旧判断保留，撤回与来源撤权分开。
+
+本次不改旧记录/旧 parser 或原始正文。回退时先关闭 DATAFABRIC_HISTORY_WATCHES 并停用新专题消费者，再回到已验收提交；保留新增版本/控制行。旧回填代码可从兼容 last_id=min(各站游标) 重新扫过，已捕获事件仍去重；无需删除资料或收窄数据库约束。WHO 和 typed observation 的新增能力在旧代码中不承诺可读/可执行，恢复新版后再启用。日常仍保留低磁盘底线，不能为补库存关闭该保护。
+
+公开依据：[WHO DON](https://www.who.int/emergencies/disease-outbreak-news/)、[WHO 官方API字段](https://www.who.int/api/default/diseaseoutbreaknews/sfhelp)、[Europe PMC 官方查询字段](https://dev.europepmc.org/docs/EBI_Europe_PMC_Web_Service_Reference.pdf)。这些公开接口说明不是来源覆盖或本系统分析质量证明。

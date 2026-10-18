@@ -340,3 +340,10 @@ def publication_status(
     from db.publication import publication_status as read_status
 
     return _call(read_status, source_id)
+
+
+@router.get("/source-health", dependencies=[Depends(require_read)])
+def source_health(source_id: str = Query(min_length=1, max_length=80)):
+    from db.source_refresh import source_health as health
+
+    return _call(health, source_id)

@@ -32,6 +32,21 @@ def migrate_history():
             """),
                 {"id": source_id, "catalog": canonical(catalog)},
             )
+            if source_id == "external_archive":
+                conn.execute(
+                    text(
+                        "UPDATE history_sources SET catalog=catalog || CAST(:metadata AS jsonb) WHERE source_id=:id"
+                    ),
+                    {
+                        "id": source_id,
+                        "metadata": canonical(
+                            {
+                                "business_types": catalog["business_types"],
+                                "read_scope": catalog["read_scope"],
+                            }
+                        ),
+                    },
+                )
             if source_id == "primekg_graph":
                 # 只更新当前能力说明，不重置已持久来源依赖/许可或版本。
                 conn.execute(

@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from biz_rules.history_models import HistoryError
 from db.publication import backfill_once, publish_once, publisher_heartbeat
+from db.source_refresh import refresh_once
 
 
 def main():
@@ -41,6 +42,7 @@ def main():
         failed = False
         try:
             publisher_heartbeat("running")
+            refresh = refresh_once()
             seeded = (
                 backfill_once(limit=args.backfill_batch_size)
                 if args.backfill_batch_size
@@ -69,7 +71,12 @@ def main():
             )
             print(
                 json.dumps(
-                    {"backfill": seeded, "processed": states}, ensure_ascii=False
+                    {
+                        "backfill": seeded,
+                        "processed": states,
+                        "source_refresh": refresh,
+                    },
+                    ensure_ascii=False,
                 ),
                 flush=True,
             )

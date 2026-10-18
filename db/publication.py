@@ -136,8 +136,50 @@ def enqueue_current_document(session, uuid):
         )
 
 
-def backfill_once(engine=None, *, limit=50):
-    """首次存量有固定id上界；游标和待办同事务提交，新插入由触发器负责。"""
+def _seed_document(conn, row):
+    # 与采集候选同锁；等待并发写入提交后重新检查，旧库存不能覆盖新版本或复活删除。
+    document = row["document"]
+    conn.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:uuid,0))"),
+        {"uuid": document["uuid"]},
+    )
+    if conn.execute(
+        text(
+            "SELECT EXISTS(SELECT 1 FROM publication_outbox WHERE kind='document' AND source_doc_uuid=:uuid)"
+        ),
+        {"uuid": document["uuid"]},
+    ).scalar_one():
+        return 0
+    conn.execute(
+        text("SELECT publication_record_document(CAST(:value AS jsonb),'backfill')"),
+        {"value": canonical(document)},
+    )
+    conn.execute(
+        text("""
+          INSERT INTO publication_outbox(event_key,kind,source_doc_uuid,snapshot)
+          SELECT :key,'graph',:uuid,CAST(:snapshot AS jsonb)
+          WHERE EXISTS(SELECT 1 FROM extracted_entities WHERE source_doc_uuid=:uuid
+            AND NOT is_deleted AND review_status IN ('approved','auto_approved'))
+             OR EXISTS(SELECT 1 FROM entity_relations WHERE source_doc_uuid=:uuid
+            AND NOT is_deleted AND review_status IN ('approved','auto_approved'))
+          ON CONFLICT(event_key) DO NOTHING
+        """),
+        {
+            "key": "graph:backfill:" + document["uuid"],
+            "uuid": document["uuid"],
+            "snapshot": canonical(
+                {
+                    "source_doc_uuid": document["uuid"],
+                    "capture_reason": "initial_graph_backfill",
+                }
+            ),
+        },
+    )
+    return 1
+
+
+def backfill_once(engine=None, *, limit=5):
+    """固定库存上界，逐站轮转；同一总预算，库存EOF不是原站覆盖证明。"""
     engine = engine or publication_engine()
     sites = source_sites()
     disk = disk_status()
@@ -158,21 +200,19 @@ def backfill_once(engine=None, *, limit=50):
     key = "backfill:" + sha256(canonical(sites))
     with engine.begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout='5000ms'"))
-        # 先消化可处理的新提交；隔离/失败仍由发表器重试，不能永久卡住其它库存。
         if conn.execute(
             text("""
-              SELECT EXISTS(
-                SELECT 1 FROM publication_outbox o
-                WHERE o.kind IN ('document','graph')
-                  AND o.state IN ('pending','processing')
-                  AND NOT EXISTS (
-                    SELECT 1 FROM publication_outbox earlier
-                    WHERE earlier.source_doc_uuid=o.source_doc_uuid
-                      AND earlier.kind IN ('document','graph')
-                      AND earlier.id<o.id AND earlier.state!='published'
-                  )
+          SELECT EXISTS(
+            SELECT 1 FROM publication_outbox o
+            WHERE o.kind IN ('document','graph') AND o.state IN ('pending','processing')
+              AND NOT EXISTS (
+                SELECT 1 FROM publication_outbox earlier
+                WHERE earlier.source_doc_uuid=o.source_doc_uuid
+                  AND earlier.kind IN ('document','graph')
+                  AND earlier.id<o.id AND earlier.state!='published'
               )
-            """)
+          )
+        """)
         ).scalar_one():
             return {
                 "seeded": 0,
@@ -186,7 +226,8 @@ def backfill_once(engine=None, *, limit=50):
         conn.execute(
             text("""
           INSERT INTO publication_outbox(event_key,kind,source_doc_uuid,snapshot)
-          VALUES (:key,'backfill',:key,CAST(:snapshot AS jsonb)) ON CONFLICT(event_key) DO NOTHING
+          VALUES (:key,'backfill',:key,CAST(:snapshot AS jsonb))
+          ON CONFLICT(event_key) DO NOTHING
         """),
             {
                 "key": key,
@@ -205,91 +246,98 @@ def backfill_once(engine=None, *, limit=50):
             .mappings()
             .one()
         )
-        scope = control["snapshot"]
-        if control["state"] == "published":
-            return {
-                "seeded": 0,
-                "complete": True,
-                "max_id": scope["max_id"],
-                "scope": "initial_authorized_inventory",
+        scope = dict(control["snapshot"])
+        if scope.get("source_sites") != sites:
+            raise HistoryError(
+                "backfill_scope_mismatch",
+                "旧库存范围与当前许可清单不一致，不能复用游标",
+            )
+        # 旧全局游标只在同一站点清单内继承：此前所有<=last_id的合格记录确已扫过。
+        if "sites" not in scope:
+            scope["sites"] = {
+                site: {
+                    "last_id": scope["last_id"],
+                    "max_id": scope["max_id"],
+                    "complete": control["state"] == "published",
+                    "last_error": None,
+                }
+                for site in sites
             }
-        rows = list(
-            conn.execute(
-                text("""
-          SELECT id,to_jsonb(d) AS document FROM documents d
-          WHERE id>:last AND id<=:upper AND source_site=ANY(:sites)
-          ORDER BY id LIMIT :limit
-        """),
-                {
-                    "last": scope["last_id"],
-                    "upper": scope["max_id"],
-                    "sites": sites,
-                    "limit": limit + 1,
-                },
-            ).mappings()
-        )
-        picked = rows[:limit]
-        seeded = 0
-        for row in picked:
-            # 与采集候选使用同一事务锁；等并发新版本提交后重新检查，不能把读到的旧库存排在它后面。
-            conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:uuid,0))"),
-                {"uuid": row["document"]["uuid"]},
-            )
-            if conn.execute(
-                text(
-                    "SELECT EXISTS(SELECT 1 FROM publication_outbox WHERE kind='document' AND source_doc_uuid=:uuid)"
-                ),
-                {"uuid": row["document"]["uuid"]},
-            ).scalar_one():
+            scope["next_site"] = 0
+        progress = scope["sites"]
+        next_site = int(scope.get("next_site", 0)) % len(sites)
+        seeded = scanned = 0
+        attempted, failed_sites = set(), set()
+        while scanned < limit and len(attempted) < len(sites) + limit:
+            available = [
+                site
+                for site in sites
+                if not progress[site]["complete"] and site not in failed_sites
+            ]
+            if not available:
+                break
+            site = sites[next_site]
+            next_site = (next_site + 1) % len(sites)
+            if site not in available:
                 continue
-            conn.execute(
-                text(
-                    "SELECT publication_record_document(CAST(:value AS jsonb),'backfill')"
-                ),
-                {"value": canonical(row["document"])},
-            )
-            seeded += 1
-            conn.execute(
-                text("""
-              INSERT INTO publication_outbox(event_key,kind,source_doc_uuid,snapshot)
-              SELECT :key,'graph',:uuid,CAST(:snapshot AS jsonb)
-              WHERE EXISTS(SELECT 1 FROM extracted_entities WHERE source_doc_uuid=:uuid
-                AND NOT is_deleted AND review_status IN ('approved','auto_approved'))
-                 OR EXISTS(SELECT 1 FROM entity_relations WHERE source_doc_uuid=:uuid
-                AND NOT is_deleted AND review_status IN ('approved','auto_approved'))
-              ON CONFLICT(event_key) DO NOTHING
-            """),
-                {
-                    "key": "graph:backfill:" + row["document"]["uuid"],
-                    "uuid": row["document"]["uuid"],
-                    "snapshot": canonical(
-                        {
-                            "source_doc_uuid": row["document"]["uuid"],
-                            "capture_reason": "initial_graph_backfill",
-                        }
-                    ),
-                },
-            )
-        more = len(rows) > limit
-        scope = {**scope, "last_id": picked[-1]["id"] if more else scope["max_id"]}
+            attempted.add((site, scanned))
+            state = dict(progress[site])
+            try:
+                # 单站超时回滚至savepoint，保存错误并轮转；不让首站故障饿死其它站。
+                with conn.begin_nested():
+                    rows = list(
+                        conn.execute(
+                            text("""
+                      SELECT id,to_jsonb(d) AS document FROM documents d
+                      WHERE source_site=:site AND id>:last AND id<=:upper
+                      ORDER BY id LIMIT 2
+                    """),
+                            {
+                                "site": site,
+                                "last": state["last_id"],
+                                "upper": state["max_id"],
+                            },
+                        ).mappings()
+                    )
+                    added = _seed_document(conn, rows[0]) if rows else 0
+                state.update(
+                    last_id=rows[0]["id"] if len(rows) > 1 else state["max_id"],
+                    complete=len(rows) <= 1,
+                    last_error=None,
+                )
+                seeded += added
+                scanned += bool(rows)
+            except SQLAlchemyError:
+                state["last_error"] = {
+                    "code": "seed_read_failed",
+                    "message": "该站库存读取失败；游标保留，下轮重试",
+                }
+                failed_sites.add(site)
+            progress[site] = state
+        complete = all(value["complete"] for value in progress.values())
+        scope.update(
+            sites=progress,
+            next_site=next_site,
+            last_id=min(value["last_id"] for value in progress.values()),
+        )
         conn.execute(
             text("""
-          UPDATE publication_outbox SET snapshot=CAST(:scope AS jsonb),
-          state=:state,completed_at=CASE WHEN :state='published' THEN clock_timestamp() ELSE NULL END
+          UPDATE publication_outbox SET snapshot=CAST(:scope AS jsonb), state=:state,
+          completed_at=CASE WHEN :state='published' THEN clock_timestamp() ELSE NULL END
           WHERE id=:id
         """),
             {
                 "scope": canonical(scope),
-                "state": "pending" if more else "published",
+                "state": "published" if complete else "pending",
                 "id": control["id"],
             },
         )
         return {
             "seeded": seeded,
-            "scanned": len(picked),
-            "complete": not more,
+            "scanned": scanned,
+            "complete": complete,
             "max_id": scope["max_id"],
+            "sites": progress,
             "scope": "initial_authorized_inventory_not_complete_source",
         }
 
