@@ -97,12 +97,6 @@ def write_to_database(parsed_result: dict) -> dict:
         language=parsed_result.get("language", ""),
     )
 
-    # ── 字段级血缘落盘（data/lineage/<uuid>.json）──
-    try:
-        save_lineage(parsed_result)
-    except Exception as e:
-        logger.warning(f"[Storage] 血缘落盘失败（不影响主流程）: {doc_uuid} | {e}")
-
     # ── 文档级结构化校验（T5：落库前契约检查 + 违规计数，非阻断）──
     doc_report = validate_document(envelope.model_dump())
     if doc_report.violation_count > 0:
@@ -121,8 +115,16 @@ def write_to_database(parsed_result: dict) -> dict:
         logger.error(f"[Storage] 数据落库失败: {doc_uuid} | {e}")
         success = False
 
+    # ── 字段级血缘落盘（data/lineage/<uuid>.json）──
+    if success:
+        try:
+            save_lineage(parsed_result)
+        except Exception as e:
+            logger.warning(f"[Storage] 血缘落盘失败（不影响主流程）: {doc_uuid} | {e}")
+
+
     # ── 可选：本地文件存储（开发/调试用）──
-    if APP.ENABLE_LOCAL_STORAGE:
+    if success and APP.ENABLE_LOCAL_STORAGE:
         try:
             _write_to_local_storage(parsed_result, envelope, doc_uuid, site)
         except Exception as e:

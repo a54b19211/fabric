@@ -115,7 +115,7 @@ class ClinicalTrialsExtra(BaseModel):
     study_type: str = Field(default="", description="研究类型：Interventional / Observational")
     phase: List[str] = Field(default_factory=list, description="研究阶段：Phase 1 / Phase 2 / Phase 3 / Phase 4")
     study_status: str = Field(default="", description="研究状态：Recruiting / Completed / Terminated")
-    enrollment: int = Field(default=0, description="计划入组人数")
+    enrollment: Optional[int] = Field(default=None, ge=0, description="计划入组人数；未知不补零")
     study_completion_date: str = Field(default="", description="研究完成日期")
     primary_completion_date: str = Field(default="", description="主要终点完成日期")
     sponsor: str = Field(default="", description="申办方")

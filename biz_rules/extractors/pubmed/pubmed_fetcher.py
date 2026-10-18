@@ -134,7 +134,7 @@ def _normalize(pmid: str, s: dict) -> dict:
     return {
         "pmid": pmid,
         "title": s.get("title", ""),
-        "abstract": s.get("summary", ""),
+        "abstract": "",  # ESummary不提供真实摘要，由下方EFetch补入
         "publish_date": s.get("pubdate", ""),
         "journal_name": s.get("fulljournalname") or s.get("source", ""),
         "authors": authors,
@@ -143,6 +143,38 @@ def _normalize(pmid: str, s: dict) -> dict:
         "keywords": [],
         "source_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
     }
+
+
+def _fetch_pubmed_details(ids, api_key=""):
+    """EFetch原生摘要和更正关系；缺请求PMID不得伪装成无摘要。"""
+    import xml.etree.ElementTree as ET
+    params = {"db": "pubmed", "retmode": "xml", "id": ",".join(ids)}
+    if api_key:
+        params["api_key"] = api_key
+    try:
+        response = httpx.get(f"{BASE_URL}/efetch.fcgi", params=params, timeout=60)
+        response.raise_for_status()
+        if len(response.content) > 8 * 1024 * 1024:
+            raise ValueError("response_budget")
+        root = ET.fromstring(response.text)
+        if root.tag != "PubmedArticleSet":
+            raise ValueError("invalid_root")
+        result = {}
+        for article in root.findall("PubmedArticle"):
+            pmid = article.findtext("./MedlineCitation/PMID")
+            if pmid not in ids or pmid in result:
+                raise ValueError("unexpected_or_duplicate_pmid")
+            abstract = "\n".join("".join(part.itertext()).strip() for part in
+                                  article.findall("./MedlineCitation/Article/Abstract/AbstractText"))
+            result[pmid] = {"abstract": abstract,
+                "publication_types": [part.text for part in article.findall("./MedlineCitation/Article/PublicationTypeList/PublicationType") if part.text],
+                "correction_links": [{"ref_type": part.attrib.get("RefType"), "pmid": part.findtext("PMID")}
+                                     for part in article.findall("./MedlineCitation/CommentsCorrectionsList/CommentsCorrections")]}
+        if set(result) != set(ids):
+            raise ValueError("missing_pmid")
+        return result
+    except Exception:
+        raise RuntimeError("PubMed EFetch摘要原件读取失败，未将缺失摘要补为空成功") from None
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +195,8 @@ def iter_pubmed(api_cfg: dict) -> Iterator[dict]:
     """
     query = api_cfg.get("query", "drug safety[Title]")
     max_records = api_cfg.get("max_records", 200)
+    if not isinstance(max_records, int) or not 1 <= max_records <= 10000:
+        raise ValueError("PubMed仅支持1至10000条有界检索；不得用0冒充完整库")
     api_key = api_cfg.get("api_key", "")
     db = api_cfg.get("db", "pubmed")
     fetch_fulltext = api_cfg.get("fetch_fulltext", True)
@@ -190,21 +224,23 @@ def iter_pubmed(api_cfg: dict) -> Iterator[dict]:
         resp = httpx.get(f"{BASE_URL}/esearch.fcgi", params=search_params, timeout=30)
         resp.raise_for_status()
         search_data = resp.json().get("esearchresult", {})
-    except Exception as e:
-        logger.error(f"[PubMed] esearch 失败: {e}")
-        return
+    except Exception:
+        raise RuntimeError("PubMed esearch读取失败，不能视为零命中") from None
 
-    total = int(search_data.get("count", 0))
+    if "count" not in search_data or "idlist" not in search_data:
+        raise RuntimeError("PubMed esearch结构不完整")
+    total = int(search_data["count"])
     web_env = search_data.get("webenv", "")
     query_key = search_data.get("querykey", "")
     id_list: list[str] = search_data.get("idlist", [])
 
-    limit = max_records if max_records > 0 else total
+    limit = min(max_records, total)
     logger.info(f"[PubMed] 命中 {total} 条，本次拉取 {limit}")
 
-    if not id_list and not web_env:
-        logger.warning("[PubMed] 未获取到任何 PMID")
+    if total == 0:
         return
+    if not id_list and not web_env:
+        raise RuntimeError("PubMed声明有命中但未返回ID或历史游标")
 
     # ── Step 2: esummary 分批拉取 ────────────────────────────────
     fetched = 0
@@ -222,30 +258,30 @@ def iter_pubmed(api_cfg: dict) -> Iterator[dict]:
         else:
             batch_ids = id_list[retstart: retstart + batch_size]
             if not batch_ids:
-                break
+                raise RuntimeError("PubMed本批ID耗尽但声明范围尚未读完")
             summary_params["id"] = ",".join(batch_ids)
 
         try:
             resp = httpx.get(f"{BASE_URL}/esummary.fcgi", params=summary_params, timeout=60)
             resp.raise_for_status()
             data = resp.json()
-        except Exception as e:
-            logger.error(f"[PubMed] esummary 失败 (retstart={retstart}): {e}")
-            break
+        except Exception:
+            raise RuntimeError("PubMed esummary读取失败，不能视为EOF") from None
 
         result = data.get("result", {})
         uids: list[str] = result.get("uids", [])
 
         if not uids:
-            logger.warning(f"[PubMed] esummary 返回空 (retstart={retstart})")
-            break
+            raise RuntimeError("PubMed esummary在声明范围内返回意外空页")
+        time.sleep(REQUEST_DELAY)
+        details = _fetch_pubmed_details(uids, api_key)
 
         for uid in uids:
             article = result.get(uid, {})
             if not article:
-                continue
-
+                raise RuntimeError("PubMed摘要元数据缺本批请求记录")
             record = _normalize(uid, article)
+            record.update(details[uid])
             yield _build_result(record, api_key, fetch_fulltext)
             fetched += 1
 
@@ -327,6 +363,8 @@ def _build_result(record: dict, api_key: str, fetch_fulltext: bool) -> dict:
             "fulltext_status": fulltext_status,
             "pmcid": pmcid,
             "oa_pdf_url": oa_pdf_url,
+            "publication_types": record.get("publication_types", []),
+            "correction_links": record.get("correction_links", []),
         },
         "sniffed_meta": {
             "doi": doi,

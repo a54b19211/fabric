@@ -36,7 +36,6 @@ from core_engine.storage_writer import write_to_database
 from core_engine.transform_pipeline import apply_l3_normalization, apply_identifier_alignment
 from db.repository import (
     get_document_by_uuid,
-    reset_document_for_recrawl,
 )
 
 
@@ -209,8 +208,8 @@ def recrawl_document_fn(uuid: str) -> dict:
 
     流程：
       1. 从数据库取 source_url + source_site
-      2. 软删除旧抽取结果，重置 extraction_status / weknora_sync_status
-      3. 重新抓取 → 解析 → 清洗质检 → upsert 写库
+      2. API来源不支持旧URL重采时明确拒绝；不清空旧成果
+      3. 网页重新读取后写库须成功；内容变化交版本入口，不覆盖旧资料
     """
     return _recrawl_document_impl(uuid)
 
@@ -240,14 +239,16 @@ def _recrawl_document_impl(uuid: str) -> dict:
             update_crawl_log(log_id, "failed", error="文档无 source_url")
         return {"success": False, "error": "文档无 source_url", "uuid": uuid}
 
-    # 2. 重置数据库状态
-    reset_document_for_recrawl(uuid)
-    logger.info(f"[Recrawl] 已重置文档状态: {uuid}")
-
-    # 3. 重新爬取（用 .fn() 绕过 Prefect 运行时，避免 client 初始化）
+    # 原成果保留到新资料真正采用；API记录不得把集合URL交给HTML抓取器。
     profile = SITE_PROFILES.get(site_key, {})
+    if profile.get("source_type") == "api":
+        if log_id:
+            update_crawl_log(log_id, "failed", error="api_by_id_recrawl_unsupported")
+        return {"success": False, "error": "API记录旧重采入口不支持精确by-ID，请用历史读取入口", "uuid": uuid}
+    # 旧网页链没有原件版本发布，附件也不强制覆盖旧文件。
+    # 新正文不同会由upsert保旧拒写，不先清除抽取或图谱结果。
     try:
-        parsed_list = fetch_and_parse_url.fn(source_url, site_key, profile, force=True)
+        parsed_list = fetch_and_parse_url.fn(source_url, site_key, profile, force=False)
     except Exception as e:
         logger.error(f"[Recrawl] 抓取失败: {uuid} | {e}")
         if log_id:
@@ -258,18 +259,21 @@ def _recrawl_document_impl(uuid: str) -> dict:
     stored, failed = 0, 0
     for parsed in parsed_list:
         try:
-            process_and_store.fn(parsed)
+            result = process_and_store.fn(parsed)
+            if not result.get("success", False):
+                failed += 1
+                continue
             stored += 1
         except Exception as e:
             logger.error(f"[Recrawl] 写库失败: {parsed.get('uuid')} | {e}")
             failed += 1
 
     if log_id:
-        update_crawl_log(log_id, "success" if failed == 0 else "partial",
+        update_crawl_log(log_id, "success" if stored and not failed else "partial" if stored else "failed",
                          total=stored + failed, passed=stored, failed=failed)
 
     logger.info(f"[Recrawl] 完成: {uuid}，写库 {stored} 条")
-    return {"success": True, "uuid": uuid, "stored": stored}
+    return {"success": bool(stored) and not failed, "uuid": uuid, "stored": stored, "failed": failed}
 
 
 @flow(name="crawl_url_on_demand")

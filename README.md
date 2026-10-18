@@ -252,3 +252,81 @@ API 使用 reload 时，切代码前由负责人安排停启；无需因本批�
 
 Git 撤销的是代码。本次不需要恢复旧数据库，也不能用旧数据库或 Redis 快照
 覆盖新产生的业务数据。配置、数据和未跟踪文件保持原样；不使用强制重置或清理命令。
+
+
+## 有界来源采用与历史读取（本轮新增）
+
+这条链只使用独立配置的 PostgreSQL/Redis：来源目录 → 有界公开读取或受控档案导入 → 不可变版本 → 截点/许可读取 → 雷达采用。
+没有历史商业档案时，当前公开资料验证接入，明确标记的合成档案验证历史计算；不宣称已完成真实近十年回测。
+
+历史模块需要显式传入以下进程环境变量，不回退旧 `APP.DB_URL`、旧 Redis 或现役数据库：
+`DATAFABRIC_HISTORY_DATABASE_URL`、`DATAFABRIC_HISTORY_REDIS_URL`、
+`DATAFABRIC_HISTORY_READ_TOKEN`、`DATAFABRIC_HISTORY_ADMIN_TOKEN`、
+`DATAFABRIC_HISTORY_SOURCE_ALLOWLIST`（JSON数组）。
+新凭据只放私有启动配置，不进入仓库、浏览器或命令输出。API/worker使用同一工作树和这些环境，绑定本地回环。
+`DATAFABRIC_HISTORY_DATA_ROOT`预留给外部原件文件；本版JSON/XML原件直接随不可变记录保存在独立PG，不另写一套文件副本。
+
+完成私有配置注入后，从当前工作树执行：
+
+```bash
+python -m migration.history
+uvicorn api.main:app --host 127.0.0.1 --port 18511
+# 另一终端使用相同独立配置；沿用RQ extraction队列，不清队列、不启动旧采集流程
+rq worker --url "$DATAFABRIC_HISTORY_REDIS_URL" extraction
+```
+
+迁移只创建 `history_sources`、`history_versions`、`history_runs` 三表，原documents/抽取/图谱表不变。
+`migration/versions/V017__history_records.sql`也被原迁移器识别；推荐独立链使用上述专用入口，不能对现役库试跑。
+关闭本轮API/worker、回到原提交即可停用新增接口；保留独立历史库和新表，不自动删除数据或清队列。跨版本回退前核对在途任务，不能让旧代码接手新任务。
+
+实际接口（均需独立Bearer凭据，导入/采集/恢复只允许管理员）：
+
+- `GET /api/history/sources`：10类业务标签及实际可读来源，未覆盖领域不伪装已有数据。
+- `POST /api/history/fetch`：固定ClinicalTrials/PubMed/FDA CRL/Europe PMC的有界只读查询，需 `Idempotency-Key`。返回持久任务，`GET /api/history/runs/{id}`读真实完成/截断/失败。
+- `POST /api/history/runs/{id}/retry`：传 `expected_attempt`，先核对原固定RQ job不活动才恢复。Redis状态不明、started/queued任务一律不重发。数据库提交未知时先读任务，不盲重跑。
+- `POST /api/history/archives`：固定原站ID、trial/program/outcome/document JSON原件（PubMed也支持XML），需幂等键。服务器生成版本ID和本地时间，客户端不得倒填first_seen/received。
+- `GET /api/history/records`：必填 `source_id,is_demo,mode,cutoff`；可给 `run_id`冻结清单、`source_record_ids`交集、至多3个字面AND `terms`，每页1–100。日期/时刻必须保留精度，完整时刻必须含时区。
+- `GET /api/history/versions/{version_id}`及 `/raw`：必填相同来源/原站ID/demo/模式/截点绑定；旧版本也重新核当前来源许可。
+- `GET /api/history/changes`：采用提交日志，`source_id,is_demo,after,limit,cursor`；不是上游完整变更feed，也不能直接当历史特征。
+
+`current`与`operational_replay`要求该版本本地首次采用不晚于cutoff。
+`public_history_reconstruction`只接纳管理员明确审核的归档证明；普通导入、今天读到的旧发表日期均不自动获得历史资格。
+证明SHA绑定全包排序后的 `[{source_record_id,raw_content}]` 的UTF-8 canonical JSON，可用 `archive_manifest_hash`生成。
+审核记录保存服务器审核人、时间和依据，这是有责任人的人工确认，不表示程序验证了外部机构的真实性或完整历史。
+程序会拒绝结局窗口、公开时间或新映射晚于所谓旧档证明的矛盾包；真实证明须HTTPS出处，fixture仅demo。
+
+`run_id`冻结该包的原站ID清单（可显式 `scope_record_ids`），在时间资格和首响应max_seq内选版本。未来补档不能改变已发游标的发布边界。
+清单完整性、截点可见条数、缺资料成员和上游是否翻完页分别返回；一页结束不代表站点全量。不同截点应各自使用当时的独立完整清单，不把今天的成功名单回填过去。
+后到的旧归档按归档证明时间排序，不以今天入库序号替代源时间。
+历史证明的年/月/日范围重叠而不能排先后，或同一可见时点的不同原件缺少不重叠的来源修订时间，均拒绝歧义包保旧；不能用精度上界或本地导入顺序伪造源历史。
+同一原件重复采用复用版本，本地first_seen/received不改写；新的读取任务另留created/completed和采用版本清单。
+
+项目映射仅接收有出处的 `program_id,lineage_id,indication,jurisdiction,mapping_available_at`，由管理员显式审核并记录依据，不在这里重做唐蔚雯的身份算法。
+结局用独立outcome原件：`event_type,unit_kind,unit_id,event_observed,event_at,observation_start,observation_end,public_available_at`。
+没有记录或未知不当阴性；阴性必须明确覆盖窗。后续结局供雷达按独立evaluation cutoff读取，不混入早期特征。
+
+FDA CRL保留application_number原生数组和letter_type，按PDF+信函日期/类型/申请号复合键分开；同批歧义拒绝，不把CRL、撤稿、终止自动解释为疗效/安全失败。
+Europe PMC采用source:id、PMID/DOI、摘要、更正关系及许可字段，不把同PMID当独立研究，不自动下载全文；firstPublicationDate可能补算，只保留来源原值。
+ClinicalTrials保留实际/预计时间语义和未知人数。新PubMed链用EFetch原始XML摘要；原采集器也不再用ESummary的summary假充摘要、吞掉失败或把固定页数截断当EOF。
+
+旧网页/CLI链尚未统一为历史版本发布：同UUID变化正文拒写并保留旧成果；API来源的旧URL重采明确拒绝，不能先清空唐的抽取/图谱/同步结果。
+旧网页后台线程不是新增history持久任务，不把二者混为已完成的全站重采平台。
+
+本轮检查：
+
+```bash
+python -m pytest -q tests/test_history.py
+# 必须显式注入隔离PG地址（fabric_history@127.0.0.1:18436）；测试使用临时schema并清理
+python -m pytest -q tests/integration_history.py
+```
+
+真实跨系统回测与公开小批调用由雷达端E2E脚本另外验收；上述HTTP替身测试不冒充外部实际采集或科学预测表现。
+
+
+### 本分支联调结果（2026 年 10 月 18 日）
+
+在 zktest 独立测试库和 Redis 中完成了真实 HTTP/RQ 联调：ClinicalTrials 一条登记、FDA 两封信件、Europe PMC 一条记录经过采集、保存，再由雷达读取、形成调查并导出。历史教学队列另行检查，包含未来版本排除、迟公开标签、明确阴性窗口、预测固定及后续评分；不以教学数值声称真实多年预测效果。
+
+普通测试套件 247 项通过；最后时间歧义修正后，相关 16 项单元测试和 12 项真实 PostgreSQL 测试通过。这些数量存在重叠，不累加成一个更大的测试总数。跨服务最终 42 项通过，雷达还完成实际浏览器操作和跨旧入口的撤源检查。完整联调记录集中在同机雷达分支的 `evaluation/handoff-verification.json`。
+
+当前只提交联调分支，没有切换现役 dev、重启现役服务或改其数据库。临时测试进程已关闭，测试数据库保留；现役启动保护仍在。后续合入时先加载明确的历史配置并执行新增迁移。撤回代码时停止新任务、保留历史表和原件，不以删表或清队列回退。

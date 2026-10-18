@@ -93,7 +93,7 @@ def _rewrite_clinicaltrials(md: str, title: str, structured: dict) -> str:
     status = _extract_field(md, "status") or _extract_field(md, "overallStatus")
     phase = _extract_field(md, "phase")
     enrollment = _extract_field(md, "enrollment")
-    start_date = structured.get("publish_date", "")
+    update_date = structured.get("publish_date", "")
 
     paragraphs = [f"# {title}", ""]
 
@@ -104,8 +104,8 @@ def _rewrite_clinicaltrials(md: str, title: str, structured: dict) -> str:
         basic_parts.append(f"研究阶段：{phase}")
     if enrollment:
         basic_parts.append(f"计划入组人数：{enrollment}")
-    if start_date:
-        basic_parts.append(f"开始日期：{start_date}")
+    if update_date:
+        basic_parts.append(f"登记更新公开日期：{update_date}")
     if basic_parts:
         paragraphs.append("，".join(basic_parts) + "。")
 
