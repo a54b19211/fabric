@@ -151,3 +151,90 @@ def test_publisher_backfill_budget_is_separate_and_zero_keeps_consuming(
         [] if backfill == 0 else [("backfill", 1 if backfill is None else backfill)]
     )
     assert [call for call in calls if call[0] == "backfill"] == expected
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_real_nmpa_collector_headers_are_not_narrative_and_originals_stay_exact(
+    newline,
+):
+    from pathlib import Path
+
+    samples = json.loads(
+        (
+            Path(__file__).parent / "fixtures" / "collected_nmpa_frontmatter.json"
+        ).read_text()
+    )
+    for sample in samples:
+        raw = sample["raw_content"].replace("\n", newline)
+        value = {
+            "uuid": "FIXTURE-" + sample["source_doc_uuid"],
+            "source_site": sample["source_site"],
+            "title": sample["title"],
+            "source_url": sample["source_url"],
+            "raw_content": raw,
+        }
+        doc = collected_document(value, NOW, "insert")
+        item = ArchiveRecord(
+            source_record_id="legacy:nmpa:" + value["uuid"],
+            record_kind="document",
+            raw_content=doc.model_dump_json(),
+        )
+        projected = project_collected(item, json.loads(item.raw_content))
+        end = raw.index(newline + "---" + newline) + len(newline + "---" + newline)
+        assert projected["clean_text"] == raw[end:].strip("\r\n").rstrip()
+        assert "publish_date:" not in projected["clean_text"]
+        assert "source_site:" not in projected["clean_text"]
+        assert sample["title"] in projected["clean_text"]
+        assert doc.original_raw_content == raw and doc.original_raw_sha256 == sha256(
+            raw
+        )
+        assert (
+            projected["parser_version"]
+            == "datafabric.collected.document.projection.v0.2"
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "---\nsource_site: nmpa\ndoc_type: notice\nlanguage: zh\n正文没有闭合模板",
+        "---\nsource_site: other\ndoc_type: notice\nlanguage: zh\n---\n真实正文",
+        "---\nsource_site: nmpa\ndoc_type: notice\nlanguage: zh\nunknown_business_field: 重要事实\n---\n正文",
+        "真实正文\n---\npublish_date: 字段在正文中的说明，不能全局删词",
+    ],
+)
+def test_unrecognized_metadata_or_body_is_not_deleted(raw):
+    from biz_rules.collected_document import _narrative_text
+
+    assert _narrative_text(raw, "nmpa") == raw
+
+
+def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles_survive():
+    from biz_rules.collected_document import _narrative_text
+
+    raw = (
+        "SYNTHETIC A<B, CD4<CD8 and <anti-BCMA> stay in prose.\n"
+        '<table border="1"><tr><td colspan="2"><p>有意义的单元格</p>'
+        "<style>style_noise</style><script>script_noise</script></td>"
+        '<td rowspan="2">下一单元格</td></tr></table>\n'
+        "SYNTHETIC trailing paragraph."
+    )
+    clean = _narrative_text(raw, "nmpa")
+    assert "A<B, CD4<CD8 and <anti-BCMA>" in clean
+    assert "有意义的单元格" in clean and "下一单元格" in clean
+    assert "SYNTHETIC trailing paragraph." in clean
+    assert all(
+        word not in clean
+        for word in (
+            "<table",
+            "<td",
+            "colspan",
+            "rowspan",
+            "style_noise",
+            "script_noise",
+        )
+    )
+    assert (
+        _narrative_text("Example <table>not a cell</table>", "nmpa")
+        == "Example <table>not a cell</table>"
+    )

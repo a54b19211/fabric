@@ -261,8 +261,11 @@ def test_graph_review_update_then_rejection_publishes_new_bound_snapshot(databas
     source, target = databases
     value = snapshot()
     # Quotes are in the narrative prefix, not in JSON keys.
-    value["raw_content"] = value["raw_content"].replace(
-        "SYNTHETIC narrative.", "SYNTHETIC A collaborates with B."
+    value["raw_content"] = (
+        "---\ntitle: SYNTHETIC\nsource_site: clinicaltrials\ndoc_type: clinical_trial\nlanguage: en\n---\n\n"
+        + value["raw_content"].replace(
+            "SYNTHETIC narrative.", "SYNTHETIC A collaborates with B."
+        )
     )
     insert_document(source, value)
     assert publication.publish_once()["state"] == "published"
@@ -303,6 +306,19 @@ def test_graph_review_update_then_rejection_publishes_new_bound_snapshot(databas
     graph_changes = history.list_changes("reviewed_graph", True)["items"]
     graph = json.loads(graph_changes[0]["raw_content"])
     assert len(graph["edges"]) == 1 and graph["edges"][0]["binding_status"] == "bound"
+    proof = graph["edges"][0]["evidence"][0]
+    adopted = history.read_version(
+        proof["version_id"],
+        proof["source_id"],
+        proof["source_record_id"],
+        True,
+        "current",
+        datetime.now(timezone.utc),
+    )
+    locator = proof["locator"]
+    assert locator["basis"] == "clean_text"
+    assert adopted.clean_text[locator["start"] : locator["end"]] == proof["quote"]
+    assert locator["start"] < value["raw_content"].index(proof["quote"])
     with source.begin() as conn:
         conn.execute(
             text("UPDATE entity_relations SET review_status='rejected' WHERE id=:id"),
@@ -697,3 +713,85 @@ def test_quarantined_source_and_its_waiting_successor_do_not_stop_authorized_sto
         "SELECT state FROM publication_outbox WHERE source_doc_uuid='SYNTHETIC-quarantined' ORDER BY id",
     )
     assert [item["state"] for item in waiting] == ["blocked", "pending"]
+
+
+def test_reprojection_same_original_makes_new_version_and_keeps_old_immutable(
+    databases, monkeypatch
+):
+    from biz_rules.collected_document import collected_document
+    from biz_rules.history_models import ArchiveImport, ArchiveRecord
+
+    _source, target = databases
+    value = snapshot("SYNTHETIC-reprojection")
+    value["raw_content"] = (
+        "---\ntitle: SYNTHETIC\nsource_site: clinicaltrials\ndoc_type: clinical_trial\nlanguage: en\n---\n\n"
+        + value["raw_content"]
+    )
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(history, "_now", lambda _conn: now)
+    doc = collected_document(value, now, "insert")
+    item = ArchiveRecord(
+        source_record_id="legacy:clinicaltrials:" + value["uuid"],
+        record_kind="trial",
+        raw_content=doc.model_dump_json(),
+    )
+    request = ArchiveImport(
+        source_id="legacy_documents",
+        is_demo=True,
+        scope_description="SYNTHETIC parser regression",
+        declared_count=1,
+        declared_complete=False,
+        records=[item],
+    )
+    actual = history.project_record
+
+    def old_projection(source_id, record):
+        projected = actual(source_id, record)
+        projected["parser_version"] = "datafabric.collected.document.projection.v0.1"
+        projected["clean_text"] = value["raw_content"].split("## 原始数据")[0].rstrip()
+        return projected
+
+    with monkeypatch.context() as previous:
+        previous.setattr(history, "project_record", old_projection)
+        old_run = history.import_archive(request, "SYNTHETIC-original-v01")
+    old = history.read_version(
+        old_run.version_ids[0],
+        "legacy_documents",
+        item.source_record_id,
+        True,
+        "current",
+        now,
+    ).model_dump(mode="json")
+    new_run = history.import_archive(request, "SYNTHETIC-reproject-v02")
+    new = history.read_version(
+        new_run.version_ids[0],
+        "legacy_documents",
+        item.source_record_id,
+        True,
+        "current",
+        now,
+    )
+    assert new.version_id != old["version_id"]
+    assert new.raw_content == old["raw_content"] and new.raw_sha256 == old["raw_sha256"]
+    assert new.availability_proof.model_dump(mode="json") == old["availability_proof"]
+    assert new.facts == old["facts"] and new.field_locators == old["field_locators"]
+    assert new.parser_version.endswith("v0.2") and "source_site:" not in new.clean_text
+    assert (
+        history.read_version(
+            old_run.version_ids[0],
+            "legacy_documents",
+            item.source_record_id,
+            True,
+            "current",
+            now,
+        ).model_dump(mode="json")
+        == old
+    )
+    page = history.list_changes("legacy_documents", True)
+    assert page["current_version_ids"][item.source_record_id] == new.version_id
+    assert [row["version_id"] for row in page["items"]] == [
+        old["version_id"],
+        new.version_id,
+    ]
+    again = history.import_archive(request, "SYNTHETIC-reproject-v02")
+    assert again.id == new_run.id and version_count(target) == 2

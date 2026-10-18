@@ -123,6 +123,58 @@ def collected_document(snapshot, observed_at, capture_reason):
     return CollectedDocument(**value)
 
 
+def _narrative_text(raw, source_site):
+    """只移除采集器包装和真实表格格式；clean偏移不冒充原MD偏移。"""
+    lines = raw.splitlines(keepends=True)
+    start = 0
+    if lines and lines[0].strip() == "---":
+        known = {
+            "title",
+            "publish_date",
+            "source_site",
+            "doc_type",
+            "language",
+            "source_url",
+            "confidence_level",
+            "drug_name",
+            "parent_uuid",
+            "parent_title",
+            "parent_source_url",
+        }
+        metadata = {}
+        for index, line in enumerate(lines[1:32], 1):
+            if line.strip() == "---":
+                if {
+                    "source_site",
+                    "doc_type",
+                    "language",
+                } <= metadata.keys() and metadata["source_site"] == source_site:
+                    start = sum(len(value) for value in lines[: index + 1])
+                break
+            field = re.fullmatch(r"([a-z_]+):[ \t]*(.*?)[\r\n]*", line)
+            if not field or field[1] not in known or field[1] in metadata:
+                break
+            metadata[field[1]] = field[2].strip()
+    clean = (
+        re.split(r"(?m)^##[ \t]+原始数据[ \t]*\r?$", raw[start:], maxsplit=1)[0]
+        .strip("\r\n")
+        .rstrip()
+    )
+
+    def table_text(match):
+        # bs4已用于既有来源解析；不对整篇Markdown做HTML解析，避免吞掉A<B等正文。
+        from bs4 import BeautifulSoup
+
+        table = BeautifulSoup(match.group(0), "html.parser")
+        if table.find(["td", "th"]) is None:
+            return match.group(0)
+        for element in table(["script", "style"]):
+            element.decompose()
+        return "\n" + table.get_text("\n", strip=True) + "\n"
+
+    return re.sub(r"(?is)<table\b[^>]*>.*?</table\s*>", table_text, clean).rstrip()
+
+
 def project_collected(item, data):
     from biz_rules.history_sources import TRIAL_PATHS, _facts
 
@@ -170,14 +222,11 @@ def project_collected(item, data):
             trial.get("start_date"),
             "registry_start_" + str(trial.get("start_date_type", "unknown")),
         )
-    # 只采用原样叙述前缀，不让附录JSON键进入文本挖掘；完整原件仍在raw。
-    clean = re.split(
-        r"(?m)^##[ \t]+原始数据[ \t]*\r?$", document.original_raw_content, maxsplit=1
-    )[0].rstrip()
+    clean = _narrative_text(document.original_raw_content, document.source_site)
     if document.publication_state == "withdrawn":
         clean = "源记录已删除或撤回；这不是临床失败结论。"
     return {
-        "parser_version": "datafabric.collected.document.projection.v0.1",
+        "parser_version": "datafabric.collected.document.projection.v0.2",
         "record_kind": kind,
         "title": document.title,
         "source_url": document.source_url,

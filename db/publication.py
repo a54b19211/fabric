@@ -558,22 +558,38 @@ def _publish_graph(engine, row, prepared, document_run):
         )
         observation = prepared["graph_input"]["observation"]
         bundle = build_legacy_bundle(observation, [original], [ref])
-        # 原文附录不进入clean_text。未能落在实际采用叙述中的quote保持未绑定。
+
+        # 清洗可能移除模板头/HTML，原MD偏移不能切clean_text。只接受原句的唯一精确匹配。
+        def bound_evidence(items):
+            from biz_rules.reviewed_graph import GraphLocator
+
+            bound = []
+            for evidence in items:
+                start = version.clean_text.find(evidence.quote)
+                if (
+                    start >= 0
+                    and version.clean_text.find(evidence.quote, start + 1) < 0
+                ):
+                    bound.append(
+                        evidence.model_copy(
+                            update={
+                                "locator": GraphLocator(
+                                    start=start, end=start + len(evidence.quote)
+                                )
+                            }
+                        )
+                    )
+            return bound
+
         for node in bundle.nodes:
-            node.evidence = [
-                e
-                for e in node.evidence
-                if version.clean_text[e.locator.start : e.locator.end] == e.quote
-            ]
+            node.evidence = bound_evidence(node.evidence)
         for edge in bundle.edges:
-            edge.evidence = [
-                e
-                for e in edge.evidence
-                if version.clean_text[e.locator.start : e.locator.end] == e.quote
-            ]
+            edge.evidence = bound_evidence(edge.evidence)
             if not edge.evidence:
                 edge.binding_status = "unbound"
-                edge.unbound_reason = "来源句子未绑定已采用叙述文本"
+                edge.unbound_reason = (
+                    "来源句子在已采用叙述中缺失或多处出现，未作模糊定位"
+                )
     graph_request = ArchiveImport(
         source_id="reviewed_graph",
         is_demo=request.is_demo,
