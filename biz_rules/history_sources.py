@@ -121,6 +121,28 @@ SOURCE_CATALOG = {
 }
 
 
+# 既有采集库存的来源许可目录；这里只声明桥接能力，不宣称新增站点抓取已接通。
+for _legacy_id, _name, _types in (
+    ("fda_api_drug_label", "既有FDA药品标签库存", ["regulatory"]),
+    ("fda_api_enforcement", "既有FDA执法/召回库存", ["regulatory"]),
+    ("chictr", "既有中国临床试验注册库存", ["trials_pipeline"]),
+    ("nmpa", "既有国家药监局资料", ["regulatory"]),
+    ("cde_xxgk", "既有CDE信息公开库存", ["regulatory"]),
+    ("cde", "既有CDE资料", ["regulatory"]),
+):
+    SOURCE_CATALOG[_legacy_id] = {
+        "name": _name,
+        "business_types": _types,
+        "acquisition_channel": "legacy_database",
+        "access": "explicit_source_allowlist",
+        "license_url": None,
+        "history_coverage": "仅从本次自动发表后形成不可变版本；不是原站历史档案",
+        "native_id": "原source_site + document UUID",
+        "read_scope": "已入库清洗正文的版本化桥接；不代表该源新抓取接口或全量覆盖",
+        "limitations": ["需管理员逐源许可；不保证原站覆盖、原日期语义或专业结论"],
+    }
+
+
 def _unique(pairs):
     result = {}
     for key, value in pairs:

@@ -490,6 +490,10 @@ def project_graph_record(source_id, item, data):
     from biz_rules.history_sources import _facts
 
     if source_id == "legacy_documents":
+        if data.get("schema_version") == "datafabric.collected.document.v1":
+            from biz_rules.collected_document import project_collected
+
+            return project_collected(item, data)
         document = LegacyDocument.model_validate(data)
         if (
             item.record_kind != "document"

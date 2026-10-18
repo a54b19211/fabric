@@ -1,3 +1,5 @@
+from typing import Literal
+
 """有独立许可的历史资料接口；旧documents/research接口行为不变。"""
 
 import hmac
@@ -329,3 +331,12 @@ def graph_resolve(
         external_id=external_id,
         limit=limit,
     )
+
+
+@router.get("/publication/status", dependencies=[Depends(require_read)])
+def publication_status(
+    source_id: Literal["legacy_documents", "reviewed_graph"] = "legacy_documents",
+):
+    from db.publication import publication_status as read_status
+
+    return _call(read_status, source_id)

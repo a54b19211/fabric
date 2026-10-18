@@ -159,7 +159,12 @@ def _validate_derived(conn, run, item, now, proof):
         )
     data = parse_json(item.raw_content)
     if run["source_id"] == "legacy_documents":
-        original = LegacyDocument.model_validate(data)
+        if data.get("schema_version") == "datafabric.collected.document.v1":
+            from biz_rules.collected_document import CollectedDocument
+
+            original = CollectedDocument.model_validate(data)
+        else:
+            original = LegacyDocument.model_validate(data)
         _source(conn, original.source_site)
         return {original.source_site}
 
@@ -1138,7 +1143,10 @@ def list_records(
                 409,
             )
         base = "SELECT * FROM history_versions WHERE " + where
-        eligible = _eligibility(mode)
+        eligible = (
+            _eligibility(mode)
+            + " AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference'"
+        )
         counts = (
             conn.execute(
                 text(
@@ -1336,8 +1344,26 @@ def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
         more = len(rows) > len(items)
         if more and not items:
             raise HistoryError("response_budget", "单条记录超过响应预算", 413)
+        # 采用序号不是源事实的新旧顺序；仅本页ID返回固定发布边界内的当前头版。
+        head_ids = [item.source_record_id for item in items]
+        heads = conn.execute(
+            text(
+                "SELECT DISTINCT ON (source_record_id) source_record_id,version_id "
+                "FROM history_versions WHERE source_id=:source AND is_demo=:demo "
+                "AND published_seq<=:max_seq AND source_record_id=ANY(:ids) "
+                "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
+                "ORDER BY source_record_id,COALESCE(proof_available_at,first_seen_at) DESC,"
+                + _SOURCE_UPDATED_ORDER
+                + " DESC NULLS LAST,published_seq DESC"
+            ),
+            {"source": source_id, "demo": is_demo, "max_seq": max_seq, "ids": head_ids},
+        ).mappings()
         return {
             "schema_version": "datafabric.history.changes.v1",
+            "current_version_ids": {
+                **dict.fromkeys(head_ids),
+                **{row["source_record_id"]: row["version_id"] for row in heads},
+            },
             "items": [item.model_dump(mode="json") for item in items],
             "max_seq": max_seq,
             "next_after": items[-1].published_seq if more else max_seq,

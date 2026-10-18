@@ -878,3 +878,25 @@ def test_graph_manifest_cannot_bind_demo_document_into_real_package(pg, monkeypa
     with pytest.raises(Exception) as error:
         store.import_archive(request, "demo-to-real-graph")
     assert error.value.code == "graph_demo_mismatch"
+
+
+def test_changes_head_sidecar_uses_source_time_and_frozen_published_boundary(pg):
+    newer = store.import_archive(
+        archive([raw_record("late-adoption", "PHASE2")], "2018-06-01"), "sidecar-newer"
+    )
+    store.import_archive(
+        archive([raw_record("late-adoption", "PHASE1")], "2016-06-01"), "sidecar-older"
+    )
+    first = store.list_changes("external_archive", True, limit=1)
+    assert first["current_version_ids"]["late-adoption"] == newer.version_ids[0]
+    assert first["next_cursor"] and first["max_seq"] == 2
+    latest = store.import_archive(
+        archive([raw_record("late-adoption", "PHASE3")], "2020-06-01"),
+        "sidecar-after-page",
+    )
+    next_page = store.list_changes(
+        "external_archive", True, limit=1, cursor=first["next_cursor"]
+    )
+    assert next_page["max_seq"] == 2
+    assert next_page["current_version_ids"]["late-adoption"] == newer.version_ids[0]
+    assert latest.version_ids[0] != newer.version_ids[0]

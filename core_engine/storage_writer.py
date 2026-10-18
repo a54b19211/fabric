@@ -108,8 +108,12 @@ def write_to_database(parsed_result: dict) -> dict:
 
     # ── 核心：写入数据库 ──
     success = True
+    publication = {}
     try:
-        upsert_document(envelope)
+        result = upsert_document(envelope)
+        if result is False:
+            raise RuntimeError("文档写库未确认成功")
+        publication = result if isinstance(result, dict) else {}
         logger.info(f"[Storage] 数据落库成功: {doc_uuid}")
     except Exception as e:
         logger.error(f"[Storage] 数据落库失败: {doc_uuid} | {e}")
@@ -136,6 +140,7 @@ def write_to_database(parsed_result: dict) -> dict:
         "confidence_score": confidence_result["score"],
         "success": success,
         "violation_count": doc_report.violation_count,
+        **publication,
     }
 
 

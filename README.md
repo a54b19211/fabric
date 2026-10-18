@@ -466,3 +466,82 @@ python -m flows.graph_publish capture-primekg --node-type gene/protein \
 采用服务器first_seen之前不可回放；之后可回看冻结背景版本，仍无关系真实有效时间或专业证据。
 [Neo4j HTTP读取格式](https://neo4j.com/docs/http-api/current/query/)及
 [READ路由说明](https://neo4j.com/docs/http-api/current/routing/)是当前兼容路径参考；此命令不升级现役图服务。
+
+## 落库后自动发表与雷达增量衔接
+
+本轮把原有网页、CLI、API上传和批量SQL的实际写库接上不可变版本，不再要求每批手动capture。
+原流程继续采集、清洗和质检；只有原数据库事务真正提交的内容才会进入待发表。
+文本先发表，不等待实体抽取或图审核。图审核/身份资格变更后另发固定图版本。
+
+### 启动与配置
+
+由负责人在维护窗口确认源库连接、备份和代码版本。源库与历史库是两个显式配置，
+不复制现役.env，不把URL/密码写进命令行或日志。源连接可由服务器私有配置复用真实APP.DB_URL；
+不要把已经编码的密码再次按明文拼接。所需变量为：
+
+- DATAFABRIC_PUBLICATION_DATABASE_URL：原采集库完整SQLAlchemy URL。
+- DATAFABRIC_PUBLICATION_SOURCES：允许发表的原source_site JSON数组。
+- DATAFABRIC_PUBLICATION_IS_DEMO：服务端true/false；教学源库必须true。
+- DATAFABRIC_PUBLICATION_NAMESPACE：此生产实例稳定命名空间。
+- DATAFABRIC_PUBLICATION_MIN_FREE_BYTES：默认预留15GiB；DISK_PATH指定实际数据所在文件系统。
+- 原DATAFABRIC_HISTORY_*：仍指独立历史库、来源许可和独立凭据。
+
+~~~bash
+python -m migration.publication
+python -m migration.history
+python -m flows.history_publish --poll-seconds 30 --batch-size 20 --backfill-batch-size 1
+~~~
+存量补录与发表预算分开：初期每30秒至多新增1篇存量待办，同时最多消化20项已有待办；有可处理的pending/processing待办时先处理新提交和积压，不继续复制旧库存。失败/隔离行保留并按原规则核对重试，不作其它库存的永久全局闸门；同一文档仍不能越过未完成版本。持续繁忙时存量会延后，不能报告完成。改成 --backfill-batch-size 0 可暂停补录并继续处理已捕获资料；恢复同一清单会从原游标继续。调速需先看 pending、磁盘和单条复制体积，不按百万库存一次启动全量。
+
+
+V019只在显式源库新增publication_outbox和固定写入触发器，不在迁移里扫描百万库存。
+迁移的锁等待上限3秒，遇占用则整笔回滚。publisher是普通常驻循环，不增加第二队列；
+雷达计算仍使用其已有RQ。启动/停止publisher都不清现有采集或抽取队列。
+
+既有clinicaltrials、fda_api_drug_label、chictr、fda_api_enforcement、nmpa、cde_xxgk、cde
+可逐源许可后自动桥接。额外六类目录只声明已有库存，不冒充新增公开抓取接口。
+unknown或未许可来源保留blocked待办与原因，不借legacy_documents绕过许可。
+
+### 数据怎样保存
+
+documents事务内冻结正文、标题、原站和状态；doc_extra与该事务一起提交或一起回滚，
+临床事实只从已冻结正文的精确protocolSection片段解析，不借稍后可变extra补事实。
+source_projection与原MD片段、Unicode定位和SHA必须相符。旧v1原件/哈希不改写；
+自动发布使用datafabric.collected.document.v1。普通正文、临床原生字段和结构化图包分别处理。
+
+同UUID新清洗正文先作为新候选持久保存，不覆盖仍挂着旧抽取/图谱的兼容缓存。
+写入结果明确legacy_cache_retained/publication_pending。连续重复不新发，
+A→B→A或撤回后恢复仍记录新的本地观察，原正文SHA相同不等于新独立研究。
+
+初始库存按固定max(id)和keyset小批推进，已捕获的UUID不从旧缓存重发覆盖新候选。
+图若需要尚未发表的旧原件，只标context_reference供精确引用，不进入当前正文头版。
+审核dirty可合并为实际读取时的当前图，不声称捕获每次中间审核。字典撤销is_verified/
+is_deleted资格也会对实际引用文档产生图待办；不改唐的消歧或全局别名算法。
+
+源删除产生显式withdrawn状态；审核撤回产生少边/空边图版本。没有资料、抓取失败或没有图
+均不推断删除，更不推断临床失败。业务撤回与当前来源许可分开，旧版读取仍检查来源许可。
+changes继续是采用日志，current_version_ids在固定max_seq内给当前头版，context-only时为null。
+
+publisher先在源库持久冻结准备输入，再跨库用固定幂等键发表，最后确认并压缩源待办为SHA和版本回执。
+history已提交但源ACK丢失时，下次核对同key/同输入，不重抓变化内容。不宣称跨库事务原子。
+每文档按待办顺序处理，失败保留旧版与待办，不跳到后来正文冒充当前版本。
+初始库存范围、尚未走完的位置和资源暂停均明确可查，不把首批成功称为全库完成。
+
+### 状态、检查与回退
+
+GET /api/history/publication/status?source_id=legacy_documents（或reviewed_graph）使用已有read凭据，
+返回服务端is_demo、namespace、源库名称、真实last_heartbeat、状态计数、初始库存位置和磁盘门槛。
+无心跳、过期、许可失败、资源暂停与当前没有新资料分开。接口不返回待办正文或密码。
+低于磁盘门槛停止新增history复制并保留pending；已有成功回执可以继续核对，需运维处置空间/生产限额。
+
+~~~bash
+python -m pytest -q tests/test_publication.py
+python -m pytest -q tests/integration_publication.py tests/integration_history.py
+~~~
+
+后者要求显式隔离PG18436，在临时schema实际检查触发器、两库提交/失败恢复和权限，不用SQLite。
+跨服务持续验收由雷达实际HTTP上传与常驻publisher/monitor/RQ完成，测试不直接调用tick制造成功。
+
+回退前停止publisher和雷达monitor，保留待办/回执/原件；按维护窗口停用publication_*四个源表触发器，
+不删表、不清队列、不还原旧数据库覆盖新数据。未安装V019的环境保留原changedbody拒写行为。
+退到不能消费新collected原件的客户端时先停其新来源消费，其他旧来源按原许可运行。
