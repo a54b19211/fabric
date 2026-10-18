@@ -22,6 +22,7 @@ from biz_rules.history_models import (
     RecordKind,
     RunView,
 )
+from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution
 from db import history as store
 
 
@@ -259,4 +260,72 @@ def changes(
 ):
     return _call(
         store.list_changes, source_id, is_demo, after=after, limit=limit, cursor=cursor
+    )
+
+
+@router.get(
+    "/graph/{version_id}/neighborhood",
+    response_model=GraphNeighborhood,
+    dependencies=[Depends(require_read)],
+)
+def graph_neighborhood(
+    version_id: str,
+    source_id: str,
+    source_record_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    seed_ids: Annotated[list[str], Query()],
+    relation_types: Annotated[list[str] | None, Query()] = None,
+    direction: str = "both",
+    max_depth: int = Query(default=1, ge=0, le=2),
+    max_nodes: int = Query(default=50, ge=1, le=100),
+    max_edges: int = Query(default=100, ge=1, le=200),
+):
+    return _call(
+        store.read_graph_neighborhood,
+        version_id,
+        source_id,
+        source_record_id,
+        is_demo,
+        mode,
+        cutoff,
+        seed_ids=seed_ids,
+        relation_types=relation_types or (),
+        direction=direction,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+    )
+
+
+@router.get(
+    "/graph/{version_id}/resolve",
+    response_model=GraphResolution,
+    dependencies=[Depends(require_read)],
+)
+def graph_resolve(
+    version_id: str,
+    source_id: str,
+    source_record_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    name: str | None = None,
+    external_namespace: str | None = None,
+    external_id: str | None = None,
+    limit: int = Query(default=20, ge=1, le=20),
+):
+    return _call(
+        store.read_graph_resolution,
+        version_id,
+        source_id,
+        source_record_id,
+        is_demo,
+        mode,
+        cutoff,
+        name=name,
+        external_namespace=external_namespace,
+        external_id=external_id,
+        limit=limit,
     )

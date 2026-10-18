@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 CONTRACT_VERSION = "datafabric.history.v1"
 PARSER_VERSION = "datafabric.history.projection.v1"
 Mode = Literal["current", "operational_replay", "public_history_reconstruction"]
-RecordKind = Literal["trial", "program", "outcome", "document"]
+RecordKind = Literal["trial", "program", "outcome", "document", "graph"]
 BUSINESS_TYPES = (
     "mechanisms",
     "literature",

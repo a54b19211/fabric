@@ -68,6 +68,42 @@ SOURCE_CATALOG = {
             "PMID/DOI跨库复用不是新独立研究；正文另核许可",
         ],
     },
+    "legacy_documents": {
+        "name": "已授权旧文档的精确冻结桥",
+        "business_types": ["trials_pipeline", "regulatory", "literature"],
+        "acquisition_channel": "derived_export",
+        "access": "controlled_import",
+        "license_url": None,
+        "history_coverage": "本次采用后版本；旧文档日期不是历史图证明",
+        "native_id": "原source_site+source_doc_uuid",
+        "read_scope": "明确范围内原文；许可取全部原站依赖交集",
+        "dependency_source_ids": [],
+        "limitations": ["派生来源组保守授权；任一依赖撤权则整个来源组停读"],
+    },
+    "reviewed_graph": {
+        "name": "唐的有界审核图发布",
+        "business_types": ["mechanisms", "trials_pipeline"],
+        "acquisition_channel": "derived_export",
+        "access": "controlled_import",
+        "license_url": None,
+        "history_coverage": "发布后版本；不回填当前别名/合并到过去",
+        "native_id": "明确选择范围及批次；包内namespace+源实体/关系ID",
+        "read_scope": "所选发布子图；图审核不等于专业证据评价",
+        "dependency_source_ids": [],
+        "limitations": ["不是全图完整邻域；任何原来源撤权保守封整个派生来源组"],
+    },
+    "primekg_graph": {
+        "name": "PrimeKG 当前有界背景",
+        "business_types": ["mechanisms"],
+        "acquisition_channel": "derived_export",
+        "access": "background_context",
+        "license_url": None,
+        "history_coverage": "本地first_seen后可回看已收到的背景；无外部过去档案或文档证据",
+        "native_id": "原生namespace+ID及有向关系",
+        "read_scope": "管理员明确获准的当前有界捕获，不自动联网或扩展全图",
+        "dependency_source_ids": [],
+        "limitations": ["不当作新独立研究、机制核验或过去时点事实；许可另核"],
+    },
     "external_archive": {
         "name": "受控历史归档",
         "business_types": ["trials_pipeline", "regulatory", "literature"],
@@ -202,6 +238,15 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
     data = parse_json(item.raw_content)
+    if source_id in {"legacy_documents", "reviewed_graph", "primekg_graph"}:
+        from biz_rules.reviewed_graph import project_graph_record
+
+        try:
+            return project_graph_record(source_id, item, data)
+        except ValueError:
+            raise HistoryError(
+                "invalid_graph_fields", "图包或旧文档桥字段不符合固定契约"
+            ) from None
     source_url, published, updated, event_time = None, None, None, None
     if source_id == "clinicaltrials":
         facts, locators = _facts(data, TRIAL_PATHS)

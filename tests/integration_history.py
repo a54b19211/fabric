@@ -481,3 +481,400 @@ def test_overlapping_archive_proof_precision_is_not_a_revision_order(pg):
             conn.execute(text("SELECT count(*) FROM history_versions")).scalar_one()
             == 1
         )
+
+
+def _graph_sources(monkeypatch):
+    values = store.allowed_sources() | {
+        "legacy_documents",
+        "reviewed_graph",
+        "primekg_graph",
+    }
+    monkeypatch.setenv(
+        "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted(values))
+    )
+
+
+def _synthetic_graph_observation():
+    # 明确教学数据，不伪称现役唐已有人工批准关系。
+    raw = "药物甲靶向蛋白乙。"
+    return {
+        "schema_version": "datafabric.legacy.graph.observation.v1",
+        "namespace": "fixture.tang",
+        "is_demo": True,
+        "scope_record_ids": ["demo-doc"],
+        "scope_record_count": 1,
+        "batch_offset": 0,
+        "selected_document_uuids": ["demo-doc"],
+        "next_document_offset": None,
+        "selection_truncated": False,
+        "documents": [
+            {
+                "uuid": "demo-doc",
+                "source_site": "external_archive",
+                "title": "明确合成的审核原件",
+                "raw_content": raw,
+            }
+        ],
+        "entities": [
+            {
+                "id": 1,
+                "source_doc_uuid": "demo-doc",
+                "entity_type": "Drug",
+                "entity_name": "药物甲",
+                "dict_id": 10,
+                "source_text": "药物甲",
+                "review_status": "approved",
+            },
+            {
+                "id": 2,
+                "source_doc_uuid": "demo-doc",
+                "entity_type": "Target",
+                "entity_name": "蛋白乙",
+                "dict_id": 20,
+                "source_text": "蛋白乙",
+                "review_status": "approved",
+            },
+        ],
+        "relations": [
+            {
+                "id": 3,
+                "source_doc_uuid": "demo-doc",
+                "from_entity_id": 1,
+                "to_entity_id": 2,
+                "relation_type": "TARGETS",
+                "relation_props": {},
+                "source_text": raw,
+                "review_status": "approved",
+            }
+        ],
+        "verified_dict_ids": ["10", "20"],
+        "merge_logs": [],
+    }
+
+
+def _published_graph(pg, monkeypatch, key="graph-fixture"):
+    from flows.graph_publish import publish_legacy
+
+    _graph_sources(monkeypatch)
+    observation = _synthetic_graph_observation()
+    run = publish_legacy(observation, key)
+    with pg.begin() as conn:
+        payload = conn.execute(
+            text("SELECT payload FROM history_versions WHERE version_id=:id"),
+            {"id": run.version_ids[0]},
+        ).scalar_one()
+        now = store._now(conn)
+    return observation, run, payload, now
+
+
+def _graph_archive(payload, **extra):
+    return ArchiveImport(
+        source_id="reviewed_graph",
+        is_demo=True,
+        scope_description="explicit synthetic graph",
+        declared_count=1,
+        declared_complete=False,
+        records=[
+            ArchiveRecord(
+                source_record_id=payload["source_record_id"],
+                record_kind="graph",
+                raw_content=payload["raw_content"],
+            )
+        ],
+        **extra,
+    )
+
+
+def test_graph_roundtrip_unicode_quote_and_idempotency(pg, monkeypatch):
+    from biz_rules.reviewed_graph import GraphBundle
+    from flows.graph_publish import publish_legacy
+
+    observation, run, payload, now = _published_graph(pg, monkeypatch)
+    graph = GraphBundle.model_validate_json(payload["raw_content"])
+    assert graph.edges[0].binding_status == "bound"
+    assert graph.edges[0].evidence[0].quote == "药物甲靶向蛋白乙。"
+    assert graph.nodes[0].identity_status == "confirmed"
+    assert publish_legacy(observation, "graph-fixture").version_ids == run.version_ids
+    result = store.read_graph_neighborhood(
+        run.version_ids[0],
+        "reviewed_graph",
+        payload["source_record_id"],
+        True,
+        "current",
+        now,
+        seed_ids=["fixture.tang.entity_dict|10"],
+        direction="out",
+    )
+    assert len(result.edges) == 1 and result.edges[0].target.id == "20"
+    assert result.graph_ref.version_id == run.version_ids[0]
+    assert result.coverage.scope == "selected_published_subgraph"
+    resolved = store.read_graph_resolution(
+        run.version_ids[0],
+        "reviewed_graph",
+        payload["source_record_id"],
+        True,
+        "current",
+        now,
+        name="药物甲",
+    )
+    assert resolved.status == "resolved" and resolved.candidates[0].id == "10"
+
+
+def test_graph_quote_tamper_is_rejected_and_previous_versions_remain(pg, monkeypatch):
+    from biz_rules.reviewed_graph import GraphBundle
+
+    _, _, payload, now = _published_graph(pg, monkeypatch)
+    graph = GraphBundle.model_validate_json(payload["raw_content"])
+    graph.edges[0].evidence[0].quote = "伪造证据"
+    invalid = {**payload, "raw_content": graph.model_dump_json()}
+    with pytest.raises(Exception) as error:
+        store.import_archive(_graph_archive(invalid), "bad-quote")
+    assert error.value.code == "graph_quote_mismatch"
+    unchanged = store.read_version(
+        payload["version_id"],
+        "reviewed_graph",
+        payload["source_record_id"],
+        True,
+        "current",
+        now,
+    )
+    assert unchanged.raw_sha256 == payload["raw_sha256"]
+    with pg.begin() as conn:
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM history_versions WHERE record_kind='graph'")
+            ).scalar_one()
+            == 1
+        )
+
+
+def test_graph_dependencies_revoke_normal_version_raw_and_neighborhood(pg, monkeypatch):
+    _, _, payload, now = _published_graph(pg, monkeypatch)
+    with pg.begin() as conn:
+        source = conn.execute(
+            text("SELECT catalog FROM history_sources WHERE source_id='reviewed_graph'")
+        ).scalar_one()
+        assert set(source["dependency_source_ids"]) == {
+            "legacy_documents",
+            "external_archive",
+        }
+        conn.execute(
+            text(
+                "UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"
+            )
+        )
+    available = {row["source_id"] for row in store.list_sources()}
+    assert "reviewed_graph" not in available and "legacy_documents" not in available
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    params = {
+        "source_id": "reviewed_graph",
+        "source_record_id": payload["source_record_id"],
+        "is_demo": "true",
+        "mode": "current",
+        "cutoff": now.isoformat(),
+    }
+    headers = {"Authorization": "Bearer test-reader-only"}
+    for path in (
+        "/api/history/versions/" + payload["version_id"],
+        "/api/history/versions/" + payload["version_id"] + "/raw",
+        "/api/history/graph/" + payload["version_id"] + "/neighborhood",
+        "/api/history/graph/" + payload["version_id"] + "/resolve",
+    ):
+        response = client.get(
+            path,
+            params={
+                **params,
+                "seed_ids": "fixture.tang.entity_dict|10",
+                "name": "药物甲",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 403 and "药物甲" not in response.text
+
+
+def test_current_graph_cannot_gain_old_archive_proof_or_future_merge(pg, monkeypatch):
+    from datetime import timedelta
+
+    from biz_rules.reviewed_graph import GraphBundle, GraphRedirect
+
+    _, _, payload, now = _published_graph(pg, monkeypatch)
+    request = _graph_archive(payload)
+    from biz_rules.history_models import ArchiveProofRequest, TimeValue
+
+    request.proof = ArchiveProofRequest(
+        available_at=TimeValue(value="2016-01-01", precision="day"),
+        uri="fixture://graph-history",
+        sha256=archive_manifest_hash(request.records),
+        reviewed=True,
+        review_note="synthetic unsupported graph proof",
+    )
+    with pytest.raises(Exception) as error:
+        store.import_archive(request, "bad-old-graph-proof")
+    assert error.value.code == "graph_history_unsupported"
+    graph = GraphBundle.model_validate_json(payload["raw_content"])
+    graph.redirects = [
+        GraphRedirect(
+            source={"namespace": "fixture.tang.entity_dict", "id": "9"},
+            target={"namespace": "fixture.tang.entity_dict", "id": "10"},
+            merge_log_id="fixture",
+            merged_at=now + timedelta(days=1),
+        )
+    ]
+    # 外部模型重新校验，避免绕开入口验证。
+    graph = GraphBundle.model_validate(graph.model_dump())
+    changed = {**payload, "raw_content": graph.model_dump_json()}
+    with pytest.raises(Exception) as error:
+        store.import_archive(_graph_archive(changed), "bad-future-merge")
+    assert error.value.code == "future_graph_merge"
+
+
+def test_graph_reads_reject_a_bound_document_not_visible_at_same_cutoff(
+    pg, monkeypatch
+):
+    from datetime import timedelta
+
+    from biz_rules.history_models import canonical, sha256
+
+    _, _, payload, now = _published_graph(pg, monkeypatch)
+    old_time = now - timedelta(days=2)
+    # 模拟已有旧版错误包的日期：只在临时schema插入，验证读取边界不会沿用包资格带入后见原件。
+    corrupted = {
+        **payload,
+        "version_id": sha256(payload["version_id"] + "explicit-test-old-date"),
+        "first_seen_at": old_time.isoformat(),
+        "received_at": old_time.isoformat(),
+    }
+    with pg.begin() as conn:
+        conn.execute(
+            text("""
+            INSERT INTO history_versions(version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,proof_available_at,published_seq,payload)
+            VALUES(:id,'reviewed_graph',true,:native,'graph',:first,:first,NULL,999,CAST(:payload AS jsonb))
+        """),
+            {
+                "id": corrupted["version_id"],
+                "native": corrupted["source_record_id"],
+                "first": old_time,
+                "payload": canonical(corrupted),
+            },
+        )
+    with pytest.raises(Exception) as error:
+        store.read_version(
+            corrupted["version_id"],
+            "reviewed_graph",
+            corrupted["source_record_id"],
+            True,
+            "operational_replay",
+            old_time + timedelta(hours=1),
+        )
+    assert error.value.code == "graph_evidence_not_visible"
+
+
+def test_primekg_only_replays_background_after_local_first_seen(pg, monkeypatch):
+    from flows.graph_publish import publish_primekg
+
+    _graph_sources(monkeypatch)
+    capture = {
+        "is_demo": False,
+        "source": "primekg_current_projection",
+        "observed_at": "2026-10-18T00:00:00Z",
+        "seed": {"node_source": "NCBI", "primekg_id": "1956"},
+        "has_more": True,
+        "rows": [
+            {
+                "from_node": {
+                    "name": "EGFR",
+                    "source": "NCBI",
+                    "id": "1956",
+                    "type": "gene/protein",
+                },
+                "to_node": {
+                    "name": "synthetic disease",
+                    "source": "MONDO",
+                    "id": "1",
+                    "type": "disease",
+                },
+                "relation_type": "disease_protein",
+                "properties": {"display_relation": "associated with"},
+            }
+        ],
+    }
+    run = publish_primekg(capture, "synthetic-primekg-shape")
+    with pg.begin() as conn:
+        row = conn.execute(
+            text("SELECT payload FROM history_versions WHERE version_id=:id"),
+            {"id": run.version_ids[0]},
+        ).scalar_one()
+        now = store._now(conn)
+    result = store.read_graph_resolution(
+        run.version_ids[0],
+        "primekg_graph",
+        row["source_record_id"],
+        False,
+        "current",
+        now,
+        external_namespace="NCBI",
+        external_id="1956",
+    )
+    assert (
+        result.status == "resolved"
+        and result.candidates[0].identity_status == "background"
+    )
+    replayed = store.read_version(
+        run.version_ids[0],
+        "primekg_graph",
+        row["source_record_id"],
+        False,
+        "operational_replay",
+        now,
+    )
+    assert (
+        replayed.version_id == run.version_ids[0]
+        and replayed.facts["graph_kind"] == "background"
+    )
+    with pytest.raises(Exception) as error:
+        store.read_version(
+            run.version_ids[0],
+            "primekg_graph",
+            row["source_record_id"],
+            False,
+            "operational_replay",
+            date("2018-01-01T00:00:00Z"),
+        )
+    assert error.value.code == "version_not_found"
+    with pytest.raises(Exception) as error:
+        store.read_version(
+            run.version_ids[0],
+            "primekg_graph",
+            row["source_record_id"],
+            False,
+            "public_history_reconstruction",
+            now,
+        )
+    assert error.value.code == "graph_history_unsupported"
+
+
+def test_legacy_document_cannot_smuggle_an_unlicensed_original_source(pg, monkeypatch):
+    from flows.graph_publish import publish_legacy
+
+    _graph_sources(monkeypatch)
+    observation = _synthetic_graph_observation()
+    observation["documents"][0]["source_site"] = "not-in-catalog"
+    with pytest.raises(Exception) as error:
+        publish_legacy(observation, "bad-original-source")
+    assert error.value.code in {"source_not_allowed", "source_not_available"}
+    with pg.begin() as conn:
+        assert (
+            conn.execute(text("SELECT count(*) FROM history_versions")).scalar_one()
+            == 0
+        )
+
+
+def test_graph_manifest_cannot_bind_demo_document_into_real_package(pg, monkeypatch):
+    _, _, payload, _ = _published_graph(pg, monkeypatch)
+    request = _graph_archive(payload)
+    request.is_demo = False
+    with pytest.raises(Exception) as error:
+        store.import_archive(request, "demo-to-real-graph")
+    assert error.value.code == "graph_demo_mismatch"

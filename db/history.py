@@ -63,7 +63,20 @@ def allowed_sources():
     return {str(item).strip() for item in values if str(item).strip()}
 
 
-def _source(conn, source_id, *, lock=False):
+def _catalog_dependencies(row):
+    values = row["catalog"].get("dependency_source_ids", [])
+    if not isinstance(values, list) or any(
+        not isinstance(value, str) for value in values
+    ):
+        raise HistoryError("invalid_source_dependencies", "派生来源许可配置无效", 503)
+    return set(values)
+
+
+def _source(conn, source_id, *, lock=False, _seen=None):
+    seen = set() if _seen is None else set(_seen)
+    if source_id in seen:
+        raise HistoryError("cyclic_source_dependencies", "来源许可依赖存在循环", 503)
+    seen.add(source_id)
     if source_id not in allowed_sources():
         raise HistoryError("source_not_allowed", "当前许可不允许该来源", 403)
     row = (
@@ -77,26 +90,252 @@ def _source(conn, source_id, *, lock=False):
         .mappings()
         .first()
     )
-    if row is None or not row["read_enabled"]:
+    if row is None or row["read_enabled"] is not True:
         raise HistoryError("source_not_available", "该来源当前不可读取", 403)
+    for dependency in _catalog_dependencies(row):
+        _source(conn, dependency, _seen=seen)
     return row
 
 
 def list_sources():
     with history_engine().begin() as conn:
-        rows = conn.execute(
-            text("SELECT * FROM history_sources ORDER BY source_id")
-        ).mappings()
+        rows = list(
+            conn.execute(
+                text("SELECT * FROM history_sources ORDER BY source_id")
+            ).mappings()
+        )
+        by_id, allowed = {row["source_id"]: row for row in rows}, allowed_sources()
+
+        def enabled(source_id, seen=()):
+            row = by_id.get(source_id)
+            if (
+                row is None
+                or source_id in seen
+                or source_id not in allowed
+                or row["read_enabled"] is not True
+            ):
+                return False
+            return all(
+                enabled(value, (*seen, source_id))
+                for value in _catalog_dependencies(row)
+            )
+
         return [
             {
                 "source_id": row["source_id"],
                 **row["catalog"],
                 "published_seq": row["published_seq"],
-                "read_enabled": row["read_enabled"],
+                "read_enabled": True,
             }
             for row in rows
-            if row["source_id"] in allowed_sources() and row["read_enabled"]
+            if enabled(row["source_id"])
         ]
+
+
+def _derived_mode(source_id, mode):
+    if source_id == "primekg_graph" and mode == "public_history_reconstruction":
+        raise HistoryError(
+            "graph_history_unsupported",
+            "PrimeKG捕获没有外部历史可得证明；本地回放只从first_seen开始",
+        )
+    if (
+        source_id in {"reviewed_graph", "legacy_documents"}
+        and mode == "public_history_reconstruction"
+    ):
+        raise HistoryError(
+            "graph_history_unsupported", "当前图/旧文档导出没有外部历史可得证明"
+        )
+
+
+def _validate_derived(conn, run, item, now, proof):
+    from biz_rules.history_sources import parse_json
+    from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, LegacyDocument
+
+    if run["source_id"] not in DERIVED_SOURCES:
+        return set()
+    if proof.kind != "unverified" or proof.available_at is not None:
+        raise HistoryError(
+            "graph_history_unsupported", "当前图和旧文档桥不能借导入证明回填过去"
+        )
+    data = parse_json(item.raw_content)
+    if run["source_id"] == "legacy_documents":
+        original = LegacyDocument.model_validate(data)
+        _source(conn, original.source_site)
+        return {original.source_site}
+
+    bundle = GraphBundle.model_validate(data)
+    if bundle.is_demo != run["is_demo"]:
+        raise HistoryError("graph_demo_mismatch", "图包和采用请求的demo标记不一致")
+    if run["source_id"] == "primekg_graph":
+        if bundle.graph_kind != "background":
+            raise HistoryError("graph_kind_mismatch", "PrimeKG只能发布当前背景")
+        return set()
+    if bundle.graph_kind != "reviewed":
+        raise HistoryError("graph_kind_mismatch", "审核图来源不接收背景图")
+
+    if bundle.origin == "legacy_reviewed_export" and (
+        not bundle.selected_document_uuids
+        or set(bundle.selected_document_uuids)
+        != {ref.origin_doc_uuid for ref in bundle.document_refs}
+    ):
+        raise HistoryError(
+            "legacy_graph_document_scope", "旧图导出的所选UUID须全部绑定精确冻结文档"
+        )
+    documents, dependencies = {}, set()
+    for ref in bundle.document_refs:
+        _source(conn, ref.source_id)
+        row = conn.execute(
+            text(
+                "SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source AND source_record_id=:native AND is_demo=:demo AND first_seen_at<=:now"
+            ),
+            {
+                "id": ref.version_id,
+                "source": ref.source_id,
+                "native": ref.source_record_id,
+                "demo": run["is_demo"],
+                "now": now,
+            },
+        ).scalar_one_or_none()
+        if (
+            row is None
+            or row["raw_sha256"] != ref.raw_sha256
+            or row["record_kind"] == "graph"
+        ):
+            raise HistoryError(
+                "graph_evidence_version_mismatch", "图包原件引用与已采用文档版本不一致"
+            )
+        if ref.source_id == "legacy_documents":
+            if row["facts"].get("origin_doc_uuid") != ref.origin_doc_uuid:
+                raise HistoryError(
+                    "graph_document_uuid_mismatch", "图引用的旧文档UUID不一致"
+                )
+            original_source = row["facts"]["source_site"]
+            _source(conn, original_source)
+            dependencies.add(original_source)
+        dependencies.add(ref.source_id)
+        key = (
+            ref.source_id,
+            ref.source_record_id,
+            ref.version_id,
+            ref.raw_sha256,
+            ref.origin_doc_uuid,
+        )
+        if key in documents:
+            raise HistoryError("duplicate_graph_document", "图包文档清单重复")
+        documents[key] = row
+    if dependencies != set(bundle.dependency_source_ids):
+        raise HistoryError(
+            "graph_source_dependencies_mismatch",
+            "图包依赖必须等于服务器核对的原件及原站许可",
+        )
+    for node in bundle.nodes:
+        if node.review.reviewed_at is not None and node.review.reviewed_at > now:
+            raise HistoryError("future_graph_review", "源审核时间晚于本次服务器采用")
+    for edge in bundle.edges:
+        if edge.review.reviewed_at is not None and edge.review.reviewed_at > now:
+            raise HistoryError("future_graph_review", "源审核时间晚于本次服务器采用")
+    for ref in [value for node in bundle.nodes for value in node.evidence] + [
+        value for edge in bundle.edges for value in edge.evidence
+    ]:
+        key = (
+            ref.source_id,
+            ref.source_record_id,
+            ref.version_id,
+            ref.raw_sha256,
+            ref.origin_doc_uuid,
+        )
+        original = documents.get(key)
+        if original is None:
+            raise HistoryError(
+                "graph_evidence_outside_manifest", "图证据不属于本包声明的文档版本"
+            )
+        locator = ref.locator
+        if original["clean_text"][
+            locator.start : locator.end
+        ] != ref.quote or locator.end > len(original["clean_text"]):
+            raise HistoryError(
+                "graph_quote_mismatch", "图证据与冻结原文字符范围不一致，不能标记已绑定"
+            )
+    if any(
+        item.merged_at is not None and item.merged_at > now for item in bundle.redirects
+    ):
+        raise HistoryError("future_graph_merge", "源身份合并时间晚于本次服务器采用")
+    return dependencies
+
+
+def _persist_dependencies(conn, source, dependencies):
+    combined = _catalog_dependencies(source) | dependencies
+    if source["source_id"] in combined:
+        raise HistoryError("cyclic_source_dependencies", "派生来源不能依赖自身")
+    if combined != _catalog_dependencies(source):
+        conn.execute(
+            text(
+                "UPDATE history_sources SET catalog=jsonb_set(catalog,'{dependency_source_ids}',CAST(:deps AS jsonb),true) WHERE source_id=:id"
+            ),
+            {"deps": canonical(sorted(combined)), "id": source["source_id"]},
+        )
+
+
+def read_graph_neighborhood(
+    version_id,
+    source_id,
+    source_record_id,
+    is_demo,
+    mode,
+    cutoff,
+    *,
+    seed_ids,
+    relation_types=(),
+    direction="both",
+    max_depth=1,
+    max_nodes=50,
+    max_edges=100,
+):
+    from biz_rules.history_sources import parse_json
+    from biz_rules.reviewed_graph import (
+        GRAPH_SOURCES,
+        GraphBundle,
+        GraphIdentity,
+        GraphRef,
+        neighborhood,
+    )
+
+    if source_id not in GRAPH_SOURCES:
+        raise HistoryError("unsupported_graph_source", "请选择固定图来源")
+    record = read_version(
+        version_id, source_id, source_record_id, is_demo, mode, cutoff
+    )
+    if record.record_kind != "graph":
+        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    seeds = []
+    for value in seed_ids:
+        if value.count("|") != 1:
+            raise HistoryError("invalid_graph_identity", "身份格式须为namespace|id")
+        namespace, identity = value.split("|")
+        try:
+            seeds.append(GraphIdentity(namespace=namespace, id=identity))
+        except ValueError:
+            raise HistoryError(
+                "invalid_graph_identity", "身份命名空间或ID无效"
+            ) from None
+    bundle = GraphBundle.model_validate(parse_json(record.raw_content))
+    return neighborhood(
+        bundle,
+        GraphRef(
+            source_id=record.source_id,
+            source_record_id=record.source_record_id,
+            version_id=record.version_id,
+            raw_sha256=record.raw_sha256,
+            is_demo=record.is_demo,
+            first_seen_at=record.first_seen_at,
+        ),
+        seeds,
+        relation_types=relation_types,
+        direction=direction,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+    )
 
 
 def _view(row):
@@ -285,7 +524,9 @@ def _publish(
     source = _source(conn, run["source_id"], lock=True)
     seq = source["published_seq"]
     version_ids, new_count = [], 0
+    dependencies = set()
     for item, projected in prepared:
+        dependencies.update(_validate_derived(conn, run, item, now, proof))
         mapping_review = None
         if item.source_record_id in verified_mapping_ids:
             facts = projected["facts"]
@@ -461,6 +702,7 @@ def _publish(
             )
             new_count += 1
         version_ids.append(version_id)
+    _persist_dependencies(conn, source, dependencies)
     conn.execute(
         text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
         {"seq": seq, "id": run["source_id"]},
@@ -853,6 +1095,7 @@ def list_records(
     limit=25,
     cursor=None,
 ):
+    _derived_mode(source_id, mode)
     if not 1 <= limit <= 100:
         raise HistoryError("query_budget", "每页条数须为1至100")
     binding = sha256(
@@ -1014,6 +1257,7 @@ def list_records(
 
 
 def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff):
+    _derived_mode(source_id, mode)
     if not re.fullmatch(r"[0-9a-f]{64}", version_id):
         raise HistoryError("version_not_found", "版本不存在", 404)
     with history_engine().begin() as conn:
@@ -1044,7 +1288,10 @@ def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
             raise HistoryError(
                 "version_not_found", "该版本在当前许可、范围或截止时间下不可见", 404
             )
-        return HistoryRecord.model_validate(row["payload"])
+        record = HistoryRecord.model_validate(row["payload"])
+        if record.record_kind == "graph":
+            _check_graph_document_visibility(conn, record, mode, cutoff)
+        return record
 
 
 def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
@@ -1105,3 +1352,103 @@ def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
             else None,
             "scope": "committed_adoptions_not_source_change_feed",
         }
+
+
+def _check_graph_document_visibility(conn, record, mode, cutoff):
+    from biz_rules.history_sources import parse_json
+    from biz_rules.reviewed_graph import GraphBundle
+
+    bundle = GraphBundle.model_validate(parse_json(record.raw_content))
+    documents = {}
+    for ref in bundle.document_refs:
+        _derived_mode(ref.source_id, mode)
+        _source(conn, ref.source_id)
+        row = conn.execute(
+            text(
+                "SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source AND source_record_id=:native AND is_demo=:demo AND "
+                + _eligibility(mode)
+            ),
+            {
+                "id": ref.version_id,
+                "source": ref.source_id,
+                "native": ref.source_record_id,
+                "demo": record.is_demo,
+                "cutoff": cutoff,
+            },
+        ).scalar_one_or_none()
+        if row is None or row["raw_sha256"] != ref.raw_sha256:
+            raise HistoryError(
+                "graph_evidence_not_visible",
+                "图引用原件在同一许可/模式/截止时间下不可见",
+                404,
+            )
+        documents[
+            (
+                ref.source_id,
+                ref.source_record_id,
+                ref.version_id,
+                ref.raw_sha256,
+                ref.origin_doc_uuid,
+            )
+        ] = row
+    for evidence in [item for node in bundle.nodes for item in node.evidence] + [
+        item for edge in bundle.edges for item in edge.evidence
+    ]:
+        original = documents.get(
+            (
+                evidence.source_id,
+                evidence.source_record_id,
+                evidence.version_id,
+                evidence.raw_sha256,
+                evidence.origin_doc_uuid,
+            )
+        )
+        if (
+            original is None
+            or original["clean_text"][evidence.locator.start : evidence.locator.end]
+            != evidence.quote
+            or evidence.locator.end > len(original["clean_text"])
+        ):
+            raise HistoryError(
+                "graph_quote_mismatch", "图证据不属于同截止下可见的冻结原文"
+            )
+
+
+def read_graph_resolution(
+    version_id,
+    source_id,
+    source_record_id,
+    is_demo,
+    mode,
+    cutoff,
+    *,
+    name=None,
+    external_namespace=None,
+    external_id=None,
+    limit=20,
+):
+    from biz_rules.history_sources import parse_json
+    from biz_rules.reviewed_graph import GRAPH_SOURCES, GraphBundle, GraphRef, resolve
+
+    if source_id not in GRAPH_SOURCES:
+        raise HistoryError("unsupported_graph_source", "请选择固定图来源")
+    record = read_version(
+        version_id, source_id, source_record_id, is_demo, mode, cutoff
+    )
+    if record.record_kind != "graph":
+        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    return resolve(
+        GraphBundle.model_validate(parse_json(record.raw_content)),
+        GraphRef(
+            source_id=record.source_id,
+            source_record_id=record.source_record_id,
+            version_id=record.version_id,
+            raw_sha256=record.raw_sha256,
+            is_demo=record.is_demo,
+            first_seen_at=record.first_seen_at,
+        ),
+        name=name,
+        external_namespace=external_namespace,
+        external_id=external_id,
+        limit=limit,
+    )

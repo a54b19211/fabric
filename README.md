@@ -330,3 +330,139 @@ python -m pytest -q tests/integration_history.py
 普通测试套件 247 项通过；最后时间歧义修正后，相关 16 项单元测试和 12 项真实 PostgreSQL 测试通过。这些数量存在重叠，不累加成一个更大的测试总数。跨服务最终 42 项通过，雷达还完成实际浏览器操作和跨旧入口的撤源检查。完整联调记录集中在同机雷达分支的 `evaluation/handoff-verification.json`。
 
 当前只提交联调分支，没有切换现役 dev、重启现役服务或改其数据库。临时测试进程已关闭，测试数据库保留；现役启动保护仍在。后续合入时先加载明确的历史配置并执行新增迁移。撤回代码时停止新任务、保留历史表和原件，不以删表或清队列回退。
+
+
+## 唐的图谱接入：固定发布包，不复制图谱算法
+
+本轮沿用同一个历史库、版本ID、管理员导入和读取许可，新增三个固定来源：
+`legacy_documents`（已获准旧原文的冻结桥）、`reviewed_graph`（所选审核图）、
+`primekg_graph`（当前背景图）。不新增图表、队列、Agent或图后端；
+`V018__graph_record_kind.sql`只放宽既有版本类型，旧四种原件和旧哈希不变。
+再次执行 `python -m migration.history` 即可在**独立测试库**应用。
+
+先在私有历史配置的来源allowlist中加入需要的派生来源及所有原站点。
+原 `source_site` 必须已在history来源目录中并获准，不能用图来源绕过它。
+派生目录持久保存服务器核对的 `dependency_source_ids`，读取许可取当前依赖交集；
+任一原站撤权，保守停读整个派生来源组，包括旧版本、raw、邻域和名称解析。
+当前粒度是来源组，不是已实现逐文档/多机构授权。恢复原源许可后才能重读。
+
+### 旧图只读捕获与续批
+
+发布桥只GET现有文档详情、审核实体/关系和图视图，不触发审核、抽取、合并或WeKnora同步。
+它要求明确本机HTTP根地址；不读现役.env或尝试修改现役数据库。
+完整UUID清单保存在一个私有JSON数组文件中，不在每个图包重复保存整个项目名单。
+
+```bash
+python -m flows.graph_publish capture-legacy \
+  --url http://127.0.0.1:8100 --namespace datafabric.zktest \
+  --scope-file /private/selected-uuids.json --offset 0 \
+  --output /private/graph-batch-0.json
+python -m flows.graph_publish publish-legacy \
+  --observation /private/graph-batch-0.json \
+  --idempotency-key project-batch-0 --receipt /private/publish-batch-0.json
+```
+
+默认只取源状态 `approved`。需要检查自动审核资料时，捕获命令可显式加
+`--include-auto-approved`；原 `auto_approved` 原样保留且身份不标为人工确认。
+旧HTTP仅在人工审核状态并有字典 `is_verified=true` 时给当前已确认身份标志；
+审核人/时间未暴露则为null，不补写。它仍不等于机制评价或专业批准。
+
+一批最多6篇、100节点和200边；这不是项目总上限。输出带
+`scope_manifest_sha256/scope_record_count/batch_offset/next_document_offset`。
+继续时使用同一个完整清单及首次输出的SHA：
+
+```bash
+python -m flows.graph_publish capture-legacy \
+  --url http://127.0.0.1:8100 --namespace datafabric.zktest \
+  --scope-file /private/selected-uuids.json --offset 6 \
+  --expected-scope-sha256 <首次回执中的SHA> --output /private/graph-batch-6.json
+```
+
+名单发生变化就拒绝续读。每批观测/图包只保留本批ID和完整清单标识。
+捕获限时60秒、每响应2MiB、每批8MiB，超过预算或上游失败明确失败；
+不会把失败当空结果或无关系。文件以0600新建，已存在则拒绝覆盖。
+
+先冻结原文，再发布图包，两个步骤各有现有history任务和幂等键。
+后一步失败时保留前一步原件；回执留document任务ID。遇到结果不明先核对回执，
+不自动重发。重新操作必须使用同一冻结观测和原幂等键，不能重新抓取变化内容冒充重试。
+
+### 固定版本读取、身份候选与背景
+
+图原件是 `datafabric.graph.bundle.v1` 根JSON；图版本就是已有history `version_id`。
+节点以稳定namespace+源ID标识，entity_dict与extracted_entity使用不同namespace；
+未映射mention不会回退成 `dict:<抽取ID>`。默认别名只来自本批已选mention原名，
+自动/未核mention即便有提议dict_id也保持独立mention身份，不进入已确认节点的别名或证据。
+不披露没有逐来源归属的全字典别名或汇总属性。源合并重定向保留日志指针，
+不让雷达重新合并，也不把当前合并/别名倒填到过去。
+
+- `GET /api/history/graph/{version_id}/resolve`：仍必填来源/原站ID/demo/mode/cutoff；
+  另外给精确 `name`，或 `external_namespace+external_id`，最多20个候选。
+  返回resolved/ambiguous/not_found，绝不按同名自动选第一。
+- `GET /api/history/graph/{version_id}/neighborhood`：同样的版本绑定，重复
+  `seed_ids=namespace|id`；可筛relation_types、direction，最多2跳/100节点/200边。
+  返回原有方向及类型、所选固定子图范围和截断原因，不称为全图所有邻居。
+- 原文继续走已有 `/api/history/versions/{id}` 和 `/raw`。
+  关系review与binding分开；quote必须在指定版本clean_text字符范围精确匹配。
+  不匹配标unbound，不能喂给“已确认关系”计算。关系有效时间未知留null，
+  不拿文档日期补成关系发生时间。
+
+当前导出只获得本次服务器采用时间，可在此后做operational回放；
+不支持以导入旧proof获得public历史图资格。原文引用在每次图读取时按相同模式/
+截点核对，图包资格不能夹带未来原文或未来身份合并。未来真实历史图档案应另加
+受控、可审核的导入口，不能复用本次当前导出冒充。
+
+PrimeKG使用同一固定图包契约，可current读取，或在本地first_seen后operational回看当时收到的背景；不允许public_history_reconstruction：
+
+```bash
+python -m flows.graph_publish publish-primekg \
+  --observation /private/primekg-current-capture.json \
+  --idempotency-key primekg-current-capture-1 --receipt /private/primekg-publish-1.json
+```
+
+输入是明确只读捕获的原生节点、端点、关系、观察时间和has_more。
+不自动连接Neo4j、补历史或补文档证据。PPI/associated with等保持原类型和存储端点；
+存储方向不等于因果方向，反向物理重复不当独立研究。当前PrimeKG边只能作背景追问，
+不能改名成合作/供应关系来强启现有雷达算法。
+
+现场核查没有人工approved关系；auto_approved实体也不能冒充人工确认关系。
+因此真实PrimeKG背景链、真实旧资料的未核/缺口、合成已核证据链分别验收。
+这不表示唐的身份/时态工作已完成，也不表示机制专业评价已经接通。
+
+旧WeKnora写推送保持原样：其dict ID fallback、来源字段丢失和Go投影tenant/KB隔离
+缺口尚须单独治理。本轮不清现图、不改旧writer发布身份，也不把HybridSearch工具
+冒充能返回结构边的图provider。
+
+图相关检查：
+
+```bash
+python -m pytest -q tests/test_reviewed_graph.py
+python -m pytest -q tests/integration_history.py
+```
+
+后者使用明确隔离PostgreSQL临时schema，检查精确引用、未知/真实失败、跨来源撤权、
+伪旧proof、未来原文、namespace、demo和背景边界；普通HTTP替身不冒充现场数据验证。
+撤回代码前停用新图发布，并从旧服务的来源allowlist移除 `reviewed_graph`、
+`primekg_graph`、`legacy_documents`。保留原件、版本表及CHECK扩展，不收窄CHECK、
+不删库/清队列；旧四来源按原接口继续读取。旧版0a4b9b8不能解析新graph类型，
+不能让它继续读取上述新增来源。
+
+### 可重复的PrimeKG只读捕获
+
+不再需要手写observation。复用现有httpx和现场已验证的Neo4j HTTP事务路径，
+私有环境显式设置 DATAFABRIC_GRAPH_NEO4J_URL/USER/PASSWORD，DATABASE默认neo4j。
+地址必须本机回环，凭据不写进参数或输出，也不读取现役.env。建议配置只读账户；
+命令只发送固定参数化MATCH及Access-Mode: READ，不接受任意Cypher、不写图。
+
+```bash
+python -m flows.graph_publish capture-primekg --node-type gene/protein \
+  --node-source NCBI --seed-id 1956 --neighbor-term lung --limit 10 \
+  --output /private/primekg-egfr-current.json
+```
+
+当前明确支持gene/protein、disease、drug三类种子；一跳最多200边，加读一条识别has_more。
+命名空间+ID命中多个物理节点时拒绝，不自动选第一个；明确空邻域、未找到种子和查询失败分开。
+2MiB/20秒客户端预算，事务只包含固定读取，不声称已经设置服务器全局限时或完整图快照。
+输出先以0600新建且不覆盖，再用独立publish-primekg命令发布，捕获本身不写业务库/图。
+采用服务器first_seen之前不可回放；之后可回看冻结背景版本，仍无关系真实有效时间或专业证据。
+[Neo4j HTTP读取格式](https://neo4j.com/docs/http-api/current/query/)及
+[READ路由说明](https://neo4j.com/docs/http-api/current/routing/)是当前兼容路径参考；此命令不升级现役图服务。

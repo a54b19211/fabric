@@ -10,7 +10,11 @@ from db.history import history_engine
 
 
 def migrate_history():
-    sql = (Path(__file__).parent / "versions" / "V017__history_records.sql").read_text()
+    directory = Path(__file__).parent / "versions"
+    sql = "\n".join(
+        (directory / name).read_text()
+        for name in ("V017__history_records.sql", "V018__graph_record_kind.sql")
+    )
     with history_engine().begin() as conn:
         for statement in sql.split(";"):
             statement = "\n".join(
@@ -28,6 +32,19 @@ def migrate_history():
             """),
                 {"id": source_id, "catalog": canonical(catalog)},
             )
+            if source_id == "primekg_graph":
+                # 只更新当前能力说明，不重置已持久来源依赖/许可或版本。
+                conn.execute(
+                    text(
+                        "UPDATE history_sources SET catalog=catalog || CAST(:metadata AS jsonb) WHERE source_id=:id"
+                    ),
+                    {
+                        "id": source_id,
+                        "metadata": canonical(
+                            {"history_coverage": catalog["history_coverage"]}
+                        ),
+                    },
+                )
 
 
 if __name__ == "__main__":
