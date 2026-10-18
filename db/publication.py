@@ -8,11 +8,13 @@ import shutil
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from biz_rules.collected_document import CollectedDocument, collected_document
 from biz_rules.history_models import (
+    MAX_RECORD_BYTES,
     ArchiveImport,
     ArchiveRecord,
     HistoryError,
@@ -647,6 +649,33 @@ def _known_commits(row):
     return True
 
 
+def _validation_error(exc):
+    """仅保存固定诊断，不保存Pydantic的input、msg或任意ctx内容。"""
+    for issue in exc.errors(include_input=False, include_url=False):
+        if issue["loc"] != ("raw_content",):
+            continue
+        unit = None
+        if issue["type"] == "string_too_long":
+            unit = "characters"
+        elif (
+            issue["type"] == "value_error"
+            and str(issue.get("ctx", {}).get("error")) == "单条原件超过读取预算"
+        ):
+            unit = "bytes"
+        if unit is not None and exc.title == "ArchiveRecord":
+            return {
+                "code": "publication_record_too_large",
+                "message": "单条原件超过当前发表上限；待办及旧版保留，请先分块或使用原件存储扩展，不会截断为成功",
+                "field": "raw_content",
+                "limit": MAX_RECORD_BYTES,
+                "unit": unit,
+            }
+    return {
+        "code": "publication_input_invalid",
+        "message": "来源输入未通过当前发表结构校验；待办及旧版保留，需核对输入后处理",
+    }
+
+
 def publish_once(engine=None):
     engine = engine or publication_engine()
     disk = disk_status()
@@ -712,18 +741,28 @@ def publish_once(engine=None):
         return {"state": "published", "id": row["id"], **receipt}
     except (HistoryError, SQLAlchemyError, ValueError, RuntimeError) as exc:
         # 已冻结输入和同key允许跨库提交未知后核对；绝不重新抓取变更内容。
-        blocked = isinstance(exc, HistoryError) and exc.status in {403, 410}
-        code = exc.code if isinstance(exc, HistoryError) else "publication_failed"
-        message = (
-            exc.message
-            if isinstance(exc, HistoryError)
-            else "发表未完成；待办及旧版本保留，将按固定输入核对"
+        invalid_input = isinstance(exc, ValidationError)
+        blocked = invalid_input or (
+            isinstance(exc, HistoryError) and exc.status in {403, 410}
         )
+        error = (
+            _validation_error(exc)
+            if invalid_input
+            else {
+                "code": exc.code
+                if isinstance(exc, HistoryError)
+                else "publication_failed",
+                "message": exc.message
+                if isinstance(exc, HistoryError)
+                else "发表未完成；待办及旧版本保留，将按固定输入核对",
+            }
+        )
+        code = error["code"]
         with engine.begin() as conn:
             conn.execute(
                 text("""
               UPDATE publication_outbox SET state=:state,error=CAST(:error AS jsonb),
-                lease_until=NULL,next_attempt_at=clock_timestamp()+interval '30 seconds'
+                lease_until=NULL,next_attempt_at=clock_timestamp()+(:retry_seconds * interval '1 second')
               WHERE id=:id AND lease_token=:token AND state='processing'
             """),
                 {
@@ -732,7 +771,8 @@ def publish_once(engine=None):
                     else "blocked"
                     if blocked
                     else "failed",
-                    "error": canonical({"code": code, "message": message}),
+                    "error": canonical(error),
+                    "retry_seconds": 3600 if invalid_input else 30,
                     "id": row["id"],
                     "token": row["lease_token"],
                 },
@@ -744,7 +784,7 @@ def publish_once(engine=None):
             if blocked
             else "failed",
             "id": row["id"],
-            "error": {"code": code, "message": message},
+            "error": error,
         }
 
 

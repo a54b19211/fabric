@@ -238,3 +238,41 @@ def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles
         _narrative_text("Example <table>not a cell</table>", "nmpa")
         == "Example <table>not a cell</table>"
     )
+
+
+@pytest.mark.parametrize("unit", ["characters", "bytes"])
+def test_input_size_diagnostics_have_only_safe_field_limit_and_unit(unit):
+    from biz_rules.history_models import MAX_RECORD_BYTES
+    from db.publication import _validation_error
+
+    marker = "SYNTHETIC_VALUE_MUST_NOT_BE_RECORDED"
+    raw = marker + (
+        "x" * MAX_RECORD_BYTES
+        if unit == "characters"
+        else "药" * (MAX_RECORD_BYTES // 3 + 1)
+    )
+    with pytest.raises(ValidationError) as failure:
+        ArchiveRecord(
+            source_record_id="SYNTHETIC", record_kind="document", raw_content=raw
+        )
+    diagnostic = _validation_error(failure.value)
+    assert set(diagnostic) == {"code", "message", "field", "limit", "unit"}
+    assert diagnostic["code"] == "publication_record_too_large"
+    assert diagnostic["field"] == "raw_content"
+    assert diagnostic["limit"] == MAX_RECORD_BYTES and diagnostic["unit"] == unit
+    assert marker not in json.dumps(diagnostic)
+    assert "input_value" not in json.dumps(diagnostic)
+
+
+def test_other_validation_does_not_copy_input_or_exception_message():
+    from db.publication import _validation_error
+
+    marker = "SYNTHETIC_INVALID_SOURCE_VALUE_MUST_NOT_BE_RECORDED"
+    with pytest.raises(ValidationError) as failure:
+        ArchiveRecord(
+            source_record_id="bad\n" + marker, record_kind="document", raw_content="ok"
+        )
+    diagnostic = _validation_error(failure.value)
+    assert set(diagnostic) == {"code", "message"}
+    assert diagnostic["code"] == "publication_input_invalid"
+    assert marker not in json.dumps(diagnostic)

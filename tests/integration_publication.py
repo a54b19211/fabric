@@ -795,3 +795,77 @@ def test_reprojection_same_original_makes_new_version_and_keeps_old_immutable(
     ]
     again = history.import_archive(request, "SYNTHETIC-reproject-v02")
     assert again.id == new_run.id and version_count(target) == 2
+
+
+@pytest.mark.parametrize("unit", ["characters", "bytes"])
+def test_oversized_input_is_blocked_for_one_hour_without_losing_fifo_or_other_documents(
+    databases, unit
+):
+    from datetime import timedelta
+
+    from biz_rules.history_models import MAX_RECORD_BYTES, sha256
+
+    source, target = databases
+    value = snapshot("SYNTHETIC-large-source")
+    insert_document(source, value)
+    prior = publication.publish_once()
+    assert prior["state"] == "published"
+    marker = "SYNTHETIC_VALUE_MUST_NOT_BE_RECORDED"
+    oversized = marker + (
+        "x" * MAX_RECORD_BYTES
+        if unit == "characters"
+        else "药" * (MAX_RECORD_BYTES // 3 + 1)
+    )
+    with source.begin() as conn:
+        conn.execute(
+            text("UPDATE documents SET raw_content=:body WHERE uuid=:uuid"),
+            {"body": oversized, "uuid": value["uuid"]},
+        )
+    with source.begin() as conn:
+        conn.execute(
+            text("UPDATE documents SET raw_content=:body WHERE uuid=:uuid"),
+            {
+                "body": "SYNTHETIC later revision must wait for its predecessor.",
+                "uuid": value["uuid"],
+            },
+        )
+    insert_document(source, snapshot("SYNTHETIC-independent-normal"))
+    result = publication.publish_once()
+    assert result["state"] == "blocked"
+    assert result["error"]["code"] == "publication_record_too_large"
+    saved = rows(
+        source,
+        "SELECT * FROM publication_outbox WHERE state='blocked'",
+    )[0]
+    assert saved["error"] == result["error"]
+    assert saved["error"]["field"] == "raw_content"
+    assert (
+        saved["error"]["limit"] == MAX_RECORD_BYTES and saved["error"]["unit"] == unit
+    )
+    assert marker not in json.dumps(saved["error"]) and "input_value" not in json.dumps(
+        saved["error"]
+    )
+    assert saved["next_attempt_at"] - datetime.now(timezone.utc) > timedelta(minutes=59)
+    assert saved["prepared"] is None and saved["receipt"] is None
+    assert sha256(saved["snapshot"]["document"]["raw_content"]) == sha256(oversized)
+    assert publication.publish_once()["state"] == "published"
+    assert publication.publish_once()["state"] == "idle"
+    states = rows(
+        source,
+        "SELECT state FROM publication_outbox WHERE source_doc_uuid='SYNTHETIC-large-source' ORDER BY id",
+    )
+    assert [item["state"] for item in states] == ["published", "blocked", "pending"]
+    assert version_count(target) == 2
+    old = history.read_version(
+        prior["document_version_ids"][0],
+        "legacy_documents",
+        "legacy:clinicaltrials:" + value["uuid"],
+        True,
+        "current",
+        datetime.now(timezone.utc),
+    )
+    assert json.loads(old.raw_content)["original_raw_sha256"] == sha256(
+        value["raw_content"]
+    )
+    publication.publisher_heartbeat("running")
+    assert publication.publication_status()["counts"]["blocked"] == 1

@@ -508,6 +508,8 @@ documents事务内冻结正文、标题、原站和状态；doc_extra与该事�
 临床事实只从已冻结正文的精确protocolSection片段解析，不借稍后可变extra补事实。
 source_projection与原MD片段、Unicode定位和SHA必须相符。旧v1原件/哈希不改写；
 自动发布使用datafabric.collected.document.v1。普通正文、临床原生字段和结构化图包分别处理。
+新采用的正文投影v0.2只剥离文首完整且原站匹配的采集元数据头，并将真实HTML表格转为单元格文字；原MD、SHA及临床协议定位不变，clean_text字符位置不是原MD位置。图证据只在目标clean_text里唯一精确定位，缺失/歧义保持未绑定。旧版本和旧分析不改写；清洗规则修正后的重投影使用现有archives导入同一原件生成新版本，不作为新的独立研究。
+
 
 同UUID新清洗正文先作为新候选持久保存，不覆盖仍挂着旧抽取/图谱的兼容缓存。
 写入结果明确legacy_cache_retained/publication_pending。连续重复不新发，
@@ -545,3 +547,5 @@ python -m pytest -q tests/integration_publication.py tests/integration_history.p
 回退前停止publisher和雷达monitor，保留待办/回执/原件；按维护窗口停用publication_*四个源表触发器，
 不删表、不清队列、不还原旧数据库覆盖新数据。未安装V019的环境保留原changedbody拒写行为。
 退到不能消费新collected原件的客户端时先停其新来源消费，其他旧来源按原许可运行。
+
+当前单条ArchiveRecord.raw_content须同时满足1,048,576字符及1MiB UTF-8字节预算，外层冻结包装也计入预算。明确超限保存publication_record_too_large及字段/上限/单位，结构校验失败保存publication_input_invalid；两者保留原待办和旧版、标blocked并至少1小时后核对重试，同文档后继不越过，其他文档继续处理。大原件需按证据定位分块或通过已有原件存储扩展接入；当前不自动截断、不冒称已经处理成功。
