@@ -802,15 +802,22 @@ def get_pipeline_overview():
         stages.append(PipelineStage(key="relation_review", label="关系审核", total=sum(by.values()), by_status=by))
 
         # ④ 消歧链接（dict_id 是否命中）
+        # 注意：extracted_entities 中混入了 source_site='primekg' 的本体镜像行，
+        # 它们由实体字典 1:1 镜像、不参与消歧（同文件 .list_discriminable_entities 亦排除 primekg）。
+        # 为避免「未消歧(none)」等指标被本体规模污染，以下统计统一排除 primekg；
+        # 用 (source_site IS NULL OR source_site != 'primekg') 显式保留空 source_site 的存量实体，仅排除本体行。
+        _primekg_excl = "AND (source_site IS NULL OR source_site != 'primekg')"
         linked = session.execute(text(
-            "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false AND dict_id IS NOT NULL"
+            "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false "
+            f"AND dict_id IS NOT NULL {_primekg_excl}"
         )).scalar() or 0
         unlinked = session.execute(text(
-            "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false AND dict_id IS NULL"
+            "SELECT COUNT(*) FROM extracted_entities WHERE is_deleted=false "
+            f"AND dict_id IS NULL {_primekg_excl}"
         )).scalar() or 0
         match_rows = session.execute(text(
             "SELECT entity_data->'_disambig'->>'match_step' AS ms, COUNT(*) "
-            "FROM extracted_entities WHERE is_deleted=false GROUP BY ms"
+            f"FROM extracted_entities WHERE is_deleted=false {_primekg_excl} GROUP BY ms"
         )).fetchall()
         by_match_step = {r[0] or "none": r[1] for r in match_rows}
         stages.append(PipelineStage(

@@ -148,7 +148,7 @@ const SITE_COLORS = [
 ]
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
-  disambiguation: 'dict_id 命中率 = 初步消歧（强ID匹配 / 精确别名 / 类型规则 / 向量召回+Reranker 精排，抽取时）+ 精细消歧（Agent D，审核后）两段累积结果',
+  disambiguation: 'dict_id 命中率 = 初步消歧（强ID匹配 / 精确别名 / 类型规则 / 向量召回+Reranker 精排，抽取时）+ 精细消歧（Agent D，审核后）两段累积结果；统计已排除 PrimeKG 本体镜像行（其不参与消歧，避免污染"未消歧"指标）',
 }
 
 function stageDesc(key: string) {
