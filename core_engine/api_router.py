@@ -62,7 +62,7 @@ def _extract_extra_value(record: dict, spec) -> object:
       - "a.b.c"：普通点号路径，返回字符串（取不到返回 ""）
       - {"path": "a.b.c", "type": "list"}：路径指向列表，返回 List[str]
       - {"path": "a.b.c", "type": "list", "key": "name"}：路径指向 dict 列表，取每项的 key 字段
-      - {"path": "a.b.c", "type": "int"}：解析为整数，失败返回 0
+      - {"path": "a.b.c", "type": "int"}：解析为整数，未知/非法返回 None（真实0保留）
     """
     if isinstance(spec, dict):
         path = spec.get("path", "")
@@ -75,7 +75,7 @@ def _extract_extra_value(record: dict, spec) -> object:
 
     if not path:
         if vtype == "int":
-            return 0
+            return None
         if vtype == "list":
             return []
         return ""
@@ -108,10 +108,12 @@ def _extract_extra_value(record: dict, spec) -> object:
         return [str(it) for it in node if it not in (None, "")]
 
     if vtype == "int":
+        if isinstance(node, bool):
+            return None
         try:
-            return int(node)
+            return int(node) if node is not None else None
         except (TypeError, ValueError):
-            return 0
+            return None
 
     return str(node) if node else ""
 

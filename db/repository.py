@@ -85,7 +85,7 @@ def _write_operation_log(
 # 1. Document Repository
 # ═══════════════════════════════════════════════════════════════════════
 
-def upsert_document(envelope) -> None:
+def upsert_document(envelope) -> dict | None:
     """
     幂等写入文档。同一 uuid 重复调用只更新，不新增。
     同时写入：documents + doc_extra（extra 非空时）+ attachments（有附件时）。
@@ -95,11 +95,10 @@ def upsert_document(envelope) -> None:
 
     with get_session() as session:
         if session is None:
-            logger.warning("[DB] Session 未初始化，跳过 upsert_document")
-            return
+            raise RuntimeError("数据库未配置，文档未保存")
 
         # ── 1. documents 表 ──────────────────────────────────────────
-        doc = session.query(Document).filter(Document.uuid == envelope.uuid).first()
+        doc = session.query(Document).filter(Document.uuid == envelope.uuid).with_for_update().first()
         if doc is None:
             doc = Document(
                 uuid=envelope.uuid,
@@ -127,6 +126,12 @@ def upsert_document(envelope) -> None:
             logger.info(f"[DB] 新增文档: {envelope.uuid}")
             is_new = True
         else:
+            # 旧链路没有版本化发布：变化先拒写，不能沿用旧抽取/审核成果盖成新正文。
+            incoming = envelope.raw_content or ""
+            if doc.raw_content and incoming and doc.raw_content != incoming:
+                from db.publication import enqueue_changed_document
+
+                return enqueue_changed_document(session, envelope)
             # 只更新可变字段，保留 extraction_status / weknora_sync_status 等流水线状态
             doc.title = envelope.title or doc.title
             doc.summary = envelope.summary or doc.summary
@@ -173,6 +178,9 @@ def upsert_document(envelope) -> None:
                     local_path=getattr(att, "local_path", "") or "",
                 ))
 
+        from db.publication import enqueue_current_document
+
+        enqueue_current_document(session, envelope.uuid)
         logger.info(f"[DB] 文档入库成功: {envelope.uuid}")
 
 

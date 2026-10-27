@@ -45,6 +45,8 @@ def fetch_clinicaltrials(api_config: Dict) -> Iterator[Dict]:
     base_url = api_config.get("base_url", "https://clinicaltrials.gov/api/v2/studies")
     params = api_config.get("params", {"format": "json"})
     max_pages = api_config.get("max_pages", 10)
+    if not isinstance(max_pages, int) or max_pages < 1:
+        raise ValueError("ClinicalTrials max_pages必须为正整数")
 
     page_token = None
     page_count = 0
@@ -62,14 +64,17 @@ def fetch_clinicaltrials(api_config: Dict) -> Iterator[Dict]:
         try:
             response = requests.get(base_url, params=current_params, timeout=30)
             response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"[ClinicalTrials] API 请求失败: {e}")
-            break
+        except requests.exceptions.RequestException:
+            raise RuntimeError("ClinicalTrials读取失败，不能视为源已读完") from None
 
         data = response.json()
-        studies = data.get("studies", [])
+        studies = data.get("studies")
+        if not isinstance(studies, list):
+            raise RuntimeError("ClinicalTrials返回结构不完整，不能视为零命中")
 
         if not studies:
+            if data.get("nextPageToken"):
+                raise RuntimeError("ClinicalTrials空页仍有后续标记")
             logger.info("[ClinicalTrials] 没有更多数据，停止拉取")
             break
 
@@ -82,11 +87,16 @@ def fetch_clinicaltrials(api_config: Dict) -> Iterator[Dict]:
         logger.info(f"[ClinicalTrials] 已拉取 {total_records} 条记录")
 
         # 检查下一页
+        previous = page_token
         page_token = data.get("nextPageToken")
+        if page_token and page_token == previous:
+            raise RuntimeError("ClinicalTrials分页标记重复")
         if not page_token:
             logger.info("[ClinicalTrials] 无下一页 token，停止拉取")
             break
 
         page_count += 1
 
+    if page_token and page_count >= max_pages:
+        raise RuntimeError("ClinicalTrials达到页数预算，结果已截断而非全量EOF")
     logger.info(f"[ClinicalTrials] 拉取完成，共 {total_records} 条记录")

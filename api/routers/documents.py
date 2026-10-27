@@ -202,10 +202,8 @@ def recrawl_document(uuid: str, body: RecrawlRequest = RecrawlRequest()):
       2. 在后台线程提交 recrawl_document_flow（Prefect flow run，UI 可见）
       3. 立即返回，不等待完成
 
-    重爬会：
-      - 软删除旧的 extracted_entities / entity_relations
-      - 重置 extraction_status / weknora_sync_status 为 pending
-      - 重新抓取页面并 upsert 写库
+    旧网页入口仍是后台线程，非历史任务接口。
+    API来源在提交前拒绝；不清空抽取/图谱/同步成果，变化正文保旧拒写。
     """
     # UUID 格式校验
     if not uuid or not uuid.strip():
@@ -218,7 +216,7 @@ def recrawl_document(uuid: str, body: RecrawlRequest = RecrawlRequest()):
         
         try:
             doc = (
-                session.query(Document.uuid, Document.source_url)
+                session.query(Document.uuid, Document.source_url, Document.source_site)
                 .filter(
                     Document.uuid == uuid, Document.is_deleted == False
                 ).first()
@@ -226,6 +224,9 @@ def recrawl_document(uuid: str, body: RecrawlRequest = RecrawlRequest()):
             if doc is None:
                 logger.warning(f"[API] 文档不存在: {uuid}")
                 raise HTTPException(status_code=404, detail="文档不存在")
+            from config.crawler_settings import SITE_PROFILES
+            if SITE_PROFILES.get(doc.source_site, {}).get("source_type") == "api":
+                raise HTTPException(status_code=422, detail="API记录旧重采入口不支持精确by-ID，请用历史读取入口；旧成果保留")
             if not doc.source_url:
                 logger.warning(f"[API] 文档无 source_url: {uuid}")
                 raise HTTPException(status_code=422, detail="文档无 source_url，无法重爬")
@@ -280,7 +281,7 @@ def batch_recrawl_documents(body: BatchRecrawlRequest):
 
         try:
             docs = (
-                session.query(Document.uuid, Document.source_url)
+                session.query(Document.uuid, Document.source_url, Document.source_site)
                 .filter(
                     Document.uuid.in_(body.uuids),
                     Document.is_deleted == False,
@@ -288,6 +289,9 @@ def batch_recrawl_documents(body: BatchRecrawlRequest):
                 .all()
             )
 
+            from config.crawler_settings import SITE_PROFILES
+            if any(SITE_PROFILES.get(d.source_site, {}).get("source_type") == "api" for d in docs):
+                raise HTTPException(status_code=422, detail="包含旧入口不支持精确by-ID的API记录；本批未提交，旧成果保留")
             found_uuids = {d.uuid for d in docs}
             missing = [u for u in body.uuids if u not in found_uuids]
             no_url = [d.uuid for d in docs if not d.source_url]

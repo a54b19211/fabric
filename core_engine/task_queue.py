@@ -117,12 +117,12 @@ class RedisTaskQueue:
                     from rq import Queue as RQQueue
                     conn = Redis.from_url(self._redis_url)
                     self._rq_queue = RQQueue("extraction", connection=conn)
-                    logger.info(f"[TaskQueue] Redis 队列已连接: {self._redis_url}")
+                    logger.info("[TaskQueue] Redis 队列已初始化")
         return self._rq_queue
 
     def enqueue(self, task: Task) -> None:
         from flows.extraction_rq_job import extraction_job
-        self._q.enqueue(extraction_job, task.uuid, job_timeout=18000)  # 10 分钟超时
+        self._q.enqueue(extraction_job, task.uuid, job_timeout=18000)  # 5 小时超时
 
     def dequeue(self, timeout: float = 1.0) -> Optional[Task]:
         # RQ worker 进程自己从 Redis 取任务，不经过这个方法
@@ -131,8 +131,10 @@ class RedisTaskQueue:
     def size(self) -> int:
         try:
             return self._q.count
+        except ImportError:
+            raise
         except Exception:
-            return 0
+            raise RuntimeError("无法读取抽取队列，请核对 Redis 后重试") from None
 
     def recover_pending(self) -> list[Task]:
         """启动时把超时的 StartedJob 重新入队（worker 崩溃兜底）。"""
@@ -209,8 +211,10 @@ def is_extraction_paused() -> bool:
         from redis import Redis
         conn = Redis.from_url(APP.REDIS_URL)
         return bool(conn.get(_EXTRACTION_PAUSE_KEY))
+    except ImportError:
+        raise
     except Exception:
-        return False
+        raise RuntimeError("无法读取抽取暂停状态，请核对 Redis 后重试") from None
 
 
 def set_extraction_paused(paused: bool) -> None:
@@ -224,8 +228,10 @@ def set_extraction_paused(paused: bool) -> None:
             conn.set(_EXTRACTION_PAUSE_KEY, "1")
         else:
             conn.delete(_EXTRACTION_PAUSE_KEY)
-    except Exception as e:
-        logger.warning(f"[TaskQueue] 设置暂停标志失败: {e}")
+    except ImportError:
+        raise
+    except Exception:
+        raise RuntimeError("无法更新抽取暂停状态，请核对 Redis 后重试") from None
 
 
 # ═══════════════════════════════════════════════════════════════════════

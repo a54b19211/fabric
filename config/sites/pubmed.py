@@ -9,9 +9,9 @@ CONFIG = {
     "url_pattern": "pubmed.ncbi.nlm.nih.gov",
     "api": {
         # PubMed 检索式，支持完整的 PubMed 语法
-        # 示例：药品安全相关文献，最近 1 年
-        "query": 'drug safety[Title/Abstract] AND ("2024"[Date - Publication] : "2025"[Date - Publication])',
-        "max_records": 200,   # 调试用，正式跑可改大或设 0 拉全量
+        # 默认只作有界调试；历史日期窗口由本次显式检索式指定
+        "query": 'drug safety[Title/Abstract]',
+        "max_records": 200,   # 有界读取，禁止把0或NCBI截断冒充全量
         "db": "pubmed",
         # "api_key": "",      # 填入 NCBI API Key 可提升速率至 10 req/s
         "fetch_fulltext": True,          # 是否尝试获取全文（PMC + Unpaywall）

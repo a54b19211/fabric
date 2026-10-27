@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routers import documents, extraction, review, weknora, agent
+from api.routers import documents, extraction, review, weknora, agent, research, history
 from core_engine.exception_logger import ExceptionLogger
 
 app = FastAPI(
@@ -15,15 +15,8 @@ app = FastAPI(
 
 
 @app.on_event("startup")
-def _startup_recovery():
-    """启动时清空 DB 残留状态 + Redis 残留队列，完全重置为干净状态。"""
-    from db.repository import reset_stale_extractions
-    from core_engine.task_queue import clear_extraction_redis
-
-    reset_stale_extractions()
-    clear_extraction_redis()
-
-    # 注册 review_status 直写防护监听器
+def _register_review_listeners():
+    """API 重启时 Worker 可能仍在执行，不能清理队列或重置任务。"""
     import db.review_listeners  # noqa: F401
 
 # ── CORS（前端本地开发需要）──────────────────────────────────────────────
@@ -41,6 +34,8 @@ app.include_router(extraction.router)
 app.include_router(review.router)
 app.include_router(weknora.router)
 app.include_router(agent.router)
+app.include_router(research.router)
+app.include_router(history.router)
 
 
 # ── 统一错误处理 ────────────────────────────────────────────────────────

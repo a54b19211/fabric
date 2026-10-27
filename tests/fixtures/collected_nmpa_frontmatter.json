@@ -1,0 +1,18 @@
+[
+  {
+    "source_doc_uuid": "016b309e-c6f8-56f4-b015-a3c36d2778ff",
+    "source_site": "nmpa",
+    "title": "国家药监局关于发布互联网药品医疗器械信息服务备案管理规定的公告（2025年第123号）",
+    "source_url": "https://www.nmpa.gov.cn/xxgk/ggtg/ylqxggtg/ylqxqtggtg/20251222182516159.html",
+    "raw_content": "---\ntitle: \"国家药监局关于发布互联网药品医疗器械信息服务备案管理规定的公告（2025年第123号）\"\npublish_date: 2025-12-22\nsource_site: nmpa\ndoc_type: regulatory_notice\nlanguage: zh\nsource_url: https://www.nmpa.gov.cn/xxgk/ggtg/ylqxggtg/ylqxqtggtg/20251222182516159.html\n---\n\n# 国家药监局关于发布互联网药品医疗器械信息服务备案管理规定的公告（2025年第123号）\n\n索引号\nFGWJ-2025-10103\n主题分类\n标题\n",
+    "fixture_note": "真实公开NMPA原件的前15行片段，仅用于模板头回归，不代表完整正文；测试禁止按实际库导入。"
+  },
+  {
+    "source_doc_uuid": "03e97604-b863-5914-a5ae-30594eefa32c",
+    "source_site": "nmpa",
+    "title": "国家药监局关于发布仿制药参比制剂目录 （第九十九批）及调出参比制剂目录品种清单（第三批）的通告（2025年第44号）",
+    "source_url": "https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/ypqtggtg/20251205111322143.html",
+    "raw_content": "---\ntitle: \"国家药监局关于发布仿制药参比制剂目录 （第九十九批）及调出参比制剂目录品种清单（第三批）的通告（2025年第44号）\"\npublish_date: 2025-12-05\nsource_site: nmpa\ndoc_type: regulatory_notice\nlanguage: zh\nsource_url: https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/ypqtggtg/20251205111322143.html\n---\n\n# 国家药监局关于发布仿制药参比制剂目录 （第九十九批）及调出参比制剂目录品种清单（第三批）的通告（2025年第44号）\n\n索引号\nFGWJ-2025-10100\n主题分类\n标题\n",
+    "fixture_note": "真实公开NMPA原件的前15行片段，仅用于模板头回归，不代表完整正文；测试禁止按实际库导入。"
+  }
+]
