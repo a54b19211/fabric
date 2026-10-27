@@ -10,6 +10,7 @@
   - pmc_url:         PMC 全文页面链接（有 pmcid 时）
   - oa_pdf_url:      Unpaywall 找到的 OA PDF 链接（有时）
 """
+import re
 import time
 import uuid as _uuid
 from typing import Iterator
@@ -113,6 +114,40 @@ def _query_unpaywall(doi: str) -> str:
 # esummary 字段规范化
 # ---------------------------------------------------------------------------
 
+# PMCID 规范形态：PMC + 数字
+_PMCID_RE = re.compile(r"PMC\s*(\d+)", re.IGNORECASE)
+_PMCID_BARE_RE = re.compile(r"^\s*(\d{4,})\s*$")
+
+
+def normalize_pmcid(raw: str) -> str:
+    """从 esummary 的 pmcid value 中提取规范 PMCID，取不到返回空串。
+
+    esummary 返回的 value 并非裸 `PMC13xxxxxx`，而是带键名前缀的形态，实测
+    （存量 10 条 pubmed 中 9 条有值，9 条全为该形态）：
+        "PMCpmc-id: PMC13183325;"                              # 7 条
+        "PMCpmc-id: PMC13283083;embargo-date: 2027/07/01;"     # 限制期
+        "PMCpmc-id: PMC13069838;manuscript-id: NIHMS2158247;"  # 作者手稿
+    即「以 PMC 开头的键值串」，有时追加 embargo-date / manuscript-id 等附加键。
+
+    旧实现只判断 startswith("PMC") 就认为已是规范形态、整串采用，判断条件恰好
+    被这个前缀骗过，落库得到的就是上述脏值。实际影响有两点：
+      1. `_fetch_pmc_fulltext` 把脏值当 `id` 参数发给 efetch，请求无法解析，
+         全文抓取失败、`fulltext_status` 掉回 abstract_only（不是必然失败：
+         存量一条脏值最终仍拿到 pmc_fulltext，说明 NCBI 有部分容错，危害是
+         不稳定而非稳定失败）；
+      2. 脏值会原样写进 markdown 正文与 structured_data.pmcid 落库。
+    注：pmcid 目前不在 `_FORMAT_VALIDATORS` 校验族内（该族只有 application_number
+    / nct_id / pmid / doi / cas_number），故本问题不涉及格式校验判定。
+    """
+    if not raw:
+        return ""
+    m = _PMCID_RE.search(raw)
+    if m:
+        return f"PMC{m.group(1)}"
+    m = _PMCID_BARE_RE.match(raw)
+    return f"PMC{m.group(1)}" if m else ""
+
+
 def _normalize(pmid: str, s: dict) -> dict:
     """将 esummary 单条记录规范化，提取 pmcid、doi 等关键字段。"""
     authors_raw = s.get("authors", [])
@@ -122,13 +157,11 @@ def _normalize(pmid: str, s: dict) -> dict:
     doi_raw = s.get("elocationid", "")
     doi = doi_raw.replace("doi: ", "").strip() if "doi" in doi_raw.lower() else ""
 
-    # pmcid：从 articleids 列表中找 idtype=="pmcid"
+    # pmcid：从 articleids 列表中找 idtype=="pmcid"，并归一为 PMC+数字
     pmcid = ""
     for id_item in s.get("articleids", []):
         if id_item.get("idtype") == "pmcid":
-            val = id_item.get("value", "")
-            # 格式可能是 "PMC1234567" 或纯数字
-            pmcid = val if val.startswith("PMC") else (f"PMC{val}" if val else "")
+            pmcid = normalize_pmcid(id_item.get("value", ""))
             break
 
     return {
@@ -363,6 +396,17 @@ def _build_result(record: dict, api_key: str, fetch_fulltext: bool) -> dict:
             "fulltext_status": fulltext_status,
             "pmcid": pmcid,
             "oa_pdf_url": oa_pdf_url,
+            # 以下标识符必须显式进入 structured_data：落库时由
+            # storage_writer._merge_site_fields 按 PubmedExtra 的字段集
+            # 从 structured_data 补齐 extra。此前 pmid / doi / journal_name /
+            # authors 只散落在 markdown 文本和 sniffed_meta 里，
+            # extra 落库后只剩 Pydantic 默认值，本地可校验的 PMID / DOI
+            # 标识符整批丢失，T3 标识符对齐无从触发。
+            "pmid": pmid,
+            "doi": doi,
+            "journal_name": record.get("journal_name", ""),
+            "authors": record.get("authors", []),
+            # 服务器侧新增：文献类型与更正关系（来自 EFetch）
             "publication_types": record.get("publication_types", []),
             "correction_links": record.get("correction_links", []),
         },

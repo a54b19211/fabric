@@ -22,6 +22,7 @@ from db.models import (
     EntityMergeQueue, EntityMergeLog,
     EntityIdentityMergeProposal,
     OperationLog,
+    DocAuthorityResolution,
 )
 
 # ── 来源优先级（canonical_data 合并用）──────────────────────────────────
@@ -218,6 +219,173 @@ def _upsert_doc_extra_in_session(session, uuid: str, source_site: str, extra: di
             details={"uuid": uuid, "source_site": source_site},
             trigger_source="_upsert_doc_extra_in_session",
         )
+
+
+# ── 标准标识符对齐结果（A1）────────────────────────────────────────────
+
+def _opt_str(val) -> Optional[str]:
+    """归一成可入库的字符串：None/空串→None，非字符串转 str。"""
+    if val is None:
+        return None
+    text_val = val if isinstance(val, str) else str(val)
+    return text_val or None
+
+
+def _opt_int(val) -> Optional[int]:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_float(val) -> Optional[float]:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_authority_rows(
+    uuid: str,
+    source_site: str,
+    authority_resolutions: Optional[dict],
+    identifier_resolutions: Optional[dict],
+) -> list[dict]:
+    """把两族对齐结果摊平成待插入行。
+
+    两族结构差异在这一层吸收：
+      - 药名族（`authority_resolutions`）：key 是**原始药名**，`id_type` 固定
+        `drug_name`，额外有 `candidate` / `rule` / `candidates_tried`（A0.5 归一产物）
+      - 标识符族（`identifier_resolutions`）：key 是**字段名**（pmid/doi/nct_id…），
+        `id_type` 取结果自身的 `id_type` 或回落用 key，三元组字段恒为 None
+    """
+    rows: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(id_type: str, key, res: dict, *, drug_family: bool) -> None:
+        marker = (id_type, str(key))
+        if marker in seen:  # 唯一约束 (uuid, id_type, resolution_key)，防重
+            return
+        seen.add(marker)
+        rows.append({
+            "uuid": uuid,
+            "source_site": source_site or "",
+            "id_type": id_type,
+            "resolution_key": str(key),
+            "found": bool(res.get("found")),
+            "degraded": bool(res.get("degraded")),
+            "skipped": bool(res.get("skipped")),
+            "std_id": _opt_str(res.get("std_id")),
+            "source_id": _opt_str(res.get("source_id")),
+            "raw_value": _opt_str(res.get("raw_value")),
+            "resolved_value": _opt_str(res.get("resolved_value")),
+            "candidate": _opt_str(res.get("candidate")) if drug_family else None,
+            "rule": _opt_str(res.get("rule")) if drug_family else None,
+            "candidates_tried": _opt_int(res.get("candidates_tried")) if drug_family else None,
+            "confidence": _opt_float(res.get("confidence")),
+            "candidates": res.get("candidates") or [],
+        })
+
+    for key, res in (authority_resolutions or {}).items():
+        if isinstance(res, dict):
+            _add("drug_name", key, res, drug_family=True)
+
+    for key, res in (identifier_resolutions or {}).items():
+        if isinstance(res, dict):
+            _add(_opt_str(res.get("id_type")) or str(key), key, res, drug_family=False)
+
+    return rows
+
+
+def upsert_authority_resolutions(
+    uuid: str,
+    source_site: str = "",
+    authority_resolutions: Optional[dict] = None,
+    identifier_resolutions: Optional[dict] = None,
+    session=None,
+) -> int:
+    """写入一次采集的两族对齐结果（先删后插，幂等）。
+
+    同一文档重复采集时整体替换，不做逐行 upsert —— 药名集合本身会变（这次
+    抽到 3 个药名、下次 2 个），按行 upsert 会留下上次多余的键。
+
+    返回写入行数。以下情况返回 0 且不抛异常：
+      - 两族都空（无可写内容）
+      - `doc_authority_resolution` 表不存在（迁移未执行）—— 只警告，不阻断写库
+
+    传入 `session` 时复用调用方事务（回填脚本用），否则自建会话。
+    """
+    from db.session import get_session
+
+    rows = _collect_authority_rows(uuid, source_site, authority_resolutions, identifier_resolutions)
+    if not rows:
+        return 0
+
+    def _apply(sess) -> int:
+        exists = sess.execute(
+            text("SELECT to_regclass('doc_authority_resolution') IS NOT NULL")
+        ).scalar()
+        if exists is not True:
+            logger.warning(
+                "[Authority] doc_authority_resolution 表不存在，跳过对齐结果入库"
+                "（请先执行 V020 迁移）"
+            )
+            return 0
+        sess.query(DocAuthorityResolution).filter(
+            DocAuthorityResolution.uuid == uuid
+        ).delete(synchronize_session=False)
+        for row in rows:
+            sess.add(DocAuthorityResolution(**row))
+        sess.flush()
+        return len(rows)
+
+    if session is not None:
+        return _apply(session)
+
+    with get_session() as sess:
+        if sess is None:
+            return 0
+        return _apply(sess)
+
+
+def get_authority_resolutions(uuid: str) -> list[dict]:
+    """按文档读取对齐结果明细（供统计/论文取数/前端展示）。"""
+    from db.session import get_session
+
+    with get_session() as session:
+        if session is None:
+            return []
+        rows = (
+            session.query(DocAuthorityResolution)
+            .filter(
+                DocAuthorityResolution.uuid == uuid,
+                DocAuthorityResolution.is_deleted.is_(False),
+            )
+            .order_by(DocAuthorityResolution.id_type, DocAuthorityResolution.id)
+            .all()
+        )
+        return [
+            {
+                "id_type": r.id_type,
+                "resolution_key": r.resolution_key,
+                "found": r.found,
+                "degraded": r.degraded,
+                "skipped": r.skipped,
+                "std_id": r.std_id,
+                "source_id": r.source_id,
+                "raw_value": r.raw_value,
+                "resolved_value": r.resolved_value,
+                "candidate": r.candidate,
+                "rule": r.rule,
+                "candidates_tried": r.candidates_tried,
+                "confidence": r.confidence,
+            }
+            for r in rows
+        ]
 
 
 def get_document_by_uuid(uuid: str) -> Optional[Document]:

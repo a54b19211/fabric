@@ -5,6 +5,9 @@ API 数据路由器。
 
 字段映射规则（field_map）：
   - 普通 key：用点号路径从原始记录取值，如 "openfda.brand_name.0"
+  - 候选链（list）：按顺序取值，返回第一个非空，如
+    ["openfda.generic_name.0", "product_description"]。用于同一语义字段在
+    原始记录里分散多处、且各自覆盖率不均的情况（openFDA 召回记录尤甚）。
   - "__const__:值"：固定常量，如 "__const__:药品召回"
 """
 
@@ -34,8 +37,24 @@ def _record_parse_lineage(parsed_result: dict, op: str = "") -> None:
     record_step(parsed_result, step="parse", before=empty_before, op=op)
 
 
-def _get_nested(record: dict, dotted_key: str) -> str:
-    """支持点号路径取值，如 "openfda.brand_name.0"，取不到返回空字符串。"""
+def _get_nested(record: dict, dotted_key) -> str:
+    """支持点号路径取值，如 "openfda.brand_name.0"，取不到返回空字符串。
+
+    也接受「候选路径列表」：按顺序尝试，返回第一个非空值。
+    为什么需要：同一语义字段在原始记录里往往有多个落点，且分布极不均匀。
+    openFDA 的 `openfda` 子对象在召回类记录里大部分是空 `{}`，只有品牌名在
+    顶层 `product_description` 里以整段描述的形式存在。单一路径会让字段在
+    多数记录上直接变空（实测 10 条召回记录只有 3 条有 openfda），而整段
+    描述又不能当规范名用。候选链把「结构化优先、原文兜底」的取舍放进配置，
+    不写死在代码里。
+    """
+    if isinstance(dotted_key, (list, tuple)):
+        for key in dotted_key:
+            val = _get_nested(record, key)
+            if val:
+                return val
+        return ""
+
     if not dotted_key:
         return ""
     if dotted_key.startswith("__const__:"):

@@ -12,6 +12,8 @@ T4 测试 —— 锁定 check_quality() 多维质量评分行为。
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core_engine.quality_checker import (
@@ -44,13 +46,27 @@ def test_short_markdown_fails():
 
 
 def test_long_markdown_passes():
-    """正文足够长（>= 100 字符）但无结构化/DOI → 落在"低"，仍非隔离即通过。"""
+    """正文足够长（>= 100 字符）但无结构化/DOI → 落在"低"，仍非隔离即通过。
+
+    对照 T1 基线（commit 50a4faa，见 .workbuddy/snapshots/t1-baseline/）：
+    原断言为 `assert res["quality_issues"] == []`——单长度判据下"通过"等价于"无问题"。
+    多维模型下二者不再等价：低分档虽通过，仍会如实列出具体维度缺口。
+
+    因此本用例改为校验缺口清单的具体内容，不再用 `isinstance(..., list)`——
+    后者对任何返回值恒为真，等于没有校验力。
+    """
     long_md = "这是一段足够长的正文内容，" * 20  # 260 字符
     res = check_quality.fn(_base_parsed(long_md))
     assert res["quality_passed"] is True
-    assert res["quality_level"] != "隔离"
-    # 多维模型会列出维度缺口，issues 不再为空（与原单长度判定不同）
-    assert isinstance(res["quality_issues"], list)
+    assert res["quality_level"] == "低"
+    assert 0.40 <= res["quality_score"] < 0.60
+
+    # 三处维度缺口必须被如实报出（空列表即视为漏报）
+    issues = res["quality_issues"]
+    assert issues, "低分档必须给出维度缺口，不得返回空列表"
+    assert any("结构化字段" in i for i in issues)
+    assert any("标题" in i for i in issues)
+    assert any("权威性" in i for i in issues)
 
 
 def test_quality_step_recorded_in_lineage():
@@ -172,3 +188,77 @@ def test_accuracy_ignores_missed_alignment():
         },
     )
     assert _score_dimensions(p)["accuracy"] == 0.8
+
+
+# ── 真实采集信封的字段映射（T1 细化：让真实样本可进入测试）──────────────
+
+def test_real_envelope_converts_to_quality_input(envelope_to_parsed, real_envelopes):
+    """落库信封（raw_content 口径）经字段映射后可被质检正确读取。
+
+    未做映射时直接喂信封，正文会被读成 0 字符，静默报出
+    "Markdown 过短(0字符 < 100)" 并给出错误分数。本用例锁定映射后的正确行为。
+    """
+    envelopes = real_envelopes("nmpa")
+    if not envelopes:
+        pytest.skip("data/json_envelopes/nmpa/ 无样本，跳过")
+
+    env = envelopes[0]
+    parsed = envelope_to_parsed(env)
+
+    # 正文必须完整带过来，长度与源信封一致
+    assert parsed["markdown"] == env["raw_content"]
+    assert len(parsed["markdown"]) > 100
+
+    # 来源信息需从嵌套的 provenance 里取出
+    assert parsed["source_url"] == env["provenance"]["source_url"]
+    assert parsed["source_site"] == "nmpa"
+
+    # 质检不再误判为"正文为空"
+    res = check_quality.fn(parsed)
+    assert not any("过短(0字符" in i for i in res["quality_issues"])
+    assert res["quality_score"] > 0
+
+
+def test_envelope_placeholder_lineage_is_ignored(envelope_to_parsed, real_envelopes):
+    """信封自带的 lineage 是统一占位，不得被当作真实字段血缘使用。
+
+    实测 150 个信封的 lineage 键全部是同一组 4 个占位键
+    （approval_number / drug_name / manufacturer / title），与站点无关——
+    pubmed 样本不该出现 approval_number。
+    """
+    envelopes = real_envelopes("pubmed")
+    if not envelopes:
+        pytest.skip("data/json_envelopes/pubmed/ 无样本，跳过")
+
+    env = envelopes[0]
+    assert set(env["lineage"]) == {
+        "title", "drug_name", "approval_number", "manufacturer"
+    }, "信封占位 lineage 的形态变了，需重新确认本用例前提"
+
+    parsed = envelope_to_parsed(env)
+    # 若误用占位 lineage，pubmed 的 structured_data 会混入药品注册类字段
+    assert "approval_number" not in parsed["structured_data"]
+    assert "manufacturer" not in parsed["structured_data"]
+
+
+def test_lineage_backfills_station_fields(envelope_to_parsed, real_envelopes):
+    """字段级血缘可补回信封未携带的站点特有字段（以 chictr 为例）。
+
+    chictr 是现有样本中血缘非空率最高的站点（65%），
+    其余多数站点血缘字段几乎全为空，补不出内容——这是数据问题，非机制问题。
+    """
+    envelopes = real_envelopes("chictr")
+    if not envelopes:
+        pytest.skip("data/json_envelopes/chictr/ 无样本，跳过")
+
+    parsed = envelope_to_parsed(envelopes[0])
+    sd = parsed["structured_data"]
+    assert sd, "chictr 样本应能从血缘补到结构化字段"
+    # 血缘中该站点的特征字段应出现在 structured_data 里
+    assert any(
+        k in sd for k in ("regno", "sample_size", "recruitment_status", "condition")
+    ), f"未补到 chictr 特征字段，实际键：{sorted(sd)}"
+
+    # 补齐后不应再报"缺少结构化字段"
+    res = check_quality.fn(parsed)
+    assert not any("缺少结构化字段" in i for i in res["quality_issues"])
