@@ -126,31 +126,48 @@ def _original_matches(path: Path, digest: str) -> bool:
     return calculated.hexdigest() == digest
 
 
-def _save_original(path: Path, content: bytes, digest: str) -> bool:
-    """只发布完整原件；返回是否复用了同内容文件，绝不覆盖旧文件。"""
-    if path.exists():
-        if not _original_matches(path, digest):
-            raise OSError(f"原件摘要不符，未覆盖: {path}")
-        return True
+def _sync_original_directories(directory: Path) -> None:
+    """确认文件名和新增祖先目录的条目都已同步；重试也不能跳过。"""
+    directory = directory.absolute()
+    while True:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if directory.parent == directory:
+            break
+        directory = directory.parent
 
+
+def _save_original(path: Path, content: bytes, digest: str) -> bool:
+    """校验原件并同步文件/目录后才返回；不覆盖旧文件。"""
+    reused = path.exists()
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".download-", delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            # 同目录硬链接只在目标不存在时成功；并发请求不会覆盖对方的原件。
-            os.link(temporary, path)
-        except FileExistsError:
+        if reused:
             if not _original_matches(path, digest):
                 raise OSError(f"原件摘要不符，未覆盖: {path}")
-            return True
-        return False
+        else:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".download-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                # 同目录硬链接只在目标不存在时成功；并发请求不会覆盖原件。
+                os.link(temporary, path)
+            except FileExistsError:
+                if not _original_matches(path, digest):
+                    raise OSError(f"原件摘要不符，未覆盖: {path}")
+                reused = True
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+    # 三条成功路径共用此处。mkdir/link遗留的目录和文件即使已存在，
+    # 也不能证明前一次已同步成功；每次同步整条祖先链，失败直接上抛。
+    _sync_original_directories(path.parent)
+    return reused
 
 
 # ---------------------------------------------------------------------------
