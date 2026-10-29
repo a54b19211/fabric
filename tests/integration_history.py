@@ -900,3 +900,101 @@ def test_changes_head_sidecar_uses_source_time_and_frozen_published_boundary(pg)
     assert next_page["max_seq"] == 2
     assert next_page["current_version_ids"]["late-adoption"] == newer.version_ids[0]
     assert latest.version_ids[0] != newer.version_ids[0]
+
+
+def _fetch_europe_pmc_revision(abstract, key):
+    """固定合法来源输入，只替代网络请求；使用真实抓取任务和事务发布入口。"""
+    raw = json.dumps({"source": "MED", "id": "123", "title": "Example",
+                      "abstractText": abstract}, sort_keys=True)
+    request = FetchRequest(source_id="europe_pmc", query="synthetic return regression")
+    run, fresh = store.create_fetch(request, key)
+    if not fresh:
+        return run
+    store.job_input(run.id, run.attempt)
+    return store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id="MED:123", record_kind="document",
+                                  raw_content=raw)],
+        "complete": False, "upstream_pagination_exhausted": True,
+        "stop_reason": "end", "requests": 1, "bytes": len(raw.encode()),
+        "source_total": 1, "error": None,
+    })
+
+
+def test_public_fetch_restored_content_is_a_new_adoption_not_a_duplicate(pg):
+    runs, sequences = [], []
+    for index, abstract in enumerate(["A", "B", "A", "A"]):
+        runs.append(_fetch_europe_pmc_revision(abstract, f"return-{index}"))
+        with pg.begin() as conn:
+            sequences.append(conn.execute(text(
+                "SELECT published_seq FROM history_sources WHERE source_id='europe_pmc'"
+            )).scalar_one())
+        if index == 1:
+            frozen = store.list_changes("europe_pmc", False, limit=1)
+    cutoff = datetime.now().astimezone()
+    current = store.list_records("europe_pmc", False, "current", cutoff)
+    changes = store.list_changes("europe_pmc", False, after=2)
+    print(json.dumps({
+        "sequence": sequences, "run_states": [run.state for run in runs],
+        "new_version_counts": [run.coverage["new_version_count"] for run in runs],
+        "current_abstract": current.items[0].facts["abstract"],
+        "changes_after_2": [item["published_seq"] for item in changes["items"]],
+    }, ensure_ascii=False))
+
+    assert sequences == [1, 2, 3, 3]
+    assert all(run.state == "completed" for run in runs)
+    assert [run.coverage["new_version_count"] for run in runs] == [1, 1, 1, 0]
+    assert runs[2].version_ids != runs[0].version_ids
+    assert runs[3].version_ids == runs[2].version_ids
+    assert current.items[0].facts["abstract"] == "A"
+    assert current.items[0].version_id == runs[2].version_ids[0]
+    assert [item["published_seq"] for item in changes["items"]] == [3]
+    assert changes["current_version_ids"]["MED:123"] == runs[2].version_ids[0]
+    assert changes["next_after"] == 3
+    continued = store.list_changes("europe_pmc", False, limit=1, cursor=frozen["next_cursor"])
+    assert continued["max_seq"] == 2
+    assert continued["items"][0]["version_id"] == runs[1].version_ids[0]
+    assert continued["current_version_ids"]["MED:123"] == runs[1].version_ids[0]
+
+    # 旧版本内容/编号/首次看到时间不可被恢复操作改写。
+    fixed = [store.read_version(run.version_ids[0], "europe_pmc", "MED:123",
+                                False, "current", cutoff) for run in runs[:3]]
+    assert [record.facts["abstract"] for record in fixed] == ["A", "B", "A"]
+    assert fixed[0].raw_sha256 == fixed[2].raw_sha256
+    assert all(record.source_updated_at is None and record.source_published_at is None
+               for record in fixed)
+    assert fixed[0].first_seen_at < fixed[1].first_seen_at < fixed[2].first_seen_at
+    past = store.list_records("europe_pmc", False, "operational_replay",
+                              runs[1].completed_at)
+    assert past.items[0].version_id == runs[1].version_ids[0]
+    assert store.list_records(
+        "europe_pmc", False, "public_history_reconstruction", cutoff
+    ).items == []  # 本次观察不自动变成历史可见证明。
+    retry = _fetch_europe_pmc_revision("A", "return-2")
+    assert retry.id == runs[2].id and retry.version_ids == runs[2].version_ids
+    assert store.list_changes("europe_pmc", False, after=3)["items"] == []
+
+
+def test_concurrent_public_restorations_publish_once_and_old_run_retry_is_read_only(pg):
+    first = _fetch_europe_pmc_revision("A", "concurrent-first")
+    same = _fetch_europe_pmc_revision("A", "concurrent-same")
+    assert same.version_ids == first.version_ids
+    assert same.coverage["new_version_count"] == 0
+    changed = _fetch_europe_pmc_revision("B", "concurrent-changed")
+    repeated = _fetch_europe_pmc_revision("A", "concurrent-first")
+    assert repeated.id == first.id
+    before = store.list_records("europe_pmc", False, "current", datetime.now().astimezone())
+    assert before.items[0].version_id == changed.version_ids[0]
+    assert store.list_changes("europe_pmc", False)["max_seq"] == 2
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        restored = list(pool.map(
+            lambda index: _fetch_europe_pmc_revision("A", f"concurrent-restore-{index}"),
+            [1, 2],
+        ))
+    assert restored[0].version_ids == restored[1].version_ids
+    assert restored[0].version_ids != first.version_ids
+    assert sorted(run.coverage["new_version_count"] for run in restored) == [0, 1]
+    changes = store.list_changes("europe_pmc", False)
+    assert changes["max_seq"] == 3 and len(changes["items"]) == 3
+    assert changes["current_version_ids"]["MED:123"] == restored[0].version_ids[0]
+    assert [item["facts"]["abstract"] for item in changes["items"]] == ["A", "B", "A"]

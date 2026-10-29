@@ -714,6 +714,45 @@ def _publish(
             text("SELECT version_id FROM history_versions WHERE version_id=:id"),
             {"id": version_id},
         ).first()
+        if run["kind"] == "fetch" and existing is not None:
+            # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。
+            # 档案导入仍按原件/证明去重，不把迟到的旧档案改成当前状态。
+            current = conn.execute(
+                text(
+                    "SELECT version_id,payload FROM history_versions "
+                    "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
+                    "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
+                    "ORDER BY COALESCE(proof_available_at,first_seen_at) DESC,"
+                    + _SOURCE_UPDATED_ORDER
+                    + " DESC NULLS LAST,published_seq DESC LIMIT 1"
+                ),
+                {"source": run["source_id"], "demo": run["is_demo"],
+                 "native": item.source_record_id},
+            ).mappings().first()
+            if current is not None:
+                prior_identity = {key: current["payload"].get(key) for key in identity}
+                prior_identity["availability_proof"] = {
+                    key: value for key, value in prior_identity["availability_proof"].items()
+                    if key != "verified_at"
+                }
+                if prior_identity["mapping_review"]:
+                    prior_identity["mapping_review"] = {
+                        key: value for key, value in prior_identity["mapping_review"].items()
+                        if key != "reviewed_at"
+                    }
+                if canonical(prior_identity) == canonical(identity):
+                    # 恢复后的连续A复用A3，不能重新引用A1或再增加一个版本。
+                    version_id = current["version_id"]
+                else:
+                    # 首次出现的内容ID不变；再次采用旧内容时，以前一版区分这次变化。
+                    version_id = sha256(canonical({
+                        "content_version_id": version_id,
+                        "previous_version_id": current["version_id"],
+                    }))
+                    existing = conn.execute(
+                        text("SELECT version_id FROM history_versions WHERE version_id=:id"),
+                        {"id": version_id},
+                    ).first()
         if existing is None:
             seq += 1
             payload = HistoryRecord(
