@@ -1,0 +1,157 @@
+"""JS pagination failures must reach the caller, using an in-memory browser."""
+
+import ast
+import concurrent.futures
+import json
+import sys
+import types
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urljoin, urlparse
+
+import pytest
+
+
+class Quiet:
+    def __getattr__(self, _name):
+        return lambda *_args, **_kwargs: None
+
+
+def load_driver():
+    source = Path(__file__).parents[1] / "core_engine/pagination_driver.py"
+    tree = ast.parse(source.read_text())
+    nodes = [n for n in tree.body if isinstance(n, ast.ClassDef)
+             and n.name in {"BasePaginationDriver", "JsClickDriver"}]
+    namespace = {
+        "ABC": ABC, "abstractmethod": abstractmethod, "urlparse": urlparse,
+        "urljoin": urljoin, "json": json, "concurrent": concurrent,
+        "SITE_PROFILES": {}, "DEFAULT_HEADERS": {"User-Agent": "synthetic"},
+        "logger": Quiet(), "time": SimpleNamespace(sleep=lambda _delay: None),
+        "make_uuid": lambda value: value,
+        "_rows_to_markdown": lambda rows: json.dumps(rows),
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["JsClickDriver"]
+
+
+class Element:
+    def __init__(self, page, kind):
+        self.page, self.kind = page, kind
+
+    def get_attribute(self, name):
+        return "/record-" + str(self.page.number) if name == "href" else ""
+
+    def inner_text(self):
+        return "row-" + str(self.page.number)
+
+    def click(self):
+        self.page.clicks += 1
+        if self.page.advance:
+            self.page.number += 1
+
+
+class Page:
+    url = "https://example.invalid/list"
+
+    def __init__(self, advance):
+        self.advance = advance
+        self.number = 1
+        self.clicks = 0
+        self.waits = 0
+        self.context_closes = 0
+        self.browser_closes = 0
+
+    def goto(self, *_args, **_kwargs):
+        pass
+
+    def title(self):
+        return "SYNTHETIC"
+
+    def query_selector_all(self, selector):
+        return [Element(self, "table" if selector == "table" else "link")]
+
+    def query_selector(self, selector):
+        return None if selector == "li.is_active" else Element(self, "next")
+
+    def wait_for_function(self, script, **_kwargs):
+        self.waits += 1
+        if not self.advance:
+            raise TimeoutError("synthetic second page never changed")
+
+    def wait_for_timeout(self, _delay):
+        pass
+
+
+def install_browser(monkeypatch, page):
+    def close_context():
+        page.context_closes += 1
+
+    def close_browser():
+        page.browser_closes += 1
+
+    browser = SimpleNamespace(
+        new_context=lambda **_kwargs: SimpleNamespace(new_page=lambda: page, close=close_context),
+        close=close_browser,
+    )
+
+    @contextmanager
+    def sync_playwright():
+        yield SimpleNamespace(chromium=SimpleNamespace(launch=lambda **_kwargs: browser))
+
+    package = types.ModuleType("playwright")
+    api = types.ModuleType("playwright.sync_api")
+    api.sync_playwright = sync_playwright
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", api)
+
+
+def driver_for(monkeypatch, advance, pages=2):
+    page = Page(advance)
+    install_browser(monkeypatch, page)
+    driver = load_driver()("site", {"max_pages": pages, "request_delay_seconds": 0}, page.url)
+    driver.site_cfg = {"pagination": {"next_btn_selector": ".next"}, "list_item_selector": "a"}
+    driver._extract_table_rows = lambda _table: [["header"], ["row-" + str(page.number)]]
+    return driver, page
+
+
+@pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
+def test_second_page_timeout_cannot_return_a_duplicate_success(monkeypatch, method):
+    driver, page = driver_for(monkeypatch, advance=False)
+    with pytest.raises(RuntimeError, match="翻页"):
+        getattr(driver, method)()
+    assert page.clicks == 1 and page.waits == 1
+    assert page.context_closes == page.browser_closes == 1
+
+
+@pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
+def test_bounded_success_does_not_request_an_unwanted_third_page(monkeypatch, method):
+    driver, page = driver_for(monkeypatch, advance=True)
+    batches = getattr(driver, method)()
+    assert len(batches) == 2
+    assert batches[0] != batches[1]
+    assert page.clicks == 1
+    assert page.context_closes == page.browser_closes == 1
+
+
+@pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
+def test_interruption_can_be_explicitly_restarted_from_first_page(monkeypatch, method):
+    driver, _ = driver_for(monkeypatch, advance=False)
+    with pytest.raises(RuntimeError):
+        getattr(driver, method)()
+    recovered, _ = driver_for(monkeypatch, advance=True)
+    assert len(getattr(recovered, method)()) == 2
+
+
+@pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
+def test_initial_read_failure_closes_browser_and_context(monkeypatch, method):
+    driver, page = driver_for(monkeypatch, advance=True)
+
+    def fail_goto(*_args, **_kwargs):
+        raise TimeoutError("synthetic initial read timeout")
+
+    page.goto = fail_goto
+    with pytest.raises(TimeoutError, match="initial read"):
+        getattr(driver, method)()
+    assert page.context_closes == page.browser_closes == 1

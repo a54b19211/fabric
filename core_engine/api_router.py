@@ -35,7 +35,10 @@ def _record_parse_lineage(parsed_result: dict, op: str = "") -> None:
 
 
 def _get_nested(record: dict, dotted_key: str) -> str:
-    """支持点号路径取值，如 "openfda.brand_name.0"，取不到返回空字符串。"""
+    """字符串展示映射：保留0/False，缺字段、None及空字符串仍展示为空。
+
+    不用于保存原始字段类型；不修改传入record，也不为缺字段补造null。
+    """
     if not dotted_key:
         return ""
     if dotted_key.startswith("__const__:"):
@@ -52,14 +55,14 @@ def _get_nested(record: dict, dotted_key: str) -> str:
                 return ""
         else:
             return ""
-    return str(val) if val else ""
+    return str(val) if val is not None else ""
 
 
 def _extract_extra_value(record: dict, spec) -> object:
     """按 extra_fields 的规格从原始记录取值。
 
     支持三种写法：
-      - "a.b.c"：普通点号路径，返回字符串（取不到返回 ""）
+      - "a.b.c"：字符串展示；0/False保留，缺字段、None和空字符串仍返回 ""
       - {"path": "a.b.c", "type": "list"}：路径指向列表，返回 List[str]
       - {"path": "a.b.c", "type": "list", "key": "name"}：路径指向 dict 列表，取每项的 key 字段
       - {"path": "a.b.c", "type": "int"}：解析为整数，未知/非法返回 None（真实0保留）
@@ -103,7 +106,7 @@ def _extract_extra_value(record: dict, spec) -> object:
             return [
                 str(it.get(key, "")).strip()
                 for it in node
-                if isinstance(it, dict) and it.get(key)
+                if isinstance(it, dict) and it.get(key) not in (None, "")
             ]
         return [str(it) for it in node if it not in (None, "")]
 
@@ -115,7 +118,7 @@ def _extract_extra_value(record: dict, spec) -> object:
         except (TypeError, ValueError):
             return None
 
-    return str(node) if node else ""
+    return str(node) if node is not None else ""
 
 
 def _record_to_markdown(record: dict, title: str) -> str:

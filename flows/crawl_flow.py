@@ -21,6 +21,8 @@
 """
 
 import concurrent.futures
+import re
+import time
 from loguru import logger
 from prefect import task, flow
 
@@ -63,24 +65,88 @@ def _strip_frontmatter(markdown: str) -> str:
     return markdown[end + 4:].lstrip("\n")
 
 
+def _is_transient_read_error(error: Exception) -> bool:
+    """Only retry timeouts and throttling; parsing and other HTTP errors are final."""
+    seen = set()
+    while isinstance(error, BaseException) and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, TimeoutError) or any(
+            cls.__name__ in {"TimeoutException", "TimeoutError", "ReadTimeout",
+                             "ConnectTimeout", "WriteTimeout", "PoolTimeout"}
+            for cls in type(error).__mro__
+        ):
+            return True
+        response = getattr(error, "response", None)
+        if getattr(response, "status_code", None) == 429:
+            return True
+        # fetch_page deliberately raises RuntimeError for non-2xx responses.
+        if isinstance(error, RuntimeError) and re.search(r"\bHTTP\s+429\b", str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _read_with_retries(read, **kwargs):
+    """Bound read retries also for .fn callers, without retrying any database write."""
+    retries = max(0, APP.TASK_RETRIES)
+    delay = min(max(float(APP.TASK_RETRY_DELAY), 0.0), 60.0)
+    for attempt in range(retries + 1):
+        try:
+            return read(**kwargs)
+        except Exception as error:
+            if attempt == retries or not _is_transient_read_error(error):
+                raise
+            logger.warning(
+                f"[Crawl] 暂时读取失败，{delay:g}秒后重试 "
+                f"({attempt + 1}/{retries}): {type(error).__name__}"
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+
+
+def _has_document_text(parsed: dict) -> bool:
+    markdown = parsed.get("markdown")
+    if not isinstance(markdown, str):
+        return False
+    text = _strip_frontmatter(markdown).strip()
+    # The generic router can return a title even when body extraction failed.
+    return bool(text) and text != f"# {parsed.get('title', '')}".strip()
+
+
+def _validate_parsed_document(parsed, *, allow_attachment_only: bool = False) -> dict:
+    """An empty parser result is a failure, not a successful zero-match response."""
+    if not isinstance(parsed, dict) or not parsed.get("uuid"):
+        raise ValueError("解析器未返回有效文档或文档编号")
+    if parsed.get("success") is False or parsed.get("status") == "failed":
+        raise ValueError(f"文档解析失败: {parsed.get('error') or parsed.get('uuid')}")
+    has_attachments = any(
+        isinstance(item, dict) and item.get("url")
+        for item in (parsed.get("attachment_links") or [])
+    )
+    if not _has_document_text(parsed) and not (allow_attachment_only and has_attachments):
+        raise ValueError(f"文档正文解析为空: {parsed.get('uuid')}")
+    return parsed
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Prefect Tasks — 每步可被 UI 监控
 # ═══════════════════════════════════════════════════════════════════════
 
 @task(
     name="fetch_and_parse_url",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
+    retries=0,  # Reading retries live below so .fn() has the same bounded policy.
 )
-def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = False) -> dict:
+def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = False) -> list[dict]:
     """
     抓取单个网页并解析为结构化 dict。
     force=True 时附件强制重新下载（重爬场景）。
+    返回文档列表；抓取/解析失败抛异常，不转换为合法零命中的空列表。
     """
     site_cfg = SITE_PROFILES.get(site_key, {})
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         page_data = executor.submit(
+            _read_with_retries,
             fetch_page.fn,
             url=url,
             delay=profile.get("request_delay_seconds", 2.0),
@@ -90,7 +156,9 @@ def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = Fa
             use_simple_fetch=site_cfg.get("use_simple_fetch", False),
         ).result()
 
-    parsed = route_webpage.fn(page_data, site_key=site_key)
+    parsed = _validate_parsed_document(
+        route_webpage.fn(page_data, site_key=site_key), allow_attachment_only=True,
+    )
     cookies = page_data.get("cookies", [])
     attachment_links = parsed.get("attachment_links", [])
     merge_attachments = site_cfg.get("merge_attachments", False)
@@ -103,6 +171,8 @@ def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = Fa
             parent_parsed=parsed, force=force,
             cookies=cookies,
         )
+        if not att_results and not _has_document_text(parsed):
+            raise ValueError(f"正文为空且没有可解析附件: {parsed.get('uuid')}")
         if merge_attachments:
             merged_md = parsed.get("markdown", "")
             for att_parsed in att_results:
@@ -124,8 +194,7 @@ def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = Fa
 
 @task(
     name="fetch_and_parse_attachments",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
+    retries=0,  # Reading retries live below so .fn() has the same bounded policy.
 )
 def fetch_and_parse_attachments(
     attachment_links: list,
@@ -144,9 +213,10 @@ def fetch_and_parse_attachments(
         if not att_url:
             continue
 
-        att_info = download_pdf.fn(pdf_url=att_url, parent_uuid=parent_uuid,
-                                   source_site=site_key, force=force,
-                                   cookies=cookies)
+        att_info = _read_with_retries(
+            download_pdf.fn, pdf_url=att_url, parent_uuid=parent_uuid,
+            source_site=site_key, force=force, cookies=cookies,
+        )
         file_ext = (att_info.get("file_ext") or "").lower()
         local_path = att_info.get("local_path", "")
 
@@ -157,14 +227,14 @@ def fetch_and_parse_attachments(
         if file_ext in {".xls", ".xlsx"}:
             logger.info(f"[Crawl] → route_excel (直接读取), ext={file_ext}")
             att_info["file_ext"] = file_ext
-            results.append(route_excel(att_info, parent_parsed=parent_parsed))
+            results.append(_validate_parsed_document(route_excel(att_info, parent_parsed=parent_parsed)))
         elif file_ext == ".pdf":
             logger.info(f"[Crawl] → MinerU")
-            results.append(route_pdf.fn(att_info))
+            results.append(_validate_parsed_document(route_pdf.fn(att_info)))
         elif file_ext in {".doc", ".docx"}:
             logger.info(f"[Crawl] → route_docx")
             att_info["file_ext"] = file_ext
-            results.append(route_docx(att_info, parent_parsed=parent_parsed))
+            results.append(_validate_parsed_document(route_docx(att_info, parent_parsed=parent_parsed)))
         else:
             logger.warning(f"[Crawl] 未知类型 {file_ext}，跳过: {local_path}")
 
@@ -276,12 +346,9 @@ def _recrawl_document_impl(uuid: str) -> dict:
     return {"success": bool(stored) and not failed, "uuid": uuid, "stored": stored, "failed": failed}
 
 
-@flow(name="crawl_url_on_demand")
+@flow(name="crawl_url_on_demand", retries=0)
 def crawl_url_flow(url: str, site_key: str = "") -> dict:
-    """
-    按需爬取一个新 URL（调试/补录用）。
-    site_key 为空时自动从 URL 匹配。
-    """
+    """按需获取：明确空结果、解析失败、隔离和未确认保存，不自动重放写入。"""
     if not site_key:
         url_lower = url.lower()
         for key, profile in SITE_PROFILES.items():
@@ -295,15 +362,44 @@ def crawl_url_flow(url: str, site_key: str = "") -> dict:
 
     try:
         parsed_list = fetch_and_parse_url(url, site_key, profile)
-    except Exception as e:
-        logger.error(f"[CrawlOnDemand] 抓取失败 url={url} site_key={site_key}: {e}")
-        return {"success": False, "error": str(e), "url": url}
+        if not isinstance(parsed_list, list):
+            raise ValueError("抓取解析未返回文档列表")
+    except Exception as error:
+        logger.error(f"[CrawlOnDemand] 抓取/解析失败 url={url} site_key={site_key}: {error}")
+        # Record counts describe parsed documents; this stage produced none.
+        return {"success": False, "status": "failed", "error_stage": "fetch_parse",
+                "error": str(error), "url": url, "total": 0,
+                "stored": 0, "failed": 0, "quarantined": 0}
 
-    stored = 0
+    if not parsed_list:
+        return {"success": True, "status": "empty", "url": url, "total": 0,
+                "stored": 0, "failed": 0, "quarantined": 0,
+                "message": "获取完成，未返回可保存记录"}
+
+    stored, failed, quarantined = 0, 0, 0
+    failures = []
     for parsed in parsed_list:
+        doc_uuid = parsed.get("uuid", "") if isinstance(parsed, dict) else ""
         try:
-            process_and_store(parsed)
-            stored += 1
-        except Exception as e:
-            logger.error(f"[CrawlOnDemand] 写库失败: {e}")
-    return {"success": True, "url": url, "stored": stored}
+            result = process_and_store(parsed)
+            if isinstance(result, dict) and result.get("status") == "quarantined":
+                quarantined += 1
+                failures.append({"uuid": doc_uuid, "status": "quarantined",
+                                 "error": "资料未通过质量检查"})
+            elif isinstance(result, dict) and result.get("success") is True:
+                stored += 1
+            else:
+                failed += 1
+                reason = (result.get("error") or result.get("status")) if isinstance(result, dict) else None
+                failures.append({"uuid": doc_uuid, "status": "failed",
+                                 "error": str(reason or "保存结果未确认成功；未自动重写")})
+        except Exception as error:
+            logger.error(f"[CrawlOnDemand] 处理/写库失败: {doc_uuid} | {error}")
+            failed += 1
+            failures.append({"uuid": doc_uuid, "status": "failed", "error": str(error)})
+
+    status = ("success" if not failed and not quarantined else "partial" if stored
+              else "failed" if failed else "quarantined")
+    return {"success": not failed and not quarantined, "status": status, "url": url,
+            "total": len(parsed_list), "stored": stored, "failed": failed,
+            "quarantined": quarantined, "failures": failures}

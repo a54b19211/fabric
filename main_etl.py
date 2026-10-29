@@ -10,7 +10,7 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1"
     python main_etl.py --mode crawl           # 仅采集（网页 + API）
     python main_etl.py --mode local           # 仅处理本地 PDF
     python main_etl.py --mode export_review   # 仅导出待审核 CSV
-    python main_etl.py --crawl_mode incremental  # 增量爬取：遇到第一个重复即停止
+    python main_etl.py --crawl_mode incremental  # 增量复查：保留旧记录修订，继续读取后续新增
 """
 
 import sys
@@ -31,6 +31,7 @@ from core_engine.api_router import iter_api_results
 from core_engine.storage_writer import write_to_database
 from core_engine.review_exporter import export_review_csv
 from flows.crawl_flow import (
+    _validate_parsed_document,
     fetch_and_parse_url,
     process_and_store,
 )
@@ -69,8 +70,44 @@ def _ensure_dirs():
 #  公共处理逻辑：质检 → 落盘 / 隔离
 # ===================================================================
 
-class StopIncremental(Exception):
-    """增量模式下遇到已处理记录时抛出，用于中断翻页循环。"""
+class CrawlTaskError(RuntimeError):
+    """入口失败时保留已完成记录统计；分页错误不冒充一条文档。"""
+
+    def __init__(self, message: str, stats: dict):
+        super().__init__(message)
+        self.stats = dict(stats)
+
+    def __reduce__(self):
+        return type(self), (str(self), self.stats)
+
+
+def _new_stats() -> dict:
+    return {"total": 0, "passed": 0, "quarantined": 0, "failed": 0}
+
+
+def _merge_stats(stats: dict, other: dict):
+    for key in stats:
+        stats[key] += other.get(key, 0)
+
+
+def _crawl_status(stats: dict, error: str = "") -> str:
+    if error or stats["failed"]:
+        return "partial" if stats["passed"] else "failed"
+    return "success"
+
+
+def _update_task_log(log_id: int, stats: dict, error: str = ""):
+    if not log_id:
+        return
+    from db.repository import update_crawl_log
+    update_crawl_log(
+        log_id=log_id,
+        status=_crawl_status(stats, error),
+        total=stats["total"],
+        passed=stats["passed"],
+        failed=stats["failed"],
+        error=error or (f"{stats['failed']} 条记录处理失败" if stats["failed"] else ""),
+    )
 
 
 def _already_processed(doc_uuid: str, site: str) -> bool:
@@ -93,67 +130,60 @@ def _already_processed(doc_uuid: str, site: str) -> bool:
 
 
 def _process_single_result(parsed: dict, stats: dict):
-    """对单条解析结果执行清洗、质检和落盘。"""
-    result = process_and_store.fn(parsed)
-    if result.get("success", True) and result.get("status") != "quarantined":
-        stats["passed"] += 1
-    else:
-        stats["quarantined"] += 1
+    """保存明确成功才计通过；质量隔离与保存失败分别累计。"""
+    try:
+        result = process_and_store.fn(parsed)
+        if not isinstance(result, dict):
+            raise TypeError("处理保存未返回结果对象")
+        if result.get("status") == "quarantined":
+            stats["quarantined"] += 1
+        elif result.get("success") is True:
+            stats["passed"] += 1
+        else:
+            raise RuntimeError(result.get("error") or "保存未确认成功")
+    except Exception as e:
+        stats["failed"] = stats.get("failed", 0) + 1
+        logger.error(f"记录处理失败: {e}")
+        return str(e)
 
 
 # ===================================================================
 #  子流程 1：数据采集流水线（网页爬取 + API 拉取）
 # ===================================================================
 
-@task(
-    name="crawl_detail_page",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
+@task(name="crawl_detail_page", retries=0)
 def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode: str = "full") -> dict:
-    """爬取单条详情页并完成解析 → 质检 → 落盘。"""
-    stats = {"total": 0, "passed": 0, "quarantined": 0}
-
-    # ── 断点续爬：全量=跳过已处理，增量=遇到重复立即停止 ──
-    from core_engine.scrapling_client import make_uuid as _make_uuid
-    doc_uuid = _make_uuid(detail_url)
-    if _already_processed(doc_uuid, site_key):
-        if crawl_mode == "incremental":
-            logger.info(f"[增量] 遇到已处理记录，停止: {detail_url}")
-            raise StopIncremental(detail_url)
-        logger.info(f"[跳过] 已处理: {detail_url}")
-        return {"detail_url": detail_url, "stats": stats}
-
+    """重新读取详情，旧 UUID 也交既有存储机制核对修订；写入不自动重试。"""
+    stats = _new_stats()
     try:
         parsed_list = fetch_and_parse_url.fn(detail_url, site_key, profile)
+        if not isinstance(parsed_list, list):
+            raise TypeError("详情解析未返回结果列表")
     except Exception as e:
         logger.error(f"详情页处理失败: {detail_url} | {e}")
         stats["total"] += 1
-        return {"detail_url": detail_url, "stats": stats}
+        stats["failed"] += 1
+        return {"detail_url": detail_url, "stats": stats, "error": str(e)}
 
+    error = ""
     for parsed in parsed_list:
         stats["total"] += 1
-        _process_single_result(parsed, stats)
+        failure = _process_single_result(parsed, stats)
+        if failure and not error:
+            error = failure
 
-    return {"detail_url": detail_url, "stats": stats}
+    return {"detail_url": detail_url, "stats": stats, "error": error}
 
 
-
-
-@task(
-    name="crawl_single_start_url",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
+@task(name="crawl_single_start_url", retries=0)
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_mode: str = "full") -> dict:
-    """单个站点入口的完整爬取任务：翻页驱动 → 详情页处理。"""
+    """单入口爬取：本次 URL 去重，不因历史记录停止或跳过修订。"""
     from core_engine.pagination_driver import JsClickDriver
-    from db.repository import log_crawl_task, update_crawl_log
+    from db.repository import log_crawl_task
 
-    stats = {"total": 0, "passed": 0, "quarantined": 0}
-    stop_flag = {"stop": False}
-
-    # ── 爬取日志：任务开始 ──
+    stats = _new_stats()
+    seen_urls = set()
+    errors = []  # 数据库日志保存首条具体原因；完整计数和逐条运行日志仍保留。
     log_id = log_crawl_task(
         site_key=site_key,
         task_type=crawl_mode,
@@ -162,80 +192,63 @@ def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_m
 
     def _process_urls(urls: list[str]):
         for detail_url in urls:
+            if detail_url in seen_urls:
+                continue
+            # 本次失败也不立即重写；显式重放时 seen_urls 会重新建立。
+            seen_urls.add(detail_url)
             try:
                 result = crawl_detail_page.fn(site_key, profile, detail_url, crawl_mode=crawl_mode)
-                s = result["stats"]
-                stats["total"] += s["total"]
-                stats["passed"] += s["passed"]
-                stats["quarantined"] += s["quarantined"]
-            except StopIncremental:
-                stop_flag["stop"] = True
-                return  # 停止当前页剩余 URL 的处理
+                _merge_stats(stats, result["stats"])
+                if result.get("error") and not errors:
+                    errors.append(f"{detail_url}: {result['error']}")
             except Exception as e:
                 logger.error(f"详情页处理失败: {detail_url} | {e}")
                 stats["total"] += 1
+                stats["failed"] += 1
+                if not errors:
+                    errors.append(f"{detail_url}: {e}")
 
     try:
-        # ── 表格直提模式：直接从列表页提取表格内容，不经过详情页 ──
+        driver = make_driver(site_key, profile, start_url)
         if profile.get("source_type") == "table_page":
-            driver = make_driver(site_key, profile, start_url)
             for page_batch in driver.iter_table_data():
                 for parsed in page_batch:
                     stats["total"] += 1
-                    _process_single_result(parsed, stats)
+                    failure = _process_single_result(parsed, stats)
+                    if failure and not errors:
+                        errors.append(failure)
+        elif isinstance(driver, JsClickDriver):
+            for page_urls in driver._playwright_crawl():
+                _process_urls(page_urls)
         else:
-            driver = make_driver(site_key, profile, start_url)
-            if isinstance(driver, JsClickDriver):
-                for page_urls in driver._playwright_crawl():
-                    _process_urls(page_urls)
-                    if stop_flag["stop"]:
-                        logger.info(f"[增量] 站点 {site_key} 翻页已停止")
-                        break
-            else:
-                for detail_url in driver.iter_detail_urls():
-                    _process_urls([detail_url])
-                    if stop_flag["stop"]:
-                        logger.info(f"[增量] 站点 {site_key} 翻页已停止")
-                        break
-
-        # ── 爬取日志：任务成功 ──
-        if log_id:
-            update_crawl_log(
-                log_id=log_id,
-                status="success",
-                total=stats["total"],
-                passed=stats["passed"],
-                failed=stats["total"] - stats["passed"] - stats["quarantined"],
-            )
+            for detail_url in driver.iter_detail_urls():
+                _process_urls([detail_url])
+        _update_task_log(log_id, stats, "; ".join(errors))
     except Exception as e:
-        # ── 爬取日志：任务失败 ──
-        if log_id:
-            update_crawl_log(
-                log_id=log_id,
-                status="failed",
-                total=stats["total"],
-                passed=stats["passed"],
-                failed=stats["total"] - stats["passed"] - stats["quarantined"],
-                error=str(e),
-            )
-        raise
+        error = "; ".join(errors + [str(e)])
+        try:
+            _update_task_log(log_id, stats, error)
+        except Exception as log_error:
+            logger.error(f"爬取失败日志更新失败: {log_error}")
+        # 不自动重放含写入的批次；向上保留已完成统计和失败原因。
+        raise CrawlTaskError(error, stats) from e
 
-    return {"site_key": site_key, "site_name": profile.get("name", site_key), "start_url": start_url, "stats": stats}
+    return {"site_key": site_key, "site_name": profile.get("name", site_key), "start_url": start_url,
+            "status": _crawl_status(stats), "stats": stats}
 
 
 @flow(
     name="crawl_websites",
+    retries=0,
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
 def crawl_websites_flow(only_site: Optional[str] = None, crawl_mode: str = "full"):
-    """
-    统一数据采集入口。根据站点 source_type 自动分发：
-    - source_type='api'：API 拉取
-    - 其他（默认）：网页爬取
-    """
-    logger.info(f"========== 开始数据采集流水线（{crawl_mode}模式）==========")
-    stats = {"total": 0, "passed": 0, "quarantined": 0}
+    """统一采集入口；API 与网页均保留失败和已完成记录统计。"""
+    from db.repository import log_crawl_task
 
+    logger.info(f"========== 开始数据采集流水线（{crawl_mode}模式）==========")
+    stats = _new_stats()
+    failed_sites = {}
     profiles = SITE_PROFILES
     if only_site:
         if only_site not in SITE_PROFILES:
@@ -243,54 +256,68 @@ def crawl_websites_flow(only_site: Optional[str] = None, crawl_mode: str = "full
             return
         profiles = {only_site: SITE_PROFILES[only_site]}
 
-    # ---- API 来源站点（串行，受限于 API 速率）----
+    # API 读取可合法零命中；读取或分页异常不视为正常结束。
     for site_key, profile in profiles.items():
         if profile.get("source_type") != "api":
             continue
-        logger.info(f"[API] 站点已入队: {profile['name']} ({site_key})")
+        site_stats = _new_stats()
+        site_error = ""
+        log_id = log_crawl_task(site_key=site_key, task_type=crawl_mode,
+                                config_snapshot={"source_type": "api"})
         try:
             for parsed in iter_api_results(site_key, profile):
-                stats["total"] += 1
-                _process_single_result(parsed, stats)
-            logger.info(f"[API] 站点完成: {profile['name']}")
+                site_stats["total"] += 1
+                failure = _process_single_result(parsed, site_stats)
+                if failure and not site_error:
+                    site_error = failure
+            _update_task_log(log_id, site_stats, site_error)
+            if site_stats["failed"]:
+                failed_sites.setdefault(site_key, []).append("api")
         except Exception as e:
-            logger.error(f"[API] 站点失败: {profile['name']} | {e}")
+            failed_sites.setdefault(site_key, []).append("api")
+            logger.error(f"[API] 站点失败: {profile.get('name', site_key)} | {e}")
+            try:
+                _update_task_log(log_id, site_stats, "; ".join(x for x in (site_error, str(e)) if x))
+            except Exception as log_error:
+                logger.error(f"爬取失败日志更新失败: {log_error}")
+        _merge_stats(stats, site_stats)
 
-    # ---- 网页爬取站点（Prefect 并发）----
     jobs = []
     for site_key, profile in profiles.items():
         if profile.get("source_type") == "api":
             continue
-        logger.info(f"[Web] 站点已入队: {profile['name']} ({site_key})")
         for start_url in profile["start_urls"]:
             future = crawl_single_start_url.submit(site_key, profile, start_url, crawl_mode)
-            jobs.append({"site_key": site_key, "site_name": profile["name"], "start_url": start_url, "future": future})
+            jobs.append({"site_key": site_key, "site_name": profile.get("name", site_key),
+                         "start_url": start_url, "future": future})
 
-    failed_sites = {}
     for job in jobs:
         try:
             result = job["future"].result()
             s = result["stats"]
-            stats["total"] += s["total"]
-            stats["passed"] += s["passed"]
-            stats["quarantined"] += s["quarantined"]
+            _merge_stats(stats, s)
+            if s.get("failed", 0):
+                failed_sites.setdefault(job["site_key"], []).append(job["start_url"])
             logger.info(
                 f"[Web] 站点入口完成: {result['site_name']} | {result['start_url']} | "
-                f"总计={s['total']} 通过={s['passed']} 隔离={s['quarantined']}"
+                f"总计={s['total']} 通过={s['passed']} 隔离={s['quarantined']} 失败={s.get('failed', 0)}"
             )
         except Exception as e:
+            if isinstance(e, CrawlTaskError):
+                _merge_stats(stats, e.stats)
             failed_sites.setdefault(job["site_key"], []).append(job["start_url"])
             logger.error(f"[Web] 站点入口失败: {job['site_name']} | {job['start_url']} | 错误: {e}")
 
     logger.info(
-        f"========== 数据采集完成 | "
-        f"总计: {stats['total']} | 通过: {stats['passed']} | 隔离: {stats['quarantined']} =========="
+        f"========== 数据采集完成 | 总计: {stats['total']} | 通过: {stats['passed']} | "
+        f"隔离: {stats['quarantined']} | 失败: {stats['failed']} =========="
     )
-    if failed_sites:
-        for site_key, failed_urls in failed_sites.items():
-            logger.error(f"站点失败汇总: {site_key} | 失败入口数: {len(failed_urls)}")
-            for url in failed_urls:
-                logger.error(f"  - 失败入口: {url}")
+    for site_key, failed_urls in failed_sites.items():
+        logger.error(f"站点失败汇总: {site_key} | 失败入口数: {len(failed_urls)}")
+        for url in failed_urls:
+            logger.error(f"  - 失败入口: {url}")
+    return {"stats": stats, "failed_sites": failed_sites,
+            "status": _crawl_status(stats, "采集入口失败" if failed_sites else "")}
 
 
 # ===================================================================
@@ -299,33 +326,48 @@ def crawl_websites_flow(only_site: Optional[str] = None, crawl_mode: str = "full
 
 @flow(
     name="process_local_pdfs",
+    retries=0,
     task_runner=ConcurrentTaskRunner(max_workers=APP.MAX_CONCURRENCY),
 )
 def process_local_pdfs_flow():
-    """批量扫描本地目录中的 PDF → MinerU 解析 → 质检 → 落盘。"""
+    """批量处理本地 PDF，解析和保存失败均保留到根入口。"""
     logger.info("========== 开始本地 PDF 处理流水线 ==========")
-    stats = {"total": 0, "passed": 0, "quarantined": 0}
-
+    stats = _new_stats()
+    errors = []
     for scan_dir in LOCAL_PDF_SCAN_DIRS:
-        for pdf_info in scan_local_pdfs(scan_dir):
-            if _already_processed(pdf_info["uuid"], pdf_info["source_site"]):
-                logger.warning(f"[跳过] 已处理: {pdf_info['local_path']}")
-                continue
-            parsed = route_pdf.fn(pdf_info)
-            stats["total"] += 1
-            _process_single_result(parsed, stats)
-
+        try:
+            for pdf_info in scan_local_pdfs(scan_dir):
+                if _already_processed(pdf_info["uuid"], pdf_info["source_site"]):
+                    logger.warning(f"[跳过] 已处理: {pdf_info['local_path']}")
+                    continue
+                stats["total"] += 1
+                try:
+                    parsed = _validate_parsed_document(route_pdf.fn(pdf_info))
+                except Exception as e:
+                    stats["failed"] += 1
+                    logger.error(f"本地 PDF 解析失败: {pdf_info['local_path']} | {e}")
+                    if not errors:
+                        errors.append(str(e))
+                    continue
+                failure = _process_single_result(parsed, stats)
+                if failure and not errors:
+                    errors.append(failure)
+        except Exception as e:
+            logger.error(f"本地 PDF 扫描失败: {scan_dir} | {e}")
+            errors.append(str(e))
+    error = "; ".join(errors)
     logger.info(
-        f"========== 本地 PDF 处理完成 | "
-        f"总计: {stats['total']} | 通过: {stats['passed']} | 隔离: {stats['quarantined']} =========="
+        f"========== 本地 PDF 处理完成 | 总计: {stats['total']} | 通过: {stats['passed']} | "
+        f"隔离: {stats['quarantined']} | 失败: {stats['failed']} =========="
     )
+    return {"stats": stats, "status": _crawl_status(stats, error), "error": error}
 
 
 # ===================================================================
 #  主入口 Flow
 # ===================================================================
 
-@flow(name="zk_data_fabric_main")
+@flow(name="zk_data_fabric_main", retries=0)
 def main_pipeline(mode: str = "all", site: Optional[str] = None, crawl_mode: str = "full"):
     """
     总调度入口。
@@ -333,7 +375,7 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None, crawl_mode: str
     参数:
         mode:       "all" | "crawl" | "local" | "export_review"
         site:       调试用，指定只跑某个站点，None 则跑所有站点
-        crawl_mode: "full"（全量续爬）| "incremental"（增量，遇到重复即停）
+        crawl_mode: "full"（全量复查）| "incremental"（增量复查，保留旧 ID 修订）
     """
     _ensure_dirs()
     logger.info(
@@ -350,12 +392,21 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None, crawl_mode: str
         logger.info(f"[DB] 连接正常: {APP.DB_HOST}:{APP.DB_PORT}/{APP.DB_NAME}，执行迁移检查")
         run_migrations()
 
+    stats = _new_stats()
     if mode in ("all", "crawl"):
-        crawl_websites_flow(only_site=site, crawl_mode=crawl_mode)
+        result = crawl_websites_flow(only_site=site, crawl_mode=crawl_mode)
+        if not isinstance(result, dict) or "stats" not in result:
+            raise CrawlTaskError("采集未返回明确完成结果", stats)
+        _merge_stats(stats, result["stats"])
+        if result.get("status") != "success":
+            raise CrawlTaskError(f"采集未完整成功: {result.get('failed_sites', {})}", stats)
 
     if mode in ("all", "local"):
         if LOCAL_PDF_SCAN_DIRS:
-            process_local_pdfs_flow()
+            result = process_local_pdfs_flow()
+            _merge_stats(stats, result["stats"])
+            if result.get("status") != "success":
+                raise CrawlTaskError(f"本地 PDF 处理未完整成功: {result.get('error', '')}", stats)
         else:
             logger.info("未配置本地 PDF 扫描目录，跳过")
 
@@ -365,6 +416,7 @@ def main_pipeline(mode: str = "all", site: Optional[str] = None, crawl_mode: str
             logger.info(f"待审核 CSV 已导出: {csv_path}")
 
     logger.info("ZK_Data Fabric ETL 运行结束")
+    return {"stats": stats, "status": "success"}
 
 
 # ===================================================================
@@ -388,7 +440,7 @@ if __name__ == "__main__":
         "--crawl_mode",
         choices=["full", "incremental"],
         default="full",
-        help="续爬策略: full=全量续爬（跳过已处理，继续爬剩余）, incremental=增量（遇到第一个重复即停止）",
+        help="续爬策略: full=全量复查, incremental=增量复查；旧记录均核对修订，仅去重本次重复URL",
     )
     args = parser.parse_args()
     main_pipeline(mode=args.mode, site=args.site, crawl_mode=args.crawl_mode)

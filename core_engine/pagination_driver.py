@@ -219,55 +219,65 @@ class JsClickDriver(BasePaginationDriver):
                 headless=True,
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
-            ctx = browser.new_context(user_agent=ua, locale="zh-CN")
-            pw_page = ctx.new_page()
-            pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
-            if self.wait_sel:
-                pw_page.wait_for_selector(self.wait_sel, timeout=15000)
+            ctx = None
+            try:
+                ctx = browser.new_context(user_agent=ua, locale="zh-CN")
+                pw_page = ctx.new_page()
+                pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
+                if self.wait_sel:
+                    pw_page.wait_for_selector(self.wait_sel, timeout=15000)
 
-            page_count = 0
-            while page_count < self.max_pages:
-                logger.info(f"[列表页 {page_count + 1}] 当前URL: {pw_page.url}")
+                page_count = 0
+                while page_count < self.max_pages:
+                    logger.info(f"[列表页 {page_count + 1}] 当前URL: {pw_page.url}")
 
-                hrefs = []
-                for a in pw_page.query_selector_all(item_link_selector):
-                    href = a.get_attribute("href") or ""
-                    if href and href not in hrefs:
-                        hrefs.append(href)
+                    hrefs = []
+                    for a in pw_page.query_selector_all(item_link_selector):
+                        href = a.get_attribute("href") or ""
+                        if href and href not in hrefs:
+                            hrefs.append(href)
 
-                page_urls = [(origin + h if h.startswith("/") else h) for h in hrefs]
-                logger.info(f"  提取到 {len(page_urls)} 条详情页链接")
-                batches.append(page_urls)
+                    page_urls = [(origin + h if h.startswith("/") else h) for h in hrefs]
+                    logger.info(f"  提取到 {len(page_urls)} 条详情页链接")
+                    batches.append(page_urls)
 
-                next_btn = pw_page.query_selector(next_btn_selector)
-                if not next_btn:
-                    logger.info(f"没有下一页（next_btn_selector={next_btn_selector!r}），翻页结束")
-                    break
+                    # 配置范围内的最后一页已取得，不再请求范围外的下一页。
+                    if page_count + 1 >= self.max_pages:
+                        break
+                    next_btn = pw_page.query_selector(next_btn_selector)
+                    if not next_btn:
+                        logger.info(f"没有下一页（next_btn_selector={next_btn_selector!r}），翻页结束")
+                        break
 
-                first_links = pw_page.query_selector_all(item_link_selector)
-                old_first = first_links[0].get_attribute("href") if first_links else ""
-                next_btn.click()
+                    first_links = pw_page.query_selector_all(item_link_selector)
+                    old_first = first_links[0].get_attribute("href") if first_links else ""
+                    next_btn.click()
 
-                if old_first:
-                    safe_selector = item_link_selector.replace("'", "\\'")
-                    safe_old = old_first.replace("'", "\\'")
-                    try:
-                        pw_page.wait_for_function(
-                            f"""() => {{
-                                const els = document.querySelectorAll('{safe_selector}');
-                                return els.length > 0 && els[0].getAttribute('href') !== '{safe_old}';
-                            }}""",
-                            timeout=10000,
-                        )
-                    except Exception:
+                    if old_first:
+                        safe_selector = item_link_selector.replace("'", "\\'")
+                        safe_old = old_first.replace("'", "\\'")
+                        try:
+                            pw_page.wait_for_function(
+                                f"""() => {{
+                                    const els = document.querySelectorAll('{safe_selector}');
+                                    return els.length > 0 && els[0].getAttribute('href') !== '{safe_old}';
+                                }}""",
+                                timeout=10000,
+                            )
+                        except Exception as exc:
+                            raise RuntimeError("JS翻页未确认新列表，停止本轮采集") from exc
+                    else:
                         pw_page.wait_for_timeout(3000)
-                else:
-                    pw_page.wait_for_timeout(3000)
 
-                page_count += 1
-                time.sleep(self.delay)
+                    page_count += 1
+                    time.sleep(self.delay)
 
-            browser.close()
+            finally:
+                try:
+                    if ctx is not None:
+                        ctx.close()
+                finally:
+                    browser.close()
         return batches
 
     # ── 表格直提模式 ────────────────────────────────────────────────
@@ -294,96 +304,106 @@ class JsClickDriver(BasePaginationDriver):
                 headless=True,
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
-            ctx = browser.new_context(user_agent=ua, locale="zh-CN")
-            pw_page = ctx.new_page()
-            pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
-            if self.wait_sel:
-                pw_page.wait_for_selector(self.wait_sel, timeout=30000)
+            ctx = None
+            try:
+                ctx = browser.new_context(user_agent=ua, locale="zh-CN")
+                pw_page = ctx.new_page()
+                pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
+                if self.wait_sel:
+                    pw_page.wait_for_selector(self.wait_sel, timeout=30000)
 
-            page_count = 0
-            while page_count < self.max_pages:
-                logger.info(f"[表格页 {page_count + 1}] 当前URL: {pw_page.url}")
+                page_count = 0
+                while page_count < self.max_pages:
+                    logger.info(f"[表格页 {page_count + 1}] 当前URL: {pw_page.url}")
 
-                page_title = pw_page.title() or ""
-                active_tab = pw_page.query_selector("li.is_active")
-                tab_title = active_tab.inner_text().strip() if active_tab else ""
+                    page_title = pw_page.title() or ""
+                    active_tab = pw_page.query_selector("li.is_active")
+                    tab_title = active_tab.inner_text().strip() if active_tab else ""
 
-                # 遍历页面上所有 table，取有数据的（排除 detail_table 等非数据表）
-                all_tables = pw_page.query_selector_all("table")
-                page_parsed = []
+                    # 遍历页面上所有 table，取有数据的（排除 detail_table 等非数据表）
+                    all_tables = pw_page.query_selector_all("table")
+                    page_parsed = []
 
-                for table_el in all_tables:
-                    # 跳过明确不是数据表的 table
-                    cls = (table_el.get_attribute("class") or "").lower()
-                    if "detail_table" in cls:
-                        continue
+                    for table_el in all_tables:
+                        # 跳过明确不是数据表的 table
+                        cls = (table_el.get_attribute("class") or "").lower()
+                        if "detail_table" in cls:
+                            continue
 
-                    rows_data = self._extract_table_rows(table_el)
-                    if not rows_data or len(rows_data) < 2:
-                        continue
+                        rows_data = self._extract_table_rows(table_el)
+                        if not rows_data or len(rows_data) < 2:
+                            continue
 
-                    md_table = _rows_to_markdown(rows_data)
-                    if not md_table:
-                        continue
+                        md_table = _rows_to_markdown(rows_data)
+                        if not md_table:
+                            continue
 
-                    doc_title = tab_title or page_title or self.profile.get("name", "")
-                    if page_count > 0:
-                        doc_title = f"{doc_title} - 第{page_count + 1}页"
+                        doc_title = tab_title or page_title or self.profile.get("name", "")
+                        if page_count > 0:
+                            doc_title = f"{doc_title} - 第{page_count + 1}页"
 
-                    parsed = {
-                        "uuid": make_uuid(f"{self.start_url}#page{page_count + 1}"),
-                        "title": doc_title,
-                        "publish_date": "",
-                        "markdown": f"# {doc_title}\n\n{md_table}",
-                        "structured_data": {
+                        parsed = {
+                            "uuid": make_uuid(f"{self.start_url}#page{page_count + 1}"),
                             "title": doc_title,
                             "publish_date": "",
-                            "category": "",
-                            "summary": "",
-                        },
-                        "parse_method": "table_extract",
-                        "attachment_links": [],
-                        "source_url": self.start_url,
-                        "source_site": self.site_key,
-                    }
-                    page_parsed.append(parsed)
+                            "markdown": f"# {doc_title}\n\n{md_table}",
+                            "structured_data": {
+                                "title": doc_title,
+                                "publish_date": "",
+                                "category": "",
+                                "summary": "",
+                            },
+                            "parse_method": "table_extract",
+                            "attachment_links": [],
+                            "source_url": self.start_url,
+                            "source_site": self.site_key,
+                        }
+                        page_parsed.append(parsed)
 
-                if page_parsed:
-                    batches.append(page_parsed)
-                    logger.info(f"  提取到 {len(page_parsed)} 张表格")
-                else:
-                    logger.warning("  未找到有数据的表格")
-                    break
+                    if page_parsed:
+                        batches.append(page_parsed)
+                        logger.info(f"  提取到 {len(page_parsed)} 张表格")
+                    else:
+                        logger.warning("  未找到有数据的表格")
+                        break
 
-                next_btn = pw_page.query_selector(next_btn_selector)
-                if not next_btn:
-                    logger.info("没有下一页，翻页结束")
-                    break
+                    # 配置范围内的最后一页已取得，不再请求范围外的下一页。
+                    if page_count + 1 >= self.max_pages:
+                        break
+                    next_btn = pw_page.query_selector(next_btn_selector)
+                    if not next_btn:
+                        logger.info("没有下一页，翻页结束")
+                        break
 
-                # 翻页等待：记录第一条数据行文本，点击后等待变化
-                first_row = pw_page.query_selector("table:not(.detail_table) tbody tr:first-child")
-                old_text = first_row.inner_text() if first_row else ""
-                next_btn.click()
+                    # 翻页等待：记录第一条数据行文本，点击后等待变化
+                    first_row = pw_page.query_selector("table:not(.detail_table) tbody tr:first-child")
+                    old_text = first_row.inner_text() if first_row else ""
+                    next_btn.click()
 
-                if old_text:
-                    try:
-                        safe_old = json.dumps(old_text)
-                        pw_page.wait_for_function(
-                            f"""() => {{
-                                const rows = document.querySelectorAll('table:not(.detail_table) tbody tr');
-                                return rows.length === 0 || rows[0].innerText !== {safe_old};
-                            }}""",
-                            timeout=10000,
-                        )
-                    except Exception:
-                        pw_page.wait_for_timeout(5000)
-                else:
-                    pw_page.wait_for_timeout(3000)
+                    if old_text:
+                        try:
+                            safe_old = json.dumps(old_text)
+                            pw_page.wait_for_function(
+                                f"""() => {{
+                                    const rows = document.querySelectorAll('table:not(.detail_table) tbody tr');
+                                    return rows.length > 0 && rows[0].innerText !== {safe_old};
+                                }}""",
+                                timeout=10000,
+                            )
+                        except Exception as exc:
+                            raise RuntimeError("JS翻页未确认新表格，停止本轮采集") from exc
+                    else:
+                        pw_page.wait_for_timeout(3000)
 
-                page_count += 1
-                time.sleep(self.delay)
+                    page_count += 1
+                    time.sleep(self.delay)
 
-            browser.close()
+            finally:
+                try:
+                    if ctx is not None:
+                        ctx.close()
+                finally:
+                    browser.close()
         return batches
 
     @staticmethod
