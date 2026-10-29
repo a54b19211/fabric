@@ -139,7 +139,7 @@ def _validate_parsed_document(parsed, *, allow_attachment_only: bool = False) ->
 def fetch_and_parse_url(url: str, site_key: str, profile: dict, force: bool = False) -> list[dict]:
     """
     抓取单个网页并解析为结构化 dict。
-    force=True 时附件强制重新下载（重爬场景）。
+    force保留接口兼容；附件每次核对远端并保留旧文件。
     返回文档列表；抓取/解析失败抛异常，不转换为合法零命中的空列表。
     """
     site_cfg = SITE_PROFILES.get(site_key, {})
@@ -315,8 +315,8 @@ def _recrawl_document_impl(uuid: str) -> dict:
         if log_id:
             update_crawl_log(log_id, "failed", error="api_by_id_recrawl_unsupported")
         return {"success": False, "error": "API记录旧重采入口不支持精确by-ID，请用历史读取入口", "uuid": uuid}
-    # 旧网页链没有原件版本发布，附件也不强制覆盖旧文件。
-    # 新正文不同会由upsert保旧拒写，不先清除抽取或图谱结果。
+    # 附件每次重新核对远端并保留不可变原件，不覆盖旧文件。
+    # 新正文交既有版本发布机制处理；不先清除抽取或图谱结果。
     try:
         parsed_list = fetch_and_parse_url.fn(source_url, site_key, profile, force=False)
     except Exception as e:

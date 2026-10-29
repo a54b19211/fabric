@@ -4,6 +4,9 @@
 """
 
 import io
+import hashlib
+import os
+import tempfile
 import uuid
 import re
 import time
@@ -115,6 +118,41 @@ def _ext_from_response(resp, url: str = "") -> str:
     return ".bin"
 
 
+def _original_matches(path: Path, digest: str) -> bool:
+    calculated = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            calculated.update(chunk)
+    return calculated.hexdigest() == digest
+
+
+def _save_original(path: Path, content: bytes, digest: str) -> bool:
+    """只发布完整原件；返回是否复用了同内容文件，绝不覆盖旧文件。"""
+    if path.exists():
+        if not _original_matches(path, digest):
+            raise OSError(f"原件摘要不符，未覆盖: {path}")
+        return True
+
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".download-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            # 同目录硬链接只在目标不存在时成功；并发请求不会覆盖对方的原件。
+            os.link(temporary, path)
+        except FileExistsError:
+            if not _original_matches(path, digest):
+                raise OSError(f"原件摘要不符，未覆盖: {path}")
+            return True
+        return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 #  Prefect Tasks
 # ---------------------------------------------------------------------------
@@ -199,7 +237,9 @@ def download_pdf(
     下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx/xls/xlsx）。
 
     参数:
-        force:   True 时跳过幂等检查，强制重新下载（重爬场景使用）
+        force:   保留参数兼容；每次调用都重新请求，True也不会覆盖旧原件。
+                 当前未保存条件请求凭据，成功GET后按字节摘要复用或保存文件。
+                 skipped仅表示本地已有相同字节，不表示未检查远端。
         cookies: 从抓取页面继承的浏览器 cookies（Playwright 格式），
                  用于需要会话的站点（如 CDE）
     """
@@ -208,6 +248,7 @@ def download_pdf(
     save_dir.mkdir(parents=True, exist_ok=True)
 
     headers = dict(DEFAULT_HEADERS)
+    headers["Cache-Control"] = "no-cache"
     if cookies:
         headers["Cookie"] = "; ".join(
             f"{c['name']}={c['value']}" for c in cookies if "name" in c
@@ -217,27 +258,16 @@ def download_pdf(
         resp = client.get(pdf_url)
         resp.raise_for_status()
 
-    # 从响应推断扩展名（Content-Disposition → Content-Type → 魔数 → URL 后缀 → .bin）
-    file_ext = _ext_from_response(resp, pdf_url)
-    save_path = save_dir / f"{file_uuid}{file_ext}"
+    content = resp.content
+    if not content:
+        raise ValueError("附件响应为空，未采用旧缓存")
+    # PDF文件头比可能变化的响应头可靠；其余类型沿用已有判别规则。
+    file_ext = ".pdf" if content.startswith(b"%PDF") else _ext_from_response(resp, pdf_url)
+    digest = hashlib.sha256(content).hexdigest()
+    save_path = save_dir / f"{file_uuid}.{digest}{file_ext}"
+    skipped = _save_original(save_path, content, digest)
 
-    if save_path.exists() and not force:
-        logger.info(f"附件已存在，跳过保存: {save_path}")
-        return {
-            "uuid": file_uuid,
-            "local_path": str(save_path),
-            "source_url": pdf_url,
-            "parent_uuid": parent_uuid,
-            "source_site": source_site,
-            "file_ext": file_ext,
-            "timestamp": _now_iso(),
-            "skipped": True,
-        }
-
-    save_path.write_bytes(resp.content)
-
-    logger.info(f"附件下载完成: {pdf_url} → {save_path}")
-
+    logger.info(f"附件已核对远端并保留原件: {pdf_url} → {save_path}")
     return {
         "uuid": file_uuid,
         "local_path": str(save_path),
@@ -246,7 +276,7 @@ def download_pdf(
         "source_site": source_site,
         "file_ext": file_ext,
         "timestamp": _now_iso(),
-        "skipped": False,
+        "skipped": skipped,
     }
 
 
