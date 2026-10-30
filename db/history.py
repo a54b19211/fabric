@@ -269,6 +269,9 @@ def _validate_derived(conn, run, item, now, proof):
         item.merged_at is not None and item.merged_at > now for item in bundle.redirects
     ):
         raise HistoryError("future_graph_merge", "源身份合并时间晚于本次服务器采用")
+    from biz_rules.native_graph import validate_field_bindings
+
+    validate_field_bindings(bundle, documents)
     return dependencies
 
 
@@ -346,6 +349,7 @@ def read_graph_neighborhood(
     max_depth=1,
     max_nodes=50,
     max_edges=100,
+    review_scope=None,
 ):
     from biz_rules.history_sources import parse_json
     from biz_rules.reviewed_graph import (
@@ -391,6 +395,7 @@ def read_graph_neighborhood(
         max_depth=max_depth,
         max_nodes=max_nodes,
         max_edges=max_edges,
+        review_scope=review_scope,
     )
 
 
@@ -1566,6 +1571,10 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
                 "graph_quote_mismatch", "图证据不属于同截止下可见的冻结原文"
             )
 
+    from biz_rules.native_graph import validate_field_bindings
+
+    validate_field_bindings(bundle, documents)
+
 
 def read_graph_resolution(
     version_id,
@@ -1579,6 +1588,7 @@ def read_graph_resolution(
     external_namespace=None,
     external_id=None,
     limit=20,
+    review_scope=None,
 ):
     from biz_rules.history_sources import parse_json
     from biz_rules.reviewed_graph import GRAPH_SOURCES, GraphBundle, GraphRef, resolve
@@ -1604,4 +1614,42 @@ def read_graph_resolution(
         external_namespace=external_namespace,
         external_id=external_id,
         limit=limit,
+        review_scope=review_scope,
     )
+
+
+def _fixed_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff):
+    from biz_rules.reviewed_graph import GRAPH_SOURCES, GraphBundle, GraphRef
+
+    if source_id not in GRAPH_SOURCES:
+        raise HistoryError("unsupported_graph_source", "请选择固定图来源")
+    record = read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
+    if record.record_kind != "graph":
+        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    return GraphBundle.model_validate_json(record.raw_content), GraphRef(
+        source_id=record.source_id, source_record_id=record.source_record_id,
+        version_id=record.version_id, raw_sha256=record.raw_sha256,
+        is_demo=record.is_demo, first_seen_at=record.first_seen_at,
+    )
+
+
+def read_graph_paths(version_id, source_id, source_record_id, is_demo, mode, cutoff, *,
+                     start, target, relation_types=(), direction="out",
+                     review_scope="reviewed", max_depth=4, max_paths=10, max_expansions=1000):
+    from biz_rules.graph_tools import graph_identity, paths
+
+    bundle, ref = _fixed_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
+    return paths(bundle, ref, graph_identity(start), graph_identity(target),
+                 relation_types=relation_types, direction=direction, review_scope=review_scope,
+                 max_depth=max_depth, max_paths=max_paths, max_expansions=max_expansions)
+
+
+def read_graph_subgraph(version_id, source_id, source_record_id, is_demo, mode, cutoff, *,
+                        node_ids, relation_types=(), review_scope="reviewed",
+                        max_nodes=100, max_edges=200):
+    from biz_rules.graph_tools import graph_identity, subgraph
+
+    bundle, ref = _fixed_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
+    return subgraph(bundle, ref, [graph_identity(value) for value in node_ids],
+                    relation_types=relation_types, review_scope=review_scope,
+                    max_nodes=max_nodes, max_edges=max_edges)

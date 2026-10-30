@@ -70,6 +70,7 @@ def capture_legacy(
     offset=0,
     batch_size=6,
     include_auto=False,
+    include_pending=False,
     expected_manifest_sha256=None,
     client=None,
 ):
@@ -154,9 +155,12 @@ def capture_legacy(
             with store.history_engine().begin() as conn:
                 store._source(conn, document.get("source_site"))
             documents.append(document)
-            for status in (
-                ["approved", "auto_approved"] if include_auto else ["approved"]
-            ):
+            statuses = ["approved"]
+            if include_auto:
+                statuses.append("auto_approved")
+            if include_pending:
+                statuses.append("pending")
+            for status in statuses:
                 for kind, destination in (
                     ("entities", entities),
                     ("relations", relations),
@@ -502,7 +506,7 @@ def build_legacy_bundle(observation, documents, document_refs):
     truncated = observation.get("selection_truncated") is True
     for item in sorted(observation["entities"], key=lambda item: int(item["id"])):
         uuid, status = item["source_doc_uuid"], item["review_status"]
-        if uuid not in doc_map or status not in {"approved", "auto_approved"}:
+        if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
             raise HistoryError(
                 "legacy_review_scope_mismatch", "实体不在所选文档或审核范围"
             )
@@ -563,7 +567,7 @@ def build_legacy_bundle(observation, documents, document_refs):
             node.evidence.append(evidence)
     for item in sorted(observation["relations"], key=lambda item: int(item["id"])):
         uuid, status = item["source_doc_uuid"], item["review_status"]
-        if uuid not in doc_map or status not in {"approved", "auto_approved"}:
+        if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
             raise HistoryError(
                 "legacy_review_scope_mismatch", "关系不在所选文档或审核范围"
             )
@@ -652,6 +656,7 @@ def build_legacy_bundle(observation, documents, document_refs):
         limitations=[
             "身份状态来自源系统当前审核/字典标志，不是机制证据评价或专业批准",
             "auto_approved仍为自动审核且身份未确认；别名只来自本批mention原名，不披露全字典汇总",
+            "pending关系仅为未审核候选；原文绑定与事实审核是两件事，不能据此升级为人工审核或机制证据",
             "当前别名/合并没有历史资格；有效时间仅保留来源关系属性，未知不取文档日期",
             "无审核关系只说明此所选范围缺少可用关系，不代表现实不存在",
         ],
@@ -732,6 +737,21 @@ def publish_legacy(observation, key, progress=None):
     return graph_run
 
 
+def publish_native_graph(records, key, *, max_nodes=100, max_edges=200):
+    from biz_rules.native_graph import build_native_graph
+
+    bundle = build_native_graph(records, max_nodes=max_nodes, max_edges=max_edges)
+    native = "source-fields:" + sha256(canonical({
+        "namespace": bundle.namespace, "scope": sorted(bundle.scope_record_ids),
+        "max_nodes": max_nodes, "max_edges": max_edges,
+    }))
+    return store.import_archive(ArchiveImport(
+        source_id="reviewed_graph", is_demo=bundle.is_demo,
+        scope_description=bundle.scope_description, declared_count=1, declared_complete=False,
+        records=[ArchiveRecord(source_record_id=native, record_kind="graph", raw_content=bundle.model_dump_json())],
+    ), key)
+
+
 def publish_primekg(observation, key):
     bundle = primekg_bundle(observation)
     identity = {"namespace": bundle.namespace, "scope": bundle.scope_record_ids}
@@ -779,6 +799,7 @@ def main():
     capture.add_argument("--offset", type=int, default=0)
     capture.add_argument("--batch-size", type=int, default=6)
     capture.add_argument("--include-auto-approved", action="store_true")
+    capture.add_argument("--include-pending", action="store_true")
     capture.add_argument("--expected-scope-sha256")
     capture.add_argument("--output", required=True)
     for name in ("publish-legacy", "publish-primekg"):
@@ -829,6 +850,7 @@ def main():
                 offset=args.offset,
                 batch_size=args.batch_size,
                 include_auto=args.include_auto_approved,
+                include_pending=args.include_pending,
                 expected_manifest_sha256=args.expected_scope_sha256,
             )
         except HistoryError as exc:

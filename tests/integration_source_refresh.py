@@ -630,3 +630,33 @@ def test_epmc_watch_persists_update_window_not_publication_date(databases, monke
     )[0]["snapshot"]
     assert later["request"]["query"] == query
     assert later["request"]["continuation"] == continuation
+
+
+@pytest.mark.parametrize("query,ids", [("*", []), ("lung cancer", []),
+                                    ("*", ["NCT00000001"])])
+def test_clinical_watch_freezes_update_window_or_exact_ids(databases, monkeypatch, query, ids):
+    source, target = databases
+    allow(monkeypatch, ["clinicaltrials"])
+    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps([{
+        "id": "ct-fixed-fixture", "lookback_days": 30,
+        "request": {"source_id": "clinicaltrials", "query": query, "source_record_ids": ids},
+    }]))
+    import flows.history_fetch as fetch
+    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
+
+    def active(*_):
+        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
+
+    monkeypatch.setattr(fetch, "retry_inactive", active)
+    source_refresh.refresh_once()
+    state = rows(source, "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'")[0]["snapshot"]
+    request = state["request"]
+    if ids:
+        assert request["query"] == query and request["source_record_ids"] == ids
+    else:
+        expected = "AREA[LastUpdatePostDate]RANGE[" + state["window_started_at"][:10] + "," + state["window_ended_at"][:10] + "]"
+        assert request["query"] == (expected if query == "*" else "(" + query + ") AND " + expected)
+    source_refresh.refresh_once()
+    saved = rows(source, "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'")[0]["snapshot"]
+    assert saved["request"] == request and saved["active_run_id"] == state["active_run_id"]
+    assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 1

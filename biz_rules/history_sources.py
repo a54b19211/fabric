@@ -21,6 +21,23 @@ from biz_rules.history_models import (
 )
 
 SOURCE_CATALOG = {
+    "sec_companyfacts": {
+        "name": "SEC XBRL 公司概念事实",
+        "business_types": ["corporate_finance", "research_capacity"],
+        "acquisition_channel": "public_api",
+        "access": "public_structured_filings",
+        "license_url": "https://www.sec.gov/search-filings/edgar-application-programming-interfaces",
+        "endpoint_kind": "companyconcept",
+        "native_analysis_mode": "company_concept_reported_facts",
+        "history_coverage": "本地采用后版本；当前多期披露集合不是过去API快照",
+        "native_id": "CIK十位数:taxonomy:tag；每个原件为官方单概念完整JSON",
+        "read_scope": "明确CIK/概念清单；按单位保留所有披露、期间、filed及accession，不选最新行",
+        "limitations": [
+            "窄CompanyConcept端点属于SEC CompanyFacts同族；不是整公司CompanyFacts原件切片",
+            "fy/fp是申报财政期间，不替代每个事实的start/end；filed不是本地first_seen",
+            "单位、币种及重复披露分别保留；未提供合并范围/分母时未知，不编造汇率或可比性",
+        ],
+    },
     "clinicaltrials": {
         "name": "ClinicalTrials.gov",
         "business_types": ["trials_pipeline"],
@@ -29,6 +46,7 @@ SOURCE_CATALOG = {
         "license_url": "https://clinicaltrials.gov/data-api/about-api",
         "history_coverage": "本应用采用后不可变版本；当前API不是过去快照",
         "native_id": "NCT ID",
+        "native_analysis_mode": "registered_study_not_drug_program",
         "read_scope": "公开登记字段，含未决/终止记录",
         "limitations": ["登记状态不是药物成败；日期保留原精度和ACTUAL/ESTIMATED"],
     },
@@ -62,6 +80,7 @@ SOURCE_CATALOG = {
         "license_url": "https://europepmc.org/Copyright",
         "history_coverage": "当前元数据/更正关系采用；非过去全文版本档案",
         "native_id": "source:id",
+        "native_analysis_mode": "bibliographic_record_not_independent_study",
         "read_scope": "core元数据/摘要/许可和关系；不自动抓全文",
         "limitations": [
             "firstPublicationDate可能补算，保留原值，不作历史原件证明",
@@ -76,10 +95,12 @@ SOURCE_CATALOG = {
         "license_url": "https://www.who.int/about/policies/publishing/copyright",
         "history_coverage": "本地采用后版本；当前公告API不提供过去原件资格",
         "native_id": "WHO原生Id（DonId单独保留）",
+        "native_analysis_mode": "notice_event_only",
         "read_scope": "明确LastModified时间窗内DON公告、原文和发布元数据",
         "limitations": [
             "DON是选择性公告，不是全球疫情全量；零公告不证明没有暴发",
             "发布/更新日期不是暴发开始；不从叙述推病例数、发病率或专业确认",
+            "本API无结构化人群分母，仅供公告事件模式；不能生成发病率/病例数序列",
         ],
     },
     "legacy_documents": {
@@ -230,6 +251,27 @@ TRIAL_PATHS = {
     "start_date_type": "/protocolSection/statusModule/startDateStruct/type",
     "completion_date": "/protocolSection/statusModule/completionDateStruct/date",
     "completion_date_type": "/protocolSection/statusModule/completionDateStruct/type",
+    "primary_completion_date": "/protocolSection/statusModule/primaryCompletionDateStruct/date",
+    "primary_completion_date_type": "/protocolSection/statusModule/primaryCompletionDateStruct/type",
+    "organization_study_id": "/protocolSection/identificationModule/orgStudyIdInfo",
+    "secondary_ids": "/protocolSection/identificationModule/secondaryIdInfos",
+    "official_title": "/protocolSection/identificationModule/officialTitle",
+    "lead_sponsor": "/protocolSection/sponsorCollaboratorsModule/leadSponsor",
+    "collaborators": "/protocolSection/sponsorCollaboratorsModule/collaborators",
+    "study_type": "/protocolSection/designModule/studyType",
+    "design_info": "/protocolSection/designModule/designInfo",
+    "arm_groups": "/protocolSection/armsInterventionsModule/armGroups",
+    "primary_outcomes": "/protocolSection/outcomesModule/primaryOutcomes",
+    "secondary_outcomes": "/protocolSection/outcomesModule/secondaryOutcomes",
+    "eligibility": "/protocolSection/eligibilityModule",
+    "locations": "/protocolSection/contactsLocationsModule/locations",
+    "has_results": "/hasResults",
+    "results_first_posted": "/protocolSection/statusModule/resultsFirstPostDateStruct/date",
+    "results_first_posted_type": "/protocolSection/statusModule/resultsFirstPostDateStruct/type",
+    "results_participant_flow": "/resultsSection/participantFlowModule",
+    "results_baseline": "/resultsSection/baselineCharacteristicsModule",
+    "results_outcome_measures": "/resultsSection/outcomeMeasuresModule",
+    "results_adverse_events": "/resultsSection/adverseEventsModule",
 }
 EXTERNAL_FIELDS = {
     "trial_id",
@@ -280,6 +322,10 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
     data = parse_json(item.raw_content)
+    if source_id == "sec_companyfacts":
+        from biz_rules.sec_xbrl import project_sec
+
+        return project_sec(item, data)
     if source_id == "who_don":
         from biz_rules.who_don import project_who
 
@@ -408,6 +454,23 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
             "is_open_access": "/isOpenAccess",
             "in_europepmc": "/inEPMC",
             "date_of_revision": "/dateOfRevision",
+            "authors": "/authorList",
+            "author_ids": "/authorIdList",
+            "author_string": "/authorString",
+            "affiliation": "/affiliation",
+            "journal": "/journalInfo",
+            "keywords": "/keywordList",
+            "mesh_headings": "/meshHeadingList",
+            "chemicals": "/chemicalList",
+            "grants": "/grantsList",
+            "fulltext_links": "/fullTextUrlList",
+            "fulltext_ids": "/fullTextIdList",
+            "data_links": "/dataLinksTagsList",
+            "cross_references": "/dbCrossReferenceList",
+            "publication_status": "/publicationStatus",
+            "language": "/language",
+            "first_index_date": "/firstIndexDate",
+            "fulltext_received_date": "/fullTextReceivedDate",
         }
         facts, locators = _facts(data, fields)
         title = data.get("title") or native
@@ -473,7 +536,7 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
         raise HistoryError("record_kind_mismatch", "原件类型与导入声明不一致")
     if not isinstance(title, str) or len(title) > 10000:
         raise HistoryError("invalid_source_fields", "来源标题格式错误")
-    return {
+    projected = {
         "record_kind": kind,
         "title": title,
         "source_url": source_url,
@@ -484,6 +547,11 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
         "source_published_at": published.model_dump(mode="json") if published else None,
         "source_updated_at": updated.model_dump(mode="json") if updated else None,
     }
+    if source_id == "clinicaltrials":
+        projected["parser_version"] = "datafabric.clinicaltrials.native.v0.2"
+    elif source_id == "europe_pmc":
+        projected["parser_version"] = "datafabric.europepmc.core.v0.2"
+    return projected
 
 
 def _validate_outcome(facts):
@@ -659,6 +727,10 @@ def read_public(request: FetchRequest) -> dict:
         from biz_rules.who_don import read_who
 
         return read_who(request)
+    if request.source_id == "sec_companyfacts":
+        from biz_rules.sec_xbrl import read_sec
+
+        return read_sec(request)
     records, seen, requests_count, source_total = [], {}, 0, None
     exhausted, error, stop = False, None, "record_budget"
     began = time.monotonic()
@@ -686,6 +758,7 @@ def read_public(request: FetchRequest) -> dict:
                         "format": "json",
                         "pageSize": size,
                         "query.term": request.query,
+                        "countTotal": "true",
                     }
                     if request.source_record_ids:
                         if not all(
@@ -758,7 +831,18 @@ def read_public(request: FetchRequest) -> dict:
                     response.raise_for_status()
                 bytes_read += len(body)
                 data = parse_json(text)
-                if request.source_id == "fda_crl":
+                if request.source_id == "clinicaltrials":
+                    if "totalCount" in data and (
+                        not isinstance(data["totalCount"], int)
+                        or isinstance(data["totalCount"], bool)
+                        or data["totalCount"] < 0
+                    ):
+                        raise HistoryError(
+                            "invalid_source_pagination",
+                            "临床登记显式命中总数无效，不能确认EOF",
+                        )
+                    source_total = data.get("totalCount")
+                elif request.source_id == "fda_crl":
                     source_total = ((data.get("meta") or {}).get("results") or {}).get(
                         "total"
                     )
@@ -800,6 +884,17 @@ def read_public(request: FetchRequest) -> dict:
                         break
                 if request.source_id == "clinicaltrials":
                     next_cursor = data.get("nextPageToken")
+                    consumed += len(page_items)
+                    if not next_cursor and source_total is not None and consumed < source_total:
+                        raise HistoryError(
+                            "invalid_source_pagination",
+                            "临床登记仍有未读命中但缺少续页标记，不能视为EOF",
+                        )
+                    if next_cursor and (
+                        not isinstance(next_cursor, str) or not page_items
+                        or next_cursor in previous_cursors
+                    ):
+                        raise HistoryError("invalid_source_pagination", "临床登记分页中断，不能视为EOF")
                     exhausted = not bool(next_cursor)
                 elif request.source_id == "europe_pmc":
                     next_cursor = data.get("nextCursorMark")
@@ -830,7 +925,7 @@ def read_public(request: FetchRequest) -> dict:
                     raise HistoryError(
                         "unexpected_empty_page", "来源仍有后续标记但返回空页"
                     )
-                if request.source_id == "europe_pmc":
+                if request.source_id in {"clinicaltrials", "europe_pmc"}:
                     next_continuation = (
                         None
                         if exhausted

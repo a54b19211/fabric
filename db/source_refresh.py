@@ -28,8 +28,13 @@ class SourceWatch(Model):
 
     @model_validator(mode="after")
     def query_budget(self):
-        if self.request.source_id == "europe_pmc" and len(self.request.query) > 400:
-            raise ValueError("Europe PMC固定刷新查询须为更新日期窗预留长度")
+        if self.request.source_id in {"europe_pmc", "clinicaltrials"} and len(self.request.query) > 400:
+            raise ValueError("论文/临床固定刷新查询须为更新日期窗预留长度")
+        if self.request.source_id == "sec_companyfacts":
+            count = len(self.request.source_record_ids)
+            if (self.request.query != "*" or not count
+                    or count > min(self.request.max_pages, self.request.max_records)):
+                raise ValueError("SEC固定刷新须给明确概念清单，页数和记录预算须覆盖清单")
         return self
 
 
@@ -42,7 +47,7 @@ def watches():
         if len({value.id for value in values}) != len(values):
             raise ValueError()
         if any(
-            value.request.source_id not in {"who_don", "europe_pmc"}
+            value.request.source_id not in {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts"}
             or value.request.continuation is not None
             or value.request.updated_since is not None
             or value.request.updated_until is not None
@@ -53,7 +58,7 @@ def watches():
     except (ValueError, ValidationError):
         raise HistoryError(
             "source_watch_configuration",
-            "固定刷新配置无效；仅允许WHO/Europe PMC明确范围",
+            "固定刷新配置无效；仅允许WHO、Europe PMC、临床登记和SEC明确范围",
         ) from None
 
 
@@ -148,6 +153,14 @@ def refresh_once(engine=None):
                         + " TO "
                         + end
                         + "]"
+                    )
+                if watch.request.source_id == "clinicaltrials" and not request["source_record_ids"]:
+                    start = (now - timedelta(days=watch.lookback_days)).date().isoformat()
+                    end = now.date().isoformat()
+                    date_filter = "AREA[LastUpdatePostDate]RANGE[" + start + "," + end + "]"
+                    request["query"] = (
+                        date_filter if request["query"] == "*"
+                        else "(" + request["query"] + ") AND " + date_filter
                     )
                 state["fixed_scope_query"] = request["query"]
                 state["window_started_at"] = (

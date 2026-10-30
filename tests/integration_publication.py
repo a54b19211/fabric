@@ -37,9 +37,9 @@ def databases(monkeypatch):
             conn.execute(text("CREATE SCHEMA " + name))
     engines = [
         create_engine(
-            url, connect_args={"options": "-csearch_path=" + name + ",public"}
+            url, connect_args={"options": "-csearch_path=" + name + (",public" if index == 0 else "")}
         )
-        for name in names
+        for index, name in enumerate(names)
     ]
     source, target = engines
     Base.metadata.create_all(source)

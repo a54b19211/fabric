@@ -261,7 +261,7 @@ class FetchContinuation(Model):
 
 
 class FetchRequest(Model):
-    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc", "who_don"]
+    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc", "who_don", "sec_companyfacts"]
     query: str = Field(min_length=1, max_length=500)
     source_record_ids: list[str] = Field(default_factory=list, max_length=100)
     max_records: int = Field(default=10, ge=1, le=100)
@@ -302,7 +302,7 @@ class FetchRequest(Model):
         if self.source_id != "who_don" and (self.updated_since or self.updated_until):
             raise ValueError("此来源尚不支持更新窗口参数")
         if self.continuation is not None:
-            if self.source_id not in {"europe_pmc", "who_don"}:
+            if self.source_id not in {"europe_pmc", "who_don", "clinicaltrials"}:
                 raise ValueError("此来源尚不支持连续分页")
             if self.continuation.scope_hash != self.scope_hash():
                 raise ValueError("续页必须绑定原查询范围及固定时间窗")

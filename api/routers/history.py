@@ -28,6 +28,7 @@ from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKG
 from flows.graph_query import (
     PrimeKGResult, PrimeKGLookupResult, lookup_primekg, query_primekg,
 )
+from biz_rules.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
 from db import history as store
 
 
@@ -316,6 +317,7 @@ def graph_neighborhood(
     seed_ids: Annotated[list[str], Query()],
     relation_types: Annotated[list[str] | None, Query()] = None,
     direction: str = "both",
+    review_scope: ReviewScope | None = None,
     max_depth: int = Query(default=1, ge=0, le=2),
     max_nodes: int = Query(default=50, ge=1, le=100),
     max_edges: int = Query(default=100, ge=1, le=200),
@@ -334,6 +336,7 @@ def graph_neighborhood(
         max_depth=max_depth,
         max_nodes=max_nodes,
         max_edges=max_edges,
+        review_scope=review_scope,
     )
 
 
@@ -352,6 +355,7 @@ def graph_resolve(
     name: str | None = None,
     external_namespace: str | None = None,
     external_id: str | None = None,
+    review_scope: ReviewScope | None = None,
     limit: int = Query(default=20, ge=1, le=20),
 ):
     return _call(
@@ -365,6 +369,7 @@ def graph_resolve(
         name=name,
         external_namespace=external_namespace,
         external_id=external_id,
+        review_scope=review_scope,
         limit=limit,
     )
 
@@ -383,3 +388,78 @@ def source_health(source_id: str = Query(min_length=1, max_length=80)):
     from db.source_refresh import source_health as health
 
     return _call(health, source_id)
+
+
+@router.get("/graph/{version_id}/paths", response_model=GraphPaths,
+            dependencies=[Depends(require_read)])
+def graph_paths(version_id: str, source_id: str, source_record_id: str, is_demo: bool,
+                mode: Mode, cutoff: datetime, start: str, target: str,
+                relation_types: Annotated[list[str] | None, Query()] = None,
+                direction: Literal["out", "in", "both"] = "out",
+                review_scope: ReviewScope = "reviewed",
+                max_depth: int = Query(default=4, ge=1, le=4),
+                max_paths: int = Query(default=10, ge=1, le=20),
+                max_expansions: int = Query(default=1000, ge=1, le=5000)):
+    return _call(store.read_graph_paths, version_id, source_id, source_record_id,
+                 is_demo, mode, cutoff, start=start, target=target,
+                 relation_types=relation_types or (), direction=direction,
+                 review_scope=review_scope, max_depth=max_depth, max_paths=max_paths,
+                 max_expansions=max_expansions)
+
+
+@router.get("/graph/{version_id}/subgraph", response_model=GraphSubgraph,
+            dependencies=[Depends(require_read)])
+def graph_subgraph(version_id: str, source_id: str, source_record_id: str, is_demo: bool,
+                   mode: Mode, cutoff: datetime,
+                   node_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+                   relation_types: Annotated[list[str] | None, Query()] = None,
+                   review_scope: ReviewScope = "reviewed",
+                   max_nodes: int = Query(default=100, ge=1, le=100),
+                   max_edges: int = Query(default=200, ge=1, le=200)):
+    return _call(store.read_graph_subgraph, version_id, source_id, source_record_id,
+                 is_demo, mode, cutoff, node_ids=node_ids,
+                 relation_types=relation_types or (), review_scope=review_scope,
+                 max_nodes=max_nodes, max_edges=max_edges)
+
+
+class NativeGraphVersion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_record_id: str = Field(min_length=1, max_length=200)
+    version_id: str = Field(min_length=64, max_length=64)
+
+
+class NativeGraphRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    records: list[NativeGraphVersion] = Field(min_length=1, max_length=20)
+    is_demo: bool
+    mode: Mode
+    cutoff: datetime
+    max_nodes: int = Field(default=100, ge=1, le=100)
+    max_edges: int = Field(default=200, ge=1, le=200)
+
+
+@router.post("/graph/native/capture", response_model=RunView,
+             dependencies=[Depends(require_admin)])
+def native_graph(body: NativeGraphRequest,
+                 idempotency_key: str = Header(alias="Idempotency-Key")):
+    from flows.graph_publish import publish_native_graph
+
+    records = [_call(store.read_version, item.version_id, "clinicaltrials",
+                     item.source_record_id, body.is_demo, body.mode, body.cutoff)
+               for item in body.records]
+    return _call(publish_native_graph, records, idempotency_key,
+                 max_nodes=body.max_nodes, max_edges=body.max_edges)
+
+
+@router.get("/index/status", dependencies=[Depends(require_admin)])
+def index_status(limit: int = Query(default=100, ge=1, le=100)):
+    from db.index_publication import status
+
+    return _call(status, limit=limit)
+
+
+@router.post("/index/{publication_id}/retry", dependencies=[Depends(require_admin)])
+def index_retry(publication_id: str):
+    from db.index_publication import retry
+
+    return _call(retry, publication_id)

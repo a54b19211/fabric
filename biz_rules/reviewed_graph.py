@@ -119,16 +119,37 @@ class GraphEvidence(GraphDocumentRef):
     locator: GraphLocator
 
 
+class GraphFieldEvidence(GraphDocumentRef):
+    json_pointer: str = Field(min_length=1, max_length=1000)
+    value: Any
+
+    @field_validator("json_pointer")
+    @classmethod
+    def pointer(cls, value):
+        if not value.startswith("/"):
+            raise ValueError("字段出处须为原件JSON pointer")
+        return value
+
+
+class GraphIdentityRule(Model):
+    method_version: Literal["clinicaltrials.native-id.v1"] = "clinicaltrials.native-id.v1"
+    namespace: Literal["clinicaltrials.NCT"] = "clinicaltrials.NCT"
+    value: str = Field(pattern=r"^NCT[0-9]{8}$")
+    basis: GraphFieldEvidence
+
+
 class GraphNode(GraphIdentity):
     entity_type: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=1000)
     aliases: list[str] = Field(default_factory=list, max_length=100)
     external_ids: dict[str, Any] = Field(default_factory=dict)
-    identity_status: Literal["confirmed", "unresolved", "background"]
+    identity_status: Literal["confirmed", "rule_confirmed", "unresolved", "background"]
     identity_review_basis: str | None = Field(default=None, max_length=2000)
+    identity_rule: GraphIdentityRule | None = None
     review: GraphReview
     mention_ids: list[str] = Field(default_factory=list, max_length=1000)
     evidence: list[GraphEvidence] = Field(default_factory=list, max_length=100)
+    field_evidence: list[GraphFieldEvidence] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def identity_has_basis(self):
@@ -136,6 +157,13 @@ class GraphNode(GraphIdentity):
             self.review.status != "approved" or not self.identity_review_basis
         ):
             raise ValueError("已确认身份须有源系统人工审核及身份依据")
+        if self.identity_status == "rule_confirmed":
+            rule = self.identity_rule
+            if (rule is None or self.namespace != rule.namespace or self.id != rule.value
+                    or rule.basis.value != rule.value or self.review.status != "rule_confirmed"):
+                raise ValueError("规则身份须绑定原生编号、规则版本与精确字段出处")
+        elif self.identity_rule is not None:
+            raise ValueError("原生编号规则只能用于rule_confirmed身份")
         return self
 
 
@@ -151,16 +179,18 @@ class GraphEdge(Model):
     review: GraphReview
     binding_status: Literal["bound", "unbound", "background"]
     evidence: list[GraphEvidence] = Field(default_factory=list, max_length=100)
+    field_evidence: list[GraphFieldEvidence] = Field(default_factory=list, max_length=100)
     source_doc_uuid: str | None = Field(default=None, max_length=400)
     unbound_reason: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def bound_has_evidence(self):
         if self.binding_status == "bound" and (
-            not self.evidence or self.review.status not in {"approved", "auto_approved"}
+            not (self.evidence or self.field_evidence)
+            or self.review.status not in {"approved", "auto_approved", "pending", "rule_confirmed"}
         ):
             raise ValueError("已绑定关系须有审核状态和精确原文引用")
-        if self.binding_status == "background" and self.evidence:
+        if self.binding_status == "background" and (self.evidence or self.field_evidence):
             raise ValueError("背景关系不得伪造文档证据")
         if (
             self.valid_from is not None
@@ -191,7 +221,7 @@ class GraphBundle(Model):
     is_demo: bool
     title: str = Field(min_length=1, max_length=1000)
     origin: Literal[
-        "legacy_reviewed_export", "primekg_current_capture", "explicit_demo"
+        "legacy_reviewed_export", "primekg_current_capture", "explicit_demo", "source_field_projection"
     ]
     scope_description: str = Field(min_length=1, max_length=4000)
     selected_document_uuids: list[str] = Field(default_factory=list, max_length=100)
@@ -243,11 +273,11 @@ class GraphBundle(Model):
             self.document_refs
             or self.dependency_source_ids
             or any(
-                node.identity_status != "background" or node.evidence
+                node.identity_status != "background" or node.evidence or node.field_evidence
                 for node in self.nodes
             )
             or any(
-                edge.binding_status != "background" or edge.evidence
+                edge.binding_status != "background" or edge.evidence or edge.field_evidence
                 for edge in self.edges
             )
         ):
@@ -322,6 +352,7 @@ def neighborhood(
     max_depth=1,
     max_nodes=50,
     max_edges=100,
+    review_scope=None,
 ):
     """只遍历已发布的有限包；保留边方向，不补相同名字的节点或静默跟随redirect。"""
     if (
@@ -335,6 +366,9 @@ def neighborhood(
         raise HistoryError("graph_query_budget", "须给1至20个明确身份及至多16种关系")
     if len({identity_key(seed) for seed in seeds}) != len(seeds):
         raise HistoryError("duplicate_graph_seed", "查询身份重复")
+    if review_scope is not None:
+        from biz_rules.graph_tools import select_bundle
+        bundle = select_bundle(bundle, review_scope)
     nodes = {identity_key(node): node for node in bundle.nodes}
     found = [seed for seed in seeds if identity_key(seed) in nodes]
     missing = [seed for seed in seeds if identity_key(seed) not in nodes]
@@ -625,7 +659,8 @@ class GraphResolution(Model):
 
 
 def resolve(
-    bundle, graph_ref, *, name=None, external_namespace=None, external_id=None, limit=20
+    bundle, graph_ref, *, name=None, external_namespace=None, external_id=None, limit=20,
+    review_scope=None,
 ):
     if not 1 <= limit <= 20:
         raise HistoryError("graph_query_budget", "身份查询最多返回20个候选")
@@ -637,6 +672,9 @@ def resolve(
         raise HistoryError(
             "invalid_graph_resolution", "须给精确名称或完整外部命名空间/ID"
         ) from None
+    if review_scope is not None:
+        from biz_rules.graph_tools import select_bundle
+        bundle = select_bundle(bundle, review_scope)
     matches = []
     for node in bundle.nodes:
         if name is not None:

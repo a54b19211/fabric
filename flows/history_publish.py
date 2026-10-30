@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from biz_rules.history_models import HistoryError
 from db.publication import backfill_once, publish_once, publisher_heartbeat
 from db.source_refresh import refresh_once
+from db.index_publication import index_tick
 
 
 def main():
@@ -43,6 +44,7 @@ def main():
         try:
             publisher_heartbeat("running")
             refresh = refresh_once()
+            failed = any(item.get("state") in {"failed", "blocked"} for item in refresh)
             seeded = (
                 backfill_once(limit=args.backfill_batch_size)
                 if args.backfill_batch_size
@@ -98,6 +100,18 @@ def main():
                 ),
                 flush=True,
             )
+
+        # 来源刷新失败也要继续核对索引撤权；各自保存进度，互不冒充成功。
+        try:
+            index = index_tick(batch_size=min(args.batch_size, 5))
+            if index["state"] != "disabled":
+                print(json.dumps({"index": index}, ensure_ascii=False), flush=True)
+                failed = failed or any(
+                    item in {"waiting", "blocked"} for item in index.get("processed", [])
+                )
+        except (HistoryError, SQLAlchemyError, OSError):
+            failed = True
+            print('{"index":{"state":"unavailable","message":"索引待办保留，等待恢复"}}', flush=True)
         if args.once:
             if failed:
                 raise SystemExit(1)
