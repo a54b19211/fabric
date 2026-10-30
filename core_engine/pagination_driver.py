@@ -79,8 +79,8 @@ class BasePaginationDriver(ABC):
                 continue
             # urljoin handles absolute, root-relative, and ../relative paths correctly
             full = urljoin(base_url, href)
-            # 去掉 query string 后去重（同一篇文章可能带不同 tracking 参数）
-            dedup_key = full.split("?")[0]
+            # 查询参数可能包含记录编号；保留完整 URL，避免把不同记录合并。
+            dedup_key = full
             if dedup_key not in seen:
                 seen.add(dedup_key)
                 urls.append(full)

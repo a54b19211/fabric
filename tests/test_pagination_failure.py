@@ -155,3 +155,23 @@ def test_initial_read_failure_closes_browser_and_context(monkeypatch, method):
     with pytest.raises(TimeoutError, match="initial read"):
         getattr(driver, method)()
     assert page.context_closes == page.browser_closes == 1
+
+
+@pytest.mark.parametrize(("links", "expected"), [
+    (
+        ["/detail?id=1", "/detail?id=2", "/detail?id=1",
+         "https://example.invalid/detail?id=2"],
+        ["https://example.invalid/detail?id=1", "https://example.invalid/detail?id=2"],
+    ),
+    (
+        ["/detail", "/detail", "https://example.invalid/detail"],
+        ["https://example.invalid/detail"],
+    ),
+])
+def test_detail_url_dedup_keeps_distinct_record_ids(links, expected):
+    driver = load_driver()("site", {}, "https://example.invalid/list")
+    driver.site_cfg = {"list_item_selector": "a"}
+    page = SimpleNamespace(
+        css=lambda _selector: [SimpleNamespace(attrib={"href": link}) for link in links],
+    )
+    assert driver._extract_detail_urls(page) == expected
