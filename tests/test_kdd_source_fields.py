@@ -176,3 +176,30 @@ def test_ct_empty_page_with_token_stops_after_one_request(monkeypatch):
     assert batch["stop_reason"] == "source_failed"
     assert not batch["upstream_pagination_exhausted"] and batch["next_continuation"] is None
     assert len(calls) == 1  # Never spins through changing tokens from an empty source page.
+
+
+@pytest.mark.parametrize("query", ["*", " * ", "lung cancer"])
+def test_clinical_native_ids_do_not_send_literal_wildcard(monkeypatch, query):
+    import httpx
+    from biz_rules.history_models import FetchRequest
+    from biz_rules.history_sources import read_public
+
+    real = httpx.Client
+
+    def handler(request):
+        assert request.url.params["filter.ids"] == "NCT00000001"
+        if query.strip() == "*":
+            assert "query.term" not in request.url.params
+        else:
+            assert request.url.params["query.term"] == query
+        return httpx.Response(200, json={"totalCount": 1, "studies": [{
+            "protocolSection": {"identificationModule": {
+                "nctId": "NCT00000001", "briefTitle": "SYNTHETIC fixed-id study",
+            }},
+        }]})
+
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    result = read_public(FetchRequest(source_id="clinicaltrials", query=query,
+                                     source_record_ids=["NCT00000001"], max_records=5))
+    assert result["error"] is None and result["upstream_pagination_exhausted"]
+    assert [item.source_record_id for item in result["records"]] == ["NCT00000001"]

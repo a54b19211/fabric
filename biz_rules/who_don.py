@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from biz_rules.history_models import ArchiveRecord, HistoryError, canonical, source_time
 
 ENDPOINT = "https://www.who.int/api/emergencies/diseaseoutbreaknews"
-WHO_PARSER = "datafabric.who.don.projection.v0.1"
+WHO_PARSER = "datafabric.who.don.projection.v0.2"
 PATHS = {
     "native_notice_id": "/Id",
     "notice_id": "/DonId",
@@ -45,6 +45,7 @@ def project_who(item, data):
             raise HistoryError("who_notice_time", "WHO公告原生时间无效")
     facts, locators = _facts(data, PATHS)
     parts = [data["Title"]]
+    sections = {}
     for key in (
         "Summary",
         "Overview",
@@ -57,7 +58,28 @@ def project_who(item, data):
         if value is not None and not isinstance(value, str):
             raise HistoryError("who_notice_text", "WHO公告正文不是原生文本")
         if value:
-            parts.append(BeautifulSoup(value, "html.parser").get_text(" ", strip=True))
+            soup = BeautifulSoup(value, "html.parser")
+            text = soup.get_text(" ", strip=True)
+            blocks, cursor = [], 0
+            for tag in soup.find_all(["p", "li"]):
+                if tag.find_parent(["p", "li", "table", "figure", "figcaption", "caption"]):
+                    continue
+                block = tag.get_text(" ", strip=True)
+                start = text.find(block, cursor) if block else -1
+                if start >= 0:
+                    blocks.append((start, start + len(block)))
+                    cursor = start + len(block)
+            if not soup.find(["p", "li", "table", "figure", "figcaption", "caption", "h1", "h2", "h3", "h4"]):
+                blocks = None  # Plain text or inline markup, unlike excluded structural HTML.
+            sections[key] = (text, len("\n\n".join(parts)) + 2, blocks)
+            parts.append(text)
+    clean_text = "\n\n".join(parts)
+    from biz_rules.who_facts import extract_counts
+
+    extracted = extract_counts(sections, native_notice_id=native, clean_text=clean_text)
+    # 派生计数自带原生字段pointer与clean_text精确范围，不伪装成JSON内已有数值。
+    facts["count_statements"] = extracted.pop("statements")
+    facts["count_extraction"] = extracted
     slug = data.get("UrlName")
     url = None
     if isinstance(slug, str) and slug and all(c.isalnum() or c in "-_" for c in slug):
@@ -70,7 +92,7 @@ def project_who(item, data):
         "record_kind": "document",
         "title": data["Title"],
         "source_url": url,
-        "clean_text": "\n\n".join(parts),
+        "clean_text": clean_text,
         "parser_version": WHO_PARSER,
         "facts": facts,
         "field_locators": locators,

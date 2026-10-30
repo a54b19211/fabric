@@ -757,9 +757,11 @@ def read_public(request: FetchRequest) -> dict:
                     params = {
                         "format": "json",
                         "pageSize": size,
-                        "query.term": request.query,
                         "countTotal": "true",
                     }
+                    # ClinicalTrials把星号当检索表达式，会过滤掉合法登记号。
+                    if request.query.strip() != "*":
+                        params["query.term"] = request.query
                     if request.source_record_ids:
                         if not all(
                             re.fullmatch(r"NCT\d{8}", value)
