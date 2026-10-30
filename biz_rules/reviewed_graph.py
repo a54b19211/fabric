@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -30,6 +30,32 @@ def clean_identity(value):
     if not value or "|" in value or any(ord(char) < 33 for char in value):
         raise ValueError("身份命名空间/ID不得为空或含空白、控制符和竖线")
     return value
+
+
+class PrimeKGQuery(Model):
+    """仅允许当前图的一跳查询，参数会随发布包保存。"""
+
+    node_type: Literal["drug", "disease", "gene/protein"]
+    node_source: str = Field(min_length=1, max_length=152)
+    seed_id: str = Field(min_length=1, max_length=400)
+    relation_types: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=16
+    )
+    neighbor_term: str = Field(default="", max_length=120)
+    limit: int = Field(default=20, ge=1, le=200, strict=True)
+
+    @field_validator("node_source", "seed_id")
+    @classmethod
+    def valid_identity(cls, value):
+        return clean_identity(value)
+
+    @field_validator("relation_types")
+    @classmethod
+    def normalize_relations(cls, values):
+        return sorted(set(values))
+
+    def scope(self):
+        return "PrimeKG bounded current query: " + canonical(self.model_dump())
 
 
 class GraphIdentity(Model):
@@ -298,6 +324,7 @@ def neighborhood(
     found = [seed for seed in seeds if identity_key(seed) in nodes]
     missing = [seed for seed in seeds if identity_key(seed) not in nodes]
     visited, picked, picked_ids = {}, [], set()
+    boundary = set()
     queue = deque((identity_key(seed), 0) for seed in found)
     adjacency = {}
     for edge in bundle.edges:
@@ -323,6 +350,7 @@ def neighborhood(
             break
         visited[key] = nodes[key]
         if depth >= max_depth:
+            boundary.add(key)
             continue
         for edge, other in adjacency.get(key, ()):
             if edge.id in picked_ids:
@@ -341,6 +369,12 @@ def neighborhood(
             picked_ids.add(edge.id)
             if other not in visited:
                 queue.append((other, depth + 1))
+    if not reason and any(
+        edge.id not in picked_ids
+        for key in boundary
+        for edge, _ in adjacency.get(key, ())
+    ):
+        reason = "depth_budget"
     # 边端点必须全部在实际返回节点内；预算被截断时不留下悬空引用。
     picked = [
         edge

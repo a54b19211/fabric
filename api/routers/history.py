@@ -24,7 +24,8 @@ from biz_rules.history_models import (
     RecordKind,
     RunView,
 )
-from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution
+from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGQuery
+from flows.graph_query import PrimeKGResult, query_primekg
 from db import history as store
 
 
@@ -104,6 +105,21 @@ def require_admin(
     return "history-admin"
 
 
+def require_graph_query(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+):
+    token = _credential(credentials)
+    expected = os.environ.get("DATAFABRIC_GRAPH_QUERY_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail={
+            "code": "graph_query_not_configured", "message": "当前图查询尚未配置"
+        })
+    if not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=403, detail={
+            "code": "graph_query_credential_required", "message": "需要当前图查询凭据"
+        })
+
+
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
@@ -138,6 +154,16 @@ def sources():
         "business_types": list(BUSINESS_TYPES),
         "sources": _call(store.list_sources),
     }
+
+
+@router.post(
+    "/graph/primekg/capture", response_model=PrimeKGResult,
+    dependencies=[Depends(require_graph_query)],
+)
+def primekg_capture(
+    body: PrimeKGQuery, idempotency_key: str = Header(alias="Idempotency-Key")
+):
+    return _call(query_primekg, body, idempotency_key)
 
 
 @router.post("/archives", response_model=RunView, dependencies=[Depends(require_admin)])

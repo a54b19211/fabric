@@ -21,6 +21,7 @@ from biz_rules.history_models import (
 )
 from biz_rules.reviewed_graph import (
     GraphBundle,
+    PrimeKGQuery,
     GraphDocumentRef,
     GraphEdge,
     GraphEvidence,
@@ -257,6 +258,10 @@ def capture_primekg(
         or len(neighbor_term) > 120
     ):
         raise HistoryError("primekg_capture_budget", "PrimeKG身份、类型或读取预算无效")
+    query = PrimeKGQuery(
+        node_type=node_type, node_source=node_source, seed_id=seed_id,
+        relation_types=list(relation_types), neighbor_term=neighbor_term, limit=limit,
+    )
     url = os.environ.get("DATAFABRIC_GRAPH_NEO4J_URL", "")
     user = os.environ.get("DATAFABRIC_GRAPH_NEO4J_USER", "")
     password = os.environ.get("DATAFABRIC_GRAPH_NEO4J_PASSWORD", "")
@@ -410,14 +415,8 @@ def capture_primekg(
             "is_demo": False,
             "source": "primekg_current_projection",
             "observed_at": datetime.now(timezone.utc).isoformat(),
-            "query": "bounded one-hop "
-            + node_type
-            + " source="
-            + node_source
-            + " id="
-            + seed_id
-            + " neighbor_literal="
-            + neighbor_term,
+            "query": query.scope(),
+            "query_parameters": query.model_dump(),
             "seed": {"node_source": node_source, "primekg_id": seed_id},
             "seed_found": seed_found,
             "seed_node": seed_node,
@@ -427,6 +426,10 @@ def capture_primekg(
             "historical_availability": "unknown",
             "evidence_status": "background_no_document_binding",
         }
+    except httpx.TimeoutException:
+        raise HistoryError(
+            "primekg_timeout", "当前图读取超时，未发布；可重试本次请求", 504
+        ) from None
     except httpx.HTTPError:
         raise HistoryError(
             "primekg_read_failed", "当前图HTTP读取失败，未发布，不当作空结果", 503
@@ -724,9 +727,10 @@ def publish_legacy(observation, key, progress=None):
 
 def publish_primekg(observation, key):
     bundle = primekg_bundle(observation)
-    native = "primekg-capture:" + sha256(
-        canonical({"namespace": bundle.namespace, "scope": bundle.scope_record_ids})
-    )
+    identity = {"namespace": bundle.namespace, "scope": bundle.scope_record_ids}
+    if observation.get("query_parameters") is not None:
+        identity["query"] = observation["query_parameters"]
+    native = "primekg-capture:" + sha256(canonical(identity))
     return store.import_archive(
         ArchiveImport(
             source_id="primekg_graph",
