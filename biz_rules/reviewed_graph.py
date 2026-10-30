@@ -139,6 +139,7 @@ class GraphIdentityRule(Model):
 
 
 class GraphNode(GraphIdentity):
+    properties: dict[str, Any] = Field(default_factory=dict)
     entity_type: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=1000)
     aliases: list[str] = Field(default_factory=list, max_length=100)

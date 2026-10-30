@@ -1,5 +1,5 @@
 """
-LLM 实体抽取流程
+实体抽取流程：已知结构化来源按原字段映射，叙述来源沿用 LLM
 
 流程：
   1. 从 documents 表取 extraction_status=queued 的文档
@@ -20,12 +20,18 @@ from sqlalchemy import text
 
 from biz_rules.extraction_prompts import get_extraction_prompt, VALID_RELATION_TYPES
 from biz_rules.entity_schemas import validate_entity_data, VALID_ENTITY_TYPES
-from core_engine.cloud_api_client import qwen_extract_structured
+from biz_rules.native_extraction import NATIVE_SOURCES, RULE_VERSION, NativeExtractionError, extract_native_entities
+from disambiguation.models import (
+    CandidateEntity, DisambiguationResult, STATUS_AUTO_MATCHED,
+    STATUS_CANDIDATE_MATCHED, STATUS_AMBIGUOUS, STATUS_NEW_ENTITY,
+)
+from core_engine.common.cloud_api_client import qwen_extract_structured
 from flows.chunking import split_document, build_memory_context
 from db.repository import (
     update_extraction_status,
     insert_extraction_result,
-    lookup_alias,
+    lookup_alias_candidates,
+    lookup_external_id_candidates,
 )
 from db.session import get_session
 from db.models import Document
@@ -86,6 +92,16 @@ def _call_llm_for_chunk(chunk, source_site: str) -> dict:
 # 解析与校验
 # ═══════════════════════════════════════════════════════════════════════
 
+def _model_data(value):
+    """Model content cannot supply internal evidence, identity or cache metadata."""
+    if isinstance(value, dict):
+        return {key: _model_data(item) for key, item in value.items()
+                if isinstance(key, str) and not key.startswith("_")}
+    if isinstance(value, list):
+        return [_model_data(item) for item in value]
+    return value
+
+
 def _parse_chunk_output(raw: dict, chunk_index: int) -> tuple[list[dict], list[dict]]:
     """
     解析单块 LLM 输出，返回 (entities, relations)。
@@ -110,7 +126,7 @@ def _parse_chunk_output(raw: dict, chunk_index: int) -> tuple[list[dict], list[d
         entities.append({
             "entity_type": entity_type,
             "entity_name": str(item.get("entity_name", "")),
-            "entity_data": validate_entity_data(entity_type, item.get("entity_data", {})),
+            "entity_data": validate_entity_data(entity_type, _model_data(item.get("entity_data", {}))),
             "source_text": str(item.get("source_text", ""))[:500],
             "confidence_score": float(item.get("confidence_score", 0.5)),
             "confidence_reason": str(item.get("confidence_reason", "")),
@@ -136,7 +152,7 @@ def _parse_chunk_output(raw: dict, chunk_index: int) -> tuple[list[dict], list[d
             "from_entity_idx": from_idx,   # 块内局部下标，待重映射
             "to_entity_idx": to_idx,
             "relation_type": relation_type,
-            "relation_props": item.get("relation_props", {}),
+            "relation_props": _model_data(item.get("relation_props", {})),
             "source_text": str(item.get("source_text", ""))[:500],
             "confidence_score": float(item.get("confidence_score", 0.5)),
             "confidence_reason": str(item.get("confidence_reason", "")),
@@ -218,10 +234,56 @@ def _merge_chunks(
 # 消歧
 # ═══════════════════════════════════════════════════════════════════════
 
-def _disambiguate(entities: list[dict], session=None) -> list[dict]:
-    """完整 6 阶段消歧流水线（替换旧的仅精确别名匹配）。"""
+_NATIVE_IDENTIFIERS = {
+    "clinicaltrials.NCT": ("ClinicalTrial", "trial_id", {"clinicaltrials"}),
+    "fda.application_number": ("RegulatoryApplication", "application_number", {"fda_crl", "fda_api_drug_label"}),
+    "fda.recall_number": ("RecallProduct", "recall_number", {"fda_api_enforcement"}),
+}
+
+
+def _native_identifier(entity, *, native_source=None):
+    data = entity.get("entity_data") or {}
+    native = data.get("_native") or {}
+    kind, key, sources = _NATIVE_IDENTIFIERS.get(native.get("identity_namespace"), (None, None, set()))
+    if (native_source in sources and entity.get("source_site") == native_source
+            and native.get("rule_version") == RULE_VERSION and kind == entity.get("entity_type")
+            and native.get("identity_value") and data.get(key) == native["identity_value"]):
+        return key, native["identity_value"]
+    return None
+
+
+def _disambiguate(entities: list[dict], session=None, *, native_source=None) -> list[dict]:
+    """Typed native IDs use exact lookup; named endpoints use the existing pipeline."""
     from disambiguation import disambiguate_entities
-    return disambiguate_entities(entities, session=session)
+    named = []
+    for entity in entities:
+        identifier = _native_identifier(entity, native_source=native_source)
+        if not identifier:
+            named.append(entity)
+            continue
+        key, value = identifier
+        matches = lookup_external_id_candidates(entity["entity_type"], key, value, session=session)
+        matches = list({match["dict_id"]: match for match in matches}.values())
+        unique = len(matches) == 1
+        result = DisambiguationResult(
+            status=STATUS_AUTO_MATCHED if unique else STATUS_AMBIGUOUS if matches else STATUS_NEW_ENTITY,
+            dict_id=matches[0]["dict_id"] if unique else None, auto_link=unique,
+            confidence=1.0 if unique else 0.0,
+            reason=f"native typed identifier lookup: {len(matches)} candidates; not a human verification",
+            match_step="step1_native_id", rule_version=RULE_VERSION,
+            candidates=[CandidateEntity(dict_id=match["dict_id"],
+                name=match.get("canonical_name") or entity["entity_name"], match_type="native_id",
+                canonical_data=match.get("canonical_data") or {}, external_ids=match.get("external_ids") or {})
+                for match in matches],
+        )
+        entity["dict_id"] = result.dict_id
+        entity["_disambig"] = result.to_metadata()
+        entity["entity_data"]["_disambig"] = entity["_disambig"]
+        entity["confidence_score"] = result.confidence
+        entity["confidence_reason"] = result.reason
+    if named:
+        disambiguate_entities(named, session=session)
+    return entities
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -239,6 +301,9 @@ def extract_single_document(
     raw_content: str,
     source_site: str,
     doc_type: str,
+    *,
+    source_version_id: str | None = None,
+    source_ref: dict | None = None,
 ) -> bool:
     """
     对单篇文档执行完整抽取流程（支持长文档多块带记忆）。
@@ -251,73 +316,90 @@ def extract_single_document(
         update_extraction_status(doc_uuid, "failed", error="文档raw_content为空，无法抽取")
         return False
 
-    # 1. 智能分块
-    chunks = split_document(raw_content)
-    if not chunks:
-        logger.warning(f"[Extraction] 文档内容为空，跳过: {doc_uuid}")
-        update_extraction_status(doc_uuid, "failed", error="文档内容为空")
-        return False
+    native = source_site in NATIVE_SOURCES
+    if native:
+        try:
+            projection = extract_native_entities(raw_content, source_site,
+                                                 source_version_id=source_version_id,
+                                                 source_ref=source_ref)
+            entities, relations = projection["entities"], projection["relations"]
+        except NativeExtractionError as error:
+            update_extraction_status(doc_uuid, "failed", model=RULE_VERSION,
+                                     error=f"原始结构化资料不可用，未调用实体抽取LLM: {error}")
+            return False
+    else:
+        # 1. 智能分块
+        chunks = split_document(raw_content)
+        if not chunks:
+            logger.warning(f"[Extraction] 文档内容为空，跳过: {doc_uuid}")
+            update_extraction_status(doc_uuid, "failed", error="文档内容为空")
+            return False
 
-    logger.info(f"[Extraction] 分块完成: {doc_uuid} 共 {len(chunks)} 块")
+        logger.info(f"[Extraction] 分块完成: {doc_uuid} 共 {len(chunks)} 块")
 
-    # 2. 逐块抽取，携带记忆上下文
-    all_entities_per_chunk: list[list[dict]] = []
-    all_relations_per_chunk: list[list[dict]] = []
-    accumulated_entities: list[dict] = []   # 用于生成记忆摘要
-    llm_failed_chunks = 0                    # LLM 调用失败（返回空）的块数
+        # 2. 逐块抽取，携带记忆上下文
+        all_entities_per_chunk: list[list[dict]] = []
+        all_relations_per_chunk: list[list[dict]] = []
+        accumulated_entities: list[dict] = []   # 用于生成记忆摘要
+        llm_failed_chunks = 0                    # LLM 调用失败（返回空）的块数
 
-    for chunk in chunks:
-        # 注入记忆上下文
-        chunk.memory_context = build_memory_context(accumulated_entities)
+        for chunk in chunks:
+            # 注入记忆上下文
+            chunk.memory_context = build_memory_context(accumulated_entities)
 
-        if len(chunks) > 1:
+            if len(chunks) > 1:
+                logger.info(
+                    f"[Extraction] 处理第 {chunk.chunk_index + 1}/{chunk.total_chunks} 块"
+                    f"（{'表格' if chunk.is_table else '文章'}型，{len(chunk.text)} 字）"
+                )
+
+            raw_result = _call_llm_for_chunk(chunk, source_site)
+            if not raw_result:
+                logger.warning(f"[Extraction] 第 {chunk.chunk_index + 1} 块 LLM 返回空，跳过")
+                llm_failed_chunks += 1
+                all_entities_per_chunk.append([])
+                all_relations_per_chunk.append([])
+                continue
+
+            chunk_entities, chunk_relations = _parse_chunk_output(raw_result, chunk.chunk_index)
+            all_entities_per_chunk.append(chunk_entities)
+            all_relations_per_chunk.append(chunk_relations)
+            accumulated_entities.extend(chunk_entities)
+
             logger.info(
-                f"[Extraction] 处理第 {chunk.chunk_index + 1}/{chunk.total_chunks} 块"
-                f"（{'表格' if chunk.is_table else '文章'}型，{len(chunk.text)} 字）"
+                f"[Extraction] 第 {chunk.chunk_index + 1} 块完成: "
+                f"entities={len(chunk_entities)} relations={len(chunk_relations)}"
             )
 
-        raw_result = _call_llm_for_chunk(chunk, source_site)
-        if not raw_result:
-            logger.warning(f"[Extraction] 第 {chunk.chunk_index + 1} 块 LLM 返回空，跳过")
-            llm_failed_chunks += 1
-            all_entities_per_chunk.append([])
-            all_relations_per_chunk.append([])
-            continue
-
-        chunk_entities, chunk_relations = _parse_chunk_output(raw_result, chunk.chunk_index)
-        all_entities_per_chunk.append(chunk_entities)
-        all_relations_per_chunk.append(chunk_relations)
-        accumulated_entities.extend(chunk_entities)
-
+        # 3. 跨块合并去重
+        entities, relations = _merge_chunks(all_entities_per_chunk, all_relations_per_chunk)
         logger.info(
-            f"[Extraction] 第 {chunk.chunk_index + 1} 块完成: "
-            f"entities={len(chunk_entities)} relations={len(chunk_relations)}"
+            f"[Extraction] 合并完成: {doc_uuid} "
+            f"entities={len(entities)} relations={len(relations)}"
         )
 
-    # 3. 跨块合并去重
-    entities, relations = _merge_chunks(all_entities_per_chunk, all_relations_per_chunk)
-    logger.info(
-        f"[Extraction] 合并完成: {doc_uuid} "
-        f"entities={len(entities)} relations={len(relations)}"
-    )
-
-    if not entities:
-        if llm_failed_chunks >= len(chunks):
-            # LLM 完全不可用 → 真失败
-            error = "LLM 不可用（所有块调用失败/返回空）"
-            logger.warning(f"[Extraction] {error}: {doc_uuid}")
-            update_extraction_status(doc_uuid, "failed", error=error)
-            return False
-        # LLM 正常响应但文档中无目标实体（如化妆品/器械文档，Drug 边界收紧后正确抽空）
-        # 与 failed 区分：这是「抽取成功但无需求实体」，不是失败，单独入 no_entity
-        error = "抽取成功但无目标实体"
-        logger.info(f"[Extraction] {error}: {doc_uuid}（no_entity）")
-        update_extraction_status(doc_uuid, "no_entity", error=error)
-        return True
+        if not entities:
+            if llm_failed_chunks >= len(chunks):
+                # LLM 完全不可用 → 真失败
+                error = "LLM 不可用（所有块调用失败/返回空）"
+                logger.warning(f"[Extraction] {error}: {doc_uuid}")
+                update_extraction_status(doc_uuid, "failed", error=error)
+                return False
+            # LLM 正常响应但文档中无目标实体（如化妆品/器械文档，Drug 边界收紧后正确抽空）
+            # 与 failed 区分：这是「抽取成功但无需求实体」，不是失败，单独入 no_entity
+            error = "抽取成功但无目标实体"
+            logger.info(f"[Extraction] {error}: {doc_uuid}（no_entity）")
+            update_extraction_status(doc_uuid, "no_entity", error=error)
+            return True
 
     # 4. 消歧（DB 事务内但锁外执行，可并行，可包含慢 API 调用）
     for ent in entities:
         ent["source_site"] = source_site
+        if source_site.startswith(("nmpa", "cde")):
+            ent.setdefault("entity_data", {})["_native"] = {
+                "rule_version": RULE_VERSION, "identity_status": "unresolved",
+                "limitations": ["未核对真实网页固定编号标签；模型抽取编号仅作弱候选，不作为规则确认身份"],
+            }
 
     try:
         with get_session() as session:
@@ -327,7 +409,23 @@ def extract_single_document(
 
             # 4a. 消歧 — 锁外，多进程可并行
             disambig_start = time.time()
-            entities = _disambiguate(entities, session=session)
+            entities = _disambiguate(entities, session=session, native_source=source_site if native else None)
+            if source_site.startswith(("nmpa", "cde")):
+                for ent in entities:
+                    info = dict(ent.get("_disambig") or (ent.get("entity_data") or {}).get("_disambig")
+                                or DisambiguationResult(status=STATUS_AMBIGUOUS).to_metadata())
+                    selected = info.get("dict_id") or ent.get("dict_id")
+                    candidates = list(info.get("candidates") or [])
+                    if selected and not any(candidate["dict_id"] == selected for candidate in candidates):
+                        candidates.append({"dict_id": selected, "name": ent.get("entity_name", ""),
+                                           "similarity_score": ent.get("confidence_score", 0.0),
+                                           "match_type": "unverified_page_identifier"})
+                    info.update(status=STATUS_CANDIDATE_MATCHED if selected else STATUS_AMBIGUOUS,
+                                dict_id=selected, candidates=candidates, auto_link=False,
+                                reason="source page identifier labels are unverified; requires review")
+                    ent["dict_id"] = None
+                    ent["_disambig"] = info
+                    ent.setdefault("entity_data", {})["_disambig"] = info
             disambig_sec = time.time() - disambig_start
             logger.info(
                 f"[Extraction] 消歧完成: doc={doc_uuid} "
@@ -337,10 +435,12 @@ def extract_single_document(
             # 4a2. 锁外预生成 embedding — 对消歧判 new 的实体，提前调云 API
             #       embedding 缓存写入 entity_data["_embeddings"]，
             #       锁内 _write_aliases_with_embedding 直接复用，不占锁
-            from core_engine.cloud_api_client import generate_embedding
+            from core_engine.common.cloud_api_client import generate_embedding
             embed_start = time.time()
             embed_count = 0
             for ent in entities:
+                if _native_identifier(ent, native_source=source_site if native else None):
+                    continue
                 ed = ent.get("entity_data", {}) or {}
                 entity_name = (ent.get("entity_name") or "").strip()
                 names: set[str] = {entity_name} if entity_name else set()
@@ -359,7 +459,10 @@ def extract_single_document(
                     continue
                 cache: dict[str, list[float]] = {}
                 for name in names:
-                    emb = generate_embedding(name)
+                    try:
+                        emb = generate_embedding(name)
+                    except Exception:
+                        emb = None
                     if emb:
                         cache[name] = emb
                         embed_count += 1
@@ -392,25 +495,29 @@ def extract_single_document(
             # 4c. 快速复核：对消歧判为 new 的实体，重跑 Step 2 alias lookup。
             #     解决多进程竞态：消歧时其他进程的 alias 尚未 commit，
             #     此时已可见，命中则修正 dict_id。
-            recheck_hits = 0
             for ent in entities:
-                if ent.get("dict_id") is None:
-                    name = ent.get("entity_name", "")
-                    etype = ent.get("entity_type", "")
-                    if name and etype:
-                        dict_id = lookup_alias(name, etype, session=session)
-                        if dict_id:
-                            ent["dict_id"] = dict_id
-                            recheck_hits += 1
-                            logger.info(
-                                f"[Extraction] 锁内复核命中: '{name}' "
-                                f"type={etype} → dict_id={dict_id}"
-                            )
-            if recheck_hits:
-                logger.info(
-                    f"[Extraction] 锁内复核: doc={doc_uuid} "
-                    f"命中 {recheck_hits} 个实体"
-                )
+                if ent.get("dict_id") is not None:
+                    continue
+                name, kind = ent.get("entity_name", ""), ent.get("entity_type", "")
+                if not name or not kind:
+                    continue
+                matches = lookup_alias_candidates(name, kind, session=session)
+                if not matches:
+                    continue
+                info = ent.get("_disambig") or ent.setdefault("entity_data", {}).get("_disambig")
+                info = dict(info or DisambiguationResult(status=STATUS_AMBIGUOUS).to_metadata())
+                candidates = {candidate["dict_id"]: candidate for candidate in info.get("candidates", [])}
+                for match in matches:
+                    candidates.setdefault(match["dict_id"], {"dict_id": match["dict_id"],
+                        "name": match.get("canonical_name") or name, "similarity_score": 0.85,
+                        "match_type": "alias_recheck", "canonical_data": match.get("canonical_data") or {},
+                        "aliases": [name], "external_ids": match.get("external_ids") or {}})
+                info.update(status=STATUS_CANDIDATE_MATCHED if len(candidates) == 1 else STATUS_AMBIGUOUS,
+                            dict_id=next(iter(candidates)) if len(candidates) == 1 else None,
+                            candidates=list(candidates.values()), match_step="step2_alias_recheck",
+                            auto_link=False, reason="concurrent alias match requires review")
+                ent["_disambig"] = info
+                ent.setdefault("entity_data", {})["_disambig"] = info
 
             # 4d. 清理消歧临时字段
             for ent in entities:
@@ -442,6 +549,8 @@ def extract_single_document(
         update_extraction_status(doc_uuid, "failed", error=f"写库失败: {e}")
         return False
 
+    if native:
+        update_extraction_status(doc_uuid, "done", model=RULE_VERSION)
     logger.info(f"[Extraction] 完成: {doc_uuid}")
     return True
 

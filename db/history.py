@@ -1573,7 +1573,7 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
 
     from biz_rules.native_graph import validate_field_bindings
 
-    validate_field_bindings(bundle, documents)
+    validate_field_bindings(bundle, documents, allow_legacy=True)
 
 
 def read_graph_resolution(

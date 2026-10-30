@@ -4,7 +4,18 @@
 
 ## 版本使用
 
-zktest 开发和运行统一使用 `dev`。截至业务提交 `4e7fb67`，本轮九个提交已归入 `dev`，包括任务保护、原文版本、连续发布、图谱接入与来源刷新。原 `main` 和其他学生分支保留，本轮未推送远端。联调工作目录没有独有的业务改动。正常修改按任务提交，不按版本或日期另开交付分支。
+现役目录是 `/home/zk_test/zk_projects/ZK_Data-Fabric-test`，分支 `feat/server_fix`。本次改造在隔离目录 `/home/zk_test/zk_projects/.datafabric-maintenance/20261031-opus`、分支 `codex/fabric-opus-20261031` 完成，基线为 `82bad7b`。这份代码尚未合并、部署；不能因为测试分支通过，就认为学生使用的服务已经更新。不要在现役目录复制环境文件、清队列或执行数据库迁移。
+
+本次重点是让“资料里写了什么”“系统猜它是谁”“人工确认了什么”分得清楚。主要变化：
+
+- ClinicalTrials 和已确认结构的 FDA 字段先按规则读取，不再让模型重抄编号。名称、别名、相似度和模型判断只提候选；没有人工标注集，阈值仍未校准。
+- 重复出现只增加来源记录，不再自动审核通过。机器审核保存建议；真正确认需要服务端登记的审核人、固定原文和明确依据。
+- 接受一条链接提案只调整这一条记录。合并整个字典是另一项明确操作，支持核对改动和撤销。
+- 正文、更正指向、材料类型、来源时间及原文位置随版本交给雷达。新闻标题、摘要、全文分开；社媒按未证实说法保存。
+- 图查询的 `reviewed` 范围要求身份与关系有可核对依据。查看未核候选时显式使用 `with_candidates`；旧版本仍可读取。
+- 旧批量同步线程已停用，索引沿现有 History 发布程序处理；目录按采集、解析、质检、队列、审核和同步分开。
+
+详细修改和接手事项见下面的同一份修改报告，历史记录按日期保留。
 
 徐子雯组本阶段的开发安排见[数据采集工作说明](task_doc/数据采集工作说明.html)（下载后用浏览器打开）。其中列明数据用途、来源任务、现有代码位置、雷达交接、验收办法和研一任务拆分；本阶段任务以这份说明为准。下面的修改报告继续保留既有改动记录和技术说明。
 
@@ -90,14 +101,14 @@ python feedback_ingest.py --csv /data/review/pending_review_20240315.csv
 ## 项目结构
 
 ```
-├── main_etl.py              # ETL 主入口（Prefect 调度）
+├── main_etl.py              # 兼容命令入口，实际调度在 flows/etl.py
 ├── feedback_ingest.py       # 人工审核回灌脚本
 ├── requirements.txt         # 依赖清单
 ├── .env.example             # 环境变量模板
 ├── config/
 │   ├── settings.py          # 全局配置（API Key、路径、阈值）
 │   └── crawler_settings.py  # 爬虫站点配置
-├── core_engine/             # 核心引擎（采集、解析、质检、存储）
+├── core_engine/             # acquisition/parsing/quality/queues/agents/lineage/sync/storage/common
 ├── biz_rules/               # 业务规则（清洗、提取、Schema）
 └── logs/                    # 运行日志（按日期滚动）
 ```
@@ -286,7 +297,7 @@ rq worker --url "$DATAFABRIC_HISTORY_REDIS_URL" extraction
 实际接口（均需独立Bearer凭据，导入/采集/恢复只允许管理员）：
 
 - `GET /api/history/sources`：10类业务标签及实际可读来源，未覆盖领域不伪装已有数据。
-- `POST /api/history/fetch`：固定ClinicalTrials/PubMed/FDA CRL/Europe PMC的有界只读查询，需 `Idempotency-Key`。返回持久任务，`GET /api/history/runs/{id}`读真实完成/截断/失败。
+- `POST /api/history/fetch`：ClinicalTrials/PubMed/FDA CRL/Europe PMC/WHO DON/SEC/GDELT 的有界只读查询，需 `Idempotency-Key`。返回持久任务，`GET /api/history/runs/{id}`读真实完成/截断/失败。
 - `POST /api/history/runs/{id}/retry`：传 `expected_attempt`，先核对原固定RQ job不活动才恢复。Redis状态不明、started/queued任务一律不重发。数据库提交未知时先读任务，不盲重跑。
 - `POST /api/history/archives`：固定原站ID、trial/program/outcome/document JSON原件（PubMed也支持XML），需幂等键。服务器生成版本ID和本地时间，客户端不得倒填first_seen/received。
 - `GET /api/history/records`：必填 `source_id,is_demo,mode,cutoff`；可给 `run_id`冻结清单、`source_record_ids`交集、至多3个字面AND `terms`，每页1–100。日期/时刻必须保留精度，完整时刻必须含时区。
@@ -601,3 +612,19 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 本次不改旧记录/旧 parser 或原始正文。回退时先关闭 DATAFABRIC_HISTORY_WATCHES 并停用新专题消费者，再回到已验收提交；保留新增版本/控制行。旧回填代码可从兼容 last_id=min(各站游标) 重新扫过，已捕获事件仍去重；无需删除资料或收窄数据库约束。WHO 和 typed observation 的新增能力在旧代码中不承诺可读/可执行，恢复新版后再启用。日常仍保留低磁盘底线，不能为补库存关闭该保护。
 
 公开依据：[WHO DON](https://www.who.int/emergencies/disease-outbreak-news/)、[WHO 官方API字段](https://www.who.int/api/default/diseaseoutbreaknews/sfhelp)、[Europe PMC 官方查询字段](https://dev.europepmc.org/docs/EBI_Europe_PMC_Web_Service_Reference.pdf)。这些公开接口说明不是来源覆盖或本系统分析质量证明。
+
+## 本次新增字段怎样使用（2026-10-31）
+
+`HistoryRecord.document_evidence` 说明材料类型、正文完整程度、同源关系和更正指向。外部归档正文放在原件 JSON 的 `full_text`；仍可只交摘要，但不能把摘要标成全文。`document_relations` 的 `corrects/retracts/supplements/reposts` 指向来源记录，已知版本再填 `target_version_id`，不知道留空。同一 DOI 或 PMID 的跨库资料不能算两份独立研究。社媒、转载保留 `unverified_report`；删帖时点未知就留空，不能用发帖时间替代。
+
+审核接口中的 `evidence` 是全部已记录来源；`current_review_evidence` 才是与当前审核人、审核时点和对象绑定相符的那次审核依据。两者不能混用。`identity_confirmed_*` 属于这条记录，`dict_context.verified_*` 属于字典；旧 `is_verified=true` 不能替代这些信息。原 Markdown 的位置还可能包含 `locator.container_json_pointer=/original_raw_content`，先取该字段，再按 Unicode 字符下标切片。
+
+涉及确认、提案采纳、整对象合并、关系审核和字段裁决的操作使用 `X-Review-Token`。服务端通过私有环境变量 `DATAFABRIC_REVIEW_TOKENS` 将令牌映射到审核人，不接受客户端填写一个名字便获得确认资格。配置未提供时明确拒绝，密钥不写进源码或浏览器页面。
+
+新来源 `gdelt_doc` 只返回标题、原网址及索引元数据，不提供新闻全文；其 `seendate` 是 GDELT 的观察时间，不是原帖发布时间，也不是本机的首次采集时间。接口无续页，到条数上限须缩小查询时间窗。实际探测曾返回 429，故不能声称当前服务器已经稳定采通。资料使用需注明 [GDELT 项目](https://www.gdeltproject.org/about.html#termsofuse)。ProMED 尚无所需许可；各级卫健委网页尚未逐站验证；实时社媒商用接口尚未选定。这些都不能写成已覆盖。
+
+新增身份结构使用 V021 迁移。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
+
+历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。
+
+仅做模拟资料归档与检索联调时，archives 请求同步落入 History；随后用同一隔离配置运行 python -m flows.history_publish --poll-seconds 5 --batch-size 5 --backfill-batch-size 0，由后台自动建索引并核对回执。归档不需要另造导入队列。结束时给测试发布进程发 SIGTERM，保留持久待办，不能清空队列或数据库。

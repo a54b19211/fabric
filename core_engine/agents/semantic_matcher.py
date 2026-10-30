@@ -13,7 +13,7 @@ from loguru import logger
 
 from core_engine.agent_tools import SEMANTIC_MATCH_TOOLS
 from core_engine.agents.prompts import SEMANTIC_MATCH_SYSTEM
-from core_engine.agent_config import AgentConfig
+from core_engine.agents.config import AgentConfig
 
 
 class SemanticMatchState(TypedDict):

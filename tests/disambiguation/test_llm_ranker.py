@@ -93,14 +93,16 @@ class TestRankWithReranker:
             r = rank_with_reranker("X", "Drug", None, "", cands)
         assert r.status == STATUS_AMBIGUOUS
 
-    def test_low_score_new_entity(self):
+    def test_low_score_still_needs_review_without_calibration(self):
         cands = _make_candidates("A", "B")
         with patch(
             "disambiguation.llm_ranker.requests.post",
             return_value=_FakeResponse(_results(0.3, 0.2)),
         ):
             r = rank_with_reranker("X", "Drug", None, "", cands)
-        assert r.status == STATUS_NEW_ENTITY
+        assert r.status == STATUS_AMBIGUOUS
+        assert len(r.candidates) == 2
+        assert "uncalibrated" in r.reason
 
     def test_call_failed(self):
         cands = _make_candidates("A")
@@ -119,4 +121,5 @@ class TestRankWithReranker:
             return_value=_FakeResponse([]),
         ):
             r = rank_with_reranker("X", "Drug", None, "", cands)
-        assert r.status == STATUS_NEW_ENTITY
+        assert r.status == STATUS_AMBIGUOUS
+        assert r.candidates[0].dict_id == 1

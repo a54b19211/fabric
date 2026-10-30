@@ -22,16 +22,43 @@ def graph_identity(value):
         raise HistoryError("invalid_graph_identity", "图身份无效") from None
 
 
+def audited_review(review):
+    actor = (review.reviewed_by or "").strip()
+    return (review.status == "approved" and bool(actor) and review.reviewed_at is not None
+            and actor.casefold() not in {"auto", "system", "agent", "unknown"})
+
+
+def confirmed_identity(node):
+    if node.identity_status == "rule_confirmed":
+        return node.identity_rule is not None and node.review.status == "rule_confirmed"
+    return (node.identity_status == "confirmed" and audited_review(node.review)
+            and bool(node.identity_review_basis) and bool(node.evidence or node.field_evidence))
+
+
 def _selection(bundle, scope):
     if scope not in {"reviewed", "with_candidates"}:
         raise HistoryError("graph_review_scope", "请选择审核事实或显式包含候选")
-    statuses = {"approved", "rule_confirmed"}
-    if scope == "with_candidates":
-        statuses |= {"auto_approved", "pending", "background"}
-    nodes = {identity_key(node): node for node in bundle.nodes if node.review.status in statuses}
+    statuses = {"approved", "rule_confirmed", "auto_approved", "pending", "background"}
+    nodes = {}
+    for node in bundle.nodes:
+        if node.review.status not in statuses:
+            continue
+        trusted = confirmed_identity(node)
+        if scope == "reviewed" and not trusted:
+            continue
+        if node.identity_status == "confirmed" and not trusted:
+            # 原包不改写；旧confirmed声明在查询结果中明确降为未核候选。
+            node = node.model_copy(update={
+                "identity_status": "unresolved",
+                "identity_review_basis": "source_declared_confirmation_without_audit",
+            })
+        nodes[identity_key(node)] = node
     edges = [edge for edge in bundle.edges if edge.review.status in statuses
              and identity_key(edge.source) in nodes and identity_key(edge.target) in nodes
-             and (scope == "with_candidates" or edge.binding_status == "bound")]
+             and (scope == "with_candidates" or (
+                 edge.binding_status == "bound"
+                 and (audited_review(edge.review)
+                      or (edge.review.status == "rule_confirmed" and bool(edge.field_evidence)))))]
     return nodes, edges
 
 

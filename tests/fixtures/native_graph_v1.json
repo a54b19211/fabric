@@ -1,0 +1,178 @@
+{
+  "baseline": "82bad7b",
+  "record": {
+    "schema_version": "datafabric.history.record.v1",
+    "source_id": "clinicaltrials",
+    "source_record_id": "NCT00000001",
+    "version_id": "4fe5eddd1b7248cd56ea0d567e8554df2ac740530a580f30e2b8cea72a0cbce1",
+    "record_kind": "trial",
+    "is_demo": true,
+    "title": "Title",
+    "source_url": null,
+    "raw_content": "{\"protocolSection\": {\"identificationModule\": {\"nctId\": \"NCT00000001\", \"briefTitle\": \"Title\"}, \"designModule\": {\"phases\": [\"PHASE2\"]}, \"statusModule\": {\"overallStatus\": \"TERMINATED\", \"startDateStruct\": {\"date\": \"2020-04\", \"type\": \"ESTIMATED\"}}, \"conditionsModule\": {\"conditions\": [\"Condition A\"]}}}",
+    "raw_media_type": "application/json",
+    "raw_sha256": "d5abafcba177ea36d477635c5ea5f45d77a386cba3d7410f286e1301c4fb9188",
+    "clean_text": "Title",
+    "parser_version": "datafabric.history.projection.v1",
+    "facts": {},
+    "field_locators": {},
+    "event_time": null,
+    "source_published_at": null,
+    "source_updated_at": null,
+    "first_seen_at": "2026-10-31T00:00:00Z",
+    "received_at": "2026-10-31T00:00:00Z",
+    "availability_proof": {
+      "kind": "unverified",
+      "available_at": null,
+      "uri": null,
+      "sha256": null,
+      "verified_by": null,
+      "verified_at": null,
+      "review_note": null
+    },
+    "mapping_review": null,
+    "published_seq": 1,
+    "document_evidence": null
+  },
+  "graph": {
+    "schema_version": "datafabric.graph.bundle.v1",
+    "graph_kind": "reviewed",
+    "namespace": "clinicaltrials.source_fields",
+    "is_demo": true,
+    "title": "固定登记版本的对象与来源字段关系",
+    "origin": "source_field_projection",
+    "scope_description": "明确登记原件版本的字段投影；不是全行业项目队列或药物项目谱系",
+    "selected_document_uuids": [],
+    "scope_record_ids": [
+      "NCT00000001"
+    ],
+    "scope_manifest_sha256": null,
+    "scope_record_count": null,
+    "batch_offset": 0,
+    "next_document_offset": null,
+    "dependency_source_ids": [
+      "clinicaltrials"
+    ],
+    "document_refs": [
+      {
+        "source_id": "clinicaltrials",
+        "source_record_id": "NCT00000001",
+        "version_id": "4fe5eddd1b7248cd56ea0d567e8554df2ac740530a580f30e2b8cea72a0cbce1",
+        "raw_sha256": "d5abafcba177ea36d477635c5ea5f45d77a386cba3d7410f286e1301c4fb9188",
+        "origin_doc_uuid": null
+      }
+    ],
+    "selection_truncated": false,
+    "nodes": [
+      {
+        "namespace": "clinicaltrials.NCT",
+        "id": "NCT00000001",
+        "entity_type": "ClinicalTrial",
+        "name": "NCT00000001",
+        "aliases": [],
+        "external_ids": {
+          "NCT": "NCT00000001"
+        },
+        "identity_status": "rule_confirmed",
+        "identity_review_basis": "原生NCT字段逐值核对；不是人工审核或药物项目谱系",
+        "identity_rule": {
+          "method_version": "clinicaltrials.native-id.v1",
+          "namespace": "clinicaltrials.NCT",
+          "value": "NCT00000001",
+          "basis": {
+            "source_id": "clinicaltrials",
+            "source_record_id": "NCT00000001",
+            "version_id": "4fe5eddd1b7248cd56ea0d567e8554df2ac740530a580f30e2b8cea72a0cbce1",
+            "raw_sha256": "d5abafcba177ea36d477635c5ea5f45d77a386cba3d7410f286e1301c4fb9188",
+            "origin_doc_uuid": null,
+            "json_pointer": "/protocolSection/identificationModule/nctId",
+            "value": "NCT00000001"
+          }
+        },
+        "review": {
+          "status": "rule_confirmed",
+          "reviewed_by": null,
+          "reviewed_at": null
+        },
+        "mention_ids": [],
+        "evidence": [],
+        "field_evidence": []
+      },
+      {
+        "namespace": "clinicaltrials.NCT00000001.condition",
+        "id": "a5339ebd7d8d7af934c82cf2e0b327b5a88589214723952a32e3869c4751c5be",
+        "entity_type": "Indication",
+        "name": "Condition A",
+        "aliases": [],
+        "external_ids": {},
+        "identity_status": "unresolved",
+        "identity_review_basis": null,
+        "identity_rule": null,
+        "review": {
+          "status": "rule_confirmed",
+          "reviewed_by": null,
+          "reviewed_at": null
+        },
+        "mention_ids": [],
+        "evidence": [],
+        "field_evidence": [
+          {
+            "source_id": "clinicaltrials",
+            "source_record_id": "NCT00000001",
+            "version_id": "4fe5eddd1b7248cd56ea0d567e8554df2ac740530a580f30e2b8cea72a0cbce1",
+            "raw_sha256": "d5abafcba177ea36d477635c5ea5f45d77a386cba3d7410f286e1301c4fb9188",
+            "origin_doc_uuid": null,
+            "json_pointer": "/protocolSection/conditionsModule/conditions/0",
+            "value": "Condition A"
+          }
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "id": "native-field:2caf3c98619935d524750a372f57d51ffddcd53c115c9e88d9a34f6561dade5a",
+        "source": {
+          "namespace": "clinicaltrials.NCT",
+          "id": "NCT00000001"
+        },
+        "target": {
+          "namespace": "clinicaltrials.NCT00000001.condition",
+          "id": "a5339ebd7d8d7af934c82cf2e0b327b5a88589214723952a32e3869c4751c5be"
+        },
+        "relation_type": "REGISTERED_CONDITION",
+        "directed": true,
+        "relation_props": {
+          "method_version": "clinicaltrials.fields.v1"
+        },
+        "valid_from": null,
+        "valid_to": null,
+        "review": {
+          "status": "rule_confirmed",
+          "reviewed_by": null,
+          "reviewed_at": null
+        },
+        "binding_status": "bound",
+        "evidence": [],
+        "field_evidence": [
+          {
+            "source_id": "clinicaltrials",
+            "source_record_id": "NCT00000001",
+            "version_id": "4fe5eddd1b7248cd56ea0d567e8554df2ac740530a580f30e2b8cea72a0cbce1",
+            "raw_sha256": "d5abafcba177ea36d477635c5ea5f45d77a386cba3d7410f286e1301c4fb9188",
+            "origin_doc_uuid": null,
+            "json_pointer": "/protocolSection/conditionsModule/conditions/0",
+            "value": "Condition A"
+          }
+        ],
+        "source_doc_uuid": null,
+        "unbound_reason": null
+      }
+    ],
+    "redirects": [],
+    "limitations": [
+      "NCT只确认试验登记对象；条件、干预和申办方按本登记范围保留，未做跨项目名称合并",
+      "关系表示本版本登记字段，不证明机制、疗效或专业审核；rule_confirmed与人工approved不同",
+      "关系valid_from/valid_to未知，不用抓取或文档日期补造；历史读取受固定原件首次可见时间约束"
+    ]
+  }
+}

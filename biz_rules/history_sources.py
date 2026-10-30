@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -21,6 +22,23 @@ from biz_rules.history_models import (
 )
 
 SOURCE_CATALOG = {
+    "gdelt_doc": {
+        "name": "GDELT DOC 新闻索引",
+        "business_types": ["population_need", "corporate_finance", "regulatory", "literature"],
+        "acquisition_channel": "public_api", "access": "public_metadata",
+        "license_url": "https://www.gdeltproject.org/about.html#termsofuse",
+        "attribution": "The GDELT Project — https://www.gdeltproject.org/",
+        "history_coverage": "仅本地采用后版本；实时DOC接口不是十年新闻档案",
+        "native_id": "完整新闻URL的SHA256，query参数保留",
+        "native_analysis_mode": "news_index_not_independent_evidence",
+        "read_scope": "查询的有界新闻索引；默认最近24小时，支持显式起止窗口",
+        "limitations": [
+            "只有标题、原网址和索引元数据，没有新闻全文；第三方正文另核许可",
+            "GDELT seendate是索引观察时间，不是新闻发布时间或本地首次见到时间",
+            "没有连续分页；达到上限需宿主缩小时间窗，不能推断已覆盖所有报道",
+            "转载和共同源尚未核实，不能按网址数量计算独立证据数",
+        ],
+    },
     "sec_companyfacts": {
         "name": "SEC XBRL 公司概念事实",
         "business_types": ["corporate_finance", "research_capacity"],
@@ -317,11 +335,24 @@ def crl_id(data: dict) -> str:
 
 
 def project_record(source_id: str, item: ArchiveRecord) -> dict:
+    from biz_rules.document_evidence import attach_document_evidence
+
+    projected = _project_record(source_id, item)
+    try:
+        return attach_document_evidence(source_id, item, projected)
+    except (ValueError, TypeError, AttributeError):
+        raise HistoryError("invalid_document_evidence", "材料类型、全文或文档关联依据不符合契约") from None
+
+
+def _project_record(source_id: str, item: ArchiveRecord) -> dict:
     if source_id == "pubmed" and item.raw_media_type == "application/xml":
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
     data = parse_json(item.raw_content)
+    if source_id == "gdelt_doc":
+        from biz_rules.gdelt_news import project_gdelt
+        return project_gdelt(item, data)
     if source_id == "sec_companyfacts":
         from biz_rules.sec_xbrl import project_sec
 
@@ -721,8 +752,18 @@ def _raw_array_items(text: str, path: list[str]):
         pos = end
 
 
+def require_public_fetch_enabled():
+    """Keep the legacy default; every configured value must explicitly mean true."""
+    if os.environ.get("DATAFABRIC_HISTORY_FETCH_ENABLED", "true").strip().lower() != "true":
+        raise HistoryError("public_fetch_disabled", "当前环境已关闭公开来源采集；归档与固定版本读取不受影响", 403)
+
+
 def read_public(request: FetchRequest) -> dict:
     """返回真实完成/截断/失败及已读原件。HTTP异常绝不伪装EOF。"""
+    require_public_fetch_enabled()
+    if request.source_id == "gdelt_doc":
+        from biz_rules.gdelt_news import read_gdelt
+        return read_gdelt(request)
     if request.source_id == "who_don":
         from biz_rules.who_don import read_who
 

@@ -1,5 +1,6 @@
 """响应体 Pydantic 模型"""
 from typing import Any, Optional
+from datetime import datetime
 from pydantic import BaseModel, Field
 
 
@@ -82,9 +83,34 @@ class ExtractionStatsResponse(BaseModel):
 
 # ── Review ─────────────────────────────────────────────────────────────
 
+class ObjectReviewEvidence(BaseModel):
+    current_review_evidence: list[dict] = Field(default_factory=list)
+    evidence: list[dict] = Field(default_factory=list)
+    source_site: str = ""
+    source_version_id: Optional[str] = None
+    source_quote: Optional[str] = None
+    source_char_start: Optional[int] = None
+    source_char_end: Optional[int] = None
+    first_seen_at: Optional[datetime] = None
+    valid_from: Optional[datetime] = None
+    valid_to: Optional[datetime] = None
+    reviewed_by: str = ""
+    reviewed_at: Optional[datetime] = None
+    reviewer_note: str = ""
+    confidence_reason: str = ""
+
+
+class EntityReviewEvidence(ObjectReviewEvidence):
+    identity_confirmed_by: Optional[str] = None
+    identity_confirmed_at: Optional[datetime] = None
+    identity_confirmation_basis: Optional[str] = None
+    dict_context: Optional[dict] = None
+
+
 class DisambigCandidate(BaseModel):
     dict_id: int
-    name: str
+    name: str = ""
+    score: Optional[float] = None
     similarity_score: float = 0.0
     match_type: str = ""
 
@@ -93,9 +119,18 @@ class DisambigInfo(BaseModel):
     status: str = ""
     candidates: list[DisambigCandidate] = []
     match_step: str = ""
+    dict_id: Optional[int] = None
+    auto_link: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    rule_version: Optional[str] = None
+    model_version: Optional[str] = None
+    decision_policy: str = ""
+    calibration_status: str = ""
+    model_trace: list[dict] = Field(default_factory=list)
 
 
-class EntityItem(BaseModel):
+class EntityItem(EntityReviewEvidence):
     id: int
     source_doc_uuid: str
     entity_type: str
@@ -114,7 +149,7 @@ class EntityListResponse(BaseModel):
     items: list[EntityItem]
 
 
-class RelationItem(BaseModel):
+class RelationItem(ObjectReviewEvidence):
     id: int
     source_doc_uuid: str
     relation_type: str
@@ -322,7 +357,7 @@ class GraphSyncStatsResponse(BaseModel):
 
 # ── Graph Review ─────────────────────────────────────────────────────────
 
-class GraphNode(BaseModel):
+class GraphNode(EntityReviewEvidence):
     id: int
     entity_type: str
     entity_name: str
@@ -335,7 +370,7 @@ class GraphNode(BaseModel):
     is_verified: bool = False
 
 
-class GraphEdge(BaseModel):
+class GraphEdge(ObjectReviewEvidence):
     id: int
     relation_type: str
     from_entity_id: Optional[int]

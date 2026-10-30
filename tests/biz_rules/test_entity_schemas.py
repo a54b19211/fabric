@@ -48,8 +48,12 @@ class TestSanitizeEntityData:
 
 
 class TestEntityTypeRegistry:
-    def test_sixteen_types(self):
-        assert len(VALID_ENTITY_TYPES) == 16
+    def test_native_types_preserve_registration_and_regulatory_grain(self):
+        assert {"Organization", "Intervention", "RegulatoryApplication", "RecallProduct"} <= VALID_ENTITY_TYPES
+        application = validate_entity_data("RegulatoryApplication", {"application_number": "NDA209510"})
+        product = validate_entity_data("RecallProduct", {"recall_number": "D-1234-2026", "event_id": "999"})
+        assert application["application_number"] == "NDA209510"
+        assert product["recall_number"] == "D-1234-2026" and product["event_id"] == "999"
 
     def test_common_types_present(self):
         for t in ("Company", "Drug", "Target", "Indication", "ClinicalTrial"):

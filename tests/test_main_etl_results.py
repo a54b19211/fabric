@@ -9,10 +9,10 @@ from typing import Optional
 from unittest.mock import Mock, patch
 
 
-SOURCE = Path(__file__).resolve().parents[1] / "main_etl.py"
+SOURCE = Path(__file__).resolve().parents[1] / "flows" / "etl.py"
 # 本文件单独在临时目录复核时，也读取同目录的真实源文件副本。
 if not SOURCE.is_file():
-    SOURCE = Path(__file__).with_name("main_etl.py")
+    SOURCE = Path(__file__).with_name("etl.py")
 NAMES = {
     "CrawlTaskError", "_new_stats", "_merge_stats", "_crawl_status", "_update_task_log",
     "_process_single_result", "crawl_detail_page", "crawl_single_start_url", "crawl_websites_flow",
@@ -35,6 +35,9 @@ class MainEtlResultsTests(unittest.TestCase):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
                  and node.name in NAMES]
+        common = SOURCE.with_name("crawl_flow.py")
+        nodes.extend(node for node in ast.parse(common.read_text(encoding="utf-8")).body
+                     if isinstance(node, ast.FunctionDef) and node.name == "classify_store_result")
         for node in nodes:
             if isinstance(node, ast.FunctionDef):
                 node.decorator_list = []
@@ -58,13 +61,13 @@ class MainEtlResultsTests(unittest.TestCase):
         repository.log_crawl_task = Mock(return_value=1)
         repository.update_crawl_log = Mock()
         self.log = repository.update_crawl_log
-        pagination = types.ModuleType("core_engine.pagination_driver")
+        pagination = types.ModuleType("core_engine.acquisition.pagination_driver")
         pagination.JsClickDriver = type("FakeJsDriver", (), {})
         self.pagination = pagination
         self.modules = patch.dict(sys.modules, {
             "isolated_main_etl_results": module,
             "db.repository": repository,
-            "core_engine.pagination_driver": pagination,
+            "core_engine.acquisition.pagination_driver": pagination,
         })
         self.modules.start()
         self.addCleanup(self.modules.stop)

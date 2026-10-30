@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.routers import documents, extraction, review, weknora, agent, research, history
-from core_engine.exception_logger import ExceptionLogger
+from core_engine.common.exception_logger import ExceptionLogger
 
 app = FastAPI(
     title="ZK Data Fabric 审核后台 API",

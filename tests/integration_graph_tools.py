@@ -60,11 +60,12 @@ def test_native_graph_real_publication_replay_and_old_fixed_field_version(pg, mo
                   ref.is_demo, "current", datetime.now(timezone.utc))
     seed_id = "clinicaltrials.NCT|NCT00000001"
     target_ids = [edge.target.namespace + "|" + edge.target.id for edge in graph.edges]
-    assert store.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0]).status == "found"
-    linked = store.read_graph_paths(*fixed_args, start=target_ids[0], target=target_ids[2], direction="both")
+    assert store.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0]).status == "not_found"
+    assert store.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0], review_scope="with_candidates").status == "found"
+    linked = store.read_graph_paths(*fixed_args, start=target_ids[0], target=target_ids[2], direction="both", review_scope="with_candidates")
     assert len(linked.paths[0].edge_ids) == 2
     assert all(edge.field_evidence[0].version_id == source.version_id for edge in linked.edges)
-    assert len(store.read_graph_subgraph(*fixed_args, node_ids=[seed_id, target_ids[0]]).edges) == 1
+    assert len(store.read_graph_subgraph(*fixed_args, node_ids=[seed_id, target_ids[0]], review_scope="with_candidates").edges) == 1
 
     revised = adopt(source_record("SYNTHETIC condition B"), "synthetic-native-source-b")
     new = publish_native_graph([revised], "synthetic-native-graph-b")

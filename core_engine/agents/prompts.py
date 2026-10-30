@@ -166,7 +166,8 @@ CONFLICT_RESOLUTION_SYSTEM = """你是一个生物医药知识图谱的数据专
 - **custom**：需要合并两个值（提供合并后的值）
 - **escalated**：两个值含义不同且权威度接近，无法判断
 
-调用 submit_final_decision 提交。decision 字段填 keep_existing/accept_new/custom/escalated。
+调用 resolve_attribute_conflict 提交待审建议，resolution 填 keep_existing/accept_new/custom/escalated，
+并提供 reason 和 confidence；custom 时提供 resolved_value。工具不会修改字典或冲突状态，仍须人工复核。
 """
 
 SEMANTIC_MATCH_SYSTEM = """你是一个生物医药知识图谱的实体匹配专家。你需要判断两个 entity_dict 是否为同一实体（应该合并）。

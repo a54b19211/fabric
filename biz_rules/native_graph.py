@@ -4,17 +4,20 @@ import re
 
 from biz_rules.history_models import HistoryError, HistoryRecord, canonical, sha256
 from biz_rules.history_sources import parse_json
+from biz_rules.native_extraction import TRIAL_ATTRIBUTE_PATHS, clinical_trial_attributes, field_value
 from biz_rules.reviewed_graph import (
     GraphBundle, GraphDocumentRef, GraphEdge, GraphFieldEvidence, GraphIdentity,
     GraphIdentityRule, GraphNode, GraphReview,
 )
 
-METHOD = "clinicaltrials.fields.v1"
+METHOD = "clinicaltrials.fields.v2"
+LEGACY_METHOD = "clinicaltrials.fields.v1"
 NATIVE_PATH = "/protocolSection/identificationModule/nctId"
 RELATIONS = {
     "REGISTERED_CONDITION": ("conditionsModule/conditions", "Indication", "condition"),
     "REGISTERED_INTERVENTION": ("armsInterventionsModule/interventions", "Intervention", "intervention"),
     "REGISTERED_SPONSOR": ("sponsorCollaboratorsModule/leadSponsor", "Organization", "sponsor"),
+    "REGISTERED_COLLABORATOR": ("sponsorCollaboratorsModule/collaborators", "Organization", "collaborator"),
 }
 
 
@@ -46,17 +49,20 @@ def _native(record):
     return data, identity
 
 
-def _relation(pointer):
+def _relation(pointer, *, legacy=False):
     for kind, (path, entity_type, suffix) in RELATIONS.items():
+        if legacy and kind == "REGISTERED_COLLABORATOR":
+            continue
         stem = "/protocolSection/" + path
-        pattern = stem + (r"/[0-9]+" if suffix == "condition" else r"/[0-9]+/name" if suffix == "intervention" else "/name")
+        pattern = stem + (r"/[0-9]+" if suffix == "condition" else r"/[0-9]+/name"
+                          if suffix in {"intervention", "collaborator"} else "/name")
         if re.fullmatch(pattern, pointer):
             return kind, entity_type, suffix
     raise ValueError("字段不属于已定义的登记关系")
 
 
-def validate_field_bindings(bundle, documents):
-    """供db._validate_derived调用；documents沿用其精确ref→History payload映射。"""
+def validate_field_bindings(bundle, documents, *, allow_legacy=False):
+    """New publications require v2; fixed History reads may validate the exact v1 contract."""
     def bound(ref):
         record = documents.get(_key(ref))
         if record is None:
@@ -68,6 +74,17 @@ def validate_field_bindings(bundle, documents):
 
     nodes = {(node.namespace, node.id): node for node in bundle.nodes}
     try:
+        methods = {edge.relation_props.get("method_version") for edge in bundle.edges
+                   if edge.field_evidence}
+        legacy = (allow_legacy and bundle.origin == "source_field_projection"
+                  and (methods == {LEGACY_METHOD} or
+                       (not bundle.edges and all(not node.properties and not node.field_evidence
+                                                for node in bundle.nodes))))
+        if methods - ({LEGACY_METHOD} if legacy else {METHOD}):
+            raise ValueError("未知或混合的原生字段规则版本")
+        if legacy and any(node.properties or (node.identity_status == "rule_confirmed" and node.field_evidence)
+                          for node in bundle.nodes):
+            raise ValueError("v1冻结图不含新增试验属性或字段证据")
         if bundle.origin == "source_field_projection":
             refs = bundle.document_refs
             if (bundle.namespace != "clinicaltrials.source_fields" or not refs or not bundle.nodes
@@ -90,10 +107,15 @@ def validate_field_bindings(bundle, documents):
         for node in bundle.nodes:
             for ref in node.field_evidence:
                 identity = bound(ref)
-                _kind, expected_type, suffix = _relation(ref.json_pointer)
+                if node.identity_status == "rule_confirmed" and not legacy:
+                    if (identity != node.id or ref.json_pointer not in TRIAL_ATTRIBUTE_PATHS.values()
+                            or _key(ref) != _key(node.identity_rule.basis)):
+                        raise ValueError("试验属性出处与编号原件不一致")
+                    continue
+                _kind, expected_type, suffix = _relation(ref.json_pointer, legacy=legacy)
                 if (node.review.status != "rule_confirmed" or node.identity_status != "unresolved"
                         or node.entity_type != expected_type or node.name != ref.value
-                        or node.aliases or node.external_ids
+                        or node.aliases or node.external_ids or node.properties
                         or node.namespace != "clinicaltrials." + identity + "." + suffix
                         or node.id != sha256(ref.value)):
                     raise ValueError("登记字段节点的类型/身份与原件不一致")
@@ -105,16 +127,28 @@ def validate_field_bindings(bundle, documents):
                         or node.aliases
                         or node.external_ids != {"NCT": identity}):
                     raise ValueError("原生编号规则不能升级其他名称或类型")
+                if not legacy:
+                    data, _identity = _native(documents[_key(rule.basis)])
+                    expected = clinical_trial_attributes(data)
+                    missing = object()
+                    expected_fields = {path: field_value(data, path, missing)
+                                       for path in TRIAL_ATTRIBUTE_PATHS.values()}
+                    expected_fields = {path: value for path, value in expected_fields.items() if value is not missing}
+                    if (canonical(node.properties) != canonical(expected)
+                            or len(node.field_evidence) != len(expected_fields)
+                            or {ref.json_pointer: ref.value for ref in node.field_evidence} != expected_fields):
+                        raise ValueError("试验属性未完整保留原件字段或日期精度")
             elif node.review.status == "rule_confirmed" and not node.field_evidence:
                 raise ValueError("规则节点缺少字段出处")
         for edge in bundle.edges:
             for ref in edge.field_evidence:
                 identity = bound(ref)
-                kind, entity_type, suffix = _relation(ref.json_pointer)
+                kind, entity_type, suffix = _relation(ref.json_pointer, legacy=legacy)
                 source = nodes[(edge.source.namespace, edge.source.id)]
                 target = nodes[(edge.target.namespace, edge.target.id)]
                 if (edge.relation_type != kind or edge.review.status != "rule_confirmed"
-                        or edge.binding_status != "bound" or edge.relation_props != {"method_version": METHOD}
+                        or edge.binding_status != "bound"
+                        or edge.relation_props != {"method_version": LEGACY_METHOD if legacy else METHOD}
                         or source.namespace != "clinicaltrials.NCT" or source.id != identity
                         or source.identity_status != "rule_confirmed"
                         or _key(source.identity_rule.basis) != _key(ref)
@@ -153,9 +187,18 @@ def build_native_graph(records, *, max_nodes=100, max_edges=200):
             truncated = True
             continue
         basis = GraphFieldEvidence(**ref.model_dump(), json_pointer=NATIVE_PATH, value=identity)
+        try:
+            properties = clinical_trial_attributes(data)
+        except (ValueError, TypeError, AttributeError):
+            raise HistoryError("native_graph_fields", "试验属性不符合原始登记字段类型") from None
+        missing = object()
+        fields = [GraphFieldEvidence(**ref.model_dump(), json_pointer=pointer, value=value)
+                  for pointer in TRIAL_ATTRIBUTE_PATHS.values()
+                  if (value := field_value(data, pointer, missing)) is not missing]
         trial = GraphNode(namespace="clinicaltrials.NCT", id=identity, name=identity,
                           entity_type="ClinicalTrial", external_ids={"NCT": identity},
                           identity_status="rule_confirmed", identity_rule=GraphIdentityRule(value=identity, basis=basis),
+                          properties=properties, field_evidence=fields,
                           identity_review_basis="原生NCT字段逐值核对；不是人工审核或药物项目谱系",
                           review=GraphReview(status="rule_confirmed"))
         nodes[(trial.namespace, trial.id)] = trial
@@ -168,6 +211,9 @@ def build_native_graph(records, *, max_nodes=100, max_edges=200):
         sponsor = protocol.get("sponsorCollaboratorsModule", {}).get("leadSponsor", {}).get("name")
         if sponsor:
             values.append(("REGISTERED_SPONSOR", "/protocolSection/sponsorCollaboratorsModule/leadSponsor/name", sponsor))
+        for index, item in enumerate(protocol.get("sponsorCollaboratorsModule", {}).get("collaborators", [])):
+            values.append(("REGISTERED_COLLABORATOR",
+                           f"/protocolSection/sponsorCollaboratorsModule/collaborators/{index}/name", item.get("name")))
         for kind, pointer, value in values:
             if not isinstance(value, str) or not value or len(value) > 1000:
                 truncated = True
