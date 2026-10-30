@@ -136,3 +136,23 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 本接口无需新表、不改已有变化流。查询包采用后进入 `changes`，但 PrimeKG 的“新变化”只表示新收到一次当前背景观察。雷达不能把它当成真实世界刚出现的新机制。文档入库后的 outbox 发布链继续使用原服务；本接口不启动采集、审核或图同步。
 
 本轮代码先在独立分支及临时 History 库验证。是否更新现役代码、补配置和重启服务，由部署负责人统一安排，不能把测试地址写死到产品配置。
+
+## 固定版本图查询与索引状态
+
+以下路径位于 `/api/history` 下，沿用独立身份验证，不改变原 documents、research 接口。
+
+| 接口 | 用途 | 身份要求 |
+| --- | --- | --- |
+| `GET /graph/{version_id}/paths` | 固定图包内查路径，最多 4 跳，限制路径数和展开数 | History 读取凭据 |
+| `GET /graph/{version_id}/subgraph` | 返回指定对象间的有界子图 | History 读取凭据 |
+| `POST /graph/native/capture` | 将 1 至 20 个已采用 CT 固定版本投成登记字段图 | History 管理凭据 |
+| `GET /index/status` | 查看任务与上传、解析、向量、绑定状态 | History 管理凭据 |
+| `POST /index/{id}/retry` | 恢复被阻断任务，仍先核对已发请求 | History 管理凭据 |
+
+图查询须给 `source_id`、`source_record_id`、`is_demo`、`mode`、`cutoff`，对象为 `namespace|id`。新路径和子图接口默认 `review_scope=reviewed`；`with_candidates` 才含待审或未绑定候选，仍保留原状态。原邻居和解析接口增加同名可选参数，旧调用兼容，新业务应显式选择范围。
+
+索引目标按来源实例、来源编号、演示标志、知识库和业务范围固定。四源示例只代表明确配置的四个来源；既有 `legacy_documents` 应按实际授权和业务范围配置，不能把不同用途资料悄悄混装。配置删除后仍继续清理旧绑定，停止进程不等于清理完成。
+
+原文读取仍走 `/versions/{version_id}` 与 `/versions/{version_id}/raw`。固定版本与当下许可必须同时满足，索引命中不能代替原件权限检查。
+
+WHO v0.2 的 `count_statements` 与 `count_extraction` 是派生 facts，不能走逐字段顶层 JSON literal 校验。应核对 `who.explicit-count.v1`、原始字段范围和完整 `clean_text` 的 Unicode 字符位置，逐字核对 quote 与数值；完整契约见本轮交接的 `fabric-who-count-contract.json`。旧 v0.1 没有这两个字段，仍按原契约读取。
