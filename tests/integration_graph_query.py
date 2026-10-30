@@ -29,6 +29,12 @@ QUERY_TOKEN = "synthetic-primekg-query-only"
 READ_TOKEN = "test-reader-only"
 ADMIN_TOKEN = "test-admin-only"
 CAPTURE_PATH = "/api/history/graph/primekg/capture"
+LOOKUP_PATH = "/api/history/graph/primekg/lookup"
+LOOKUP_QUERY = {"name": "synthetic native seed", "node_type": "gene/protein", "limit": 10}
+NATIVE_CANDIDATE = {
+    "name": "SYNTHETIC NATIVE SEED", "node_source": "SYNTHETIC_NATIVE_NCBI",
+    "primekg_id": "00001956", "primekg_type": "gene/protein",
+}
 QUERY = {
     "node_type": "gene/protein",
     "node_source": "SYNTHETIC_NCBI",
@@ -60,6 +66,7 @@ def graph_api(pg, monkeypatch):
     state = {
         "mode": "edges", "neighbor_id": "SYNTHETIC_A", "requests": [],
         "barrier": None, "vary_per_request": False,
+        "statements": [], "lookup_nodes": None, "force_empty_rows": False,
     }
     lock = Lock()
 
@@ -76,6 +83,7 @@ def graph_api(pg, monkeypatch):
         parameters = statement["parameters"]
         with lock:
             state["requests"].append(parameters)
+            state["statements"].append(statement["statement"])
             number = len(state["requests"])
             mode = state["mode"]
             barrier = state["barrier"]
@@ -91,6 +99,21 @@ def graph_api(pg, monkeypatch):
         if mode == "protocol_error":
             return httpx.Response(200, json={
                 "errors": [{"message": "SYNTHETIC private error"}], "results": [],
+            })
+        lookup = "name" in parameters
+        columns = ["candidate"] if lookup else COLUMNS
+        if state["force_empty_rows"]:
+            return httpx.Response(200, json={
+                "errors": [], "results": [{"columns": columns, "data": []}],
+            })
+        if lookup:
+            candidates = state["lookup_nodes"]
+            if candidates is None:
+                candidates = [{**NATIVE_CANDIDATE, "name": parameters["name"].upper()}]
+            return httpx.Response(200, json={
+                "errors": [], "results": [{
+                    "columns": columns, "data": [{"row": [node]} for node in candidates],
+                }],
             })
         seed = {
             "name": "SYNTHETIC seed", "node_source": parameters["node_source"],
@@ -447,3 +470,153 @@ def test_missing_query_configuration_is_not_empty_success(graph_api, monkeypatch
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "graph_query_not_configured"
     assert graph_api.state["requests"] == [] and counts(graph_api.engine) == (0, 0, 0)
+
+
+def lookup(api, body=None, token=QUERY_TOKEN):
+    headers = {} if token is None else {"Authorization": "Bearer " + token}
+    return api.client.post(LOOKUP_PATH, json=LOOKUP_QUERY if body is None else body, headers=headers)
+
+
+def test_lookup_current_native_ids_are_preserved_when_passed_to_capture(graph_api):
+    response = lookup(graph_api)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "resolved" and result["truncated"] is False
+    assert result["query"] == LOOKUP_QUERY
+    assert result["evidence_status"] == "current_identity_candidates_only"
+    assert datetime.fromisoformat(result["observed_at"].replace("Z", "+00:00")).utcoffset() is not None
+    candidate = result["candidates"][0]
+    assert candidate == {
+        "name": NATIVE_CANDIDATE["name"], "node_type": NATIVE_CANDIDATE["primekg_type"],
+        "node_source": NATIVE_CANDIDATE["node_source"], "seed_id": NATIVE_CANDIDATE["primekg_id"],
+        "identity_status": "background",
+    }
+    assert "run" not in result and "neighborhood" not in result
+    assert counts(graph_api.engine) == (0, 0, 0)  # 名称候选本身不采用。
+    captured = post(graph_api, body={
+        **QUERY, "node_type": candidate["node_type"],
+        "node_source": candidate["node_source"], "seed_id": candidate["seed_id"],
+    })
+    assert captured.status_code == 200
+    sent = graph_api.state["requests"][1]
+    assert sent["node_source"] == "SYNTHETIC_NATIVE_NCBI"
+    assert sent["seed_id"] == "00001956"  # 不变为数字/UUID，也不复用旧查询ID。
+    seeds = captured.json()["neighborhood"]["seeds_found"]
+    assert seeds == [{"namespace": "primekg.SYNTHETIC_NATIVE_NCBI", "id": "00001956"}]
+    assert counts(graph_api.engine) == (1, 1, 1)
+
+
+def test_lookup_limit_one_retains_ambiguity_before_truncating_candidates(graph_api):
+    graph_api.state["lookup_nodes"] = [
+        dict(NATIVE_CANDIDATE), {**NATIVE_CANDIDATE, "primekg_id": "SYNTHETIC_SECOND_ID"},
+    ]
+    response = lookup(graph_api, body={**LOOKUP_QUERY, "limit": 1})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ambiguous" and result["truncated"] is True
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["identity_status"] == "background"
+    assert graph_api.state["requests"][0]["limit_plus_one"] == 2
+    assert counts(graph_api.engine) == (0, 0, 0)
+
+
+def test_lookup_duplicate_physical_candidates_are_not_silently_merged(graph_api):
+    # 两个物理节点可返回完全相同的原生属性；不能据此伪称唯一身份。
+    graph_api.state["lookup_nodes"] = [dict(NATIVE_CANDIDATE), dict(NATIVE_CANDIDATE)]
+    response = lookup(graph_api)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ambiguous" and result["truncated"] is False
+    assert len(result["candidates"]) == 2 and result["candidates"][0] == result["candidates"][1]
+    assert counts(graph_api.engine) == (0, 0, 0)
+
+
+def test_empty_http_rows_are_not_found_for_lookup_but_failure_for_capture(graph_api):
+    graph_api.state["force_empty_rows"] = True
+    response = lookup(graph_api)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "not_found" and result["candidates"] == []
+    assert result["truncated"] is False
+    assert counts(graph_api.engine) == (0, 0, 0)
+    capture = post(graph_api)
+    assert capture.status_code == 503
+    assert capture.json()["detail"]["code"] == "primekg_invalid_response"
+    assert counts(graph_api.engine) == (0, 0, 0)
+    assert len(graph_api.state["requests"]) == 2
+
+
+def test_lookup_quote_in_name_is_a_read_only_literal_parameter(graph_api):
+    name = "SYNTHETIC O'Brien') MATCH (n) DETACH DELETE n //"
+    response = lookup(graph_api, body={**LOOKUP_QUERY, "name": name})
+    assert response.status_code == 200
+    assert response.json()["status"] == "resolved"
+    statement = graph_api.state["statements"][0]
+    assert "toLower(n.name)=toLower($name)" in statement
+    assert name not in statement and "O'Brien" not in statement
+    assert graph_api.state["requests"][0] == {"name": name, "limit_plus_one": 11}
+    assert counts(graph_api.engine) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("extra", [
+    {"cutoff": "2018-01-01T00:00:00Z"},
+    {"cypher": "MATCH (n) DETACH DELETE n"},
+    {"uri": "http://untrusted.invalid:7474"},
+    {"node_type": "ANY"},
+    {"name": "   "},
+    {"limit": True},
+    {"limit": 21},
+])
+def test_lookup_invalid_or_extra_inputs_are_422_before_http(graph_api, extra):
+    response = lookup(graph_api, body={**LOOKUP_QUERY, **extra})
+    assert response.status_code == 422
+    assert graph_api.state["requests"] == [] and counts(graph_api.engine) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("token,status", [(None, 401), (READ_TOKEN, 403), (ADMIN_TOKEN, 403)])
+def test_lookup_requires_the_independent_query_credential(graph_api, token, status):
+    response = lookup(graph_api, token=token)
+    assert response.status_code == status
+    assert graph_api.state["requests"] == [] and counts(graph_api.engine) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("revoke", ["allowlist", "catalog"])
+def test_lookup_rechecks_permission_before_reading_current_candidates(graph_api, monkeypatch, revoke):
+    assert lookup(graph_api).status_code == 200
+    if revoke == "allowlist":
+        monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", "external_archive")
+    else:
+        with graph_api.engine.begin() as conn:
+            conn.execute(text("UPDATE history_sources SET read_enabled=false "
+                              "WHERE source_id='primekg_graph'"))
+    denied = lookup(graph_api)
+    assert denied.status_code == 403
+    assert len(graph_api.state["requests"]) == 1 and counts(graph_api.engine) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("mode,status,code", [
+    ("timeout", 504, "primekg_timeout"),
+    ("http_error", 503, "primekg_read_failed"),
+    ("protocol_error", 503, "primekg_query_failed"),
+])
+def test_lookup_failure_is_not_fake_not_found(graph_api, mode, status, code):
+    graph_api.state["mode"] = mode
+    failed = lookup(graph_api)
+    assert failed.status_code == status
+    assert failed.json()["detail"]["code"] == code
+    assert "SYNTHETIC private error" not in failed.text
+    assert "candidates" not in failed.json() and counts(graph_api.engine) == (0, 0, 0)
+    graph_api.state["mode"] = "edges"
+    assert lookup(graph_api).status_code == 200
+    assert counts(graph_api.engine) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("field", ["name", "node_source", "primekg_id", "primekg_type"])
+def test_lookup_missing_native_candidate_fields_are_503_without_publication(graph_api, field):
+    incomplete = dict(NATIVE_CANDIDATE)
+    incomplete.pop(field)
+    graph_api.state["lookup_nodes"] = [incomplete]
+    response = lookup(graph_api)
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "primekg_invalid_response"
+    assert counts(graph_api.engine) == (0, 0, 0)

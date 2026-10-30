@@ -24,8 +24,10 @@ from biz_rules.history_models import (
     RecordKind,
     RunView,
 )
-from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGQuery
-from flows.graph_query import PrimeKGResult, query_primekg
+from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGLookup, PrimeKGQuery
+from flows.graph_query import (
+    PrimeKGResult, PrimeKGLookupResult, lookup_primekg, query_primekg,
+)
 from db import history as store
 
 
@@ -154,6 +156,14 @@ def sources():
         "business_types": list(BUSINESS_TYPES),
         "sources": _call(store.list_sources),
     }
+
+
+@router.post(
+    "/graph/primekg/lookup", response_model=PrimeKGLookupResult,
+    dependencies=[Depends(require_graph_query)],
+)
+def primekg_lookup(body: PrimeKGLookup):
+    return _call(lookup_primekg, body)
 
 
 @router.post(

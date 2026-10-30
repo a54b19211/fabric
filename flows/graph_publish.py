@@ -227,41 +227,10 @@ def capture_legacy(
     }
 
 
-def capture_primekg(
-    *,
-    node_type,
-    node_source,
-    seed_id,
-    relation_types=(),
-    neighbor_term="",
-    limit=20,
-    client=None,
-):
-    """固定参数化一跳只读查询；复用httpx，不接收Cypher或写入命令。"""
+def _read_primekg(statement, parameters, columns, max_rows, *, client=None):
+    """两个固定图工具共用的只读HTTP边界；不接受外部传入语句。"""
     import re
-    from datetime import datetime, timezone
 
-    labels = {
-        "gene/protein": "`gene/protein`",
-        "disease": "`disease`",
-        "drug": "`drug`",
-    }
-    if (
-        node_type not in labels
-        or not node_source
-        or not seed_id
-        or len(node_source) > 160
-        or len(seed_id) > 400
-        or not 1 <= limit <= 200
-        or len(relation_types) > 16
-        or any(not value or len(value) > 120 for value in relation_types)
-        or len(neighbor_term) > 120
-    ):
-        raise HistoryError("primekg_capture_budget", "PrimeKG身份、类型或读取预算无效")
-    query = PrimeKGQuery(
-        node_type=node_type, node_source=node_source, seed_id=seed_id,
-        relation_types=list(relation_types), neighbor_term=neighbor_term, limit=limit,
-    )
     url = os.environ.get("DATAFABRIC_GRAPH_NEO4J_URL", "")
     user = os.environ.get("DATAFABRIC_GRAPH_NEO4J_USER", "")
     password = os.environ.get("DATAFABRIC_GRAPH_NEO4J_PASSWORD", "")
@@ -275,34 +244,9 @@ def capture_primekg(
         store._source(conn, "primekg_graph")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", database):
         raise HistoryError("invalid_neo4j_database", "图数据库名无效")
-    # label只能从上面固定白名单选择；其余全部以参数传入。
-    statement = (
-        "MATCH (candidate:" + labels[node_type] + " {primekg_id:$seed_id}) "
-        "WHERE candidate.node_source=$node_source "
-        "WITH candidate LIMIT 2 WITH collect(candidate) AS seeds "
-        "UNWIND CASE WHEN size(seeds)=1 THEN seeds ELSE [null] END AS s "
-        "OPTIONAL MATCH (s)-[r]-(n) "
-        "WHERE (size($relation_types)=0 OR type(r) IN $relation_types) "
-        "AND ($neighbor_term='' OR toLower(n.name) CONTAINS toLower($neighbor_term)) "
-        "RETURN size(seeds) AS seed_count,properties(s) AS seed,"
-        "properties(startNode(r)) AS from_node,properties(endNode(r)) AS to_node,"
-        "type(r) AS relation_type,properties(r) AS properties LIMIT $limit_plus_one"
-    )
-    body = {
-        "statements": [
-            {
-                "statement": statement,
-                "parameters": {
-                    "seed_id": seed_id,
-                    "node_source": node_source,
-                    "relation_types": list(relation_types),
-                    "neighbor_term": neighbor_term,
-                    "limit_plus_one": limit + 1,
-                },
-                "resultDataContents": ["row"],
-            }
-        ]
-    }
+    body = {"statements": [{
+        "statement": statement, "parameters": parameters, "resultDataContents": ["row"]
+    }]}
     owned = client is None
     if owned:
         client = httpx.Client(
@@ -341,31 +285,105 @@ def capture_primekg(
                 503,
             )
         result = data["results"][0]
-        expected = [
-            "seed_count",
-            "seed",
-            "from_node",
-            "to_node",
-            "relation_type",
-            "properties",
-        ]
-        if (
-            result.get("columns") != expected
-            or not isinstance(result.get("data"), list)
-            or len(result["data"]) > limit + 1
-        ):
-            raise HistoryError(
-                "primekg_invalid_response", "图服务响应不符合固定读取契约", 503
-            )
         rows = [item["row"] for item in result["data"]]
-        if not rows or any(not isinstance(row, list) or len(row) != 6 for row in rows):
-            raise HistoryError(
-                "primekg_invalid_response", "图服务缺少明确身份查询结果", 503
-            )
+        if (
+            result.get("columns") != columns
+            or not isinstance(result["data"], list)
+            or len(rows) > max_rows
+            or any(not isinstance(row, list) or len(row) != len(columns) for row in rows)
+        ):
+            raise HistoryError("primekg_invalid_response", "图服务响应不符合固定读取契约", 503)
+        return rows
+    except httpx.TimeoutException:
+        raise HistoryError(
+            "primekg_timeout", "当前图读取超时，未发布；可重试本次请求", 504
+        ) from None
+    except httpx.HTTPError:
+        raise HistoryError(
+            "primekg_read_failed", "当前图HTTP读取失败，未发布，不当作空结果", 503
+        ) from None
+    except (KeyError, TypeError, ValueError):
+        raise HistoryError(
+            "primekg_invalid_response", "当前图返回无法核对的结构，未发布", 503
+        ) from None
+    finally:
+        if owned:
+            client.close()
+
+
+def capture_primekg(
+    *,
+    node_type,
+    node_source,
+    seed_id,
+    relation_types=(),
+    neighbor_term="",
+    limit=20,
+    client=None,
+):
+    """固定参数化一跳只读查询；复用httpx，不接收Cypher或写入命令。"""
+    from datetime import datetime, timezone
+
+    labels = {
+        "gene/protein": "`gene/protein`",
+        "disease": "`disease`",
+        "drug": "`drug`",
+    }
+    if (
+        node_type not in labels
+        or not node_source
+        or not seed_id
+        or len(node_source) > 160
+        or len(seed_id) > 400
+        or not 1 <= limit <= 200
+        or len(relation_types) > 16
+        or any(not value or len(value) > 120 for value in relation_types)
+        or len(neighbor_term) > 120
+    ):
+        raise HistoryError("primekg_capture_budget", "PrimeKG身份、类型或读取预算无效")
+    query = PrimeKGQuery(
+        node_type=node_type, node_source=node_source, seed_id=seed_id,
+        relation_types=list(relation_types), neighbor_term=neighbor_term, limit=limit,
+    )
+    # label只能从上面固定白名单选择；其余全部以参数传入。
+    statement = (
+        "MATCH (candidate:" + labels[node_type] + " {primekg_id:$seed_id}) "
+        "WHERE candidate.node_source=$node_source "
+        "WITH candidate LIMIT 2 WITH collect(candidate) AS seeds "
+        "UNWIND CASE WHEN size(seeds)=1 THEN seeds ELSE [null] END AS s "
+        "OPTIONAL MATCH (s)-[r]-(n) "
+        "WHERE (size($relation_types)=0 OR type(r) IN $relation_types) "
+        "AND ($neighbor_term='' OR toLower(n.name) CONTAINS toLower($neighbor_term)) "
+        "RETURN size(seeds) AS seed_count,properties(s) AS seed,"
+        "properties(startNode(r)) AS from_node,properties(endNode(r)) AS to_node,"
+        "type(r) AS relation_type,properties(r) AS properties LIMIT $limit_plus_one"
+    )
+    body = {
+        "statements": [
+            {
+                "statement": statement,
+                "parameters": {
+                    "seed_id": seed_id,
+                    "node_source": node_source,
+                    "relation_types": list(relation_types),
+                    "neighbor_term": neighbor_term,
+                    "limit_plus_one": limit + 1,
+                },
+                "resultDataContents": ["row"],
+            }
+        ]
+    }
+    rows = _read_primekg(
+        statement, body["statements"][0]["parameters"],
+        ["seed_count", "seed", "from_node", "to_node", "relation_type", "properties"],
+        limit + 1, client=client,
+    )
+    try:
+        if not rows:
+            raise HistoryError("primekg_invalid_response", "图服务缺少明确身份查询结果", 503)
         if any(row[0] != rows[0][0] for row in rows) or rows[0][0] not in {0, 1}:
             raise HistoryError(
-                "ambiguous_primekg_seed",
-                "源命名空间/ID命中多个物理节点，请唐先核对身份",
+                "ambiguous_primekg_seed", "源命名空间/ID命中多个物理节点，请唐先核对身份"
             )
         seed_found = rows[0][0] == 1
 
@@ -426,21 +444,10 @@ def capture_primekg(
             "historical_availability": "unknown",
             "evidence_status": "background_no_document_binding",
         }
-    except httpx.TimeoutException:
-        raise HistoryError(
-            "primekg_timeout", "当前图读取超时，未发布；可重试本次请求", 504
-        ) from None
-    except httpx.HTTPError:
-        raise HistoryError(
-            "primekg_read_failed", "当前图HTTP读取失败，未发布，不当作空结果", 503
-        ) from None
     except (KeyError, TypeError, ValueError):
         raise HistoryError(
             "primekg_invalid_response", "当前图返回无法核对的结构，未发布", 503
         ) from None
-    finally:
-        if owned:
-            client.close()
 
 
 def _legacy_document(value):

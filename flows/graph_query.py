@@ -1,11 +1,14 @@
 """受限的当前图查询：复用捕获、发布和固定版本读取，不接受Cypher。"""
 
+from datetime import datetime, timezone
+from typing import Literal
+
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError, Model, RunView, sha256
-from biz_rules.reviewed_graph import GraphNeighborhood, PrimeKGQuery
+from biz_rules.reviewed_graph import GraphNeighborhood, PrimeKGLookup, PrimeKGQuery
 from db import history as store
-from flows.graph_publish import capture_primekg, publish_primekg
+from flows.graph_publish import _read_primekg, capture_primekg, publish_primekg
 
 
 class PrimeKGResult(Model):
@@ -68,3 +71,63 @@ def query_primekg(request: PrimeKGQuery, key: str):
             if run is None:
                 raise
     return _result(request, run)
+
+
+class PrimeKGCandidate(Model):
+    name: str
+    node_type: Literal["drug", "disease", "gene/protein"]
+    node_source: str
+    seed_id: str
+    identity_status: Literal["background"] = "background"
+
+
+class PrimeKGLookupResult(Model):
+    query: PrimeKGLookup
+    status: Literal["resolved", "ambiguous", "not_found"]
+    candidates: list[PrimeKGCandidate]
+    truncated: bool
+    observed_at: datetime
+    evidence_status: Literal["current_identity_candidates_only"] = "current_identity_candidates_only"
+    limitations: list[str]
+
+
+def lookup_primekg(request: PrimeKGLookup):
+    labels = {"drug": "`drug`", "disease": "`disease`", "gene/protein": "`gene/protein`"}
+    statement = (
+        "MATCH (n:" + labels[request.node_type] + ") "
+        "WHERE toLower(n.name)=toLower($name) "
+        "RETURN properties(n) AS candidate LIMIT $limit_plus_one"
+    )
+    rows = _read_primekg(
+        statement, {"name": request.name, "limit_plus_one": request.limit + 1},
+        ["candidate"], request.limit + 1,
+    )
+    candidates = []
+    try:
+        for row in rows:
+            raw = row[0]
+            if (not isinstance(raw, dict) or raw.get("primekg_type") != request.node_type
+                    or not isinstance(raw.get("name"), str)
+                    or raw["name"].lower() != request.name.lower()):
+                raise ValueError("图身份候选不符合本次查询")
+            query = PrimeKGQuery(
+                node_type=raw["primekg_type"], node_source=raw["node_source"],
+                seed_id=raw["primekg_id"],
+            )
+            candidates.append(PrimeKGCandidate(
+                name=raw["name"], node_type=query.node_type,
+                node_source=query.node_source, seed_id=query.seed_id,
+            ))
+    except (KeyError, TypeError, ValueError):
+        raise HistoryError("primekg_invalid_response", "图身份候选缺少可核对的原生字段", 503) from None
+    return PrimeKGLookupResult(
+        query=request,
+        status="not_found" if not candidates else "resolved" if len(candidates) == 1 else "ambiguous",
+        candidates=candidates[:request.limit], truncated=len(candidates) > request.limit,
+        observed_at=datetime.now(timezone.utc),
+        limitations=[
+            "仅为当前PrimeKG中同类型、精确名称（不区分大小写）的候选；不覆盖别名或缩写",
+            "resolved仅表示一个候选，不表示身份经专业审核；重名不能自动选择",
+            "不发布候选包，不提供过去身份已知的证明；历史调查仍须使用当时已发布的固定图版本",
+        ],
+    )

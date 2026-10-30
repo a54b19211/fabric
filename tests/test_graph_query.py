@@ -67,3 +67,16 @@ def test_capture_scope_and_timeout_are_explicit(monkeypatch):
         with pytest.raises(HistoryError) as error:
             publish.capture_primekg(**query.model_dump(), client=client)
     assert error.value.code == "primekg_timeout" and error.value.status == 504
+
+
+@pytest.mark.parametrize("bad_count", [{}, []])
+def test_malformed_capture_count_stays_a_protocol_error(monkeypatch, bad_count):
+    import flows.graph_publish as publish
+
+    monkeypatch.setattr(
+        publish, "_read_primekg",
+        lambda *args, **kwargs: [[bad_count, None, None, None, None, None]],
+    )
+    with pytest.raises(HistoryError) as error:
+        publish.capture_primekg(node_type="gene/protein", node_source="NCBI", seed_id="1956")
+    assert error.value.code == "primekg_invalid_response" and error.value.status == 503

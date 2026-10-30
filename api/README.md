@@ -68,6 +68,20 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
 雷达先选资料和对象，再通过这里读取图。图关系可以提示下一步查什么；它本身不等于药物有效、安全或机制已经证实。
 
+### 先用名称取得真实编号
+
+第一次只知道 EGFR 这样的名称时，调用 `POST /api/history/graph/primekg/lookup`，使用与 capture 相同的独立图查询凭据。例如：
+
+```json
+{"name": "EGFR", "node_type": "gene/protein", "limit": 5}
+```
+
+返回的 `candidates` 含图里实际的 `name`、`node_type`、`node_source`、`seed_id`；选定后把后三项原样传给 capture。名称按同类型精确匹配，不区分大小写；最多返回 20 项。只有一个候选时 `status=resolved`，多个为 `ambiguous`，没有为 `not_found`。即使 limit=1，只要还有其他候选，也会报告歧义和截断，不能自动采用第一条。
+
+该入口只查当前名称，不做别名推断或身份审核，不创建 History 版本。BCMA 等简称若未录为 PrimeKG 节点名称，必须明确未找到；有原资料或已核查字典中的基因符号时，可以再据此查询，不能让模型补一个编号。原有审核页的 `dict_id` 是本地字典编号，不能冒充 PrimeKG 的原生编号。
+
+候选的 `observed_at` 是本次查询时间。历史调查应直接使用当时的固定图版本及 resolve；当前名称候选不能证明过去已知身份，更不能绕过 capture 版本的首次收到时间。请求拒绝 cutoff、任意查询语句和外部地址。
+
 ### 查询当前 PrimeKG
 
 `POST /api/history/graph/primekg/capture` 使用独立的 `DATAFABRIC_GRAPH_QUERY_TOKEN`，放在 `Authorization: Bearer ...`。另需 `Idempotency-Key`，长度为 1–160 个可见 ASCII 字符。例如请求体：

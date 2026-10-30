@@ -32,6 +32,21 @@ def clean_identity(value):
     return value
 
 
+class PrimeKGLookup(Model):
+    """当前图里的精确名称候选，不代替唐的身份消歧。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    node_type: Literal["drug", "disease", "gene/protein"]
+    limit: int = Field(default=10, ge=1, le=20, strict=True)
+
+    @field_validator("name")
+    @classmethod
+    def nonblank_name(cls, value):
+        if not value.strip() or any(ord(c) < 32 for c in value):
+            raise ValueError("名称不得全为空白或含控制字符")
+        return value.strip()
+
+
 class PrimeKGQuery(Model):
     """仅允许当前图的一跳查询，参数会随发布包保存。"""
 
