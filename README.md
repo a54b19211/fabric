@@ -628,3 +628,87 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。
 
 仅做模拟资料归档与检索联调时，archives 请求同步落入 History；随后用同一隔离配置运行 python -m flows.history_publish --poll-seconds 5 --batch-size 5 --backfill-batch-size 0，由后台自动建索引并核对回执。归档不需要另造导入队列。结束时给测试发布进程发 SIGTERM，保留持久待办，不能清空队列或数据库。
+
+## 隔离补采与字段交接（2026-10-31）
+
+雷达的模拟任务可以向**专门配置的测试 Fabric** 发起补采。仍使用
+`POST /api/history/fetch` 和原来的 RQ 队列、History 版本保存流程。
+这条测试路径从服务器上的待采原件包取资料，不联网，不向现役库写入。
+返回了任务号不等于补采完成：须继续读取 `GET /api/history/runs/{id}`，
+核对状态、`version_ids` 和 `coverage`。
+
+请求沿用原字段，增加：
+
+- `is_demo: true`；
+- `demo_instance_id`：与测试 Fabric 约定的实例编号；
+- 模拟材料可用 `source_id: "external_archive"`。真实补采仍使用原来的公开来源，
+  默认 `is_demo: false`，不得带模拟实例编号。
+
+测试进程必须显式设置 `DATAFABRIC_HISTORY_DEMO_FETCH_CONFIG`。下面是格式示例，
+端口、库名和文件路径要换成该次新建资源的实际值：
+
+```json
+{
+  "instance_id": "fabric-demo-example",
+  "database": {"host": "127.0.0.1", "port": 25432, "name": "fabric_demo_test"},
+  "redis": {"host": "127.0.0.1", "port": 26379, "db": 0},
+  "input_file": "/absolute/private/demo-inputs.json"
+}
+```
+
+程序核对上述地址与本进程的 History 数据库、Redis 配置一致，并限制为回环地址。
+没有这项配置、实例号不符或后端地址不符时拒绝模拟补采。现役进程不要设置它。
+读写凭据仍使用已有 History 配置，不能写进请求样例或 Git。
+`DATAFABRIC_HISTORY_FETCH_ENABLED=false` 可以关闭外部公开读取；隔离模拟补采另按上述条件检查。
+
+待采包格式如下，`sources` 内每条记录直接使用现有 `ArchiveRecord` 格式：
+
+```json
+{
+  "schema_version": "datafabric.demo_fetch.v1",
+  "instance_id": "fabric-demo-example",
+  "sources": {
+    "external_archive": [
+      {
+        "source_record_id": "SYNTHETIC-EXAMPLE",
+        "record_kind": "document",
+        "raw_media_type": "application/json",
+        "raw_content": "{\"record_kind\":\"document\",\"title\":\"SYNTHETIC example\",\"full_text\":\"Synthetic test text.\"}"
+      }
+    ]
+  }
+}
+```
+
+包内只放本阶段已经可见、允许补采的材料，不放后续波次或裁判答案。
+`query: "*"` 表示在这个私有包内按数量上限取资料；其他查询按空格分词，
+要求每个词都出现在原站编号、标题或正文中。可用 `source_record_ids` 限定编号。
+这是模拟来源的字面查询，不代表公开站点的搜索能力。
+不支持模拟时间窗和采集续页，传入这些参数会明确报错。
+
+接受任务时会保存本次选中的原件，Worker 和恢复任务读取这个固定输入。
+同一幂等键仍指向原任务；输入包后来发生变化，不会改掉已接受任务的材料。
+回执明确返回 `fetch_mode: "simulated"`、`demo_instance_id`、`input_sha256`，
+以及实际保存的版本。查询没有命中时说明 `demo_query_no_match`；超过条数上限时说明
+`record_budget`，不能把它当成完整覆盖。模拟补采不会自行生成历史可见时间证明。
+要做历史回放，仍通过 `/archives` 提交原件、许可和可得时间依据。
+
+普通 `external_archive` 文档现在保留 `company_name`、`period_start`、
+`period_end`、`unit`、`metric_role`、`value`、`license`、`license_url`，
+并为存在的字段附上原件 JSON 位置。字段不存在、显式空值和数值零分别保留。
+这些只是来源填写的原值：不据公司名确认身份，不据单位和角色名称认定可比，
+也不据许可字符串认定已经获准使用。
+
+需要明确数值口径时，沿用 `datafabric.observation.v1` 或 SEC 的
+`financial_observations`。更正继续使用 `document_relations`，有旧版回执时绑定
+`target_version_id`；删帖、辟谣等继续保留在 `information_events`，不自动判断真假。
+图查询是另一条已有能力：材料补采不会生成已核图事实。任务没有包含图来源时应说明
+`graph_source_not_in_scope`；需要查询模拟图时，原文先归档，节点与关系保持实际的待核状态，
+再按已有图接口查询，不能为通过验收填成人工审核通过。
+
+本次还补了环境备份的忽略规则。`.env.bak` 等真实配置不应提交；
+`.env.example` 仍可正常跟踪。现役目录的本地启动脚本和虚拟环境另由本地
+`.git/info/exclude` 保护，不移动或覆盖学生文件。
+
+本次没有数据库迁移。部署或回退时，API 与 Worker 使用同一版本；先停收新的模拟任务，
+已接受任务应由相应版本处理完或保留待恢复。不要用清队列、覆盖数据库来回退代码。

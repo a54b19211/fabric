@@ -29,7 +29,6 @@ from flows.graph_query import (
     PrimeKGResult, PrimeKGLookupResult, lookup_primekg, query_primekg,
 )
 from biz_rules.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
-from biz_rules.history_sources import require_public_fetch_enabled
 from db import history as store
 
 
@@ -187,8 +186,9 @@ def archive(
 
 @router.post("/fetch", response_model=RunView, dependencies=[Depends(require_admin)])
 def fetch(body: FetchRequest, idempotency_key: str = Header(alias="Idempotency-Key")):
-    _call(require_public_fetch_enabled)
-    from flows.history_fetch import enqueue_fetch
+    from flows.history_fetch import enqueue_fetch, require_fetch_allowed
+
+    _call(require_fetch_allowed, body)
 
     run, fresh = _call(store.create_fetch, body, idempotency_key)
     return _call(enqueue_fetch, run) if fresh else run
@@ -207,9 +207,9 @@ def run(run_id: str):
     dependencies=[Depends(require_admin)],
 )
 def retry(run_id: str, body: RetryRequest):
-    _call(require_public_fetch_enabled)
-    from flows.history_fetch import retry_inactive
+    from flows.history_fetch import require_retry_allowed, retry_inactive
 
+    _call(require_retry_allowed)
     return _call(retry_inactive, run_id, body.expected_attempt)
 
 

@@ -71,7 +71,7 @@ def test_disabled_public_reader_blocks_every_source_before_http_or_dispatch(monk
 
 def test_already_queued_worker_cannot_fetch_after_runtime_closure(monkeypatch):
     monkeypatch.setenv(FLAG, "false")
-    monkeypatch.setattr(worker, "job_input", Mock(return_value=FetchRequest(source_id="clinicaltrials", query="*")))
+    monkeypatch.setattr(worker, "job_input", Mock(return_value=(FetchRequest(source_id="clinicaltrials", query="*"), None)))
     finish, failure, http = Mock(), Mock(), Mock(side_effect=AssertionError("HTTP forbidden"))
     monkeypatch.setattr(worker, "finish_fetch", finish)
     monkeypatch.setattr(worker, "fail_job", failure)

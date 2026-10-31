@@ -339,7 +339,9 @@ class FetchContinuation(Model):
 
 
 class FetchRequest(Model):
-    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc", "who_don", "sec_companyfacts", "gdelt_doc"]
+    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc", "who_don", "sec_companyfacts", "gdelt_doc", "external_archive"]
+    is_demo: bool = False
+    demo_instance_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
     query: str = Field(min_length=1, max_length=500)
     source_record_ids: list[str] = Field(default_factory=list, max_length=100)
     max_records: int = Field(default=10, ge=1, le=100)
@@ -368,6 +370,14 @@ class FetchRequest(Model):
 
     @model_validator(mode="after")
     def fixed_scope(self):
+        if self.is_demo != (self.demo_instance_id is not None):
+            raise ValueError("模拟补采须绑定隔离实例；真实补采不得带模拟实例")
+        if self.source_id == "external_archive" and not self.is_demo:
+            raise ValueError("归档来源仅允许隔离模拟补采")
+        if self.is_demo and not self.query.strip():
+            raise ValueError("模拟补采查询不能为空白")
+        if self.is_demo and (self.updated_since or self.updated_until or self.continuation):
+            raise ValueError("私有模拟包不支持公开源时间窗或续页")
         for value in (self.updated_since, self.updated_until):
             if value is not None:
                 utc(value)
@@ -388,7 +398,7 @@ class FetchRequest(Model):
 
 
 class Coverage(Model):
-    mode: Literal["declared_manifest", "bounded_public_query", "adopted_records"]
+    mode: Literal["declared_manifest", "bounded_public_query", "bounded_demo_query", "adopted_records"]
     scope_description: str
     complete: bool
     upstream_pagination_exhausted: bool | None = None
@@ -415,6 +425,9 @@ class RecordCollection(Model):
 
 
 class RunView(Model):
+    fetch_mode: Literal["public", "simulated"] | None = None
+    demo_instance_id: str | None = None
+    input_sha256: str | None = None
     id: str
     source_id: str
     is_demo: bool

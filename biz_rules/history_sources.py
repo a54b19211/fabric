@@ -315,6 +315,15 @@ EXTERNAL_FIELDS = {
     "summary",
     "source_published_at",
     "source_updated_at",
+    # 仅交接原件声明和精确位置；不据字段名确认主体、数值口径或来源许可。
+    "company_name",
+    "period_start",
+    "period_end",
+    "unit",
+    "metric_role",
+    "value",
+    "license",
+    "license_url",
 }
 
 
@@ -760,6 +769,8 @@ def require_public_fetch_enabled():
 
 def read_public(request: FetchRequest) -> dict:
     """返回真实完成/截断/失败及已读原件。HTTP异常绝不伪装EOF。"""
+    if request.is_demo:
+        raise HistoryError("demo_public_fetch_forbidden", "模拟补采不得调用外部公开来源", 403)
     require_public_fetch_enabled()
     if request.source_id == "gdelt_doc":
         from biz_rules.gdelt_news import read_gdelt

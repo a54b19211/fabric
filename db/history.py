@@ -400,7 +400,12 @@ def read_graph_neighborhood(
 
 
 def _view(row):
-    values = {key: row[key] for key in RunView.model_fields}
+    values = {key: row[key] for key in RunView.model_fields if key in row}
+    if row["kind"] == "fetch":
+        request = row["request_payload"]
+        values["fetch_mode"] = "simulated" if row["is_demo"] else "public"
+        values["demo_instance_id"] = request.get("demo_instance_id")
+        values["input_sha256"] = (request.get("_demo_fetch") or {}).get("input_sha256")
     values["id"] = str(values["id"])
     return RunView(**values)
 
@@ -850,15 +855,25 @@ def _publish(
 
 
 def create_fetch(request: FetchRequest, key: str):
+    from flows.history_fetch import freeze_demo_fetch, require_fetch_allowed
+
+    require_fetch_allowed(request)
+    body = request.model_dump(mode="json", exclude_none=True)
+    # Preserve hashes of pre-demo public requests and their existing idempotency keys.
+    if not request.is_demo:
+        body.pop("is_demo")
     with history_engine().begin() as conn:
+        stored = None
+        if request.is_demo:
+            existing = conn.execute(
+                text("SELECT id FROM history_runs WHERE idempotency_key=:key"), {"key": key}
+            ).first()
+            if existing is None:
+                stored = {**body, "_demo_fetch": freeze_demo_fetch(request)}
         row, fresh = _new_run(
-            conn,
-            request.source_id,
-            False,
-            "fetch",
-            request.model_dump(mode="json", exclude_none=True),
-            key,
-            "公开有界检索：" + request.query,
+            conn, request.source_id, request.is_demo, "fetch", body, key,
+            ("隔离模拟补采：" if request.is_demo else "公开有界检索：") + request.query,
+            stored_body=stored,
         )
         return _view(row), fresh
 
@@ -881,10 +896,18 @@ def job_input(run_id, attempt):
         ):
             raise HistoryError("stale_attempt", "该任务尝试已失效，不重新发布", 409)
         _source(conn, row["source_id"])
+        from flows.history_fetch import require_fetch_allowed
+
+        body = dict(row["request_payload"])
+        frozen = body.pop("_demo_fetch", None)
+        request = FetchRequest.model_validate(body)
+        require_fetch_allowed(request)
+        if request.is_demo != row["is_demo"]:
+            raise HistoryError("fetch_identity_mismatch", "补采任务与模拟身份不匹配", 409)
         conn.execute(
             text("UPDATE history_runs SET state='running' WHERE id=:id"), {"id": run_id}
         )
-        return FetchRequest.model_validate(row["request_payload"])
+        return request, frozen
 
 
 def finish_fetch(run_id, attempt, batch):
@@ -899,6 +922,22 @@ def finish_fetch(run_id, attempt, batch):
         )
         if run["attempt"] != attempt or run["state"] != "running":
             raise HistoryError("stale_attempt", "旧任务尝试不得发布", 409)
+        from flows.history_fetch import read_demo_fetch, require_fetch_allowed
+
+        body = dict(run["request_payload"])
+        frozen = body.pop("_demo_fetch", None)
+        request = FetchRequest.model_validate(body)
+        require_fetch_allowed(request)
+        if request.is_demo != run["is_demo"]:
+            raise HistoryError("fetch_identity_mismatch", "补采任务与模拟身份不匹配", 409)
+        if request.is_demo:
+            expected = read_demo_fetch(request, frozen)
+            if (batch.get("demo_instance_id") != request.demo_instance_id
+                    or batch.get("input_sha256") != expected["input_sha256"]
+                    or [item.model_dump(mode="json") for item in batch["records"]]
+                       != [item.model_dump(mode="json") for item in expected["records"]]):
+                raise HistoryError("demo_input_invalid", "模拟补采结果与冻结原件不匹配", 422)
+            batch = expected
         prepared = [
             (item, project_record(run["source_id"], item)) for item in batch["records"]
         ]
@@ -915,9 +954,16 @@ def finish_fetch(run_id, attempt, batch):
         }
         if batch.get("next_continuation") is not None:
             coverage["next_continuation"] = batch["next_continuation"]
+        if request.is_demo:
+            coverage.update(
+                is_demo=True, fetch_mode="simulated", demo_instance_id=request.demo_instance_id,
+                input_sha256=batch["input_sha256"],
+            )
         coverage.update(
-            mode="bounded_public_query",
+            mode="bounded_demo_query" if request.is_demo else "bounded_public_query",
             limitations=[
+                "隔离模拟包的字面查询与有界采用；不是外部公开采集或完整领域队列"
+                if request.is_demo else
                 "有界公开检索不是完整历史队列；不据此训练成功项目筛选后的伪队列"
             ],
         )
@@ -978,6 +1024,9 @@ def enqueue_failed(run_id, attempt):
 def retry_fetch(run_id, expected_attempt, *, job_inactive):
     if not job_inactive:
         raise HistoryError("job_may_be_active", "原任务可能仍在执行，不能重发", 409)
+    from flows.history_fetch import require_retry_allowed
+
+    require_retry_allowed()
     with history_engine().begin() as conn:
         row = (
             conn.execute(
@@ -998,6 +1047,9 @@ def retry_fetch(run_id, expected_attempt, *, job_inactive):
             raise HistoryError(
                 "retry_conflict", "任务类型、状态或尝试版本不允许恢复", 409
             )
+        from flows.history_fetch import require_fetch_allowed
+
+        require_fetch_allowed(_view(row))
         attempt = expected_attempt + 1
         history = list(row["attempts"])
         if not any(item["attempt"] == expected_attempt for item in history):
