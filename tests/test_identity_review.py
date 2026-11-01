@@ -188,7 +188,7 @@ def test_candidate_similarity_score_is_preserved_exactly(monkeypatch):
 def test_alias_writeback_can_explicitly_avoid_http_under_review_locks(monkeypatch, cached):
     from unittest.mock import MagicMock
     from db.repository import _write_aliases_with_embedding
-    from core_engine.common import cloud_api_client
+    from core_engine import cloud_api_client
     generate = MagicMock(side_effect=AssertionError('Review transaction must not call the embedding service'))
     monkeypatch.setattr(cloud_api_client, 'generate_embedding', generate)
     session = MagicMock()

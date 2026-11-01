@@ -210,7 +210,7 @@ class TestNormalizedAlignment:
     def test_normalized_name_written_to_entity_data(self):
         data = {"name_en": ""}
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
              patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
              patch("disambiguation.engine.generate_embedding", return_value=None):
             disambiguate("盐酸二甲双胍片", "Drug", data)
@@ -226,7 +226,7 @@ class TestNormalizedAlignment:
 
         data = {"name_en": ""}
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
              patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
              patch("disambiguation.engine.generate_embedding", side_effect=fake_embedding):
             disambiguate("盐酸二甲双胍片", "Drug", data)
@@ -237,7 +237,7 @@ class TestNormalizedAlignment:
         # 过剥零容忍：normalized_name（剥离后）不进 Step2 精确匹配
         data = {"name_en": ""}
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None) as mock_lookup, \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]) as mock_lookup, \
              patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
              patch("disambiguation.engine.generate_embedding", return_value=None):
             disambiguate("盐酸二甲双胍片", "Drug", data)

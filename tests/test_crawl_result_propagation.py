@@ -31,8 +31,7 @@ def _task_mock(**kwargs):
 
 def _load_isolated_flow():
     modules = {}
-    for package in ("config", "core_engine", "core_engine.acquisition", "core_engine.parsing",
-                    "core_engine.quality", "core_engine.storage", "db"):
+    for package in ("config", "core_engine", "db"):
         module = ModuleType(package)
         module.__path__ = []
         modules[package] = module

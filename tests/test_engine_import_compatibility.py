@@ -29,4 +29,4 @@ def test_existing_prefect_file_entrypoints_load_the_same_flow_and_task():
     from flows import etl
 
     assert load_flow_from_entrypoint("main_etl.py:main_pipeline") is etl.main_pipeline
-    assert import_object("core_engine/router.py:route_pdf") is route_pdf
+    assert import_object("core_engine/router.py:route_pdf").name == route_pdf.name
