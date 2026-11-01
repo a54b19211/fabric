@@ -61,13 +61,13 @@ class MainEtlResultsTests(unittest.TestCase):
         repository.log_crawl_task = Mock(return_value=1)
         repository.update_crawl_log = Mock()
         self.log = repository.update_crawl_log
-        pagination = types.ModuleType("core_engine.acquisition.pagination_driver")
+        pagination = types.ModuleType("core_engine.pagination_driver")
         pagination.JsClickDriver = type("FakeJsDriver", (), {})
         self.pagination = pagination
         self.modules = patch.dict(sys.modules, {
             "isolated_main_etl_results": module,
             "db.repository": repository,
-            "core_engine.acquisition.pagination_driver": pagination,
+            "core_engine.pagination_driver": pagination,
         })
         self.modules.start()
         self.addCleanup(self.modules.stop)

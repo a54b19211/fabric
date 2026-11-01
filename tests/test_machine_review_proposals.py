@@ -162,8 +162,8 @@ def test_conflict_runner_saves_value_and_input_as_a_pending_agent_run(saved):
     runner = AgentRunner(SimpleNamespace(max_iterations=3, model_name="mock-model"))
     result = {"decision": "accept_new", "resolved_value": "PHASE3", "reason": "source field",
               "confidence": 0.8, "messages": []}
-    with patch("core_engine.agents.runner.get_conflict_resolver_graph") as graph, \
-         patch("core_engine.agents.runner.save_agent_run", return_value=saved) as save:
+    with patch("core_engine.agent_runner.get_conflict_resolver_graph") as graph, \
+         patch("core_engine.agent_runner.save_agent_run", return_value=saved) as save:
         graph.return_value.invoke.return_value = result
         response = runner.run_conflict_resolution(**conflict_input())
     assert response["decision"] == ("proposal_accept_new" if saved else "error")

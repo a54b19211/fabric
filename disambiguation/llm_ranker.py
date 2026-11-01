@@ -11,7 +11,7 @@ import requests
 from loguru import logger
 
 from config.settings import APP
-from core_engine.common.cloud_api_client import qwen_chat
+from core_engine.cloud_api_client import qwen_chat
 from disambiguation.models import (
     DisambiguationResult, CandidateEntity,
     STATUS_CANDIDATE_MATCHED, STATUS_NEW_ENTITY, STATUS_AMBIGUOUS,

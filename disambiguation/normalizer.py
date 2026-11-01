@@ -13,6 +13,12 @@ from disambiguation.normalization_rules import (
     DOSAGE_WHITELIST,
     PROCESSING_ENTITY_TYPES,
     DOSAGE_ENTITY_TYPES,
+    COMPANY_CN_SUFFIXES,
+    COMPANY_EN_SUFFIXES,
+    SALT_PREFIXES,
+    SALT_PROTECTED_CORES,
+    HYDRATE_SUFFIXES,
+    SALT_ENTITY_TYPES,
     MIN_CORE_LENGTH,
 )
 
@@ -41,26 +47,14 @@ def _normalize_punctuation(text: str) -> str:
 
 
 def _remove_company_suffix(name: str) -> str:
-    """去除公司法律后缀：有限公司、Inc.、Ltd. 等。"""
-    cn_suffixes = [
-        '股份有限公司',      # 股份有限公司
-        '有限责任公司',      # 有限责任公司
-        '有限公司',                  # 有限公司
-        '股份公司',                  # 股份公司
-    ]
+    """去除公司法律后缀：有限公司、Inc.、Ltd. 等（规则数据见 normalization_rules）。"""
     result = name
-    for suffix in cn_suffixes:
+    for suffix in COMPANY_CN_SUFFIXES:
         if result.endswith(suffix):
             result = result[:-len(suffix)]
             break
 
-    eng_suffixes = [
-        r'\s+Inc\.?$', r'\s+Ltd\.?$', r'\s+Limited$',
-        r'\s+Co\.\s*,\s*Ltd\.?$', r'\s+Corp\.?$',
-        r'\s+Corporation$', r'\s+Co\.?$', r'\s+PLC$',
-        r'\s+LLC$', r'\s+LLP$',
-    ]
-    for pattern in eng_suffixes:
+    for pattern in COMPANY_EN_SUFFIXES:
         result = re.sub(pattern, '', result, flags=re.IGNORECASE)
 
     return result.strip()
@@ -160,13 +154,38 @@ def _strip_dosage_suffix(name: str) -> str:
     return name
 
 
+def _strip_salt_prefix(name: str) -> str:
+    """剥离盐型前缀（轻量：只剥酸根前缀，金属阳离子后缀不剥）。长前缀优先；核心名长度 ≥ MIN_CORE_LENGTH 才剥。
+
+    保护：剥离后核心名若命中 SALT_PROTECTED_CORES（纯离子/元素残留，如「乳酸亚铁→亚铁」）则不剥，
+    规避无机盐（硫酸钙/醋酸钠/乳酸亚铁）误剥成酸名/离子名。
+    """
+    for prefix in SALT_PREFIXES:
+        if name.startswith(prefix) and len(name) - len(prefix) >= MIN_CORE_LENGTH:
+            core = name[len(prefix):]
+            if core not in SALT_PROTECTED_CORES:
+                return core
+    return name
+
+
+def _strip_hydrate_suffix(name: str) -> str:
+    """剥离水合物后缀（倍半水合物/一水合物/水合物等）。长后缀优先；核心名长度 ≥ MIN_CORE_LENGTH 才剥。"""
+    for suffix in HYDRATE_SUFFIXES:
+        if name.endswith(suffix) and len(name) - len(suffix) >= MIN_CORE_LENGTH:
+            return name[:-len(suffix)]
+    return name
+
+
 def normalize_for_alignment(entity_name: str, entity_type: str = "") -> str:
     """
     对齐导向规范化（4.1）：剥离修饰成分、恢复核心名，生成 normalized_name 对齐辅助键。
 
     - OCR 纠错（全类型）
     - 炮制前缀剥离（Drug / TCMFormula）
+    - 盐型前缀剥离（Drug / Compound，轻量：只剥酸根前缀，金属阳离子后缀不剥）
     - 剂型后缀剥离（Drug / Compound）
+    - 水合物后缀剥离（Drug / Compound）
+    - 公司法律后缀剥离（Company）
 
     返回核心名；无剥离时返回去除首尾空白后的原 name。
     注意：返回值是「对齐辅助键」，不覆盖原文 entity_name；按设计仅用于 Step4 向量召回。
@@ -175,6 +194,12 @@ def normalize_for_alignment(entity_name: str, entity_type: str = "") -> str:
     name = _apply_ocr_corrections(name)
     if entity_type in PROCESSING_ENTITY_TYPES:
         name = _strip_processing_prefix(name)
+    if entity_type in SALT_ENTITY_TYPES:
+        name = _strip_salt_prefix(name)
     if entity_type in DOSAGE_ENTITY_TYPES:
         name = _strip_dosage_suffix(name)
+    if entity_type in SALT_ENTITY_TYPES:
+        name = _strip_hydrate_suffix(name)
+    if entity_type == "Company":
+        name = _remove_company_suffix(name)
     return name

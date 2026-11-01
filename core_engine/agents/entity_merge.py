@@ -13,7 +13,7 @@ from loguru import logger
 
 from core_engine.agent_tools import ENTITY_MERGE_TOOLS
 from core_engine.agents.prompts import ENTITY_MERGE_SYSTEM
-from core_engine.agents.config import AgentConfig
+from core_engine.agent_config import AgentConfig
 
 
 class EntityMergeState(TypedDict):

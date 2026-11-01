@@ -65,6 +65,18 @@ KNOWN_SITES = [
     "phirda.com",          # 中国医药创新促进会
     "fiercepharma.com",    # Fierce Pharma 行业资讯
     "chictr.org.cn",       # 中国临床试验注册中心
+
+    # --- 2026-10-22 补充：已接入但曾漏配的一手来源 ---
+    # 漏配导致官方来源被判「三无文件」拿 0.30，与内容质量无关（缺陷 D1–D5）
+    "clinicaltrials.gov",        # 美国临床试验注册库（官方一手登记）
+    "pubmed.ncbi.nlm.nih.gov",   # PubMed（NLM 官方文献库）
+    "hkexnews.hk",               # 港交所披露易（上市公司法定披露）
+    "nccn.org",                  # NCCN 指南发布方
+    "roche.com",                 # 罗氏企业官方新闻稿
+
+    # --- 2026-10-22 预置：任务书待接入的新来源（尚无样本，不参与当前评分）---
+    "europepmc.org",             # Europe PMC
+    "ebi.ac.uk/europepmc",       # Europe PMC REST 出口（限定路径，避免整个 ebi.ac.uk 被高估）
 ]
 
 

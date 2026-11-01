@@ -30,20 +30,30 @@ def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
     return text.strip()
 
 
-def full_to_half(text: str) -> str:
-    """全角字符转半角（仅 ASCII 全角区间 + 全角空格）。"""
+_FULLWIDTH_ALNUM = re.compile(r"[\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]")
+
+
+def full_to_half(text: str, alnum_only: bool = False) -> str:
+    """全角字符转半角。
+
+    alnum_only=False（默认，向后兼容）：转换整个 U+FF01–FF5E 区段 + 全角空格。
+        适用于标识符抽取等「只关心数字/字母、标点怎么变都行」的场景。
+
+    alnum_only=True：只转换全角数字、全角字母、全角空格。
+        清洗管线必须用这一档：U+FF01–FF5E 里同时住着中文标点
+        （，；：！？（）），整段转半角会把「主要目的：」改成「主要目的:」，
+        对中文语料是降质而非清洗。实测 150 条信封的字段值中
+        全角字母数字 0 个、全角中文标点 408 个，整段转换 100% 有害。
+    """
     if not text:
         return ""
-    result = []
-    for ch in text:
-        code = ord(ch)
-        if code == 0x3000:  # 全角空格 → 半角空格
-            result.append(" ")
-        elif 0xFF01 <= code <= 0xFF5E:  # 全角 ASCII → 半角
-            result.append(chr(code - 0xFEE0))
-        else:
-            result.append(ch)
-    return "".join(result)
+    text = text.replace("\u3000", " ")
+    if alnum_only:
+        return _FULLWIDTH_ALNUM.sub(lambda m: chr(ord(m.group()) - 0xFEE0), text)
+    return "".join(
+        chr(ord(ch) - 0xFEE0) if 0xFF01 <= ord(ch) <= 0xFF5E else ch
+        for ch in text
+    )
 
 
 def remove_extra_whitespace(text: str) -> str:

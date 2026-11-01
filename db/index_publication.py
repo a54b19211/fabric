@@ -8,7 +8,7 @@ from pydantic import Field
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError, HistoryRecord, Model, canonical, sha256
-from core_engine.sync.weknora_index_client import WeKnoraIndexClient, publication_id
+from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
 from db import history
 
 

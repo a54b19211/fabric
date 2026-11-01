@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from loguru import logger
 
-from core_engine.agents.runner import get_agent_runner
+from core_engine.agent_runner import get_agent_runner
 from db.agent_run_repo import (
     get_agent_run, list_agent_runs, list_runs_by_document,
     get_agent_stats, get_runs_for_document, count_pending_entities,
@@ -688,7 +688,7 @@ async def stream_entity_merge(entity_id: int):
 @router.post("/merge/batch", response_model=MergeQueueStatusResponse)
 def trigger_batch_merge(body: BatchMergeRequest):
     """批量消歧——从可消歧实体中取 N 个入队，后台消费。"""
-    from core_engine.queues.merge_queue import get_merge_queue
+    from core_engine.merge_queue import get_merge_queue
     from sqlalchemy import text
 
     mq = get_merge_queue()
@@ -723,7 +723,7 @@ def trigger_batch_merge(body: BatchMergeRequest):
 @router.get("/merge/queue/status", response_model=MergeQueueStatusResponse)
 def get_merge_queue_status():
     """查询消歧队列状态。"""
-    from core_engine.queues.merge_queue import get_merge_queue
+    from core_engine.merge_queue import get_merge_queue
     mq = get_merge_queue()
     return MergeQueueStatusResponse(**mq.status())
 

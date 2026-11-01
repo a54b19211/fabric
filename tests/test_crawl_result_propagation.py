@@ -41,17 +41,17 @@ def _load_isolated_flow():
         "loguru": {"logger": Mock()},
         "config.settings": {"APP": SimpleNamespace(TASK_RETRIES=2, TASK_RETRY_DELAY=0.25)},
         "config.crawler_settings": {"SITE_PROFILES": {"demo": {}}},
-        "core_engine.acquisition.scrapling_client": {
+        "core_engine.scrapling_client": {
             "fetch_page": _task_mock(return_value={"cookies": []}),
             "download_pdf": _task_mock(), "make_uuid": Mock(), "_sniff_bytes": Mock(),
         },
-        "core_engine.parsing.router": {"route_webpage": _task_mock(), "route_pdf": _task_mock()},
-        "core_engine.parsing.docx_parser": {"route_docx": Mock()},
-        "core_engine.parsing.excel_parser": {"route_excel": Mock()},
-        "core_engine.parsing.content_cleaner": {"clean_content": _task_mock()},
-        "core_engine.quality.quality_checker": {"check_quality": _task_mock(), "quarantine_data": _task_mock()},
-        "core_engine.storage.storage_writer": {"write_to_database": _task_mock()},
-        "core_engine.parsing.transform_pipeline": {
+        "core_engine.router": {"route_webpage": _task_mock(), "route_pdf": _task_mock()},
+        "core_engine.docx_parser": {"route_docx": Mock()},
+        "core_engine.excel_parser": {"route_excel": Mock()},
+        "core_engine.content_cleaner": {"clean_content": _task_mock()},
+        "core_engine.quality_checker": {"check_quality": _task_mock(), "quarantine_data": _task_mock()},
+        "core_engine.storage_writer": {"write_to_database": _task_mock()},
+        "core_engine.transform_pipeline": {
             "apply_l3_normalization": _task_mock(), "apply_identifier_alignment": _task_mock(),
         },
         "db.repository": {"get_document_by_uuid": Mock()},

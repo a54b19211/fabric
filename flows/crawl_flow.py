@@ -28,14 +28,14 @@ from prefect import task, flow
 
 from config.settings import APP
 from config.crawler_settings import SITE_PROFILES
-from core_engine.acquisition.scrapling_client import fetch_page, download_pdf, make_uuid, _sniff_bytes
-from core_engine.parsing.router import route_webpage, route_pdf
-from core_engine.parsing.docx_parser import route_docx
-from core_engine.parsing.excel_parser import route_excel
-from core_engine.parsing.content_cleaner import clean_content
-from core_engine.quality.quality_checker import check_quality, quarantine_data
-from core_engine.storage.storage_writer import write_to_database
-from core_engine.parsing.transform_pipeline import apply_l3_normalization, apply_identifier_alignment
+from core_engine.scrapling_client import fetch_page, download_pdf, make_uuid, _sniff_bytes
+from core_engine.router import route_webpage, route_pdf
+from core_engine.docx_parser import route_docx
+from core_engine.excel_parser import route_excel
+from core_engine.content_cleaner import clean_content
+from core_engine.quality_checker import check_quality, quarantine_data
+from core_engine.storage_writer import write_to_database
+from core_engine.transform_pipeline import apply_l3_normalization, apply_identifier_alignment
 from db.repository import (
     get_document_by_uuid,
 )

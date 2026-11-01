@@ -136,7 +136,7 @@ def find_envelope(envelope_dir: Path, source: str, uuid: str) -> Path:
 # =========================================================================
 def system_level(parsed: dict) -> str:
     """对映射后的 parsed_result 跑 T4 多维质量评分，返回 quality_level。"""
-    from core_engine.quality.quality_checker import check_quality
+    from core_engine.quality_checker import check_quality
 
     checked = check_quality.fn(parsed)
     return checked["quality_level"]

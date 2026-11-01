@@ -887,7 +887,7 @@ def test_secondary_source_evidence_reaches_a_real_published_graph(databases):
     source, target = databases
     with source.begin() as conn:
         conn.exec_driver_sql((Path(__file__).resolve().parents[1] /
-            "migration/versions/V021__identity_evidence.sql").read_text())
+            "migration/versions/V023__identity_evidence.sql").read_text())
     values = [snapshot("evidence-first"), snapshot("evidence-second")]
     for value in values:
         value["raw_content"] = "SYNTHETIC company supplies this trial.\\n" + value["raw_content"]

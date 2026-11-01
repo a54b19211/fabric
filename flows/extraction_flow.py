@@ -25,7 +25,7 @@ from disambiguation.models import (
     CandidateEntity, DisambiguationResult, STATUS_AUTO_MATCHED,
     STATUS_CANDIDATE_MATCHED, STATUS_AMBIGUOUS, STATUS_NEW_ENTITY,
 )
-from core_engine.common.cloud_api_client import qwen_extract_structured
+from core_engine.cloud_api_client import qwen_extract_structured
 from flows.chunking import split_document, build_memory_context
 from db.repository import (
     update_extraction_status,
@@ -435,7 +435,7 @@ def extract_single_document(
             # 4a2. 锁外预生成 embedding — 对消歧判 new 的实体，提前调云 API
             #       embedding 缓存写入 entity_data["_embeddings"]，
             #       锁内 _write_aliases_with_embedding 直接复用，不占锁
-            from core_engine.common.cloud_api_client import generate_embedding
+            from core_engine.cloud_api_client import generate_embedding
             embed_start = time.time()
             embed_count = 0
             for ent in entities:

@@ -1,1 +1,0 @@
-"""quality implementation modules."""

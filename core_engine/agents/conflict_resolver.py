@@ -14,7 +14,7 @@ from loguru import logger
 from core_engine.agent_tools import CONFLICT_RESOLUTION_TOOLS
 from core_engine.agent_tools.decision_tools import resolve_attribute_conflict
 from core_engine.agents.prompts import CONFLICT_RESOLUTION_SYSTEM
-from core_engine.agents.config import AgentConfig
+from core_engine.agent_config import AgentConfig
 
 
 class ConflictResolutionState(TypedDict):

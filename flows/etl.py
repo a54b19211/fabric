@@ -24,12 +24,12 @@ from prefect.task_runners import ConcurrentTaskRunner
 
 from config.settings import APP
 from config.crawler_settings import SITE_PROFILES, LOCAL_PDF_SCAN_DIRS
-from core_engine.acquisition.scrapling_client import download_pdf, scan_local_pdfs
-from core_engine.acquisition.pagination_driver import make_driver
-from core_engine.parsing.router import route_pdf
-from core_engine.acquisition.api_router import iter_api_results
-from core_engine.storage.storage_writer import write_to_database
-from core_engine.agents.review_exporter import export_review_csv
+from core_engine.scrapling_client import download_pdf, scan_local_pdfs
+from core_engine.pagination_driver import make_driver
+from core_engine.router import route_pdf
+from core_engine.api_router import iter_api_results
+from core_engine.storage_writer import write_to_database
+from core_engine.review_exporter import export_review_csv
 from flows.crawl_flow import (
     _validate_parsed_document,
     classify_store_result,
@@ -180,7 +180,7 @@ def crawl_detail_page(site_key: str, profile: dict, detail_url: str, crawl_mode:
 @task(name="crawl_single_start_url", retries=0)
 def crawl_single_start_url(site_key: str, profile: dict, start_url: str, crawl_mode: str = "full") -> dict:
     """单入口爬取：本次 URL 去重，不因历史记录停止或跳过修订。"""
-    from core_engine.acquisition.pagination_driver import JsClickDriver
+    from core_engine.pagination_driver import JsClickDriver
     from db.repository import log_crawl_task
 
     stats = _new_stats()

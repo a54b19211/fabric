@@ -19,7 +19,16 @@ CONFIG = {
         "title":        "product_description",
         "publish_date": "report_date",
         "summary":      "reason_for_recall",
-        "drug_name":    "product_description",
+        # 药名候选链：openfda 结构化名优先（规范通用名/品牌名），整段产品描述兜底。
+        # 此前单映射 product_description，导致 drug_name 是 200 字的包装+企业+NDC
+        # 描述，既不是药名、也无法直接送权威库（只能靠归一器截断）。
+        # 注意：兜底时保留原值不动，截断由 biz_rules.drug_name_normalizer 负责。
+        "drug_name":    [
+            "openfda.generic_name.0",
+            "openfda.brand_name.0",
+            "openfda.substance_name.0",
+            "product_description",
+        ],
         "manufacturer": "recalling_firm",
         "category":     "__const__:药品召回",
     },
@@ -34,5 +43,9 @@ CONFIG = {
         "status": "status",
         "recalling_firm": "recalling_firm",
         "distribution_pattern": "distribution_pattern",
+        # FDA 上市申请号（NDA/ANDA/BLA + 6 位），来自 openfda 子对象。
+        # 补这一条是因为 fda 此前完全没有可校验的标识符字段，T3 标识符对齐
+        # 在这两个站点上是 0 输入。有 openfda 的记录可直接过本地格式校验。
+        "approval_number": "openfda.application_number.0",
     },
 }

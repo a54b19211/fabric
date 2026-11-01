@@ -43,21 +43,35 @@ class ConfidenceInfo(BaseModel):
 # ======================== 各来源 Extra 模型 ========================
 # 每个来源定义自己的 extra 结构，爬虫写入时用对应模型验证后序列化为 dict
 
-class NmpaExtra(BaseModel):
+class SiteExtra(BaseModel):
+    """所有站点 extra 的公共基类。
+
+    [为什么要有这个基类]
+    drug_name 不属于任何单一站点，而是跨站点的通用字段，同时也是 T3
+    标识符对齐的唯一输入键。此前各站点模型各自声明，结果 clinicaltrials /
+    fda_api_enforcement 等站点模型漏了该字段，validate_extra() 按 Pydantic
+    默认行为把它丢掉 —— 药名在落库前一刻消失，对齐永远 0 命中。
+    统一在基类声明，任何站点都不会再丢。
+    """
+
+    drug_name: str = Field(
+        default="", description="涉及药品名称（跨站点通用，供标识符对齐使用）"
+    )
+
+
+class NmpaExtra(SiteExtra):
     """国家药品监督管理局（NMPA）特有字段"""
-    drug_name: str = Field(default="", description="涉及药品名称")
     approval_number: str = Field(default="", description="批准文号")
     manufacturer: str = Field(default="", description="生产企业")
 
 
-class CdeExtra(BaseModel):
+class CdeExtra(SiteExtra):
     """国家药品审评中心（CDE）特有字段"""
-    drug_name: str = Field(default="", description="涉及药品名称")
     approval_number: str = Field(default="", description="批准文号")
     manufacturer: str = Field(default="", description="生产企业")
 
 
-class ChictrExtra(BaseModel):
+class ChictrExtra(SiteExtra):
     """中国临床试验注册中心（ChiCTR）特有字段"""
     regno: str = Field(default="", description="注册号，如 ChiCTR2600122286")
     reg_status: str = Field(default="", description="注册号状态")
@@ -78,7 +92,7 @@ class ChictrExtra(BaseModel):
     ethics_approved: str = Field(default="", description="是否获伦理委员会批准")
 
 
-class PubmedExtra(BaseModel):
+class PubmedExtra(SiteExtra):
     """PubMed 特有字段"""
     pmid: str = Field(default="", description="PubMed ID")
     pmcid: str = Field(default="", description="PubMed Central ID")
@@ -89,14 +103,14 @@ class PubmedExtra(BaseModel):
     oa_pdf_url: str = Field(default="", description="Open Access PDF 链接")
 
 
-class HkexExtra(BaseModel):
+class HkexExtra(SiteExtra):
     """香港交易所（HKEX）特有字段"""
     stock_code: str = Field(default="", description="股票代码，如 01093")
     stock_name: str = Field(default="", description="股票名称，如 石药集团")
     stock_id: Optional[int] = Field(default=None, description="HKEX 内部股票 ID")
 
 
-class DrugbankExtra(BaseModel):
+class DrugbankExtra(SiteExtra):
     """DrugBank 特有字段"""
     drugbank_id: str = Field(default="", description="DrugBank ID，如 DB12345")
     drug_type: str = Field(default="", description="药物类型：small molecule / biologic")
@@ -109,7 +123,7 @@ class DrugbankExtra(BaseModel):
     synonyms: List[str] = Field(default_factory=list, description="同义词列表（最多10个）")
 
 
-class ClinicalTrialsExtra(BaseModel):
+class ClinicalTrialsExtra(SiteExtra):
     """ClinicalTrials.gov 特有字段"""
     nct_id: str = Field(default="", description="NCT编号，如 NCT00001372")
     study_type: str = Field(default="", description="研究类型：Interventional / Observational")
@@ -125,7 +139,7 @@ class ClinicalTrialsExtra(BaseModel):
     arm_groups: List[str] = Field(default_factory=list, description="研究组别列表")
 
 
-class FdaEnforcementExtra(BaseModel):
+class FdaEnforcementExtra(SiteExtra):
     """FDA 药品召回（openFDA enforcement）特有字段"""
     recall_number: str = Field(default="", description="召回编号")
     recall_initiation_date: str = Field(default="", description="召回发起日期")
@@ -135,9 +149,23 @@ class FdaEnforcementExtra(BaseModel):
     status: str = Field(default="", description="召回状态：Ongoing / Terminated / Completed")
     recalling_firm: str = Field(default="", description="召回企业")
     distribution_pattern: str = Field(default="", description="分销范围")
+    approval_number: str = Field(
+        default="",
+        description="FDA 上市申请号（NDA/ANDA/BLA + 6 位），来自 openfda.application_number",
+    )
 
 
-class FdaDrugSafetyExtra(BaseModel):
+class FdaLabelExtra(SiteExtra):
+    """FDA 药品说明书（openFDA label）特有字段"""
+    approval_number: str = Field(
+        default="",
+        description="FDA 上市申请号（NDA/ANDA/BLA + 6 位），来自 openfda.application_number",
+    )
+    product_ndc: List[str] = Field(default_factory=list, description="NDC 编码列表")
+    spl_set_id: str = Field(default="", description="SPL 文档集 ID")
+
+
+class FdaDrugSafetyExtra(SiteExtra):
     """FDA 药品安全通报特有字段"""
     safety_report_id: str = Field(default="", description="安全报告 ID")
     report_date: str = Field(default="", description="报告日期")
@@ -153,6 +181,7 @@ EXTRA_MODEL_MAP: Dict[str, type] = {
     "hkex": HkexExtra,
     "drugbank": DrugbankExtra,
     "fda_api_enforcement": FdaEnforcementExtra,
+    "fda_api_drug_label": FdaLabelExtra,
     "fda_drug_safety": FdaDrugSafetyExtra,
     "clinicaltrials": ClinicalTrialsExtra,
 }
@@ -193,6 +222,25 @@ class MetadataEnvelope(BaseModel):
 
     # 字段级血缘追踪（lineage_tracer 写入的 JSON 结构）
     lineage: Dict[str, Any] = Field(default_factory=dict, description="字段级血缘追踪记录")
+
+    # T3 标准标识符对齐结果：{原始药名: {found, std_id, source_id, raw_value,
+    # resolved_value, confidence, candidates, degraded}}
+    # 阶段说明：当前仅进入 JSON 信封与 data/authority/ 旁路存档，尚未入库；
+    # 落库形态见 task_doc/B2_标识符对齐落库设计.md（doc_authority_resolution 表）。
+    authority_resolutions: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="药名 → 权威库标识符对齐结果（暂不入库，仅信封/旁路存档）",
+    )
+
+    # T3 标识符族对齐结果（本地格式合法性校验，零网络）：
+    # {extra 字段名: {found, std_id, source_id="format", raw_value,
+    #                 resolved_value, confidence, field, id_type}}
+    # 与 authority_resolutions 分开存放：两者分母语义不同（药名是「实体能否
+    # 对齐到权威库」，标识符是「字符串是否合法」），混算会稀释真实命中率。
+    identifier_resolutions: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="标识符字段 → 本地格式校验结果（暂不入库，仅信封/旁路存档）",
+    )
 
     # 置信度
     confidence: ConfidenceInfo = Field(default_factory=ConfidenceInfo)

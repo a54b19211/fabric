@@ -6,7 +6,7 @@ from db.history import history_engine
 
 
 def migrate_index():
-    sql = (Path(__file__).parent / "versions/V020__weknora_index.sql").read_text()
+    sql = (Path(__file__).parent / "versions/V022__weknora_index.sql").read_text()
     with history_engine().begin() as conn:
         for statement in sql.split(";"):
             statement = "\n".join(s for s in statement.splitlines() if not s.lstrip().startswith("--")).strip()

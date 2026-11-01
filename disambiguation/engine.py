@@ -3,7 +3,7 @@
 from loguru import logger
 
 from db.repository import lookup_alias_candidates, search_similar_entities
-from core_engine.common.cloud_api_client import generate_embedding
+from core_engine.cloud_api_client import generate_embedding
 from disambiguation.models import (
     DisambiguationResult, CandidateEntity,
     STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED,

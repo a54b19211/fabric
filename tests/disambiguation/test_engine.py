@@ -202,3 +202,44 @@ class TestDisambiguate:
             r = disambiguate("X", "Drug", {})
         assert r.status == STATUS_NEW_ENTITY
         assert r.match_step == "step_none"
+
+
+class TestNormalizedAlignment:
+    """Step0.5 对齐规范化（normalized_name）接入行为：写入 + 进 Step4 向量召回 + 不进 Step2。"""
+
+    def test_normalized_name_written_to_entity_data(self):
+        data = {"name_en": ""}
+        with patch("disambiguation.engine.match_strong_id", return_value=None), \
+             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
+             patch("disambiguation.engine.generate_embedding", return_value=None):
+            disambiguate("盐酸二甲双胍片", "Drug", data)
+        assert data["normalized_name"] == "二甲双胍"
+
+    def test_normalized_name_used_for_vector_recall(self):
+        # normalized_name 作为 vector_normalized 键进 Step4（generate_embedding 收到剥离后核心名）
+        emb_calls = []
+
+        def fake_embedding(name):
+            emb_calls.append(name)
+            return None
+
+        data = {"name_en": ""}
+        with patch("disambiguation.engine.match_strong_id", return_value=None), \
+             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
+             patch("disambiguation.engine.generate_embedding", side_effect=fake_embedding):
+            disambiguate("盐酸二甲双胍片", "Drug", data)
+        assert "盐酸二甲双胍片" in emb_calls
+        assert "二甲双胍" in emb_calls  # 剥离后核心名参与向量召回
+
+    def test_normalized_name_not_in_step2(self):
+        # 过剥零容忍：normalized_name（剥离后）不进 Step2 精确匹配
+        data = {"name_en": ""}
+        with patch("disambiguation.engine.match_strong_id", return_value=None), \
+             patch("disambiguation.engine.lookup_alias", return_value=None) as mock_lookup, \
+             patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
+             patch("disambiguation.engine.generate_embedding", return_value=None):
+            disambiguate("盐酸二甲双胍片", "Drug", data)
+        called_names = [c.args[0] for c in mock_lookup.call_args_list]
+        assert "二甲双胍" not in called_names

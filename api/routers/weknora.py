@@ -18,7 +18,7 @@ from db.repository import (
 from db.session import get_session
 from db.models import Document
 from sqlalchemy import func
-from core_engine.sync.weknora_graph_client import get_weknora_graph_client
+from core_engine.weknora_graph_client import get_weknora_graph_client
 
 router = APIRouter(prefix="/api/weknora", tags=["weknora"])
 

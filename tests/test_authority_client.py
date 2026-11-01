@@ -89,4 +89,8 @@ class TestAuthorityDegradation:
         monkeypatch.setattr("core_engine.authority_client._fetch_cids", _boom)
         r = resolve_identifier("zzznotadrug")
         assert r["found"] is False
-        assert r["degraded"] is False
+        # A0（2026-10-27）语义修正：网络/限流导致的未命中必须标 degraded=True。
+        # 旧实现一律返回 degraded=False，使「没查成」被当成「查了没有」，
+        # 命中率分母被污染（限流会被误算成药名不规范）。真正的「确认无此名」
+        # 只在权威库返回 404 时出现，见 test_404_is_definitive_miss。
+        assert r["degraded"] is True

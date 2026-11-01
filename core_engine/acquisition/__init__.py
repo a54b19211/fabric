@@ -1,1 +1,0 @@
-"""acquisition implementation modules."""

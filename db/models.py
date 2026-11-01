@@ -74,6 +74,49 @@ class DocExtra(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class DocAuthorityResolution(Base):
+    """标准标识符对齐结果的入库记录（A1）。
+
+    与 `doc_extra` 同级，都是 documents 的附属表（无外键，沿用软删除风格）。
+    两族共用一张表，靠 `id_type` 区分：
+      - `drug_name`：走 PubChem → ChEMBL → 本地白名单在线对齐，额外带
+        `candidate`（实际查询的候选名）/ `rule`（命中规则）/ `candidates_tried`
+      - `pmid` / `doi` / `nct_id` / `approval_number` / `cas_number`：走本地
+        格式校验族（`source_id='format'`），三元组字段为空。
+
+    `degraded=True` 表示权威库请求降级（429/5xx/网络异常），既不算命中也不算
+    未命中，统计时必须单独报，不能并进未命中率。
+    """
+    __tablename__ = "doc_authority_resolution"
+    __table_args__ = (
+        UniqueConstraint("uuid", "id_type", "resolution_key", name="uq_doc_authority_key"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    uuid: Mapped[str] = mapped_column(Text, nullable=False)  # 对应 documents.uuid
+    source_site: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    id_type: Mapped[str] = mapped_column(Text, nullable=False, default="drug_name")
+    resolution_key: Mapped[str] = mapped_column(Text, nullable=False)  # 药名原值 或 字段名
+    found: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 占位名（Placebo/盐水/包装描述）跳过查询，须从命中率分母剔除
+    skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    std_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    resolved_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidate: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rule: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidates_tried: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    candidates: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 # ── 3. attachments ────────────────────────────────────────────
 
 class Attachment(Base):

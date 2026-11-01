@@ -49,8 +49,8 @@ def engine():
         legacy_id = conn.execute(text("INSERT INTO entity_dict(entity_type,canonical_data,is_verified) VALUES ('Company','{}',true) RETURNING id")).scalar_one()
         original = conn.execute(text('SELECT is_verified FROM entity_dict WHERE id=:id'), {'id': legacy_id}).scalar_one()
         assert original
-        conn.exec_driver_sql((migration_dir / 'V021__identity_evidence.sql').read_text())
-        conn.exec_driver_sql((migration_dir / 'V021__identity_evidence.sql').read_text())
+        conn.exec_driver_sql((migration_dir / 'V023__identity_evidence.sql').read_text())
+        conn.exec_driver_sql((migration_dir / 'V023__identity_evidence.sql').read_text())
         legacy = conn.execute(text('SELECT is_verified,verified_by,verified_at FROM entity_dict WHERE id=:id'), {'id': legacy_id}).one()
         assert tuple(legacy) == (True, None, None)
     yield scoped
@@ -252,7 +252,7 @@ def test_primekg_stays_candidate_until_trusted_identity_and_checked_evidence(ses
 
 def test_migration_runner_executes_v021_transactionally_and_tracks_it_once(engine, monkeypatch):
     from migration import migrate
-    migration = Path(__file__).resolve().parents[1] / 'migration' / 'versions' / 'V021__identity_evidence.sql'
+    migration = Path(__file__).resolve().parents[1] / 'migration' / 'versions' / 'V023__identity_evidence.sql'
     monkeypatch.setattr(migrate, 'get_engine', lambda: engine)
     monkeypatch.setattr(migrate, '_collect_migrations', lambda: [migration])
     migrate.run_migrations()

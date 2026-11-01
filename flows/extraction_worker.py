@@ -197,14 +197,14 @@ class RedisWorkerManager:
     """通过 RQ 将任务推入 Redis，由独立 rq worker 进程消费。"""
 
     def __init__(self):
-        from core_engine.queues.task_queue import get_task_queue
+        from core_engine.task_queue import get_task_queue
         self._tq = get_task_queue()
         self._num_workers = APP.EXTRACTION_CONCURRENCY
         # 查询状态也会创建管理对象；不能据此认定在途任务已失活。
         logger.info(f"[WorkerManager] Redis 模式，需启动 {self._num_workers} 个 rq worker 进程")
 
     def submit(self, task: ExtractionTask) -> int:
-        from core_engine.queues.task_queue import Task as TQTask
+        from core_engine.task_queue import Task as TQTask
         self._tq.enqueue(TQTask(uuid=task.uuid))
         return 0
 
@@ -220,18 +220,18 @@ class RedisWorkerManager:
 
     def pause(self) -> None:
         """暂停抽取：rq worker 处理任务前检查标志，暂停时等待。"""
-        from core_engine.queues.task_queue import set_extraction_paused
+        from core_engine.task_queue import set_extraction_paused
         set_extraction_paused(True)
         logger.info("[WorkerManager] 已暂停抽取 (redis)")
 
     def resume(self) -> None:
         """继续抽取：清除暂停标志。"""
-        from core_engine.queues.task_queue import set_extraction_paused
+        from core_engine.task_queue import set_extraction_paused
         set_extraction_paused(False)
         logger.info("[WorkerManager] 已继续抽取 (redis)")
 
     def is_paused(self) -> bool:
-        from core_engine.queues.task_queue import is_extraction_paused
+        from core_engine.task_queue import is_extraction_paused
         return is_extraction_paused()
 
     def shutdown(self) -> None:

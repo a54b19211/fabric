@@ -36,9 +36,16 @@ FIELD_TYPES = {
 
 ENUM_LEGAL = {
     "doc_type": {
+        # --- 原有 8 类（既有 15 站使用）---
         "regulatory_notice", "drug_recall", "drug_label",
         "clinical_trial", "literature", "industry_news",
         "company_announcement", "policy",
+        # --- 2026-10-22 补充：任务书待接入的 4 类新来源 ---
+        # 原枚举不含这些类型，新来源一落库就产生虚假 enum 违规（缺陷 D6）
+        "regulatory_document",         # FDA CRL / 警告信等监管信函
+        "regulatory_decision",         # EMA 决定/意见书
+        "medical_insurance_catalog",   # 国家医保目录
+        "guideline",                   # CDE 指导原则 / NCCN 类指南
     },
     "status": {"AUTO_PROCESSED", "PENDING_REVIEW", "REVIEWED"},
     "language": {"zh", "en"},
