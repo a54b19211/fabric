@@ -8,7 +8,7 @@ from pydantic import Field
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError, HistoryRecord, Model, canonical, sha256
-from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
+from core_engine.sync.weknora_index_client import WeKnoraIndexClient, publication_id
 from db import history
 
 
@@ -37,13 +37,15 @@ def targets():
 
 
 def _manifest(target, record):
+    if target["source_id"] != record.source_id or target["is_demo"] is not record.is_demo:
+        raise HistoryError("index_source_space_mismatch", "索引目标与固定原件来源空间不一致", 409)
     identity = {
         "source_instance": target["source_instance"], "source_id": record.source_id,
         "source_record_id": record.source_record_id, "version_id": record.version_id,
         "raw_sha256": record.raw_sha256,
     }
     return {
-        **identity, "knowledge_base_id": target["knowledge_base_id"],
+        **identity, "is_demo": record.is_demo, "knowledge_base_id": target["knowledge_base_id"],
         "source_scope": target["source_scope"],
         "raw_locator": {k: identity[k] for k in identity if k != "raw_sha256"},
         "title": (record.title or record.source_record_id)[:255],
@@ -175,7 +177,8 @@ def _sent(row):
 def _validate_receipt(row, receipt):
     expected = row["manifest"]
     if (
-        receipt.get("publication_id") != row["remote_id"]
+        receipt.get("is_demo", False) is not row.get("config", {}).get("is_demo", expected.get("is_demo", False))
+        or receipt.get("publication_id") != row["remote_id"]
         or receipt.get("knowledge_base_id") != expected["knowledge_base_id"]
         or receipt.get("source_scope") != expected["source_scope"]
         or receipt.get("content_sha256") != expected["content_sha256"]
@@ -233,6 +236,11 @@ def process_once(*, client=None):
     verified_receipt = None
     try:
         desired, record = _current_state(row)
+        demo = row["config"]["is_demo"]
+        if "is_demo" in row["manifest"] and row["manifest"]["is_demo"] is not demo:
+            raise HistoryError("index_source_space_mismatch", "索引意图与目标空间不一致", 409)
+        # 兼容旧意图时只从原目标配置补标记，绝不把demo降为false。
+        row["manifest"] = {**row["manifest"], "is_demo": demo}
         if row["state"] == "blocked":
             if desired == row["desired_state"] and desired == "active":
                 return _hold_blocked(row)

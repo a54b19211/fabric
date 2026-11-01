@@ -12,6 +12,7 @@ export const syncWeknora = (uuid: string, kbId = '') =>
     { params: { ...(kbId ? { kb_id: kbId } : {}) } },
   )
 
+/** @deprecated Returns HTTP 410; batch indexing uses the existing History publisher. */
 export const syncWeknoraBatch = (count = 100, kbId = '', sourceSite = '') =>
   http.post<any, { triggered: number }>(
     '/weknora/sync-batch',

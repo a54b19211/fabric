@@ -76,7 +76,7 @@
         <el-tag :type="decisionType" size="large">
           {{ decisionLabel }}
         </el-tag>
-        <span class="decision-confidence">置信度 {{ (confidence * 100).toFixed(0) }}%</span>
+        <span v-if="confidence !== undefined" class="decision-confidence">置信度 {{ (confidence * 100).toFixed(0) }}%</span>
       </div>
     </div>
 
@@ -138,7 +138,7 @@ function isPipelineStep(s: ReviewStep): s is PipelineStep {
 const isPipeline = computed(() => props.steps.length > 0 && isPipelineStep(props.steps[0]))
 
 const pipelineSteps = computed(() =>
-  isPipeline.value ? (props.steps.map(s => ({ ...s, _expanded: !!(s as any)._expanded ?? true })) as (PipelineStep & { _expanded: boolean })[]) : []
+  isPipeline.value ? (props.steps.map(s => ({ ...s, _expanded: !!(s as any)._expanded })) as (PipelineStep & { _expanded: boolean })[]) : []
 )
 
 const reactSteps = computed(() =>

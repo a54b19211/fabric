@@ -47,7 +47,7 @@ def web_fetch(url: str) -> str:
         清理后的页面文本（最多 3000 字符），失败返回空字符串。
     """
     try:
-        from core_engine.scrapling_client import fetch_page
+        from core_engine.acquisition.scrapling_client import fetch_page
         result = fetch_page(url, use_simple_fetch=True)
         page = result.get("page")
         if page is None:

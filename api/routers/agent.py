@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from loguru import logger
 
-from core_engine.agent_runner import get_agent_runner
+from core_engine.agents.runner import get_agent_runner
 from db.agent_run_repo import (
     get_agent_run, list_agent_runs, list_runs_by_document,
     get_agent_stats, get_runs_for_document, count_pending_entities,
@@ -35,11 +35,17 @@ class AgentRunResponse(BaseModel):
 class AgentReviewResult(BaseModel):
     run_id: str = ""
     decision: str = ""
+    decision_type: str = ""
+    proposed_decision: str = ""
+    applied: bool = False
+    review_status: str | None = None
+    proposal_saved: bool = False
     reason: str = ""
     confidence: float = 0.0
     suggested_dict_id: int | None = None
     dict_id: int | None = None
     merge_queue_id: int | None = None
+    resolved_value: str | None = None
     entity_name: str = ""
     document_title: str = ""
     steps: list[dict] = Field(default_factory=list)
@@ -97,10 +103,16 @@ class DocumentReviewResponse(BaseModel):
     rejected: int = 0
     escalated: int = 0
     error: int = 0
+    proposed_approved: int = 0
+    proposed_rejected: int = 0
+    proposed_escalated: int = 0
     relation_total: int = 0
     relation_approved: int = 0
     relation_rejected: int = 0
     relation_error: int = 0
+    relation_proposed_approved: int = 0
+    relation_proposed_rejected: int = 0
+    relation_proposed_escalated: int = 0
     results: list[AgentReviewResult] = Field(default_factory=list)
     relation_results: list[AgentReviewResult] = Field(default_factory=list)
 
@@ -113,6 +125,9 @@ class DocumentRunSummary(BaseModel):
     rejected_count: int = 0
     escalated_count: int = 0
     error_count: int = 0
+    proposed_approved_count: int = 0
+    proposed_rejected_count: int = 0
+    proposed_escalated_count: int = 0
     avg_confidence: float = 0.0
     last_review_at: str = ""
     entities: list[dict] = Field(default_factory=list)
@@ -152,6 +167,20 @@ class PendingDocumentItem(BaseModel):
 class PendingDocumentListResponse(BaseModel):
     items: list[PendingDocumentItem] = Field(default_factory=list)
     total: int = 0
+
+
+def _review_run_record(record: dict) -> dict:
+    """Expose persisted suggestions without implying a human review action."""
+    result = dict(record)
+    decision = str(result.get("decision") or "")
+    if decision.startswith("proposal_"):
+        result.update(decision_type="proposal", proposed_decision=decision.removeprefix("proposal_"),
+                      applied=False, proposal_saved=True)
+        if result.get("agent_type") == "conflict_resolution":
+            detail = next((step for step in reversed(result.get("steps") or [])
+                           if step.get("type") == "conflict_proposal"), {})
+            result["resolved_value"] = detail.get("resolved_value")
+    return result
 
 
 # ── 待审核文档列表 ──────────────────────────────────────────────────────────
@@ -270,22 +299,7 @@ def trigger_document_review(document_uuid: str):
     runner = get_agent_runner()
     try:
         result = runner.run_document_review(document_uuid)
-        return DocumentReviewResponse(
-            batch_id=result["batch_id"],
-            document_uuid=result["document_uuid"],
-            document_title=result["document_title"],
-            total=result["total"],
-            approved=result["approved"],
-            rejected=result["rejected"],
-            escalated=result["escalated"],
-            error=result["error"],
-            relation_total=result.get("relation_total", 0),
-            relation_approved=result.get("relation_approved", 0),
-            relation_rejected=result.get("relation_rejected", 0),
-            relation_error=result.get("relation_error", 0),
-            results=[AgentReviewResult(**r) for r in result["results"]],
-            relation_results=[AgentReviewResult(**r) for r in result.get("relation_results", [])],
-        )
+        return DocumentReviewResponse(**result)
     except Exception as e:
         logger.error(f"[API] 文档审核失败: document_uuid={document_uuid} | {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -361,7 +375,7 @@ def get_document_runs(document_uuid: str):
         document_uuid=document_uuid,
         document_title=doc.title if doc else "",
         pending_count=pending,
-        runs=runs,
+        runs=[_review_run_record(run) for run in runs],
     )
 
 
@@ -393,7 +407,7 @@ def trigger_relation_review(relation_id: int):
 
 @router.post("/conflict/resolve", response_model=AgentReviewResult)
 def trigger_conflict_resolution(body: ConflictResolutionRequest):
-    """触发属性冲突自动裁决。"""
+    """生成属性冲突待审建议；不执行实际裁决。"""
     runner = get_agent_runner()
     try:
         result = runner.run_conflict_resolution(
@@ -674,7 +688,7 @@ async def stream_entity_merge(entity_id: int):
 @router.post("/merge/batch", response_model=MergeQueueStatusResponse)
 def trigger_batch_merge(body: BatchMergeRequest):
     """批量消歧——从可消歧实体中取 N 个入队，后台消费。"""
-    from core_engine.merge_queue import get_merge_queue
+    from core_engine.queues.merge_queue import get_merge_queue
     from sqlalchemy import text
 
     mq = get_merge_queue()
@@ -709,7 +723,7 @@ def trigger_batch_merge(body: BatchMergeRequest):
 @router.get("/merge/queue/status", response_model=MergeQueueStatusResponse)
 def get_merge_queue_status():
     """查询消歧队列状态。"""
-    from core_engine.merge_queue import get_merge_queue
+    from core_engine.queues.merge_queue import get_merge_queue
     mq = get_merge_queue()
     return MergeQueueStatusResponse(**mq.status())
 
@@ -722,7 +736,7 @@ def get_run(run_id: str):
     record = get_agent_run(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
-    return record
+    return _review_run_record(record)
 
 
 @router.get("/runs", response_model=RunListResponse)
@@ -734,7 +748,7 @@ def list_runs(
 ):
     """分页查询 Agent 运行历史。target_id 可指定实体/关系 ID。"""
     items, total = list_agent_runs(agent_type=agent_type, target_id=target_id, page=page, page_size=page_size)
-    return RunListResponse(total=total, items=items)
+    return RunListResponse(total=total, items=[_review_run_record(item) for item in items])
 
 
 @router.get("/runs/by-document", response_model=DocumentRunListResponse)
@@ -744,6 +758,8 @@ def list_runs_grouped_by_document(
 ):
     """按文档维度查询实体审核记录 — 聚合展示每篇文档的审核统计 + 可展开的实体列表。"""
     items, total = list_runs_by_document(page=page, page_size=page_size)
+    for item in items:
+        item["entities"] = [_review_run_record(run) for run in item.get("entities", [])]
     return DocumentRunListResponse(
         total=total,
         items=[DocumentRunSummary(**d) for d in items],

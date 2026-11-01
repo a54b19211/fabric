@@ -2,6 +2,13 @@
   <div v-loading="loading">
     <h2 style="margin-bottom:16px">WeKnora 同步管理</h2>
 
+    <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
+      title="按数量批量同步已停用">
+      批量索引由已有 History 发表进程处理（python -m flows.history_publish）。
+      管理员可通过 /api/history/index/status 查看进度，通过
+      /api/history/index/{publication_id}/retry 重试。
+    </el-alert>
+
     <!-- 统计卡片 -->
     <el-row :gutter="16" class="stats-row">
       <el-col :span="8" v-for="c in statCards" :key="c.label">
@@ -32,10 +39,6 @@
           <el-space>
             <el-button type="primary" @click="batchSyncBySelect" :loading="batching" :disabled="selectedUuids.length === 0">
               选中同步 ({{ selectedUuids.length }})
-            </el-button>
-            <el-input-number v-model="batchCount" :min="1" :step="100" style="width:150px" />
-            <el-button type="success" plain @click="batchSyncByCount" :loading="batchingByCount">
-              批量同步
             </el-button>
             <el-button @click="loadData">
               <el-icon><Refresh /></el-icon>刷新
@@ -78,10 +81,10 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import {
-  getWeknoraPending, getWeknoraStats, syncWeknora, syncWeknoraBatch,
+  getWeknoraPending, getWeknoraStats, syncWeknora,
 } from '@/api/weknora'
 
 const SITES = ['nmpa','cde','cde_zdyz','cde_xxgk',
@@ -91,10 +94,8 @@ const SITES = ['nmpa','cde','cde_zdyz','cde_xxgk',
 
 const loading = ref(false)
 const batching = ref(false)
-const batchingByCount = ref(false)
 const kbId = ref('')
 const sourceSite = ref('')
-const batchCount = ref(100)
 const stats = ref({ pending: 0, synced: 0, failed: 0 })
 const pending = ref<any[]>([])
 const total = ref(0)
@@ -166,27 +167,6 @@ async function batchSyncBySelect() {
     loadData()
   } finally {
     batching.value = false
-  }
-}
-
-async function batchSyncByCount() {
-  const source = sourceSite.value || '全部'
-  try {
-    await ElMessageBox.confirm(
-      `确认按数量同步 ${batchCount.value} 篇？\n来源站点: ${source}`,
-      '确认批量同步',
-      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return
-  }
-  batchingByCount.value = true
-  try {
-    const res = await syncWeknoraBatch(batchCount.value, kbId.value, sourceSite.value)
-    ElMessage.success(`已触发 ${res.triggered} 篇文档同步`)
-    loadData()
-  } finally {
-    batchingByCount.value = false
   }
 }
 

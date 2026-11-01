@@ -2,7 +2,7 @@
 
 ## 原则
 
-- **mock 驱动，不连数据库**：所有单元测试用 `mock_session`，验证逻辑而非连通性
+- **单元测试使用替身，持久性另用隔离 PostgreSQL 验证**：单元测试用 `mock_session`，验证逻辑而非连通性
 - **测改过的东西**：优先覆盖近期改动最大的模块（别名写入、实体生命周期、消歧）
 - **一个文件对一个模块**：`tests/db/test_repository.py` 对应 `db/repository.py`
 
@@ -51,7 +51,7 @@ tests/
 
 | # | 测试对象 | 用例 | 验证点 |
 |---|---------|------|--------|
-| 9 | `_do_insert_extraction_result` | 第2次命中同一实体 | review_status → auto_approved |
+| 9 | `_do_insert_extraction_result` | 第2次命中同一实体 | 仅新增来源证据；review_status 不因重复命中升级 |
 | 10 | `approve_entity` | 人工审批 | `_sync_canonical_to_extracted` 被调用 |
 | 11 | `resolve_merge` | 冲突裁决 | `_sync_canonical_to_extracted` 被调用 |
 | 12 | `_sync_canonical_to_extracted` | pending 实体 | entity_data 不被改动 |
@@ -106,7 +106,7 @@ pytest tests/db/ -v
 pytest tests/ --cov=. --cov-report=term-missing
 
 # 排除 WeKnora（第三方）
-pytest tests/ --cov=. --cov-report=term-missing --ignore=WeKnora-main
+pytest tests/ --cov=. --cov-report=term-missing --ignore=已移除的旧嵌套残留
 ```
 
 ## 不测的东西
@@ -115,4 +115,4 @@ pytest tests/ --cov=. --cov-report=term-missing --ignore=WeKnora-main
 - LLM 调用本身（外部依赖，集成测试才需要）
 - 前端组件（缺 Playwright 基础设施）
 - 爬虫网络连通（不属于单元测试范围）
-- WeKnora-main（第三方代码）
+- 已移除的旧嵌套残留（第三方代码）

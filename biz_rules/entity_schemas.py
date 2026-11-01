@@ -200,6 +200,35 @@ class TrialIndicationEntity(BaseModel):
     result_summary: str = Field(default="", description="结果摘要文本（可选）")
 
 
+class OrganizationEntity(BaseModel):
+    """A named source organization; registration does not prove it is a company."""
+    name: str = ""
+    source_fields: dict = Field(default_factory=dict)
+
+
+class InterventionEntity(BaseModel):
+    """Registered interventions can be drugs, procedures, devices or other types."""
+    name: str = ""
+    source_fields: dict = Field(default_factory=dict)
+
+
+class RegulatoryApplicationEntity(BaseModel):
+    application_number: str = ""
+    application_number_raw: str = ""
+    authority: str = ""
+    source_fields: dict = Field(default_factory=dict)
+
+
+class RecallProductEntity(BaseModel):
+    """FDA recall_number identifies one recalled product, not the whole event."""
+    recall_number: str = ""
+    event_id: Optional[str] = None
+    classification: Optional[str] = None
+    status: Optional[str] = None
+    recall_initiation_date: Optional[str] = None
+    termination_date: Optional[str] = None
+
+
 # ── 实体类型 → Pydantic 模型映射 ──────────────────────────────────────────
 ENTITY_SCHEMA_MAP: dict[str, type[BaseModel]] = {
     "Company":            CompanyEntity,
@@ -218,6 +247,10 @@ ENTITY_SCHEMA_MAP: dict[str, type[BaseModel]] = {
     "Pathway":            PathwayEntity,
     "DevelopmentProject": DevelopmentProjectEntity,
     "TrialIndication":    TrialIndicationEntity,
+    "Organization":       OrganizationEntity,
+    "Intervention":       InterventionEntity,
+    "RegulatoryApplication": RegulatoryApplicationEntity,
+    "RecallProduct":      RecallProductEntity,
 }
 
 VALID_ENTITY_TYPES = set(ENTITY_SCHEMA_MAP.keys())

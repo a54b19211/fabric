@@ -27,8 +27,7 @@ def databases(monkeypatch):
     parsed = make_url(url)
     assert (
         parsed.host == "127.0.0.1"
-        and parsed.port == 18436
-        and parsed.database == "fabric_history"
+        and (parsed.port, parsed.database) in {(18436, "fabric_history"), (18636, "bioradar_kdd_opus_history")}
     )
     admin = create_engine(url)
     names = ["test_publication_" + uuid4().hex, "test_destination_" + uuid4().hex]
@@ -532,42 +531,54 @@ def test_extra_write_failure_rolls_back_document_and_capture_in_same_source_tran
     assert version_count(target) == 0
 
 
-def test_dictionary_qualification_withdrawal_dirties_referencing_graph_only(databases):
+def test_dictionary_qualification_withdrawal_dirties_referencing_graph_only(databases, monkeypatch):
+    from api.review_auth import principal_from_token
+    from db import repository
     source, _target = databases
     value = snapshot("dict-qualification")
+    value["raw_content"] = "SYNTHETIC company sponsors this trial.\\n" + value["raw_content"]
     insert_document(source, value)
-    assert publication.publish_once()["state"] == "published"
+    original = publication.publish_once()
+    assert original["state"] == "published"
     with Session(source) as session, session.begin():
         identity = EntityDict(entity_type="Company", is_verified=True)
-        session.add(identity)
-        session.flush()
+        session.add(identity); session.flush()
         identity_id = identity.id
-        session.add(
-            ExtractedEntity(
-                source_doc_uuid=value["uuid"],
-                source_site="clinicaltrials",
-                entity_type="Company",
-                entity_name="SYNTHETIC company",
-                review_status="approved",
-                dict_id=identity.id,
-            )
-        )
+        entity = ExtractedEntity(source_doc_uuid=value["uuid"], source_site="clinicaltrials",
+            entity_type="Company", entity_name="SYNTHETIC company", source_text="SYNTHETIC company",
+            review_status="approved", dict_id=identity.id)
+        session.add(entity); session.flush()
+        entity_id = entity.id
     assert publication.publish_once()["state"] == "published"
     first = history.list_changes("reviewed_graph", True)["items"]
-    assert (
-        json.loads(first[-1]["raw_content"])["nodes"][0]["identity_status"]
-        == "confirmed"
-    )
+    assert json.loads(first[-1]["raw_content"])["nodes"][0]["identity_status"] == "unresolved"
+    # A real trusted review re-reads the actual immutable History original.
+    monkeypatch.setenv("DATAFABRIC_REVIEW_TOKENS", json.dumps({"fixture-token": "synthetic-reviewer"}))
+    monkeypatch.setattr(repository, "_write_aliases_with_embedding", lambda *a, **k: 0)
+    record = history.read_version(original["document_version_ids"][0], "legacy_documents",
+        "legacy:clinicaltrials:" + value["uuid"], True, "current", datetime.now(timezone.utc))
+    quote = "SYNTHETIC company"
+    start = record.clean_text.index(quote)
+    evidence = {"version_id": record.version_id, "quote": quote, "char_start": start, "char_end": start+len(quote)}
+    repository.approve_entity_with_alias_writeback(entity_id, "", confirm_identity=True,
+        basis="Synthetic identity checked against the fixed source", evidence=[evidence],
+        review_context=principal_from_token("fixture-token"))
+    for _ in range(10):
+        result = publication.publish_once()
+        assert result["state"] in {"published", "idle"}
+        if result["state"] == "idle":
+            break
+    confirmed = history.list_changes("reviewed_graph", True)["items"]
+    assert json.loads(confirmed[-1]["raw_content"])["nodes"][0]["identity_status"] == "confirmed"
+    old_version = confirmed[-1]["version_id"]
     with source.begin() as conn:
-        conn.execute(
-            text("UPDATE entity_dict SET is_deleted=true WHERE id=:id"),
-            {"id": identity_id},
-        )
+        conn.execute(text("UPDATE entity_dict SET is_deleted=true WHERE id=:id"), {"id": identity_id})
     assert publication.publish_once()["state"] == "published"
     second = history.list_changes("reviewed_graph", True)["items"]
     node = json.loads(second[-1]["raw_content"])["nodes"][0]
-    assert len(second) == 2 and node["identity_status"] == "unresolved"
+    assert second[-1]["version_id"] != old_version and node["identity_status"] == "unresolved"
     assert node["namespace"].endswith(".extracted_entity")
+    assert confirmed[0]["raw_content"] == first[0]["raw_content"]
 
 
 def test_low_disk_can_ack_known_history_commit_but_cannot_start_another_copy(
@@ -869,3 +880,52 @@ def test_oversized_input_is_blocked_for_one_hour_without_losing_fifo_or_other_do
     )
     publication.publisher_heartbeat("running")
     assert publication.publication_status()["counts"]["blocked"] == 1
+
+def test_secondary_source_evidence_reaches_a_real_published_graph(databases):
+    from pathlib import Path
+    from db.identity import record_evidence
+    source, target = databases
+    with source.begin() as conn:
+        conn.exec_driver_sql((Path(__file__).resolve().parents[1] /
+            "migration/versions/V021__identity_evidence.sql").read_text())
+    values = [snapshot("evidence-first"), snapshot("evidence-second")]
+    for value in values:
+        value["raw_content"] = "SYNTHETIC company supplies this trial.\\n" + value["raw_content"]
+        insert_document(source, value)
+    adopted = {}
+    for value in values:
+        result = publication.publish_once()
+        assert result["state"] == "published"
+        record = history.read_version(result["document_version_ids"][0], "legacy_documents",
+            "legacy:clinicaltrials:" + value["uuid"], True, "current", datetime.now(timezone.utc))
+        adopted[value["uuid"]] = record
+    with Session(source) as session, session.begin():
+        target_dict = EntityDict(entity_type="Company", is_verified=True)
+        session.add(target_dict); session.flush()
+        entity = ExtractedEntity(source_doc_uuid=values[0]["uuid"], source_site="clinicaltrials",
+            entity_type="Company", entity_name="SYNTHETIC company", source_text="SYNTHETIC company",
+            review_status="approved", dict_id=target_dict.id)
+        session.add(entity); session.flush()
+        entity_id = entity.id
+        for value in values:
+            record = adopted[value["uuid"]]
+            proof = {"version_id": record.version_id, "quote": "SYNTHETIC company",
+                "char_start": record.clean_text.index("SYNTHETIC company"),
+                "char_end": record.clean_text.index("SYNTHETIC company") + len("SYNTHETIC company")}
+            record_evidence(session, "entity", entity, {"evidence": [proof]}, value["uuid"], "clinicaltrials")
+    for _ in range(6):
+        result = publication.publish_once()
+        assert result["state"] in {"published", "idle"}
+        if result["state"] == "idle":
+            break
+    graphs = history.list_changes("reviewed_graph", True)["items"]
+    second = next(json.loads(item["raw_content"]) for item in graphs
+        if json.loads(item["raw_content"])["selected_document_uuids"] == [values[1]["uuid"]])
+    assert len(second["nodes"]) == 1
+    assert second["nodes"][0]["identity_status"] == "unresolved"  # Old flags never become a fresh approval.
+    assert second["nodes"][0]["evidence"][0]["version_id"] == adopted[values[1]["uuid"]].version_id
+    with Session(source) as session, session.begin():
+        record_evidence(session, "entity", session.get(ExtractedEntity, entity_id),
+            {"evidence": [proof]}, values[1]["uuid"], "clinicaltrials")
+    assert publication.publish_once()["state"] == "idle"
+    assert len(history.list_changes("reviewed_graph", True)["items"]) == len(graphs)

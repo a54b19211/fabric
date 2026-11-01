@@ -9,7 +9,7 @@
       <div class="stat-card" v-for="(count, type) in statsTopTypes" :key="type"
            :class="{ 'type-active': filters.entity_type === type }"
            style="cursor:pointer"
-           @click="toggleTypeFilter(type)">
+           @click="toggleTypeFilter(String(type))">
         <div class="stat-value">{{ count }}</div>
         <div class="stat-label">{{ type }}</div>
       </div>

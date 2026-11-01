@@ -93,17 +93,10 @@ def run_migrations():
 
             logger.info(f"[Migration] 执行: {path.name}")
             try:
-                # 按分号拆分，逐条执行（跳过空语句）
+                # PostgreSQL parses dollar-quoted function bodies and semicolons itself.
+                # Use the driver's SQL API so SQL colons are never treated as bind names.
                 from sqlalchemy import text
-                for statement in sql.split(";"):
-                    # 去掉注释行后检查是否还有实际 SQL
-                    lines = [
-                        line for line in statement.splitlines()
-                        if line.strip() and not line.strip().startswith("--")
-                    ]
-                    stmt = "\n".join(lines).strip()
-                    if stmt:
-                        conn.execute(text(stmt))
+                conn.exec_driver_sql(sql)
 
                 conn.execute(text(f"""
                     INSERT INTO {MIGRATION_TABLE} (version, description, checksum, applied_at)

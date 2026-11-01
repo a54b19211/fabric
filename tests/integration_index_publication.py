@@ -27,8 +27,10 @@ def pg_engine():
     if not url:
         pytest.skip("Explicit isolated PostgreSQL URL required")
     parsed = make_url(url)
-    assert parsed.host == "127.0.0.1" and parsed.port == 18436
-    assert parsed.database == "fabric_history"
+    assert parsed.host == "127.0.0.1"
+    assert (parsed.port, parsed.database) in {
+        (18436, "fabric_history"), (18636, "bioradar_kdd_opus_history"),
+    }
     admin = create_engine(url)
     schema = "test_index_" + uuid4().hex
     with admin.begin() as conn:
@@ -100,7 +102,8 @@ def add_collected(*, withdrawn=False):
 
 
 def receipt_for(body):
-    return {"publication_id": publication_id(body), "knowledge_id": "knowledge-" + publication_id(body),
+    return {"publication_id": publication_id(body), "is_demo": body["is_demo"],
+            "knowledge_id": "knowledge-" + publication_id(body),
             "knowledge_base_id": body["knowledge_base_id"], "source_scope": body["source_scope"],
             "identity": {key: body[key] for key in ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256")},
             "raw_locator": copy.deepcopy(body["raw_locator"]), "content_sha256": body["content_sha256"],

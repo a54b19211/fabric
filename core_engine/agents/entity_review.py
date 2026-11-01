@@ -8,7 +8,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 from loguru import logger
 
-from core_engine.agent_config import AgentConfig
+from core_engine.agents.config import AgentConfig
 from core_engine.agents.prompts import (
     ENTITY_STEP1_VALIDITY_PROMPT,
     ENTITY_STEP2_TYPE_PROMPT,

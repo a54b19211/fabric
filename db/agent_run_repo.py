@@ -158,6 +158,9 @@ def list_runs_by_document(page: int = 1, page_size: int = 20) -> tuple[list[dict
                         COUNT(CASE WHEN decision = 'rejected' THEN 1 END) AS rejected_count,
                         COUNT(CASE WHEN decision = 'escalated' THEN 1 END) AS escalated_count,
                         COUNT(CASE WHEN decision = 'error' THEN 1 END) AS error_count,
+                        COUNT(CASE WHEN decision = 'proposal_approved' THEN 1 END) AS proposed_approved_count,
+                        COUNT(CASE WHEN decision = 'proposal_rejected' THEN 1 END) AS proposed_rejected_count,
+                        COUNT(CASE WHEN decision = 'proposal_escalated' THEN 1 END) AS proposed_escalated_count,
                         AVG(confidence) AS avg_confidence,
                         MAX(created_at) AS last_review_at
                     FROM agent_run
@@ -194,6 +197,9 @@ def list_runs_by_document(page: int = 1, page_size: int = 20) -> tuple[list[dict
                     "rejected_count": r.rejected_count,
                     "escalated_count": r.escalated_count,
                     "error_count": r.error_count,
+                    "proposed_approved_count": r.proposed_approved_count,
+                    "proposed_rejected_count": r.proposed_rejected_count,
+                    "proposed_escalated_count": r.proposed_escalated_count,
                     "avg_confidence": round(float(r.avg_confidence or 0), 3),
                     "last_review_at": r.last_review_at.isoformat() if r.last_review_at else "",
                     "entities": [_row_to_dict(er) for er in entity_rows],

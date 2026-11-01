@@ -8,7 +8,7 @@ import shutil
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -410,7 +410,10 @@ def _graph_input(conn, uuid, fallback=None):
     entities = list(
         conn.execute(
             text("""
-      SELECT to_jsonb(e) AS item FROM extracted_entities e WHERE source_doc_uuid=:uuid
+      SELECT to_jsonb(e) AS item FROM extracted_entities e
+       WHERE (source_doc_uuid=:uuid OR EXISTS (
+         SELECT 1 FROM entity_source_evidence proof
+         WHERE proof.object_type='entity' AND proof.object_id=e.id AND proof.source_doc_uuid=:uuid))
        AND NOT is_deleted AND review_status IN ('approved','auto_approved') ORDER BY id LIMIT 101
     """),
             {"uuid": uuid},
@@ -419,7 +422,10 @@ def _graph_input(conn, uuid, fallback=None):
     relations = list(
         conn.execute(
             text("""
-      SELECT to_jsonb(e) AS item FROM entity_relations e WHERE source_doc_uuid=:uuid
+      SELECT to_jsonb(e) AS item FROM entity_relations e
+       WHERE (source_doc_uuid=:uuid OR EXISTS (
+         SELECT 1 FROM entity_source_evidence proof
+         WHERE proof.object_type='relation' AND proof.object_id=e.id AND proof.source_doc_uuid=:uuid))
        AND NOT is_deleted AND review_status IN ('approved','auto_approved') ORDER BY id LIMIT 201
     """),
             {"uuid": uuid},
@@ -428,21 +434,33 @@ def _graph_input(conn, uuid, fallback=None):
     ids = [
         item["dict_id"] for item in entities[:100] if item.get("dict_id") is not None
     ]
-    verified = (
-        list(
-            conn.execute(
-                text(
-                    "SELECT id::text FROM entity_dict WHERE id=ANY(:ids) AND is_verified AND NOT is_deleted"
-                ),
-                {"ids": ids},
-            ).scalars()
-        )
-        if ids
-        else []
-    )
+    dictionaries = list(conn.execute(
+        text("SELECT to_jsonb(d) FROM entity_dict d WHERE id=ANY(:ids) AND NOT is_deleted"),
+        {"ids": ids},
+    ).scalars()) if ids else []
+    dictionary_context = {str(row["id"]): {
+        key: row.get(key) for key in ("id", "is_verified", "verified_by", "verified_at", "verification_basis")
+    } for row in dictionaries}
+    verified = [str(row["id"]) for row in dictionaries if row.get("is_verified") is True]
+    from sqlalchemy.orm import Session
+    from db.identity import get_objects_evidence, get_current_review_evidence
+    # 复用审核读取逻辑，以免原始字符位置和已核对的容器位置走成两套。
+    with Session(bind=conn) as session:
+        for kind, items in (("entity", entities), ("relation", relations)):
+            evidence = get_objects_evidence(kind, [item["id"] for item in items], session=session)
+            current = get_current_review_evidence(kind, [item["id"] for item in items], session=session)
+            for item in items:
+                item["observation_source_doc_uuid"] = uuid
+                item["current_review_evidence"] = TypeAdapter(list[dict]).dump_python(current.get(item["id"], []), mode="json")
+                item["evidence"] = TypeAdapter(list[dict]).dump_python(evidence.get(item["id"], []), mode="json")
+    logs = list(conn.execute(text("""
+        SELECT to_jsonb(m) FROM entity_merge_log m
+        WHERE NOT is_rolled_back AND (keeper_dict_id=ANY(:ids) OR absorbed_dict_ids && CAST(:ids AS bigint[]))
+        ORDER BY id DESC LIMIT 501
+    """), {"ids": ids}).scalars()) if ids else []
     observed = conn.execute(text("SELECT clock_timestamp()")).scalar_one().isoformat()
     if value.get("is_deleted") is True:
-        entities, relations, verified = [], [], []
+        entities, relations, verified, logs, dictionary_context = [], [], [], [], {}
     return {
         "document": value,
         "observed_at": observed,
@@ -455,11 +473,12 @@ def _graph_input(conn, uuid, fallback=None):
             "entities": entities[:100],
             "relations": relations[:200],
             "verified_dict_ids": verified,
+            "dictionary_context": dictionary_context,
             "scope_record_ids": [uuid],
             "scope_description": "自动发表所选单文档当前审核投影；不是完整图或每次中间审核历史",
-            "selection_truncated": len(entities) > 100 or len(relations) > 200,
+            "selection_truncated": len(entities) > 100 or len(relations) > 200 or len(logs) > 500,
             "is_demo": is_demo(),
-            "merge_logs": [],
+            "merge_logs": logs[:500],
         },
     }
 
@@ -551,7 +570,7 @@ def _prepare(engine, row):
 
 
 def _publish_graph(engine, row, prepared, document_run):
-    from flows.graph_publish import build_legacy_bundle
+    from flows.graph_publish import build_legacy_bundle, bind_legacy_text
 
     if prepared.get("graph_request") is not None:
         return history.import_archive(
@@ -609,37 +628,7 @@ def _publish_graph(engine, row, prepared, document_run):
         observation = prepared["graph_input"]["observation"]
         bundle = build_legacy_bundle(observation, [original], [ref])
 
-        # 清洗可能移除模板头/HTML，原MD偏移不能切clean_text。只接受原句的唯一精确匹配。
-        def bound_evidence(items):
-            from biz_rules.reviewed_graph import GraphLocator
-
-            bound = []
-            for evidence in items:
-                start = version.clean_text.find(evidence.quote)
-                if (
-                    start >= 0
-                    and version.clean_text.find(evidence.quote, start + 1) < 0
-                ):
-                    bound.append(
-                        evidence.model_copy(
-                            update={
-                                "locator": GraphLocator(
-                                    start=start, end=start + len(evidence.quote)
-                                )
-                            }
-                        )
-                    )
-            return bound
-
-        for node in bundle.nodes:
-            node.evidence = bound_evidence(node.evidence)
-        for edge in bundle.edges:
-            edge.evidence = bound_evidence(edge.evidence)
-            if not edge.evidence:
-                edge.binding_status = "unbound"
-                edge.unbound_reason = (
-                    "来源句子在已采用叙述中缺失或多处出现，未作模糊定位"
-                )
+        bind_legacy_text(bundle, {version.version_id: version})
     graph_request = ArchiveImport(
         source_id="reviewed_graph",
         is_demo=request.is_demo,

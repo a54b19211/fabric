@@ -497,7 +497,8 @@ def merge_canonical_data(dict_id: int, new_data: dict, source_site: str) -> None
                 if key not in merged or new_priority >= current_priority:
                     merged[key] = new_val
 
-        entity.canonical_data = merged
+        from db.identity import set_dictionary_identity_data
+        set_dictionary_identity_data(session, entity, canonical_data=merged)
         entity.canonical_source = source_site
         entity.canonical_updated_at = datetime.now(timezone.utc)
         _write_operation_log(
@@ -738,7 +739,8 @@ def process_entity_merge(
         pass
 
     if auto_count > 0:
-        entity.canonical_data = current
+        from db.identity import set_dictionary_identity_data
+        set_dictionary_identity_data(session, entity, canonical_data=current)
         entity.canonical_updated_at = datetime.now(timezone.utc)
 
     if auto_count or conflict_count:
@@ -759,108 +761,12 @@ def process_entity_merge(
     return auto_count, conflict_count
 
 
-def create_identity_merge_proposal(
-    source_entity_id: int,
-    target_dict_id: int,
-    agent_reason: str = "",
-    agent_confidence: float = 0.0,
-    agent_run_id: str = "",
-) -> int | None:
-    """写入身份合并提案到 entity_identity_merge_proposal，供人工审核确认。
-
-    将 extracted_entity（source_entity_id）和 target entity_dict 的完整快照
-    分别存入 source_entity_snapshot 和 target_dict_snapshot。
-
-    Returns:
-        proposal_id，失败返回 None
-    """
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return None
-
-        source_ent = session.query(ExtractedEntity).filter(
-            ExtractedEntity.id == source_entity_id,
-            ExtractedEntity.is_deleted == False,
-        ).first()
-        if source_ent is None:
-            logger.warning(f"[DB] create_identity_merge_proposal: source_entity {source_entity_id} 不存在")
-            return None
-
-        target_dict = session.query(EntityDict).filter(
-            EntityDict.id == target_dict_id,
-            EntityDict.is_deleted == False,
-        ).first()
-        if target_dict is None:
-            logger.warning(f"[DB] create_identity_merge_proposal: target_dict {target_dict_id} 不存在")
-            return None
-
-        target_aliases = [
-            a.name for a in session.query(EntityAlias).filter(
-                EntityAlias.dict_id == target_dict_id,
-                EntityAlias.is_deleted == False,
-            ).all()
-        ]
-
-        source_snapshot = {
-            "entity_name": source_ent.entity_name or "",
-            "entity_type": source_ent.entity_type or "",
-            "entity_data": {k: v for k, v in (source_ent.entity_data or {}).items()
-                           if not k.startswith("_")},
-            "source_site": source_ent.source_site or "",
-            "source_doc_uuid": source_ent.source_doc_uuid or "",
-            "source_text": (source_ent.source_text or "")[:500],
-        }
-
-        target_snapshot = {
-            "canonical_name": (target_dict.canonical_data or {}).get("name", ""),
-            "entity_type": target_dict.entity_type or "",
-            "aliases": target_aliases,
-            "source_site": target_dict.canonical_source or "",
-            "is_verified": bool(target_dict.is_verified),
-            "key_fields": {
-                k: v for k, v in (target_dict.canonical_data or {}).items()
-                if k in ("cas_number", "unii", "atc_code", "stock_code", "approval_number",
-                         "pubchem_cid", "drugbank_id", "nct_number")
-            },
-        }
-
-        proposal = EntityIdentityMergeProposal(
-            source_entity_id=source_entity_id,
-            target_dict_id=target_dict_id,
-            source_entity_snapshot=source_snapshot,
-            target_dict_snapshot=target_snapshot,
-            agent_run_id=agent_run_id,
-            agent_reason=agent_reason,
-            agent_confidence=agent_confidence,
-            status="pending",
-        )
-        session.add(proposal)
-        session.flush()
-        proposal_id = proposal.id
-
-        _write_operation_log(
-            session, "insert", "entity_identity_merge_proposal", proposal_id,
-            business_action="disambiguate",
-            description=(
-                f"Agent 身份合并提案: {source_ent.entity_name} → "
-                f"dict_id={target_dict_id} confidence={agent_confidence:.2f}"
-            ),
-            details={
-                "source_entity_id": source_entity_id,
-                "target_dict_id": target_dict_id,
-                "agent_run_id": agent_run_id,
-                "agent_confidence": agent_confidence,
-            },
-            trigger_source="create_identity_merge_proposal",
-        )
-
-        logger.info(
-            f"[DB] 身份合并提案已创建: proposal_id={proposal_id} "
-            f"{source_ent.entity_name} → dict_id={target_dict_id}"
-        )
-        return proposal_id
+def create_identity_merge_proposal(source_entity_id, target_dict_id, agent_reason='', agent_confidence=0.0,
+                                   agent_run_id='', session=None, **metadata):
+    from db.identity import use_session, add_identity_proposal
+    with use_session(session) as active:
+        return add_identity_proposal(active, source_entity_id, target_dict_id, agent_reason,
+                                     agent_confidence, agent_run_id, **metadata)
 
 
 def get_identity_merge_proposals(status: str = "pending", limit: int = 100) -> list[dict]:
@@ -897,6 +803,12 @@ def get_identity_merge_proposals(status: str = "pending", limit: int = 100) -> l
                 "agent_run_id": r.agent_run_id,
                 "agent_reason": r.agent_reason,
                 "agent_confidence": r.agent_confidence,
+                "match_step": r.match_step,
+                "rule_version": r.rule_version,
+                "model_version": r.model_version,
+                "candidate_payload": r.candidate_payload or {},
+                "evidence_key": r.evidence_key,
+                "merge_log_id": r.merge_log_id,
                 "status": r.status,
                 "reviewer": r.reviewer,
                 "review_note": r.review_note,
@@ -907,71 +819,10 @@ def get_identity_merge_proposals(status: str = "pending", limit: int = 100) -> l
         ]
 
 
-def resolve_identity_merge_proposal(
-    proposal_id: int,
-    status: str,
-    reviewer: str = "",
-    note: str = "",
-) -> bool:
-    """批准或拒绝身份合并提案。
-
-    Args:
-        proposal_id: 提案 ID
-        status: approved | rejected
-        reviewer: 审核人
-        note: 备注
-
-    Returns:
-        是否成功
-    """
-    from db.session import get_session
-
-    if status not in ("approved", "rejected"):
-        logger.warning(f"[DB] resolve_identity_merge_proposal: 无效状态 {status}")
-        return False
-
-    with get_session() as session:
-        if session is None:
-            return False
-
-        proposal = session.query(EntityIdentityMergeProposal).filter(
-            EntityIdentityMergeProposal.id == proposal_id,
-        ).first()
-        if proposal is None:
-            logger.warning(f"[DB] resolve_identity_merge_proposal: proposal {proposal_id} 不存在")
-            return False
-        if proposal.status != "pending":
-            logger.warning(f"[DB] resolve_identity_merge_proposal: proposal {proposal_id} 状态为 {proposal.status}")
-            return False
-
-        proposal.status = status
-        proposal.reviewer = reviewer
-        proposal.review_note = note
-        proposal.reviewed_at = datetime.now(timezone.utc)
-
-        _write_operation_log(
-            session,
-            "update",
-            "entity_identity_merge_proposal",
-            proposal_id,
-            business_action="review",
-            description=(
-                f"身份合并提案 {status}: "
-                f"{proposal.source_entity_snapshot.get('entity_name', '')} "
-                f"→ dict_id={proposal.target_dict_id}"
-            ),
-            details={
-                "proposal_id": proposal_id,
-                "status": status,
-                "reviewer": reviewer,
-                "note": note,
-            },
-            operator=reviewer,
-            trigger_source="resolve_identity_merge_proposal",
-        )
-
-        logger.info(f"[DB] 身份合并提案已{status}: proposal_id={proposal_id}")
-        return True
+def resolve_identity_merge_proposal(proposal_id, status, reviewer='', note='', session=None, review_context=None):
+    """Apply or reject the link and record its decision in one source transaction."""
+    from db.identity import resolve_link_proposal
+    return resolve_link_proposal(proposal_id, status, reviewer, note, session=session, review_context=review_context)
 
 
 def get_pending_merges(limit: int = 50) -> dict:
@@ -1079,7 +930,8 @@ def get_pending_merges(limit: int = 50) -> dict:
                 auto_resolved += 1
                 cd = dict(entity.canonical_data or {})
                 cd[r.field_name] = r.new_value
-                entity.canonical_data = cd
+                from db.identity import set_dictionary_identity_data
+                set_dictionary_identity_data(session, entity, canonical_data=cd)
                 entity.canonical_updated_at = datetime.now(timezone.utc)
                 continue
             if new_empty and not cur_empty:
@@ -1188,19 +1040,24 @@ def resolve_merge(
     resolution: str,
     reviewer: str = "",
     resolved_value: dict | None = None,
+    session=None, review_context=None,
 ) -> None:
     """
     解决合并冲突。
     resolution: accept_new | keep_existing | custom
     custom 时需要传 resolved_value。
     """
-    from db.session import get_session
+    from api.review_auth import require_trusted_review_context
+    from db.identity import use_session
+    reviewer = require_trusted_review_context(review_context)
+    if resolution not in ('accept_new', 'keep_existing', 'custom') or (resolution == 'custom' and resolved_value is None):
+        raise ValueError('Invalid field resolution')
 
-    with get_session() as session:
+    with use_session(session) as session:
         if session is None:
             return
 
-        merge = session.query(EntityMergeQueue).filter(EntityMergeQueue.id == merge_id).first()
+        merge = session.query(EntityMergeQueue).filter(EntityMergeQueue.id == merge_id, EntityMergeQueue.resolution == 'pending').populate_existing().with_for_update().first()
         if merge is None:
             logger.warning(f"[DB] resolve_merge: merge_id={merge_id} 不存在")
             return
@@ -1213,8 +1070,9 @@ def resolve_merge(
             entity = session.query(EntityDict).filter(EntityDict.id == merge.target_dict_id).first()
             if entity:
                 canonical = dict(entity.canonical_data or {})
-                canonical[merge.field_name] = merge.new_value
-                entity.canonical_data = canonical
+                canonical[merge.field_name] = merge.new_value.get('_val') if isinstance(merge.new_value, dict) and list(merge.new_value) == ['_val'] else merge.new_value
+                from db.identity import set_dictionary_identity_data
+                set_dictionary_identity_data(session, entity, canonical_data=canonical)
                 entity.canonical_updated_at = datetime.now(timezone.utc)
         elif resolution == "custom" and resolved_value is not None:
             merge.resolved_value = resolved_value
@@ -1222,7 +1080,8 @@ def resolve_merge(
             if entity:
                 canonical = dict(entity.canonical_data or {})
                 canonical[merge.field_name] = resolved_value
-                entity.canonical_data = canonical
+                from db.identity import set_dictionary_identity_data
+                set_dictionary_identity_data(session, entity, canonical_data=canonical)
                 entity.canonical_updated_at = datetime.now(timezone.utc)
 
         _write_operation_log(
@@ -1244,14 +1103,20 @@ def resolve_merge(
 def batch_resolve_merges(
     decisions: list[dict],
     reviewer: str = "",
+    session=None, review_context=None,
 ) -> dict:
     """
     批量解决合并冲突。一次请求解决同 dict_id 下所有冲突字段。
     decisions: [{merge_id, resolution, resolved_value?}]
     """
-    from db.session import get_session
+    from api.review_auth import require_trusted_review_context
+    from db.identity import use_session
+    reviewer = require_trusted_review_context(review_context)
+    for decision in decisions:
+        if decision.get('resolution') not in ('accept_new', 'keep_existing', 'custom') or (decision.get('resolution') == 'custom' and decision.get('resolved_value') is None):
+            raise ValueError('Invalid field resolution')
 
-    with get_session() as session:
+    with use_session(session) as session:
         if session is None:
             return {"success": False, "error": "数据库未连接"}
 
@@ -1265,7 +1130,7 @@ def batch_resolve_merges(
             merge = session.query(EntityMergeQueue).filter(
                 EntityMergeQueue.id == merge_id,
                 EntityMergeQueue.resolution == "pending",
-            ).first()
+            ).populate_existing().with_for_update().first()
             if merge is None:
                 continue
 
@@ -1282,7 +1147,8 @@ def batch_resolve_merges(
                     canonical = dict(entity.canonical_data or {})
                     new_val = merge.new_value.get("_val") if isinstance(merge.new_value, dict) and list(merge.new_value.keys()) == ["_val"] else merge.new_value
                     canonical[merge.field_name] = new_val
-                    entity.canonical_data = canonical
+                    from db.identity import set_dictionary_identity_data
+                    set_dictionary_identity_data(session, entity, canonical_data=canonical)
                     entity.canonical_updated_at = datetime.now(timezone.utc)
                     affected_dict_ids.add(merge.target_dict_id)
             elif resolution == "keep_existing":
@@ -1296,7 +1162,8 @@ def batch_resolve_merges(
                 if entity:
                     canonical = dict(entity.canonical_data or {})
                     canonical[merge.field_name] = resolved_value
-                    entity.canonical_data = canonical
+                    from db.identity import set_dictionary_identity_data
+                    set_dictionary_identity_data(session, entity, canonical_data=canonical)
                     entity.canonical_updated_at = datetime.now(timezone.utc)
                     affected_dict_ids.add(merge.target_dict_id)
 
@@ -1314,7 +1181,7 @@ def batch_resolve_merges(
         for _dict_id in affected_dict_ids:
             _sync_canonical_to_extracted(session, _dict_id)
 
-        session.commit()
+        session.flush()
         logger.info(f"[DB] batch_resolve_merges: resolved {resolved_count} conflicts")
 
         return {"success": True, "resolved_count": resolved_count}
@@ -1477,340 +1344,34 @@ def compare_entities(dict_ids: list[int]) -> dict:
     return {"entities": entities_info, "field_diff": field_diff}
 
 
-def merge_entities(
-    keeper_dict_id: int,
-    absorbed_dict_ids: list[int],
-    field_decisions: dict,
-    reviewer: str = "",
-    note: str = "",
-) -> dict:
-    """
-    实体身份合并（事务内）：
-    1. 快照 before_snapshot
-    2. 后端计算 final_canonical_data（auto-merge + field_decisions）
-    3. keeper.canonical_data = final_canonical_data
-    4. absorbed 的 extracted_entities / aliases → keeper
-    5. absorbed entity_dict 软删除
-    6. absorbed 相关 entity_merge_queue pending → resolved
-    7. 写 entity_merge_log + operation_log
-    """
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return {"success": False, "error": "数据库未连接"}
-
-        # 校验 keeper
-        keeper = session.query(EntityDict).filter(
-            EntityDict.id == keeper_dict_id,
-            EntityDict.is_deleted == False,
-        ).first()
-        if keeper is None:
-            return {"success": False, "error": f"keeper dict_id={keeper_dict_id} 不存在"}
-
-        # 校验 absorbed
-        absorbed_entities = session.query(EntityDict).filter(
-            EntityDict.id.in_(absorbed_dict_ids),
-            EntityDict.is_deleted == False,
-        ).all()
-        if len(absorbed_entities) != len(absorbed_dict_ids):
-            return {"success": False, "error": "部分 absorbed dict_id 不存在或已删除"}
-
-        # ── 1. 快照 before_snapshot ─────────────────────────────
-        keeper_cd = dict(keeper.canonical_data or {})
-        before = {
-            "keeper": {
-                "dict_id": keeper.id,
-                "entity_type": keeper.entity_type,
-                "entity_name": keeper_cd.get("name", ""),
-                "canonical_data": keeper_cd,
-                "canonical_source": keeper.canonical_source or "",
-                "is_verified": keeper.is_verified,
-            },
-            "absorbed": [],
-        }
-
-        for abs_ent in absorbed_entities:
-            abs_cd = dict(abs_ent.canonical_data or {})
-            abs_aliases = [
-                {"id": a.id, "name": a.name, "is_canonical": a.is_canonical}
-                for a in session.query(EntityAlias).filter(
-                    EntityAlias.dict_id == abs_ent.id,
-                    EntityAlias.is_deleted == False,
-                ).all()
-            ]
-            abs_extractions = session.query(ExtractedEntity).filter(
-                ExtractedEntity.dict_id == abs_ent.id,
-                ExtractedEntity.is_deleted == False,
-            ).all()
-
-            before["absorbed"].append({
-                "dict_id": abs_ent.id,
-                "entity_type": abs_ent.entity_type,
-                "entity_name": abs_cd.get("name", ""),
-                "canonical_data": abs_cd,
-                "canonical_source": abs_ent.canonical_source or "",
-                "is_verified": abs_ent.is_verified,
-                "aliases": [{"id": a["id"], "name": a["name"]} for a in abs_aliases],
-                "extracted_entity_ids": [e.id for e in abs_extractions],
-            })
-
-        # ── 2. 计算合并后的 canonical_data ─────────────────────
-        entity_type = keeper.entity_type
-        valid_fields = _VALID_FIELDS_BY_TYPE.get(entity_type)
-        skip_fields = {"name", "name_en", "aliases", "source_text"}
-
-        keeper_cd = dict(keeper.canonical_data or {})
-        merged_cd = dict(keeper_cd)
-
-        for abs_ent in absorbed_entities:
-            abs_cd = dict(abs_ent.canonical_data or {})
-            for key, val in abs_cd.items():
-                if key.startswith("_") or key in skip_fields:
-                    continue
-                if valid_fields is not None and key not in valid_fields:
-                    continue
-
-                keeper_val = merged_cd.get(key)
-                if keeper_val is None:
-                    # keeper 无 → 补入 absorbed
-                    merged_cd[key] = val
-                elif keeper_val != val:
-                    # 都有但不同 → 看 field_decisions
-                    decision = field_decisions.get(key)
-                    if decision and decision.get("picked_dict_id"):
-                        picked_id = decision["picked_dict_id"]
-                        if picked_id == abs_ent.id:
-                            merged_cd[key] = val
-                        # 否则保留 keeper 的值（不覆盖）
-
-        keeper.canonical_data = merged_cd
-        keeper.canonical_updated_at = datetime.now(timezone.utc)
-
-        # ── 3a. 迁移 extracted_entities ─────────────────────────
-        migrated_extractions = 0
-        for abs_ent in absorbed_entities:
-            exts = session.query(ExtractedEntity).filter(
-                ExtractedEntity.dict_id == abs_ent.id,
-                ExtractedEntity.is_deleted == False,
-            ).all()
-            for ext in exts:
-                ext.dict_id = keeper_dict_id
-                migrated_extractions += 1
-
-        # ── 3b. 迁移 aliases（同名去重） ─────────────────────────
-        existing_alias_names = {
-            a.name.lower()
-            for a in session.query(EntityAlias).filter(
-                EntityAlias.dict_id == keeper_dict_id,
-                EntityAlias.is_deleted == False,
-            ).all()
-        }
-        migrated_aliases = 0
-        for abs_ent in absorbed_entities:
-            abs_aliases = session.query(EntityAlias).filter(
-                EntityAlias.dict_id == abs_ent.id,
-                EntityAlias.is_deleted == False,
-            ).all()
-            for alias in abs_aliases:
-                if alias.name.lower() in existing_alias_names:
-                    alias.is_deleted = True  # 同名 → 软删除
-                else:
-                    alias.dict_id = keeper_dict_id
-                    existing_alias_names.add(alias.name.lower())
-                    migrated_aliases += 1
-
-        # 软删除 absorbed entity_dict
-        for abs_ent in absorbed_entities:
-            abs_ent.is_deleted = True
-
-        # ── 5. 解决 absorbed 相关的 pending merge_queue ─────────
-        resolved_queue = 0
-        for abs_ent in absorbed_entities:
-            pending_items = session.query(EntityMergeQueue).filter(
-                EntityMergeQueue.target_dict_id == abs_ent.id,
-                EntityMergeQueue.resolution == "pending",
-            ).all()
-            for item in pending_items:
-                item.resolution = "resolved_merged"
-                item.reviewed_by = reviewer
-                item.reviewed_at = datetime.now(timezone.utc)
-                resolved_queue += 1
-
-        # ── 6a. 写 entity_merge_log ─────────────────────────────
-        after = {
-            "keeper_dict_id": keeper_dict_id,
-            "canonical_data": merged_cd,
-            "absorbed_dict_ids": absorbed_dict_ids,
-        }
-        merge_log = EntityMergeLog(
-            keeper_dict_id=keeper_dict_id,
-            absorbed_dict_ids=absorbed_dict_ids,
-            before_snapshot=before,
-            after_snapshot=after,
-            field_decisions=field_decisions,
-            merge_type="identity",
-            reviewer=reviewer,
-            note=note,
-        )
-        session.add(merge_log)
-        session.flush()
-        merge_log_id = merge_log.id
-
-        # ── 6b. 写 operation_log ────────────────────────────────
-        _write_operation_log(
-            session, "update", "entity_dict", keeper_dict_id,
-            business_action="identity_merge",
-            description=f"实体身份合并: keeper={keeper_dict_id} absorbed={absorbed_dict_ids}",
-            details={
-                "keeper_dict_id": keeper_dict_id,
-                "absorbed_dict_ids": absorbed_dict_ids,
-                "field_decisions": field_decisions,
-                "migrated_extractions": migrated_extractions,
-                "migrated_aliases": migrated_aliases,
-                "merge_log_id": merge_log_id,
-            },
-            operator=reviewer,
-            trigger_source="merge_entities",
-        )
-
-        # ── 7. 级联重算：合并后 keeper alias 集合扩大，重算历史 step_none 实体
-        _cascade_recompute_stale_entities(session, keeper_dict_id)
-
-        session.commit()
-
-        logger.info(
-            f"[DB] merge_entities: keeper={keeper_dict_id} "
-            f"absorbed={absorbed_dict_ids} "
-            f"extractions={migrated_extractions} aliases={migrated_aliases} "
-            f"merge_log={merge_log_id}"
-        )
-
-        return {
-            "success": True,
-            "merge_log_id": merge_log_id,
-            "keeper_dict_id": keeper_dict_id,
-            "merged_count": len(absorbed_dict_ids),
-            "migrated_extractions": migrated_extractions,
-            "migrated_aliases": migrated_aliases,
-            "migrated_relations": 0,
-        }
+def merge_entities(keeper_dict_id, absorbed_dict_ids, field_decisions, reviewer='', note='', session=None, review_context=None):
+    from db.identity import use_session, merge_dictionary_identities
+    with use_session(session) as active:
+        return merge_dictionary_identities(active, keeper_dict_id, absorbed_dict_ids, field_decisions, reviewer, note, review_context=review_context)
 
 
-def rollback_merge(merge_log_id: int, reason: str = "") -> dict:
-    """回滚实体合并：从 entity_merge_log.before_snapshot 恢复状态。"""
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return {"success": False, "error": "数据库未连接"}
-
-        merge_log = session.query(EntityMergeLog).filter(
-            EntityMergeLog.id == merge_log_id
-        ).first()
-        if merge_log is None:
-            return {"success": False, "error": f"merge_log_id={merge_log_id} 不存在"}
-        if merge_log.is_rolled_back:
-            return {"success": False, "error": "该合并记录已被回滚"}
-
-        before = merge_log.before_snapshot or {}
-        keeper_snap = before.get("keeper", {})
-        absorbed_snaps = before.get("absorbed", [])
-
-        # ── 1. 恢复 keeper canonical_data ───────────────────────
-        keeper = session.query(EntityDict).filter(
-            EntityDict.id == keeper_snap.get("dict_id"),
-            EntityDict.is_deleted == False,
-        ).first()
-        if keeper:
-            keeper.canonical_data = keeper_snap.get("canonical_data", {})
-            keeper.canonical_source = keeper_snap.get("canonical_source", "")
-            keeper.is_verified = keeper_snap.get("is_verified", False)
-
-        restored_dict_ids: list[int] = []
-        restored_extractions = 0
-        restored_aliases = 0
-
-        # ── 2. 恢复每个 absorbed entity_dict ───────────────────
-        for abs_snap in absorbed_snaps:
-            abs_dict_id = abs_snap.get("dict_id")
-            abs_ent = session.query(EntityDict).filter(
-                EntityDict.id == abs_dict_id,
-            ).first()
-            if abs_ent is None:
-                continue
-            abs_ent.is_deleted = False
-            abs_ent.canonical_data = abs_snap.get("canonical_data", {})
-            abs_ent.canonical_source = abs_snap.get("canonical_source", "")
-            abs_ent.is_verified = abs_snap.get("is_verified", False)
-            restored_dict_ids.append(abs_dict_id)
-
-            # 恢复 extracted_entities.dict_id
-            for ext_id in abs_snap.get("extracted_entity_ids", []):
-                ext = session.query(ExtractedEntity).filter(
-                    ExtractedEntity.id == ext_id,
-                ).first()
-                if ext and ext.dict_id != abs_dict_id:
-                    ext.dict_id = abs_dict_id
-                    restored_extractions += 1
-
-            # 恢复 aliases（包括被同名去重软删除的）
-            for alias_info in abs_snap.get("aliases", []):
-                alias = session.query(EntityAlias).filter(
-                    EntityAlias.id == alias_info.get("id"),
-                ).first()
-                if alias:
-                    if alias.is_deleted:
-                        alias.is_deleted = False
-                        restored_aliases += 1
-                    if alias.dict_id != abs_dict_id:
-                        alias.dict_id = abs_dict_id
-                        restored_aliases += 1
-
-        # ── 3. 标记回滚 ─────────────────────────────────────────
-        merge_log.is_rolled_back = True
-        merge_log.rolled_back_at = datetime.now(timezone.utc)
-        merge_log.rollback_reason = reason
-
-        _write_operation_log(
-            session, "update", "entity_merge_log", merge_log_id,
-            business_action="rollback_merge",
-            description=f"回滚实体合并: merge_log_id={merge_log_id} reason={reason}",
-            details={
-                "merge_log_id": merge_log_id,
-                "reason": reason,
-                "restored_dict_ids": restored_dict_ids,
-            },
-            trigger_source="rollback_merge",
-        )
-
-        session.commit()
-
-        logger.info(
-            f"[DB] rollback_merge: merge_log_id={merge_log_id} "
-            f"restored={restored_dict_ids} "
-            f"extractions={restored_extractions} aliases={restored_aliases}"
-        )
-
-        return {
-            "success": True,
-            "merge_log_id": merge_log_id,
-            "restored_dict_ids": restored_dict_ids,
-            "restored_extractions": restored_extractions,
-            "restored_aliases": restored_aliases,
-            "restored_relations": 0,
-        }
+def rollback_merge(merge_log_id, reason='', session=None, review_context=None):
+    from db.identity import use_session, rollback_identity_merge
+    from api.review_auth import require_trusted_review_context
+    require_trusted_review_context(review_context)
+    with use_session(session) as active:
+        return rollback_identity_merge(active, merge_log_id, reason, review_context=review_context)
 
 
-def get_merge_logs(limit: int = 50, include_rolled_back: bool = True) -> list[dict]:
+def get_merge_logs(limit: int = 50, include_rolled_back: bool = True, dict_ids=None, session=None) -> list[dict]:
     """查询合并日志列表。"""
-    from db.session import get_session
+    from db.identity import use_session
+    from sqlalchemy import or_
 
-    with get_session() as session:
-        if session is None:
-            return []
+    with use_session(session) as session:
 
         q = session.query(EntityMergeLog).order_by(EntityMergeLog.created_at.desc())
+        if dict_ids is not None:
+            selected_ids = sorted({int(value) for value in dict_ids})
+            if not selected_ids:
+                return []
+            q = q.filter(or_(EntityMergeLog.keeper_dict_id.in_(selected_ids),
+                             EntityMergeLog.absorbed_dict_ids.overlap(selected_ids)))
         if not include_rolled_back:
             q = q.filter(EntityMergeLog.is_rolled_back == False)
         rows = q.limit(limit).all()
@@ -1824,6 +1385,9 @@ def get_merge_logs(limit: int = 50, include_rolled_back: bool = True) -> list[di
                 "reviewer": r.reviewer,
                 "note": r.note,
                 "is_rolled_back": r.is_rolled_back,
+                "rolled_back_by": r.rolled_back_by,
+                "rolled_back_at": r.rolled_back_at.isoformat() if r.rolled_back_at else None,
+                "rollback_reason": r.rollback_reason,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
@@ -1834,33 +1398,24 @@ def get_merge_logs(limit: int = 50, include_rolled_back: bool = True) -> list[di
 # 4. EntityAlias Repository（消歧核心）
 # ═══════════════════════════════════════════════════════════════════════
 
+def lookup_alias_candidates(name: str, entity_type: str, session=None) -> list[dict]:
+    """Return every live same-name dictionary; a homonym is never a unique match."""
+    from db.identity import use_session
+    with use_session(session) as active:
+        rows = active.query(EntityDict.id, EntityDict.canonical_data, EntityDict.external_ids).join(
+            EntityAlias, EntityAlias.dict_id == EntityDict.id).filter(
+                func.lower(EntityAlias.name) == name.strip().lower(),
+                EntityDict.entity_type == entity_type, EntityDict.is_deleted == False,
+                EntityAlias.is_deleted == False).distinct().order_by(EntityDict.id).all()
+        return [{'dict_id': row.id, 'name': name, 'canonical_name': (row.canonical_data or {}).get('name', ''),
+                 'canonical_data': row.canonical_data or {}, 'external_ids': row.external_ids or {}} for row in rows]
+
+
 def lookup_alias(name: str, entity_type: str, session=None) -> Optional[int]:
-    """
-    精确匹配别名表。
-    在 entity_aliases 中查找 name 完全匹配（同 entity_type）。
-    命中返回 dict_id，未命中返回 None。
-    session 可选：传入则复用，不传则自开（向后兼容）。
-    """
-    def _query(sess):
-        result = (
-            sess.query(EntityAlias.dict_id)
-            .filter(
-                func.lower(EntityAlias.name) == name.lower(),
-                EntityAlias.entity_type == entity_type,
-                EntityAlias.is_deleted == False,
-            )
-            .first()
-        )
-        return result.dict_id if result else None
-
-    if session is not None:
-        return _query(session)
-
-    from db.session import get_session
-    with get_session() as sess:
-        if sess is None:
-            return None
-        return _query(sess)
+    """Compatibility API. Return an ID only when all live same-name matches agree."""
+    rows = lookup_alias_candidates(name, entity_type, session=session)
+    identities = {row['dict_id'] for row in rows}
+    return next(iter(identities)) if len(identities) == 1 else None
 
 
 def search_similar_entities(
@@ -1868,6 +1423,7 @@ def search_similar_entities(
     entity_type: str,
     top_k: int = 10,
     session=None,
+    strict_errors: bool = True,
 ) -> list[dict]:
     """
     向量相似度召回（pgvector，仅做候选召回，分数供参考不直接决策）。
@@ -1920,8 +1476,10 @@ def search_similar_entities(
                     "aliases": aliases_by_dict.get(r.dict_id, []),
                 })
             return results
-        except Exception as e:
-            logger.error(f"[DB] search_similar_entities 失败: {e}")
+        except Exception:
+            logger.error('[DB] Entity similarity lookup unavailable')
+            if strict_errors:
+                raise RuntimeError('Entity similarity lookup unavailable') from None
             return []
 
     if session is not None:
@@ -1930,6 +1488,8 @@ def search_similar_entities(
     from db.session import get_session
     with get_session() as sess:
         if sess is None:
+            if strict_errors:
+                raise RuntimeError("Entity similarity lookup is not configured")
             return []
         return _query(sess)
 
@@ -2166,6 +1726,8 @@ def _cascade_recompute_stale_entities(session, dict_id: int) -> int:
 
         old_dict_id = ent.dict_id
         ent.dict_id = dict_id
+        from db.identity import clear_entity_confirmation
+        clear_entity_confirmation(ent)
         _refresh_step_metadata(ent, dict_id)
         recomputed += 1
 
@@ -2235,295 +1797,146 @@ def insert_extraction_result(
         )
 
 
-def _do_insert_extraction_result(
-    session,
-    source_doc_uuid: str,
-    source_site: str,
-    entities: list[dict],
-    relations: list[dict],
-) -> list[int]:
-    """insert_extraction_result 的核心逻辑，在已有 session 中执行。"""
-    n = len(entities)
-
-    # ── Phase 1: 分类实体 ─────────────────────────────────────────
-    # merged_id_map: 输入下标 → 已有 extracted_entities.id
-    # insert_indices: 需要插入的实体下标列表
-    #
-    # dict_id 只由 Step 2 别名精确匹配设定，安全可靠，直接合并。
-    # Step 1/3/5 不会设 dict_id，走 Phase 2 创建新 entity_dict + alias。
-    merged_id_map: dict[int, int] = {}
-    insert_indices: list[int] = []
-
-    for i, rec in enumerate(entities):
-        dict_id = rec.get("dict_id")
-        entity_type = rec.get("entity_type", "")
-        entity_name = rec.get("entity_name", "")
-
+def _do_insert_extraction_result(session, source_doc_uuid, source_site, entities, relations) -> list[int]:
+    """Persist observations and link proposals without turning repeated evidence into approval."""
+    from db.identity import (digest, evidence_values, record_evidence, row_evidence_columns,
+                             batch_identity_keys, compatible_identity, disambiguation,
+                             has_candidates, persist_candidates, native_identity_claim, verified_native_identity)
+    from db.models import EntitySourceEvidence
+    # Stable across Python processes, unlike hash(). Serialize replays of one document.
+    lock_key = int(digest(['extraction', source_doc_uuid])[:15], 16)
+    session.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock_key})
+    # Native metadata is serialized input, not a trust credential. Reproject the stored original.
+    native_projection = []
+    if any(native_identity_claim(rec) for rec in entities):
+        source = session.query(Document).filter(Document.uuid == source_doc_uuid).with_for_update().first()
+        if source is not None and not source.is_deleted and source.source_site == source_site:
+            from biz_rules.native_extraction import extract_native_entities, NativeExtractionError
+            try:
+                native_projection = extract_native_entities(source.raw_content, source.source_site)['entities']
+            except NativeExtractionError:
+                pass
+    # Acquire all strong-ID locks in a fixed order to avoid opposite batch-order deadlocks.
+    native_identities = {value for rec in entities
+                         if (value := verified_native_identity(rec, source_site, native_projection))}
+    for namespace, field, value in sorted(native_identities):
+        session.execute(text('SELECT pg_advisory_xact_lock(:key)'),
+                        {'key': int(digest(['native_identity', namespace, value])[:15], 16)})
+    final_ids = []
+    batch = []
+    for incoming in entities:
+        rec = {**incoming, 'entity_data': dict(incoming.get('entity_data') or {})}
+        info = dict(disambiguation(rec))
+        native_identifier = verified_native_identity(rec, source_site, native_projection)
+        if native_identity_claim(rec) and native_identifier is None:
+            candidates = list(info.get('candidates') or [])
+            proposed_id = rec.get('dict_id') or info.get('dict_id')
+            if proposed_id and not any(item.get('dict_id') == proposed_id for item in candidates):
+                candidates.append({'dict_id': proposed_id, 'score': info.get('confidence', 0.0)})
+            info.update(status='ambiguous', auto_link=False, dict_id=None, candidates=candidates,
+                        match_step='step1_native_source_unverified',
+                        reason='Native identity does not match the stored source projection')
+            rec['dict_id'] = None
+        if native_identifier:
+            namespace, native_field, native_value = native_identifier
+            matches = {}
+            for key in (namespace, native_field):
+                for match in lookup_external_id_candidates(rec['entity_type'], key, native_value, session=session):
+                    matches[match['dict_id']] = match
+            candidates = [{'dict_id': match['dict_id'], 'name': match['canonical_name'],
+                           'similarity_score': 1.0, 'match_type': 'native_id'} for match in matches.values()]
+            selected_id = next(iter(matches)) if len(matches) == 1 else None
+            info.update(status='auto_matched' if selected_id else 'ambiguous' if matches else 'new_entity',
+                        auto_link=bool(selected_id), dict_id=selected_id, candidates=candidates,
+                        match_step='step1_native_id', rule_version='native-fields.20261031.v1',
+                        reason='Unique native identifier' if selected_id else 'Native identifier has multiple dictionaries' if matches else 'Native identifier first observation')
+            rec['dict_id'] = selected_id
+        if info:
+            rec['_disambig'] = info
+            rec['entity_data']['_disambig'] = info
+        # Intermediate and ambiguous candidates cannot allocate a new dictionary.
+        candidate = has_candidates(rec)
+        dict_id = None if candidate else (rec.get('dict_id') or info.get('dict_id'))
         if dict_id:
-            existing = _find_existing_entity_by_dict_id(session, dict_id, entity_type)
-            if existing is not None:
-                merged_id_map[i] = existing.id
-                logger.info(
-                    f"[DB] Phase1 MERGE: '{entity_name}' type={entity_type} "
-                    f"dict_id={dict_id} → existing extracted_entities.id={existing.id}"
-                )
-                continue
-            else:
-                logger.warning(
-                    f"[DB] Phase1 INSERT (dict_id有值但无已存在行): "
-                    f"'{entity_name}' type={entity_type} dict_id={dict_id}"
-                )
-
-        insert_indices.append(i)
-
-    logger.info(
-        f"[DB] 实体分类: doc={source_doc_uuid} "
-        f"total={n} merge={len(merged_id_map)} insert={len(insert_indices)}"
-    )
-
-    # ── Phase 2: 插入新实体 ───────────────────────────────────────
-    # new_entity → 自动创建 entity_dict（is_verified=False），让后续消歧可匹配
-    # batch_dict_cache 防止同一批次内重复创建同名实体
-    batch_dict_cache: dict[tuple[str, str], int] = {}
-
-    new_entities: list[ExtractedEntity] = []
-    new_index_to_obj: dict[int, ExtractedEntity] = {}
-
-    for i in insert_indices:
-        rec = entities[i]
-        entity_type = rec["entity_type"]
-        entity_name = (rec.get("entity_name") or "").strip()
-        entity_data = rec.get("entity_data", {}) or {}
-        disambig = entity_data.get("_disambig", {}) or {}
-        dict_id = rec.get("dict_id")
-
-        # dict_id 仅由 Step 2 别名精确匹配设定，其余一律创建新 entity_dict + alias
-        if dict_id is None and entity_name:
-            cache_key = (entity_type, entity_name)
-            if cache_key in batch_dict_cache:
-                dict_id = batch_dict_cache[cache_key]
-                logger.info(
-                    f"[DB] Phase2 batch_cache HIT: '{entity_name}' type={entity_type} "
-                    f"dict_id={dict_id} (批次内复用)"
-                )
-            else:
-                new_dict_id = _create_entity_dict_from_extraction(
-                    session, entity_name, entity_type, entity_data,
-                    source_site=source_site, is_verified=False,
-                    source_doc_uuid=source_doc_uuid,
-                )
-                if new_dict_id:
-                    dict_id = new_dict_id
-                    batch_dict_cache[cache_key] = new_dict_id
-            rec["dict_id"] = dict_id
-
-        ent = ExtractedEntity(
-            source_doc_uuid=source_doc_uuid,
-            source_site=source_site,
-            entity_type=entity_type,
-            entity_name=rec.get("entity_name", ""),
-            entity_data=entity_data,
-            source_text=rec.get("source_text", ""),
-            dict_id=rec.get("dict_id"),
-            confidence_score=rec.get("confidence_score", 0.0),
-            confidence_reason=rec.get("confidence_reason", ""),
-            review_status="pending",
-        )
-        new_entities.append(ent)
-        new_index_to_obj[i] = ent
-
-    if new_entities:
-        session.add_all(new_entities)
-        session.flush()  # 获取自增 id
-        for ent_obj in new_entities:
-            _write_operation_log(
-                session, "insert", "extracted_entities", ent_obj.id,
-                business_action="extract",
-                description=f"新实体: name='{ent_obj.entity_name}' type={ent_obj.entity_type} dict_id={ent_obj.dict_id}",
-                details={"entity_name": ent_obj.entity_name, "entity_type": ent_obj.entity_type,
-                          "dict_id": ent_obj.dict_id, "source_doc_uuid": ent_obj.source_doc_uuid,
-                          "source_site": ent_obj.source_site, "confidence": ent_obj.confidence_score},
-                trigger_source="_do_insert_extraction_result",
-            )
-
-    # final_id_map: 输入下标 → DB id
-    final_id_map: dict[int, int] = {}
-    for i in merged_id_map:
-        final_id_map[i] = merged_id_map[i]
-    for i in insert_indices:
-        ent_obj = new_index_to_obj[i]
-        final_id_map[i] = ent_obj.id
-
-    # ── Phase 3: 合并数据到已有实体 ───────────────────────────────
-    merge_count = 0
-    merged_dict_ids: set[int] = set()
-    for i, existing_id in merged_id_map.items():
-        existing_ent = session.query(ExtractedEntity).filter(
-            ExtractedEntity.id == existing_id
-        ).first()
-        if existing_ent is None:
-            logger.warning(f"[DB] merge 目标实体不存在: id={existing_id}")
-            continue
-
-        rec = entities[i]
-        dict_id = rec.get("dict_id")
-        entity_name = rec.get("entity_name", "")
-        entity_type = rec.get("entity_type", "")
-        new_entity_data = rec.get("entity_data", {}) or {}
-
-        # 合并 entity_data → process_entity_merge 写入 entity_dict.canonical_data
-        merge_auto, merge_conflict = process_entity_merge(
-            session, dict_id, existing_id, new_entity_data, source_site,
-        )
-
-        # 交叉验证：第二次被命中 → 实体自动通过
-        if existing_ent.review_status == "pending":
-            existing_ent.review_status = "auto_approved"
-            logger.info(
-                f"[DB] auto_approve: entity_id={existing_id} dict_id={dict_id} "
-                f"'{existing_ent.entity_name}' 交叉验证自动通过"
-            )
-
-        # 重置图同步状态，让更新推送到 WeKnora/Neo4j
-        if existing_ent.weknora_graph_status == "pushed":
-            existing_ent.weknora_graph_status = "pending"
-
-        # 合并 source_text 用于溯源
-        new_source = rec.get("source_text", "")
-        if new_source and new_source not in (existing_ent.source_text or ""):
-            existing_ent.source_text = (
-                (existing_ent.source_text or "")
-                + "\n---\n"
-                + new_source
-            )[:2000]
-
-        merge_count += 1
-        if dict_id:
-            merged_dict_ids.add(dict_id)
-        logger.info(
-            f"[DB] 实体合并: index={i} name='{entity_name}' "
-            f"→ extracted_entities.id={existing_id} dict_id={dict_id}"
-        )
-        _write_operation_log(
-            session, "update", "extracted_entities", existing_id,
-            business_action="merge",
-            description=f"merge 实体: name='{entity_name}' type={entity_type} → id={existing_id} dict_id={dict_id}",
-            details={"entity_name": entity_name, "entity_type": entity_type,
-                      "dict_id": dict_id, "merge_auto": merge_auto, "merge_conflict": merge_conflict,
-                      "source_site": source_site},
-            trigger_source="_do_insert_extraction_result",
-        )
-
-    if merge_count:
-        logger.info(
-            f"[DB] merge 阶段完成: {merge_count} 个实体"
-        )
-        # 统一回写 canonical_data → entity_data（仅 approved/auto_approved）
-        for _dict_id in merged_dict_ids:
-            _sync_canonical_to_extracted(session, _dict_id)
-
-    # ── Phase 4: 写关系（下标 → final_id_map）─────────────────────
-    # 查询当前文档已有关系，去重
-    existing_relations = set()
-    if relations:
-        for er in (
-            session.query(
-                EntityRelation.from_entity_id,
-                EntityRelation.to_entity_id,
-                EntityRelation.relation_type,
-            )
-            .filter(
-                EntityRelation.source_doc_uuid == source_doc_uuid,
-                EntityRelation.is_deleted == False,
-            )
-            .all()
-        ):
-            existing_relations.add((er.from_entity_id, er.to_entity_id, er.relation_type))
-
-    rel_objs = []
-    skipped_dups = 0
-    for rel in relations:
-        from_idx = rel.get("from_entity_idx")
-        to_idx = rel.get("to_entity_idx")
-
-        if from_idx is None or to_idx is None:
-            continue
-        if from_idx >= n or to_idx >= n:
-            logger.warning(
-                f"[DB] insert_extraction_result: 关系下标越界 "
-                f"from={from_idx} to={to_idx} n={n}"
-            )
-            continue
-
-        from_db_id = final_id_map.get(from_idx)
-        to_db_id = final_id_map.get(to_idx)
-        if from_db_id is None or to_db_id is None:
-            logger.warning(
-                f"[DB] insert_extraction_result: 关系下标无对应 DB id "
-                f"from={from_idx}({from_db_id}) to={to_idx}({to_db_id})"
-            )
-            continue
-
-        # 去重：同文档同 (from, to, type) 已存在则跳过
-        dup_key = (from_db_id, to_db_id, rel["relation_type"])
-        if dup_key in existing_relations:
-            skipped_dups += 1
-            continue
-
-        existing_relations.add(dup_key)  # 防止批次内重复
-        rel_objs.append(EntityRelation(
-            source_doc_uuid=source_doc_uuid,
-            source_site=source_site,
-            from_entity_id=from_db_id,
-            to_entity_id=to_db_id,
-            relation_type=rel["relation_type"],
-            relation_props=rel.get("relation_props", {}),
-            source_text=rel.get("source_text", ""),
-            confidence_score=rel.get("confidence_score", 0.0),
-            confidence_reason=rel.get("confidence_reason", ""),
-            review_status="pending",
-        ))
-    if rel_objs:
-        session.add_all(rel_objs)
-        session.flush()
-        for rel_obj in rel_objs:
-            _write_operation_log(
-                session, "insert", "entity_relations", rel_obj.id,
-                business_action="extract",
-                description=f"新关系: {rel_obj.relation_type} from={rel_obj.from_entity_id}→to={rel_obj.to_entity_id}",
-                details={"relation_type": rel_obj.relation_type,
-                          "from_entity_id": rel_obj.from_entity_id, "to_entity_id": rel_obj.to_entity_id,
-                          "source_doc_uuid": rel_obj.source_doc_uuid, "source_site": rel_obj.source_site},
-                trigger_source="_do_insert_extraction_result",
-            )
-
-    if skipped_dups:
-        logger.info(
-            f"[DB] 关系去重: 跳过 {skipped_dups} 条重复关系 "
-            f"(doc={source_doc_uuid})"
-        )
-
-    # ── Phase 5: 更新文档抽取状态 ──────────────────────────────────
+            dictionary = session.query(EntityDict).filter(EntityDict.id == dict_id).populate_existing().with_for_update().first()
+            if dictionary is None or dictionary.is_deleted or dictionary.entity_type != rec['entity_type']:
+                raise ValueError('Invalid extraction dictionary link')
+            if native_identifier:
+                namespace, native_field, native_value = native_identifier
+                if not any((dictionary.external_ids or {}).get(key) == native_value for key in (namespace, native_field)):
+                    raise ValueError('Native dictionary identity changed during persistence')
+        observation = evidence_values({**rec, **((rec.get('evidence') or [{}])[0])}, source_doc_uuid, source_site)
+        replay = session.query(EntitySourceEvidence).filter(
+            EntitySourceEvidence.object_type == 'entity',
+            EntitySourceEvidence.evidence_key == observation['evidence_key']).first()
+        entity = session.get(ExtractedEntity, replay.object_id) if replay else None
+        if entity is not None and entity.is_deleted:
+            entity = None
+        if entity is None and dict_id:
+            dictionary = session.get(EntityDict, dict_id)
+            if dictionary is None or dictionary.is_deleted or dictionary.entity_type != rec['entity_type']:
+                raise ValueError('Invalid extraction dictionary link')
+            entity = _find_existing_entity_by_dict_id(session, dict_id, rec['entity_type'])
+        keys = batch_identity_keys(rec)
+        if entity is None and not candidate and not native_identifier:
+            for previous_keys, previous_data, previous in batch:
+                if (keys & previous_keys and compatible_identity(rec['entity_data'], previous_data) and
+                        not (dict_id and previous.dict_id and dict_id != previous.dict_id)):
+                    entity = previous
+                    break
+        if entity is None:
+            if dict_id is None and not candidate and (rec.get('entity_name') or '').strip():
+                dict_id = _create_entity_dict_from_extraction(
+                    session, rec.get('entity_name', ''), rec['entity_type'], rec['entity_data'],
+                    source_site=source_site, is_verified=False, source_doc_uuid=source_doc_uuid,
+                    force_create=bool(native_identifier))
+            base_evidence = {**rec, **((rec.get('evidence') or [{}])[0])}
+            entity = ExtractedEntity(
+                source_doc_uuid=source_doc_uuid, source_site=source_site,
+                entity_type=rec['entity_type'], entity_name=rec.get('entity_name', ''),
+                entity_data=rec['entity_data'], source_text=rec.get('source_text', ''), dict_id=dict_id,
+                confidence_score=rec.get('confidence_score', 0.0),
+                confidence_reason=rec.get('confidence_reason', ''), review_status='pending',
+                **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
+            session.add(entity); session.flush()
+            _write_operation_log(session, 'insert', 'extracted_entities', entity.id,
+                                 business_action='extract', description='New unreviewed entity observation',
+                                 details={'source_doc_uuid': source_doc_uuid, 'dict_id': dict_id},
+                                 trigger_source='_do_insert_extraction_result')
+        # No approval, canonical overwrite, alias migration or historical bulk repair here.
+        observation_key = record_evidence(session, 'entity', entity, rec, source_doc_uuid, source_site)
+        if info.get('candidates') or info.get('dict_id'):
+            persist_candidates(session, entity, rec, observation_key)
+        batch.append((keys, rec['entity_data'], entity))
+        final_ids.append(entity.id)
+    for incoming in relations:
+        rel = dict(incoming)
+        from_idx, to_idx = rel.get('from_entity_idx'), rel.get('to_entity_idx')
+        if (not isinstance(from_idx, int) or not isinstance(to_idx, int) or
+                not 0 <= from_idx < len(final_ids) or not 0 <= to_idx < len(final_ids)):
+            raise ValueError('Relation endpoint index is outside the extraction batch')
+        from_id, to_id = final_ids[from_idx], final_ids[to_idx]
+        rel.update(from_entity_id=from_id, to_entity_id=to_id)
+        row = session.query(EntityRelation).filter(
+            EntityRelation.source_doc_uuid == source_doc_uuid,
+            EntityRelation.from_entity_id == from_id, EntityRelation.to_entity_id == to_id,
+            EntityRelation.relation_type == rel['relation_type'], EntityRelation.is_deleted == False).first()
+        if row is None:
+            base_evidence = {**rel, **((rel.get('evidence') or [{}])[0])}
+            row = EntityRelation(source_doc_uuid=source_doc_uuid, source_site=source_site,
+                from_entity_id=from_id, to_entity_id=to_id, relation_type=rel['relation_type'],
+                relation_props=rel.get('relation_props') or {}, source_text=rel.get('source_text', ''),
+                confidence_score=rel.get('confidence_score', 0.0), confidence_reason=rel.get('confidence_reason', ''),
+                review_status='pending', **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
+            session.add(row); session.flush()
+        record_evidence(session, 'relation', row, rel, source_doc_uuid, source_site)
     doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
     if doc:
-        doc.extraction_status = "done"
-        doc.extracted_at = datetime.now(timezone.utc)
-
+        doc.extraction_status = 'done'; doc.extracted_at = datetime.now(timezone.utc)
     from db.review_lifecycle import recalc_document_state
     recalc_document_state(session, source_doc_uuid)
-
-    final_ids = [final_id_map.get(i) for i in range(n)]
-    logger.info(
-        f"[DB] 抽取结果入库: doc={source_doc_uuid} "
-        f"entities={n} (new={len(insert_indices)} merged={len(merged_id_map)}) "
-        f"relations={len(relations)}"
-    )
     return final_ids
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# 6. 审核队列接口（实体）
-# ═══════════════════════════════════════════════════════════════════════
 
 def get_pending_review_entities(limit: int = 50) -> list[dict]:
     """
@@ -2548,35 +1961,9 @@ def get_pending_review_entities(limit: int = 50) -> list[dict]:
         return [_entity_to_dict(r) for r in rows]
 
 
-def approve_entity(id: int, reviewer: str, note: str = "") -> None:
-    """审核通过实体，同时写 review_log。"""
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return
-        ent = session.query(ExtractedEntity).filter(ExtractedEntity.id == id).first()
-        if ent is None:
-            logger.warning(f"[DB] approve_entity: 实体 {id} 不存在")
-            return
-        before = ent.review_status
-        ent.review_status = "approved"
-        ent.reviewer_note = note
-        ent.reviewed_by = reviewer
-        ent.reviewed_at = datetime.now(timezone.utc)
-        session.flush()
-        _write_review_log(session, "entity", id, "approve", reviewer, note,
-                          {"review_status": before}, {"review_status": "approved"})
-        _write_operation_log(
-            session, "update", "extracted_entities", id,
-            business_action="approve",
-            description=f"审核通过(简单): name='{ent.entity_name}' type={ent.entity_type}",
-            details={"review_status": {"before": before, "after": "approved"}, "reviewer": reviewer, "note": note},
-            operator=reviewer,
-            trigger_source="approve_entity",
-        )
-        from db.review_lifecycle import recalc_document_state
-        recalc_document_state(session, ent.source_doc_uuid)
+def approve_entity(id: int, reviewer: str, note: str = '', **kwargs) -> None:
+    """Compatibility entry point, with the same explicit confirmation policy."""
+    return approve_entity_with_alias_writeback(id, reviewer, note, **kwargs)
 
 
 def _extract_external_ids(entity_type: str, entity_data: dict) -> dict:
@@ -2587,16 +1974,22 @@ def _extract_external_ids(entity_type: str, entity_data: dict) -> dict:
         "Target":        ["id", "gene_symbol"],
         "ClinicalTrial": ["trial_id"],
         "ApprovalEvent": ["approval_number"],
+        "RegulatoryApplication": ["application_number"],
+        "RecallProduct":  ["recall_number", "event_id"],
+        "RecallEvent":    ["recall_number", "event_id"],
         "Compound":      ["cas_number"],
         "Policy":        ["doc_number"],
         "Pathway":       ["id"],
         "Indication":    ["id", "icd_code"],
     }
-    result: dict[str, str] = {}
+    result: dict[str, str] = dict(entity_data.get("external_ids") or {})
     for f in FIELD_MAP.get(entity_type, []):
         val = entity_data.get(f)
         if val and str(val).strip():
             result[f] = str(val).strip()
+    native = entity_data.get("_native") or {}
+    if native.get("identity_namespace") and native.get("identity_value"):
+        result[str(native["identity_namespace"])] = str(native["identity_value"])
     return result
 
 
@@ -2606,37 +1999,27 @@ def _create_entity_dict_from_extraction(
     entity_type: str,
     entity_data: dict,
     source_site: str = "",
-    is_verified: bool = True,
+    is_verified: bool = False,
     source_doc_uuid: str = "",
+    force_create: bool = False,
 ) -> int | None:
     """
     从抽取实体创建 entity_dict 记录，返回 dict_id。
     已存在同 entity_type + 同 canonical_name 则跳过（返回已有 id）。
     is_verified=False 用于首次抽取自动创建（未经人工审核）。
     """
-    # 跨进程漏斗锁：同 entity_type + entity_name 的创建操作在 DB 层面串行化。
-    # 事务提交时 pg_advisory_xact_lock 自动释放，不需要手动 unlock。
-    lock_key = hash((entity_type, entity_name.strip().lower())) & 0x7FFFFFFF
-    logger.debug(
-        f"[DB] 获取 advisory lock: name='{entity_name}' type={entity_type} "
-        f"key={lock_key}"
-    )
+    from db.identity import digest, compatible_identity
+    lock_key = int(digest([entity_type, entity_name.strip().casefold()])[:15], 16)
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
-
-    existing = (
-        session.query(EntityDict.id)
-        .join(EntityAlias, EntityAlias.dict_id == EntityDict.id)
-        .filter(
-            func.lower(EntityAlias.name) == entity_name.lower(),
-            EntityDict.entity_type == entity_type,
-            EntityDict.is_deleted == False,
-            EntityAlias.is_deleted == False,
-        )
-        .first()
-    )
-    if existing:
-        logger.info(f"[DB] entity_dict 已存在: name='{entity_name}' type={entity_type} dict_id={existing.id}，跳过创建")
-        return existing.id
+    if not force_create:
+        names = {str(value).strip().casefold() for value in (entity_name, entity_data.get('name_en')) if value}
+        candidates = session.query(EntityDict).join(EntityAlias, EntityAlias.dict_id == EntityDict.id).filter(
+            func.lower(EntityAlias.name).in_(names), EntityDict.entity_type == entity_type,
+            EntityDict.is_deleted == False, EntityAlias.is_deleted == False).all()
+        compatible = [row for row in candidates if compatible_identity(entity_data,
+                      {**(row.canonical_data or {}), 'external_ids': row.external_ids or {}})]
+        if len({row.id for row in compatible}) == 1:
+            return compatible[0].id
 
     external_ids = _extract_external_ids(entity_type, entity_data)
     canonical_data = {k: v for k, v in entity_data.items() if not k.startswith("_")}
@@ -2652,7 +2035,7 @@ def _create_entity_dict_from_extraction(
         external_ids=external_ids,
         canonical_data=canonical_data,
         canonical_source=source_site,
-        is_verified=is_verified,
+        is_verified=False,
     )
     session.add(entity)
     session.flush()
@@ -2660,7 +2043,7 @@ def _create_entity_dict_from_extraction(
         session, "insert", "entity_dict", entity.id,
         business_action="extract",
         description=f"新建 entity_dict: name='{entity_name}' type={entity_type} source={source_site}",
-        details={"entity_name": entity_name, "entity_type": entity_type, "canonical_data": canonical_data, "is_verified": is_verified},
+        details={"entity_name": entity_name, "entity_type": entity_type, "canonical_data": canonical_data, "is_verified": False},
         trigger_source="_create_entity_dict_from_extraction",
     )
     # 写入 alias（embedding 已在锁外预生成，从 entity_data._embeddings 缓存读取）
@@ -2677,9 +2060,10 @@ def _write_aliases_with_embedding(
     entity_name: str,
     entity_data: dict,
     source_doc_uuid: str = "",
+    allow_embedding_generation: bool = True,
 ) -> int:
     """将 entity_name + entity_data 中的名称写为 entity_aliases，附带 embedding。返回新增条数。"""
-    from core_engine.cloud_api_client import generate_embedding
+    from core_engine.common.cloud_api_client import generate_embedding
 
     names_to_add: set[str] = set()
     names_to_add.add(entity_name.strip())
@@ -2695,7 +2079,7 @@ def _write_aliases_with_embedding(
         if alias_str:
             names_to_add.add(alias_str)
 
-    # 锁外预生成的 embedding 缓存，优先使用，未命中则实时调 API
+    # 审核持锁路径只复用缓存；显式允许的兼容调用才生成缺失向量。
     embeddings_cache: dict[str, list[float]] = entity_data.pop("_embeddings", {}) or {}
 
     logger.info(f"[DB] alias write-back: dict_id={dict_id} names={list(names_to_add)}")
@@ -2734,7 +2118,9 @@ def _write_aliases_with_embedding(
             continue
 
         try:
-            embedding = embeddings_cache.get(name) or generate_embedding(name)
+            embedding = embeddings_cache.get(name)
+            if not embedding and allow_embedding_generation:
+                embedding = generate_embedding(name)
         except Exception as e:
             logger.warning(f"[DB] alias '{name}' embedding 生成失败: {e}")
             embedding = None
@@ -2881,6 +2267,8 @@ def _sync_canonical_to_extracted(session, dict_id: int) -> int:
             count += 1
 
     if count:
+        from db.identity import invalidate_dictionary_confirmation
+        invalidate_dictionary_confirmation(session, entity_dict)
         logger.info(
             f"[DB] _sync_canonical_to_extracted: dict_id={dict_id} "
             f"synced {count}/{len(rows)} rows, {len(cd)} canonical fields"
@@ -2889,168 +2277,98 @@ def _sync_canonical_to_extracted(session, dict_id: int) -> int:
     return count
 
 
-def approve_entity_with_alias_writeback(
-    entity_id: int,
-    reviewer: str,
-    note: str = "",
-    dict_id: int | None = None,
-    force_new: bool = False,
-) -> None:
-    """
-    审核通过实体，合并 entity_data 到 canonical_data。
-    优先级：force_new > dict_id > ent.dict_id > 创建新 entity_dict
-    - force_new=True → 忽略一切，以新实体创建
-    - dict_id 不为 None → 审核员指定了目标 dict_id
-    - 都不给 → 保留消歧结果（ent.dict_id），无则新建
-
-    约束：已审核实体（review_status='approved'）若已有 dict_id，
-    禁止 force_new 或更换 dict_id，保证实体身份不可变。
-    """
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return
-
-        ent = session.query(ExtractedEntity).filter(ExtractedEntity.id == entity_id).first()
-        if ent is None:
-            logger.warning(f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} 不存在")
-            return
-
-        # 已审核实体：dict_id 不可变
-        if ent.review_status == "approved" and ent.dict_id is not None:
-            if force_new:
-                logger.warning(
-                    f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} "
-                    f"已审核 dict_id={ent.dict_id}，拒绝 force_new"
-                )
-                return
-            if dict_id is not None and dict_id != ent.dict_id:
-                logger.warning(
-                    f"[DB] approve_entity_with_alias_writeback: 实体 {entity_id} "
-                    f"已审核 dict_id={ent.dict_id}，拒绝更换为 {dict_id}"
-                )
-                return
-
-        before = ent.review_status
-        ent.review_status = "approved"
-        ent.reviewer_note = note
-        ent.reviewed_by = reviewer
-        ent.reviewed_at = datetime.now(timezone.utc)
-        session.flush()
-        _write_review_log(session, "entity", entity_id, "approve", reviewer, note,
-                          {"review_status": before}, {"review_status": "approved"})
-        _write_operation_log(
-            session, "update", "extracted_entities", entity_id,
-            business_action="approve",
-            description=f"审核通过: name='{ent.entity_name}' type={ent.entity_type} dict_id={ent.dict_id}",
-            details={"review_status": {"before": before, "after": "approved"}, "reviewer": reviewer, "note": note},
-            operator=reviewer,
-            trigger_source="approve_entity_with_alias_writeback",
-        )
+def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=None, force_new=False,
+                                        confirm_identity=False, basis='', evidence=None, session=None, review_context=None):
+    from db.identity import (use_session, require_human_reviewer, validate_evidence, get_object_evidence,
+                             record_evidence, link_entity, has_candidates, snapshot, review_object_binding, refresh_link_dependencies)
+    from api.review_auth import require_trusted_review_context
+    if confirm_identity:
+        reviewer = require_trusted_review_context(review_context)
+    else:
+        reviewer = require_human_reviewer(reviewer)
+    if confirm_identity and not basis.strip():
+        raise ValueError('Identity confirmation requires an explicit basis')
+    # Fixed-version reads happen before source row locks. Recheck the source snapshot below.
+    with use_session(session) as active:
+        ent = active.get(ExtractedEntity, entity_id)
+        if ent is None or ent.is_deleted:
+            raise ValueError('Entity does not exist')
+        expected = snapshot(ent)
+        expected_target_id = None if force_new else (dict_id if dict_id is not None else ent.dict_id)
+        target_before = active.get(EntityDict, expected_target_id) if expected_target_id else None
+        expected_target = snapshot(target_before) if target_before else None
+        recorded_evidence = get_object_evidence('entity', entity_id, session=active)
+        allowed_sources = {(ent.source_doc_uuid, ent.source_site)} | {
+            (item['source_doc_uuid'], item['source_site']) for item in recorded_evidence}
+        stored_evidence = evidence or recorded_evidence
+    validated = validate_evidence(stored_evidence, expected['source_doc_uuid'], expected['source_site'],
+                                  allowed_sources=allowed_sources) if confirm_identity else []
+    with use_session(session) as active:
+        ent = active.query(ExtractedEntity).filter(ExtractedEntity.id == entity_id).populate_existing().with_for_update().first()
+        if ent is None or ent.is_deleted or snapshot(ent) != expected:
+            raise ValueError('Entity changed during evidence validation')
+        target_id = None if force_new else (dict_id if dict_id is not None else ent.dict_id)
+        if ent.review_status == 'approved' and ent.dict_id and (force_new or target_id != ent.dict_id):
+            raise ValueError('Use a reversible identity proposal to change an approved identity')
+        if not target_id and not confirm_identity and not force_new:
+            before_status = ent.review_status
+            ent.review_status = 'approved'; ent.reviewer_note = note
+            ent.reviewed_by = reviewer; ent.reviewed_at = datetime.now(timezone.utc)
+            _write_review_log(active, 'entity', entity_id, 'approve', reviewer, note,
+                              {'review_status': before_status, 'dict_id': None},
+                              {'review_status': 'approved', 'dict_id': None, 'confirm_identity': False})
+            from db.review_lifecycle import recalc_document_state
+            recalc_document_state(active, ent.source_doc_uuid)
+            return {'success': True, 'entity_id': entity_id, 'dict_id': None, 'identity_confirmed': False}
+        if not target_id:
+            if has_candidates({'entity_data': ent.entity_data}) and not force_new:
+                raise ValueError('Resolve the candidate link or explicitly choose a new identity first')
+            target_id = _create_entity_dict_from_extraction(active, ent.entity_name, ent.entity_type,
+                dict(ent.entity_data or {}), source_site=ent.source_site or '', is_verified=False,
+                source_doc_uuid=ent.source_doc_uuid or '', force_create=force_new)
+        target = active.query(EntityDict).filter(EntityDict.id == target_id).populate_existing().with_for_update().first()
+        if target is None or target.is_deleted or target.entity_type != ent.entity_type:
+            raise ValueError('Invalid identity dictionary')
+        if expected_target_id and snapshot(target) != expected_target:
+            raise ValueError('Dictionary identity changed during evidence validation')
+        identity_link_log_id = None
+        if ent.dict_id != target_id:
+            reviewer = require_trusted_review_context(review_context)
+            identity_link_log_id = link_entity(active, ent, target_id, reviewer, note, review_context=review_context)
+        before = {'review_status': ent.review_status, 'dict_id': ent.dict_id,
+                  'is_verified': target.is_verified, 'verified_by': target.verified_by}
+        now = datetime.now(timezone.utc)
+        ent.review_status = 'approved'; ent.reviewer_note = note; ent.reviewed_by = reviewer; ent.reviewed_at = now
+        # Human-approved content may update canonical fields, but does not confer identity confirmation.
+        process_entity_merge(active, target_id, ent.id, dict(ent.entity_data or {}), ent.source_site or '')
+        _write_aliases_with_embedding(active, target_id, ent.entity_type, ent.entity_name,
+                                       dict(ent.entity_data or {}), source_doc_uuid=ent.source_doc_uuid or '',
+                                       allow_embedding_generation=False)
+        if confirm_identity:
+            target.is_verified = True; target.verified_by = reviewer; target.verified_at = now
+            target.verification_basis = basis.strip()
+            ent.identity_confirmed_by = reviewer; ent.identity_confirmed_at = now
+            ent.identity_confirmation_basis = basis.strip()
+            record_evidence(active, 'entity', ent, {'entity_type': ent.entity_type,
+                'entity_name': ent.entity_name, 'entity_data': ent.entity_data, 'evidence': validated}, ent.source_doc_uuid, ent.source_site)
+        _write_review_log(active, 'entity', entity_id, 'confirm_identity' if confirm_identity else 'approve',
+                          reviewer, basis if confirm_identity else note, before,
+                          {'review_status': 'approved', 'dict_id': target_id, 'confirm_identity': confirm_identity,
+                           'is_verified': target.is_verified, 'verified_by': target.verified_by,
+                           'verified_at': target.verified_at.isoformat() if target.verified_at else None,
+                           'basis': basis if confirm_identity else '', 'evidence': validated,
+                           'review_audit_schema': 'trusted_human_identity_confirmation.v1' if confirm_identity else None,
+                           'identity_confirmed_by': ent.identity_confirmed_by if confirm_identity else None,
+                           'identity_confirmed_at': ent.identity_confirmed_at.isoformat() if confirm_identity else None,
+                           'object_binding_hash': review_object_binding(ent) if confirm_identity else None})
+        if identity_link_log_id is not None:
+            # Approval and optional confirmation belong to this reversible single-mention change.
+            identity_link_log = active.get(EntityMergeLog, identity_link_log_id)
+            identity_link_log.after_snapshot = {**identity_link_log.after_snapshot, 'entities': [snapshot(ent)]}
+            refresh_link_dependencies(active, identity_link_log)
         from db.review_lifecycle import recalc_document_state
-        recalc_document_state(session, ent.source_doc_uuid)
-
-        logger.info(
-            f"[DB] approve_entity_with_alias_writeback: entity_id={entity_id} "
-            f"name='{ent.entity_name}' type={ent.entity_type} dict_id={ent.dict_id} "
-            f"override_dict_id={dict_id} force_new={force_new} source_site={ent.source_site}"
-        )
-
-        entity_data = ent.entity_data or {}
-
-        # 决定目标 dict_id
-        target_dict_id: int | None = None
-        if force_new:
-            target_dict_id = None  # 强制新建
-        elif dict_id is not None:
-            target_dict_id = dict_id  # 审核员指定
-        else:
-            target_dict_id = ent.dict_id  # 保留消歧结果
-
-        if not target_dict_id:
-            logger.info(f"[DB] 创建 entity_dict for '{ent.entity_name}'")
-            new_id = _create_entity_dict_from_extraction(
-                session,
-                entity_name=ent.entity_name,
-                entity_type=ent.entity_type,
-                entity_data=entity_data,
-                source_site=ent.source_site or "",
-                source_doc_uuid=ent.source_doc_uuid or "",
-            )
-            if new_id:
-                target_dict_id = new_id
-            else:
-                logger.warning(f"[DB] 无法创建 entity_dict，跳过 alias 回写: entity_id={entity_id}")
-                return
-
-        # 更新实体 dict_id（审核员指定或新建）
-        old_dict_id = ent.dict_id
-        if target_dict_id and target_dict_id != ent.dict_id:
-            ent.dict_id = target_dict_id
-            session.flush()
-
-        # ── 迁移/清理旧 dict_id 下的别名 ──
-        if old_dict_id and target_dict_id and old_dict_id != target_dict_id:
-            logger.info(
-                f"[DB] approve: dict_id 变更 entity_id={entity_id} "
-                f"{old_dict_id} → {target_dict_id}，迁移 alias"
-            )
-            existing_names = {
-                a.name.lower()
-                for a in session.query(EntityAlias).filter(
-                    EntityAlias.dict_id == target_dict_id,
-                    EntityAlias.is_deleted == False,
-                ).all()
-            }
-            old_aliases = session.query(EntityAlias).filter(
-                EntityAlias.dict_id == old_dict_id,
-                EntityAlias.is_deleted == False,
-            ).all()
-            for alias in old_aliases:
-                if alias.name.lower() in existing_names:
-                    alias.is_deleted = True  # 同名 → 软删除
-                else:
-                    alias.dict_id = target_dict_id  # 迁移到新 dict_id
-                    existing_names.add(alias.name.lower())
-
-            # 检查旧 dict_id 是否成孤儿（无其他实体引用）
-            remaining = session.query(ExtractedEntity).filter(
-                ExtractedEntity.dict_id == old_dict_id,
-                ExtractedEntity.is_deleted == False,
-            ).count()
-            if remaining == 0:
-                old_dict = session.query(EntityDict).filter(EntityDict.id == old_dict_id).first()
-                if old_dict and not old_dict.is_verified:
-                    old_dict.is_deleted = True
-                    logger.info(f"[DB] approve: 孤儿 entity_dict {old_dict_id} 已软删除")
-
-            session.flush()
-
-        # 合并 entity_data 到 canonical_data
-        merge_auto, merge_conflict = process_entity_merge(
-            session, ent.dict_id, entity_id, entity_data, ent.source_site or "",
-        )
-        if merge_auto or merge_conflict:
-            logger.info(
-                f"[DB] merge: entity_id={entity_id} dict_id={ent.dict_id} "
-                f"auto_merged={merge_auto} conflicts={merge_conflict}"
-            )
-
-        # 回写 canonical_data → entity_data（实体刚获批）
-        _sync_canonical_to_extracted(session, ent.dict_id)
-
-        # 去重同 dict_id 的其他实体（保留当前审核通过的这一条）
-        if ent.dict_id:
-            deduped = _dedup_extracted_entities_by_dict_id(session, ent.dict_id, entity_id)
-            if deduped:
-                logger.info(
-                    f"[DB] dedup: entity_id={entity_id} dict_id={ent.dict_id} "
-                    f"removed {deduped} duplicates"
-                )
-
-            # 级联重算：审核通过后 dict 权威化/alias 迁移，重算历史 step_none 实体
-            _cascade_recompute_stale_entities(session, ent.dict_id)
+        recalc_document_state(active, ent.source_doc_uuid)
+        return {'success': True, 'entity_id': entity_id, 'dict_id': target_id, 'identity_confirmed': confirm_identity}
 
 
 def reject_entity(id: int, reviewer: str, note: str = "") -> None:
@@ -3064,6 +2382,8 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
         if ent is None:
             logger.warning(f"[DB] reject_entity: 实体 {id} 不存在")
             return
+        from db.identity import clear_entity_confirmation
+        clear_entity_confirmation(ent)
         before = ent.review_status
         ent.review_status = "rejected"
         ent.reviewer_note = note
@@ -3125,6 +2445,8 @@ def batch_approve_entities(
     min_confidence: float = 0.0
 ) -> dict:
     """批量审核通过实体，支持按条件筛选。"""
+    from db.identity import require_human_reviewer
+    require_human_reviewer(reviewer)
     from db.session import get_session
     
     with get_session() as session:
@@ -3145,8 +2467,9 @@ def batch_approve_entities(
         if source_site:
             q = q.filter(ExtractedEntity.source_site == source_site)
         
-        # 获取所有符合条件的实体
-        entities = q.all()
+        # Unresolved links remain pending until the reviewer chooses an identity.
+        from db.identity import has_candidates
+        entities = [ent for ent in q.all() if ent.dict_id or not has_candidates({'entity_data': ent.entity_data})]
         count = len(entities)
         
         if count == 0:
@@ -3176,6 +2499,8 @@ def batch_approve_entities(
                 )
                 if dict_id:
                     ent.dict_id = dict_id
+                    from db.identity import clear_entity_confirmation
+                    clear_entity_confirmation(ent)
                     session.flush()
 
             if dict_id:
@@ -3183,10 +2508,6 @@ def batch_approve_entities(
                     session, dict_id, ent.id, entity_data, ent.source_site or "",
                 )
                 affected_dict_ids.add(dict_id)
-
-        # 级联重算：批量审核通过后，重算受影响 dict 的历史 step_none 实体
-        for _dict_id in affected_dict_ids:
-            _cascade_recompute_stale_entities(session, _dict_id)
 
         session.commit()
         _write_operation_log(
@@ -3290,54 +2611,58 @@ def get_pending_review_relations(limit: int = 50) -> list[dict]:
         return [_relation_to_dict(r) for r in rows]
 
 
-def approve_relation(id: int, reviewer: str, note: str = "") -> None:
-    """审核通过关系，校验两端实体均未被拒绝，写 review_log。"""
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return
-        rel = session.query(EntityRelation).filter(EntityRelation.id == id).first()
-        if rel is None:
-            logger.warning(f"[DB] approve_relation: 关系 {id} 不存在")
-            return
-
-        # 校验两端实体均已通过审核
-        endpoint_ids = [rel.from_entity_id, rel.to_entity_id]
-        unapproved_entities = (
-            session.query(ExtractedEntity.id)
-            .filter(
-                ExtractedEntity.id.in_(endpoint_ids),
-                ExtractedEntity.review_status.notin_(["approved", "auto_approved"]),
-                ExtractedEntity.is_deleted == False,
-            )
-            .all()
-        )
-        if unapproved_entities:
-            unapproved_ids = [r.id for r in unapproved_entities]
-            logger.warning(
-                f"[DB] approve_relation: 关系 {id} 的端点实体 {unapproved_ids} 尚未通过审核，不允许通过"
-            )
-            return
-
-        before = rel.review_status
-        rel.review_status = "approved"
-        rel.reviewer_note = note
-        rel.reviewed_by = reviewer
-        rel.reviewed_at = datetime.now(timezone.utc)
-        session.flush()
-        _write_review_log(session, "relation", id, "approve", reviewer, note,
-                          {"review_status": before}, {"review_status": "approved"})
-        _write_operation_log(
-            session, "update", "entity_relations", id,
-            business_action="approve",
-            description=f"审核通过关系: {rel.relation_type} from={rel.from_entity_id}→to={rel.to_entity_id}",
-            details={"relation_type": rel.relation_type,
-                      "from_entity_id": rel.from_entity_id, "to_entity_id": rel.to_entity_id,
-                      "review_status": {"before": before, "after": "approved"}, "reviewer": reviewer, "note": note},
-            operator=reviewer,
-            trigger_source="approve_relation",
-        )
+def approve_relation(id, reviewer, note='', evidence=None, session=None, review_context=None):
+    from api.review_auth import require_trusted_review_context
+    from db.identity import use_session, auditable_identity, auditable_entity_identity, validate_evidence, get_object_evidence, record_evidence, snapshot, review_object_binding, review_endpoint_binding
+    reviewer = require_trusted_review_context(review_context)
+    with use_session(session) as active:
+        relation = active.get(EntityRelation, id)
+        if relation is None or relation.is_deleted:
+            raise ValueError('Relation does not exist')
+        expected = snapshot(relation)
+        endpoint_ids = [relation.from_entity_id, relation.to_entity_id]
+        endpoint_before = {key: active.get(ExtractedEntity, key) for key in endpoint_ids}
+        expected_endpoints = {key: snapshot(row) if row else None for key, row in endpoint_before.items()}
+        expected_dictionaries = {}
+        for endpoint in endpoint_before.values():
+            dictionary = active.get(EntityDict, endpoint.dict_id) if endpoint and endpoint.dict_id else None
+            if not auditable_entity_identity(endpoint) or not auditable_identity(dictionary):
+                raise ValueError('Both relation endpoints require auditable human identity confirmation')
+            expected_dictionaries[dictionary.id] = snapshot(dictionary)
+        existing_evidence = evidence or get_object_evidence('relation', id, session=active)
+    validated = validate_evidence(existing_evidence, expected['source_doc_uuid'], expected['source_site'])
+    with use_session(session) as active:
+        relation = active.query(EntityRelation).filter(EntityRelation.id == id).populate_existing().with_for_update().first()
+        if relation is None or relation.is_deleted or snapshot(relation) != expected:
+            raise ValueError('Relation changed during evidence validation')
+        endpoints = active.query(ExtractedEntity).filter(ExtractedEntity.id.in_(endpoint_ids)).order_by(ExtractedEntity.id).populate_existing().with_for_update().all()
+        by_id = {entity.id: entity for entity in endpoints}
+        dictionaries = active.query(EntityDict).filter(EntityDict.id.in_(expected_dictionaries)).order_by(EntityDict.id).populate_existing().with_for_update().all()
+        dictionary_by_id = {row.id: row for row in dictionaries}
+        for endpoint_id in endpoint_ids:
+            entity = by_id.get(endpoint_id)
+            if entity is None or snapshot(entity) != expected_endpoints[endpoint_id]:
+                raise ValueError('Relation endpoint identity changed during evidence validation')
+            dictionary = dictionary_by_id.get(entity.dict_id)
+            if dictionary is None or snapshot(dictionary) != expected_dictionaries.get(entity.dict_id):
+                raise ValueError('Relation endpoint identity changed during evidence validation')
+            if not auditable_entity_identity(entity) or not auditable_identity(dictionary):
+                raise ValueError('Both relation endpoints require auditable human identity confirmation')
+        before = relation.review_status
+        relation.review_status = 'approved'; relation.reviewer_note = note
+        relation.reviewed_by = reviewer; relation.reviewed_at = datetime.now(timezone.utc)
+        record_evidence(active, 'relation', relation, {'relation_type': relation.relation_type,
+            'from_entity_id': relation.from_entity_id, 'to_entity_id': relation.to_entity_id,
+            'evidence': validated}, relation.source_doc_uuid, relation.source_site)
+        _write_review_log(active, 'relation', id, 'approve', reviewer, note,
+                          {'review_status': before}, {'review_status': 'approved', 'evidence': validated,
+                            'review_audit_schema': 'trusted_human_relation_approval.v1',
+                            'reviewed_by': relation.reviewed_by, 'reviewed_at': relation.reviewed_at.isoformat(),
+                            'object_binding_hash': review_object_binding(relation),
+                            'endpoint_identities': {str(key): review_endpoint_binding(by_id[key]) for key in endpoint_ids}})
+        from db.review_lifecycle import recalc_document_state
+        recalc_document_state(active, relation.source_doc_uuid)
+        return {'success': True, 'relation_id': id}
 
 
 def reject_relation(id: int, reviewer: str, note: str = "") -> None:
@@ -3371,61 +2696,30 @@ def reject_relation(id: int, reviewer: str, note: str = "") -> None:
         )
 
 
-def batch_approve_relations(
-    source_doc_uuid: str = "",
-    source_site: str = "",
-    reviewer: str = "",
-    note: str = "",
-    min_confidence: float = 0.0
-) -> dict:
-    """批量审核通过关系，支持按条件筛选。"""
-    from db.session import get_session
-    
-    with get_session() as session:
-        if session is None:
-            return {"success": False, "message": "数据库未连接", "count": 0}
-        
-        # 构建查询条件
-        q = session.query(EntityRelation).filter(
-            EntityRelation.review_status == "pending",
-            EntityRelation.is_deleted == False,
-            EntityRelation.confidence_score >= min_confidence
-        )
-        
+def batch_approve_relations(source_doc_uuid='', source_site='', reviewer='', note='',
+                            min_confidence=0.0, review_context=None):
+    """Apply the same fixed-evidence and endpoint checks to every selected relation."""
+    from api.review_auth import require_trusted_review_context
+    from db.identity import use_session
+    from biz_rules.history_models import HistoryError
+    reviewer = require_trusted_review_context(review_context)
+    with use_session() as session:
+        query = session.query(EntityRelation).filter(EntityRelation.review_status == 'pending',
+            EntityRelation.is_deleted == False, EntityRelation.confidence_score >= min_confidence)
         if source_doc_uuid:
-            q = q.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+            query = query.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
         if source_site:
-            q = q.filter(EntityRelation.source_site == source_site)
-        
-        # 获取所有符合条件的实体
-        relations = q.all()
-        count = len(relations)
-        
-        if count == 0:
-            return {"success": True, "message": "没有符合条件的待审核关系", "count": 0}
-        
-        # 批量更新
-        for rel in relations:
-            before = rel.review_status
-            rel.review_status = "approved"
-            rel.reviewer_note = note
-            rel.reviewed_by = reviewer
-            rel.reviewed_at = datetime.now(timezone.utc)
-            _write_review_log(session, "relation", rel.id, "approve", reviewer, note,
-                            {"review_status": before}, {"review_status": "approved"})
-        
-        session.commit()
-        _write_operation_log(
-            session, "update", "entity_relations", None,
-            business_action="approve",
-            description=f"批量审核通过: {count} 个关系",
-            details={"count": count,
-                      "source_doc_uuid": source_doc_uuid, "source_site": source_site,
-                      "reviewer": reviewer, "note": note},
-            operator=reviewer,
-            trigger_source="batch_approve_relations",
-        )
-        return {"success": True, "message": f"成功批量通过 {count} 个关系", "count": count}
+            query = query.filter(EntityRelation.source_site == source_site)
+        ids = [row.id for row in query.all()]
+    approved, blocked = [], []
+    for relation_id in ids:
+        try:
+            approve_relation(relation_id, reviewer, note, review_context=review_context)
+            approved.append(relation_id)
+        except (ValueError, HistoryError) as exc:
+            blocked.append({'id': relation_id, 'reason': str(exc)})
+    return {'success': True, 'count': len(approved), 'blocked': blocked,
+            'message': f'Approved {len(approved)} relations; {len(blocked)} require evidence or identity review'}
 
 
 def batch_reject_relations(
@@ -3696,7 +2990,7 @@ def find_candidate_dicts_for_review(
             is_verified, match_type, score}, ...]
     """
     from db.session import get_session
-    from core_engine.cloud_api_client import generate_embedding
+    from core_engine.common.cloud_api_client import generate_embedding
 
     entity_data = entity_data or {}
 
@@ -4290,7 +3584,17 @@ def _entity_to_dict(r: ExtractedEntity) -> dict:
         "entity_name": r.entity_name,
         "entity_data": r.entity_data,
         "source_text": r.source_text,
+        "source_version_id": r.source_version_id,
+        "source_quote": r.source_quote,
+        "source_char_start": r.source_char_start,
+        "source_char_end": r.source_char_end,
+        "first_seen_at": r.first_seen_at,
+        "valid_from": r.valid_from,
+        "valid_to": r.valid_to,
         "dict_id": r.dict_id,
+        "identity_confirmed_by": r.identity_confirmed_by,
+        "identity_confirmed_at": r.identity_confirmed_at,
+        "identity_confirmation_basis": r.identity_confirmation_basis,
         "confidence_score": r.confidence_score,
         "confidence_reason": r.confidence_reason,
         "review_status": r.review_status,
@@ -4307,6 +3611,13 @@ def _relation_to_dict(r: EntityRelation) -> dict:
         "relation_type": r.relation_type,
         "relation_props": r.relation_props,
         "source_text": r.source_text,
+        "source_version_id": r.source_version_id,
+        "source_quote": r.source_quote,
+        "source_char_start": r.source_char_start,
+        "source_char_end": r.source_char_end,
+        "first_seen_at": r.first_seen_at,
+        "valid_from": r.valid_from,
+        "valid_to": r.valid_to,
         "confidence_score": r.confidence_score,
         "confidence_reason": r.confidence_reason,
         "review_status": r.review_status,
@@ -4379,3 +3690,19 @@ def reset_document_for_recrawl(uuid: str) -> None:
             f"[DB] reset_document_for_recrawl: {uuid} "
             f"软删实体={deleted_ents} 软删关系={deleted_rels}"
         )
+
+
+# Evidence and mapping APIs share the same source transaction helpers.
+from db.identity import (get_object_evidence, create_primekg_mapping_proposal,
+                         get_primekg_mapping_proposals, resolve_primekg_mapping_proposal)
+
+
+def lookup_external_id_candidates(entity_type, external_key, external_value, session=None):
+    from db.identity import use_session
+    with use_session(session) as active:
+        rows = active.query(EntityDict).filter(EntityDict.entity_type == entity_type,
+            EntityDict.is_deleted == False,
+            EntityDict.external_ids[external_key].astext == str(external_value).strip()).order_by(EntityDict.id).all()
+        return [{'dict_id': row.id, 'canonical_name': (row.canonical_data or {}).get('name', ''),
+                 'entity_type': row.entity_type, 'canonical_data': row.canonical_data or {},
+                 'external_ids': row.external_ids or {}} for row in rows]

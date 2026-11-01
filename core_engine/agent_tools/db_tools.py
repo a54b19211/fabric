@@ -9,7 +9,7 @@ from db.repository import (
     lookup_alias,
     search_similar_entities as _search_similar_entities,
 )
-from core_engine.cloud_api_client import generate_embedding, build_embedding_text
+from core_engine.common.cloud_api_client import generate_embedding, build_embedding_text
 from db.session import get_session
 from db.models import EntityDict
 

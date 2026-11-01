@@ -1,7 +1,4 @@
 """WeKnora 同步接口 — 文档同步 + 图数据同步"""
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
-
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
@@ -21,7 +18,7 @@ from db.repository import (
 from db.session import get_session
 from db.models import Document
 from sqlalchemy import func
-from core_engine.weknora_graph_client import get_weknora_graph_client
+from core_engine.sync.weknora_graph_client import get_weknora_graph_client
 
 router = APIRouter(prefix="/api/weknora", tags=["weknora"])
 
@@ -45,10 +42,6 @@ def _build_source_metadata(doc: dict) -> dict:
         "crawl_timestamp": doc.get("crawl_timestamp", ""),
     }
     return {k: v for k, v in meta.items() if v not in ("", [], None, 0.0)}
-
-
-BATCH_SIZE = 50
-MAX_CONCURRENCY = 5
 
 
 def _sync_one_row(row: dict, kb_id: str = "") -> tuple[str, bool, str]:
@@ -174,58 +167,21 @@ def sync_single(uuid: str, kb_id: str = Query("", description="目标知识库 I
         return WeknoraSyncResponse(success=False, message=str(e))
 
 
-@router.post("/sync-batch", response_model=WeknoraBatchResponse)
+@router.post("/sync-batch", response_model=WeknoraBatchResponse, deprecated=True,
+             responses={410: {"description": "旧后台批量同步已停用，使用History索引发表"}})
 def sync_batch(
     body: WeknoraBatchRequest,
     kb_id: str = Query("", description="目标知识库 ID，留空用 .env 配置"),
     source_site: str = Query("", description="按来源站点过滤同步"),
 ):
-    """批量同步 pending 文档到 WeKnora。后端内部自动分批，前端只管传总量。"""
-    if body.limit < 1:
-        raise HTTPException(status_code=400, detail="limit 必须 >= 1")
-
-    if kb_id:
-        try:
-            get_weknora_graph_client().validate_knowledge_base(kb_id)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    try:
-        # 先取第一页确定有数据
-        rows, total = get_pending_weknora_sync(limit=min(body.limit, BATCH_SIZE), offset=0, source_site=source_site)
-        if not rows:
-            return WeknoraBatchResponse(triggered=0)
-
-        total_to_sync = min(body.limit, total)
-        logger.info(f"[API] WeKnora 批量同步: 请求 {body.limit} 篇, pending 共 {total} 篇, 实际同步 {total_to_sync} 篇")
-
-        def _bg_sync():
-            synced = 0
-            while synced < total_to_sync:
-                batch_rows, _ = get_pending_weknora_sync(
-                    limit=BATCH_SIZE, offset=0, source_site=source_site,
-                )
-                if not batch_rows:
-                    break
-
-                with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
-                    futures = {pool.submit(_sync_one_row, row, kb_id): row for row in batch_rows}
-                    for future in as_completed(futures):
-                        try:
-                            uuid, success, msg = future.result()
-                            if success:
-                                synced += 1
-                        except Exception as e:
-                            logger.error(f"[API] 后台同步异常: {e}")
-
-            logger.info(f"[API] WeKnora 批量同步完成: {synced}/{total_to_sync}")
-
-        threading.Thread(target=_bg_sync, daemon=True).start()
-        return WeknoraBatchResponse(triggered=total_to_sync)
-
-    except Exception as e:
-        logger.error(f"[API] WeKnora 批量同步失败: {e}")
-        raise HTTPException(status_code=500, detail=f"同步失败: {str(e)}")
+    """旧入口明确停用；持久索引待办由已有History发表循环处理。"""
+    raise HTTPException(status_code=410, detail={
+        "code": "legacy_batch_sync_retired",
+        "message": "旧后台批量同步已停用；使用已有History发表循环及索引状态/重试接口（需管理员凭据）",
+        "publisher": "python -m flows.history_publish",
+        "status_url": "/api/history/index/status",
+        "retry_url": "/api/history/index/{publication_id}/retry",
+    })
 
 
 @router.get("/stats", response_model=WeknoraStatsResponse)
