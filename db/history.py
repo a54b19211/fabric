@@ -921,6 +921,11 @@ def finish_fetch(run_id, attempt, batch):
                 "有界公开检索不是完整历史队列；不据此训练成功项目筛选后的伪队列"
             ],
         )
+        if batch.get("count_drift"):
+            coverage["count_drift"] = batch["count_drift"]
+            coverage["limitations"].append(
+                "来源命中数在翻页中途下降；按上游结束标记收尾，已读数少于最初命中数"
+            )
         _publish(
             conn,
             run,
