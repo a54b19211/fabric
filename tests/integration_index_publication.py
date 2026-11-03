@@ -439,3 +439,34 @@ def test_conflicting_receipt_is_rejected_before_any_recovery_post(pg):
     assert result["state"] == "waiting"
     assert job(pg)["error"]["code"] == "index_binding_mismatch"
     assert [entry[0] for entry in client.events] == ["get"]
+
+
+def test_a_sent_job_is_confirmed_even_behind_a_backlog_of_new_uploads(pg):
+    """Live 2026-11-03: thousands of queued uploads were due earlier, so sent jobs waiting 15 s for their
+    check never came up again and nothing turned ready."""
+    class Parsing(JournalClient):
+        parsing = True
+
+        def publish(self, body):
+            value = super().publish(body)
+            if self.parsing:  # the first answer: uploaded, the upstream parse not finished yet
+                self.journal[publication_id(body)].update(
+                    parse_status="pending", vector_status="pending", index_status="pending")
+                value = copy.deepcopy(self.journal[publication_id(body)])
+            return value
+
+    client = Parsing()
+    first = add_document("SYNTHETIC-sent")
+    index.scan_committed()
+    assert index.process_once(client=client)["state"] == "indexing"
+    client.parsing = False
+    client.journal[publication_id(client.bodies[0])].update(receipt_for(client.bodies[0]))  # parsed now
+    for i in range(30):
+        add_document(f"SYNTHETIC-backlog-{i}")
+    index.scan_committed(batch_size=100)
+    with pg.begin() as conn:  # the backlog became due before the sent job's next check
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 hour' WHERE version_id<>:v"), {"v": first})
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp() WHERE version_id=:v"), {"v": first})
+    assert index.process_once(client=client, sent=True)["state"] == "ready"
+    assert job(pg, first)["state"] == "ready"
+    assert index.process_once(client=client, sent=False)["state"] in {"ready", "indexing"}  # new uploads still move

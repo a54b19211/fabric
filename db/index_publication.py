@@ -109,13 +109,16 @@ def scan_committed(*, batch_size=25):
     return {"scanned_records": count, "configured_targets": len(configured)}
 
 
-def _claim():
+def _claim(sent=None):
+    """The next due job; sent=True/False only among jobs already sent / not sent yet."""
+    only = "" if sent is None else (
+        " AND p.first_send_at IS NOT NULL" if sent else " AND p.first_send_at IS NULL")
     with history.history_engine().begin() as conn:
         row = conn.execute(text("""
             SELECT p.*,t.config,t.enabled FROM index_publications p
             JOIN index_targets t ON t.id=p.target_id
             WHERE p.next_check_at<=clock_timestamp()
-              AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp())
+              AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp())""" + only + """
             ORDER BY p.next_check_at,p.id FOR UPDATE OF p SKIP LOCKED LIMIT 1
         """)).mappings().first()
         if row is None:
@@ -224,8 +227,8 @@ def _hold_blocked(row):
             raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
     return {"id": row["id"], "state": "blocked", "desired_state": row["desired_state"]}
 
-def process_once(*, client=None):
-    row = _claim()
+def process_once(*, client=None, sent=None):
+    row = (_claim(sent) if sent is not None else None) or _claim()
     if row is None:
         return {"state": "idle"}
     desired = "unknown"
@@ -313,8 +316,9 @@ def index_tick(*, batch_size=5):
         # 配置移除意味着停止使用；旧任务/绑定仍需撤回对账。
     scanned = scan_committed(batch_size=25)
     states = []
-    for _ in range(batch_size):
-        result = process_once()
+    for slot in range(batch_size):
+        # alternate: confirm what was sent, then send something new (either falls back to the other)
+        result = process_once(sent=slot % 2 == 0)
         states.append(result["state"])
         if result["state"] == "idle":
             break
