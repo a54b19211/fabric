@@ -1057,3 +1057,21 @@ def test_an_unknown_data_date_shape_is_compared_as_it_is(pg):
     _fetch_trial("2026-11-02", "shape-1")
     _fetch_trial({"date": "2026-11-03"}, "shape-2")
     assert len(_trial_versions(pg)) == 2
+
+
+def test_no_late_old_archive_can_stand_in_for_the_current_version(pg):
+    """Codex r30: compare with the current version by Fabric's own rule, never with the last one stored."""
+    a = _fetch_trial("2026-11-02", "late-1", status="COMPLETED")
+    old = json.dumps({
+        "protocolSection": {
+            "identificationModule": {"nctId": "NCT00000123", "briefTitle": "Example trial"},
+            "statusModule": {"overallStatus": "RECRUITING"},
+        },
+        "derivedSection": {"miscInfoModule": {"versionHolder": "2016-01-01"}},
+    }, sort_keys=True)
+    request = archive([ArchiveRecord(source_record_id="NCT00000123", record_kind="trial", raw_content=old)])
+    # a real ClinicalTrials archive is refused, so no late old version can be stored beside fetched ones
+    with pytest.raises(store.HistoryError):
+        store.import_archive(request.model_copy(update={"source_id": "clinicaltrials", "is_demo": False}), "late-old")
+    back = _fetch_trial("2026-11-03", "late-2")  # upstream really returns to RECRUITING, new data date
+    assert back.version_ids != a.version_ids and len(_trial_versions(pg)) == 2
