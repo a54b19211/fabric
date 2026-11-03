@@ -414,7 +414,22 @@ def test_clinicaltrials_daily_data_date_is_not_a_record_change():
     assert sources.stable_raw("clinicaltrials", raw("2026-11-02")) == sources.stable_raw("clinicaltrials", raw("2026-11-03"))
     assert sources.stable_raw("clinicaltrials", raw("2026-11-02")) != sources.stable_raw(
         "clinicaltrials", raw("2026-11-03", status="COMPLETED"))
-    assert sources.stable_raw("europe_pmc", raw("2026-11-02")) is None
+    assert sources.stable_raw("europe_pmc", raw("2026-11-02")) != sources.stable_raw("europe_pmc", raw("2026-11-03"))
     assert sources.stable_raw("clinicaltrials", "not json") is None
     odd = json.dumps({"derivedSection": {"miscInfoModule": {"versionHolder": {"date": "2026-11-03"}}}})
     assert sources.stable_raw("clinicaltrials", odd) is None  # an unknown shape is not dropped
+
+
+def test_the_same_json_in_another_key_order_is_not_a_record_change():
+    """Live 2026-11-03: Europe PMC 23927 versions for 8444 records; neighbouring versions parsed equal,
+    only the serialization differed. Values and array order still count."""
+    import json
+
+    record = {"id": "123", "title": "Alpha", "authorList": {"author": [{"fullName": "A"}, {"fullName": "B"}]}}
+    reordered = json.dumps(dict(reversed(list(record.items()))), indent=2)
+    assert sources.stable_raw("europe_pmc", json.dumps(record)) == sources.stable_raw("europe_pmc", reordered)
+    changed = dict(record, title="Alpha (corrected)")
+    assert sources.stable_raw("europe_pmc", json.dumps(record)) != sources.stable_raw("europe_pmc", json.dumps(changed))
+    swapped = dict(record, authorList={"author": [{"fullName": "B"}, {"fullName": "A"}]})
+    assert sources.stable_raw("europe_pmc", json.dumps(record)) != sources.stable_raw("europe_pmc", json.dumps(swapped))
+    assert sources.stable_raw("pubmed", "<PubmedArticle/>") is None  # not JSON: compared by its raw hash

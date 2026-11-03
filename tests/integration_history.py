@@ -1077,3 +1077,35 @@ def test_a_fixture_proof_cannot_back_a_real_clinicaltrials_archive(pg):
         store.import_archive(request.model_copy(update={"source_id": "clinicaltrials", "is_demo": False}), "late-old")
     back = _fetch_trial("2026-11-03", "late-2")  # upstream really returns to RECRUITING, new data date
     assert back.version_ids != a.version_ids and len(_trial_versions(pg)) == 2
+
+
+def _fetch_europe_pmc_raw(raw, key):
+    request = FetchRequest(source_id="europe_pmc", query="synthetic serialization regression")
+    run, fresh = store.create_fetch(request, key)
+    if not fresh:
+        return run
+    store.job_input(run.id, run.attempt)
+    return store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id="MED:123", record_kind="document", raw_content=raw)],
+        "complete": False, "upstream_pagination_exhausted": True,
+        "stop_reason": "end", "requests": 1, "bytes": len(raw.encode()),
+        "source_total": 1, "error": None,
+    })
+
+
+def test_the_same_europe_pmc_record_in_another_key_order_is_not_a_new_version(pg):
+    """Live 2026-11-03: 23927 Europe PMC versions for 8444 records, neighbouring versions equal as JSON."""
+    record = {"source": "MED", "id": "123", "title": "Example", "abstractText": "A"}
+    first = _fetch_europe_pmc_raw(json.dumps(record, sort_keys=True), "order-1")
+    shuffled = json.dumps(dict(reversed(list(record.items()))), indent=1)
+    again = _fetch_europe_pmc_raw(shuffled, "order-2")
+    assert again.version_ids == first.version_ids
+    with pg.begin() as conn:
+        rows = conn.execute(text(
+            "SELECT payload->>'raw_sha256' FROM history_versions WHERE source_id='europe_pmc'"
+        )).all()
+    assert len(rows) == 1  # the first raw and its hash are kept
+    changed = _fetch_europe_pmc_raw(json.dumps(dict(record, abstractText="B"), sort_keys=True), "order-3")
+    assert changed.version_ids != first.version_ids
+    current = store.list_records("europe_pmc", False, "current", datetime.now().astimezone())
+    assert current.items[0].version_id == changed.version_ids[0]

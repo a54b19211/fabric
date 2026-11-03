@@ -760,8 +760,8 @@ def _publish(
             and stable_raw(run["source_id"], current["payload"].get("raw_content")) == stable
             and _same_identity(current["payload"], identity, ignore_raw=True)
         ):
-            # 公开观察只差来源每次改写的数据日期（ClinicalTrials versionHolder）：仍是当前版本；
-            # 原件、raw_sha256、first_seen 都保留首次所见。档案导入不走这里。
+            # 公开观察只差JSON序列化（键顺序、空白）或来源每次改写的数据日期（ClinicalTrials
+            # versionHolder）：仍是当前版本；原件、raw_sha256、first_seen 都保留首次所见。档案导入不走这里。
             version_id, existing = current["version_id"], (current["version_id"],)
         elif run["kind"] == "fetch" and existing is not None and current is not None:
             # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。

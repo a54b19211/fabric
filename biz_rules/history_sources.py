@@ -322,16 +322,16 @@ VOLATILE_RAW = {"clinicaltrials": (("derivedSection", "miscInfoModule", "version
 
 
 def stable_raw(source_id, raw):
-    """The raw without the source's volatile fields, for comparing two observations; None if the source
-    has none or the raw is not the expected JSON."""
-    paths = VOLATILE_RAW.get(source_id)
-    if not paths:
-        return None
+    """The raw as canonical JSON without the source's volatile fields, for comparing two observations:
+    key order and spacing are serialization, not content (live 2026-11-03: Europe PMC returned the same
+    record with its keys in another order on most refreshes, 23927 versions for 8444 records; 66 sampled
+    neighbouring versions parsed equal). Array order is kept. None if the raw is not JSON, or a volatile
+    field has an unexpected shape."""
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    for path in paths:
+    for path in VOLATILE_RAW.get(source_id, ()):
         node = data
         for key in path[:-1]:
             node = node.get(key) if isinstance(node, dict) else None
