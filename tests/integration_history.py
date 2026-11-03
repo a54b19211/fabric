@@ -998,3 +998,62 @@ def test_concurrent_public_restorations_publish_once_and_old_run_retry_is_read_o
     assert changes["max_seq"] == 3 and len(changes["items"]) == 3
     assert changes["current_version_ids"]["MED:123"] == restored[0].version_ids[0]
     assert [item["facts"]["abstract"] for item in changes["items"]] == ["A", "B", "A"]
+
+
+def _fetch_trial(holder, key, status="RECRUITING"):
+    """A ClinicalTrials study as the API returns it, stamped with the API's data date (versionHolder)."""
+    raw = json.dumps({
+        "protocolSection": {
+            "identificationModule": {"nctId": "NCT00000123", "briefTitle": "Example trial"},
+            "statusModule": {"overallStatus": status},
+        },
+        "derivedSection": {"miscInfoModule": {"versionHolder": holder}},
+    }, sort_keys=True)
+    request = FetchRequest(source_id="clinicaltrials", query="synthetic data date regression")
+    run, fresh = store.create_fetch(request, key)
+    if not fresh:
+        return run
+    store.job_input(run.id, run.attempt)
+    return store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id="NCT00000123", record_kind="trial", raw_content=raw)],
+        "complete": False, "upstream_pagination_exhausted": True,
+        "stop_reason": "end", "requests": 1, "bytes": len(raw.encode()),
+        "source_total": 1, "error": None,
+    })
+
+
+def _trial_versions(pg):
+    with pg.begin() as conn:
+        return conn.execute(text(
+            "SELECT version_id, payload->>'raw_content', payload->>'raw_sha256', first_seen_at, "
+            "payload->'facts'->>'status' FROM history_versions "
+            "WHERE source_id='clinicaltrials' AND source_record_id='NCT00000123' ORDER BY published_seq"
+        )).all()
+
+
+def test_a_new_clinicaltrials_data_date_alone_is_not_a_new_version(pg):
+    first = _fetch_trial("2026-11-02", "holder-1")
+    before = _trial_versions(pg)
+    for day, key in (("2026-11-03", "holder-2"), ("2026-11-04", "holder-3")):
+        run = _fetch_trial(day, key)
+        assert run.version_ids == first.version_ids
+    after = _trial_versions(pg)
+    assert len(after) == 1 and after == before  # raw, raw_sha256 and first_seen stay as first seen
+    assert '"2026-11-02"' in after[0][1]
+
+
+def test_a_real_change_or_a_return_is_still_a_new_version(pg):
+    a = _fetch_trial("2026-11-02", "real-1")
+    b = _fetch_trial("2026-11-03", "real-2", status="COMPLETED")
+    back = _fetch_trial("2026-11-04", "real-3")  # A again, on a later data date
+    again = _fetch_trial("2026-11-05", "real-4")
+    versions = _trial_versions(pg)
+    assert [v[4] for v in versions] == ["RECRUITING", "COMPLETED", "RECRUITING"]
+    assert len({a.version_ids[0], b.version_ids[0], back.version_ids[0]}) == 3  # A->B->A adopts anew
+    assert again.version_ids == back.version_ids  # and then the data date alone changes nothing
+
+
+def test_an_unknown_data_date_shape_is_compared_as_it_is(pg):
+    _fetch_trial("2026-11-02", "shape-1")
+    _fetch_trial({"date": "2026-11-03"}, "shape-2")
+    assert len(_trial_versions(pg)) == 2

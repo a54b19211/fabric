@@ -508,6 +508,39 @@ def _proof(request: ArchiveImport, now):
     )
 
 
+def _current_version(conn, run, item):
+    """The record's current version by Fabric's own rule (context references excluded; latest proof or
+    first sight, then the source's own update time)."""
+    return conn.execute(
+        text(
+            "SELECT version_id,payload FROM history_versions "
+            "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
+            "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
+            "ORDER BY COALESCE(proof_available_at,first_seen_at) DESC,"
+            + _SOURCE_UPDATED_ORDER
+            + " DESC NULLS LAST,published_seq DESC LIMIT 1"
+        ),
+        {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
+    ).mappings().first()
+
+
+def _same_identity(payload, identity, *, ignore_raw=False):
+    """Whether a stored version has this identity (review clocks never count; the raw hash only when
+    asked: parser version, media type, projection, proof and mapping always do)."""
+    prior = {key: payload.get(key) for key in identity}
+    prior["availability_proof"] = {
+        key: value for key, value in (prior["availability_proof"] or {}).items() if key != "verified_at"
+    }
+    if prior["mapping_review"]:
+        prior["mapping_review"] = {
+            key: value for key, value in prior["mapping_review"].items() if key != "reviewed_at"
+        }
+    mine = dict(identity)
+    if ignore_raw:
+        prior.pop("raw_sha256")
+        mine.pop("raw_sha256")
+    return canonical(prior) == canonical(mine)
+
 def import_archive(request: ArchiveImport, key: str):
     # 全包先验证再发布；任何一条非法均不部分提交或改变已有成果。
     prepared = [
@@ -719,63 +752,33 @@ def _publish(
             text("SELECT version_id FROM history_versions WHERE version_id=:id"),
             {"id": version_id},
         ).first()
-        stable = stable_raw(run["source_id"], item.raw_content) if run["kind"] == "fetch" else None
-        unchanged = False
-        if existing is None and stable is not None:
-            # 只差来源每次都改写的字段（如 ClinicalTrials 的数据日期）时，仍是当前版本；原件保留首次所见
-            current = conn.execute(
-                text(
-                    "SELECT version_id,payload FROM history_versions "
-                    "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
-                    "ORDER BY published_seq DESC LIMIT 1"
-                ),
-                {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
-            ).mappings().first()
-            if current is not None and stable_raw(
-                run["source_id"], current["payload"].get("raw_content")
-            ) == stable and all(
-                canonical(current["payload"].get(key)) == canonical(projected[key]) for key in projected
-            ):
-                version_id, existing, unchanged = current["version_id"], (current["version_id"],), True
-        if run["kind"] == "fetch" and existing is not None and not unchanged:
+        current = _current_version(conn, run, item) if run["kind"] == "fetch" else None
+        stable = stable_raw(run["source_id"], item.raw_content) if current is not None else None
+        if (
+            existing is None
+            and stable is not None
+            and stable_raw(run["source_id"], current["payload"].get("raw_content")) == stable
+            and _same_identity(current["payload"], identity, ignore_raw=True)
+        ):
+            # 公开观察只差来源每次改写的数据日期（ClinicalTrials versionHolder）：仍是当前版本；
+            # 原件、raw_sha256、first_seen 都保留首次所见。档案导入不走这里。
+            version_id, existing = current["version_id"], (current["version_id"],)
+        elif run["kind"] == "fetch" and existing is not None and current is not None:
             # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。
             # 档案导入仍按原件/证明去重，不把迟到的旧档案改成当前状态。
-            current = conn.execute(
-                text(
-                    "SELECT version_id,payload FROM history_versions "
-                    "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
-                    "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
-                    "ORDER BY COALESCE(proof_available_at,first_seen_at) DESC,"
-                    + _SOURCE_UPDATED_ORDER
-                    + " DESC NULLS LAST,published_seq DESC LIMIT 1"
-                ),
-                {"source": run["source_id"], "demo": run["is_demo"],
-                 "native": item.source_record_id},
-            ).mappings().first()
-            if current is not None:
-                prior_identity = {key: current["payload"].get(key) for key in identity}
-                prior_identity["availability_proof"] = {
-                    key: value for key, value in prior_identity["availability_proof"].items()
-                    if key != "verified_at"
-                }
-                if prior_identity["mapping_review"]:
-                    prior_identity["mapping_review"] = {
-                        key: value for key, value in prior_identity["mapping_review"].items()
-                        if key != "reviewed_at"
-                    }
-                if canonical(prior_identity) == canonical(identity):
-                    # 恢复后的连续A复用A3，不能重新引用A1或再增加一个版本。
-                    version_id = current["version_id"]
-                else:
-                    # 首次出现的内容ID不变；再次采用旧内容时，以前一版区分这次变化。
-                    version_id = sha256(canonical({
-                        "content_version_id": version_id,
-                        "previous_version_id": current["version_id"],
-                    }))
-                    existing = conn.execute(
-                        text("SELECT version_id FROM history_versions WHERE version_id=:id"),
-                        {"id": version_id},
-                    ).first()
+            if _same_identity(current["payload"], identity):
+                # 恢复后的连续A复用A3，不能重新引用A1或再增加一个版本。
+                version_id = current["version_id"]
+            else:
+                # 首次出现的内容ID不变；再次采用旧内容时，以前一版区分这次变化。
+                version_id = sha256(canonical({
+                    "content_version_id": version_id,
+                    "previous_version_id": current["version_id"],
+                }))
+                existing = conn.execute(
+                    text("SELECT version_id FROM history_versions WHERE version_id=:id"),
+                    {"id": version_id},
+                ).first()
         if existing is None:
             seq += 1
             payload = HistoryRecord(

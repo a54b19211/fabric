@@ -335,8 +335,11 @@ def stable_raw(source_id, raw):
         node = data
         for key in path[:-1]:
             node = node.get(key) if isinstance(node, dict) else None
-        if isinstance(node, dict):
-            node.pop(path[-1], None)
+        if isinstance(node, dict) and path[-1] in node:
+            # only the known shape, a plain date; anything else is compared as it is
+            if not (isinstance(node[path[-1]], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", node[path[-1]])):
+                return None
+            node.pop(path[-1])
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 def project_record(source_id: str, item: ArchiveRecord) -> dict:

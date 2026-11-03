@@ -416,3 +416,5 @@ def test_clinicaltrials_daily_data_date_is_not_a_record_change():
         "clinicaltrials", raw("2026-11-03", status="COMPLETED"))
     assert sources.stable_raw("europe_pmc", raw("2026-11-02")) is None
     assert sources.stable_raw("clinicaltrials", "not json") is None
+    odd = json.dumps({"derivedSection": {"miscInfoModule": {"versionHolder": {"date": "2026-11-03"}}}})
+    assert sources.stable_raw("clinicaltrials", odd) is None  # an unknown shape is not dropped
