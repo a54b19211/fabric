@@ -793,6 +793,7 @@ def read_public(request: FetchRequest) -> dict:
         cursor = request.continuation.cursor
     consumed = request.continuation.read_count if request.continuation else 0
     next_continuation = None
+    count_drift = None
     previous_cursors = {cursor} if cursor else set()
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
@@ -961,8 +962,17 @@ def read_public(request: FetchRequest) -> dict:
                             "invalid_source_pagination",
                             "Europe PMC缺可信命中总数，不能确认EOF",
                         )
+                    # Europe PMC重算hitCount；固定UPDATE_DATE窗内的记录被再次更新会移出窗口，
+                    # 命中数可在翻页中途下降。已读过后返回空页且无新标记是其文档化的结束，
+                    # 按读完处理，并把漂移的命中数与已读数如实记入覆盖说明。
+                    drifted = (
+                        not page_items and consumed > 0
+                        and (not next_cursor or next_cursor == cursor)
+                    )
                     consumed += len(page_items)
-                    exhausted = consumed >= source_total
+                    exhausted = consumed >= source_total or drifted
+                    if drifted and consumed < source_total:
+                        count_drift = {"source_total": source_total, "read_count": consumed}
                     if not exhausted and (
                         not page_items or not next_cursor or next_cursor == cursor
                     ):
@@ -1028,6 +1038,7 @@ def read_public(request: FetchRequest) -> dict:
         "requests": requests_count,
         "bytes": bytes_read,
         "source_total": source_total,
+        "count_drift": count_drift,
         "next_continuation": next_continuation if not error else None,
     }
 

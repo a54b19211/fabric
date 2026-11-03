@@ -360,3 +360,43 @@ def test_epmc_repeated_or_missing_cursor_is_not_eof(monkeypatch):
         assert result["error"]["code"] == "invalid_source_pagination"
         assert len(result["records"]) == 1
         assert not result["upstream_pagination_exhausted"]
+
+
+def test_epmc_end_after_window_shrinks_is_eof_with_drift(monkeypatch):
+    """Live 2026-11-03: 716 of 780 read, then hitCount 720 and an empty page without a cursor."""
+    factory = httpx.Client
+    body = {"hitCount": 720, "resultList": {"result": []}}
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=body, request=request)
+    )
+    monkeypatch.setattr(
+        sources.httpx,
+        "Client",
+        lambda transport=transport, **kwargs: factory(transport=transport, **kwargs),
+    )
+    scope = FetchRequest(source_id="europe_pmc", query="alpha").scope_hash()
+    request = FetchRequest(
+        source_id="europe_pmc",
+        query="alpha",
+        continuation={"cursor": "AoIo", "read_count": 716, "scope_hash": scope},
+    )
+    result = sources.read_public(request)
+    assert result["error"] is None and result["upstream_pagination_exhausted"] is True
+    assert result["count_drift"] == {"source_total": 720, "read_count": 716}
+    assert result["next_continuation"] is None
+
+
+def test_epmc_empty_first_page_with_hits_is_not_eof(monkeypatch):
+    factory = httpx.Client
+    body = {"hitCount": 5, "resultList": {"result": []}}
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=body, request=request)
+    )
+    monkeypatch.setattr(
+        sources.httpx,
+        "Client",
+        lambda transport=transport, **kwargs: factory(transport=transport, **kwargs),
+    )
+    result = sources.read_public(FetchRequest(source_id="europe_pmc", query="alpha"))
+    assert result["error"]["code"] == "invalid_source_pagination"
+    assert not result["upstream_pagination_exhausted"]
