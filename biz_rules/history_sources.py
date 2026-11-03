@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -321,15 +323,37 @@ def crl_id(data: dict) -> str:
 VOLATILE_RAW = {"clinicaltrials": (("derivedSection", "miscInfoModule", "versionHolder"),)}
 
 
+class _Ambiguous(ValueError):
+    """A JSON text another parser may read differently: compared by its raw hash, not as content."""
+
+
+def _object(pairs):
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise _Ambiguous("duplicate key")  # RFC 8259: parsers differ on which value wins
+    return dict(pairs)
+
+
+def _constant(name):
+    raise _Ambiguous(name)  # NaN / Infinity are not JSON
+
+
+def _number(text):
+    value = float(text)
+    if not math.isfinite(value) or Decimal(text) != Decimal(repr(value)):
+        raise _Ambiguous("precision")  # two different numbers could parse to one float
+    return value
+
+
 def stable_raw(source_id, raw):
     """The raw as canonical JSON without the source's volatile fields, for comparing two observations:
     key order and spacing are serialization, not content (live 2026-11-03: Europe PMC returned the same
     record with its keys in another order on most refreshes, 23927 versions for 8444 records; 66 sampled
-    neighbouring versions parsed equal). Array order is kept. None if the raw is not JSON, or a volatile
-    field has an unexpected shape."""
+    neighbouring versions parsed equal). Array order is kept. None (compare the raw hash) if the raw is not
+    JSON, is ambiguous JSON (a duplicate key, NaN/Infinity, a number a float cannot hold exactly), or a
+    volatile field has an unexpected shape."""
     try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
+        data = json.loads(raw, object_pairs_hook=_object, parse_constant=_constant, parse_float=_number)
+    except (TypeError, ValueError):  # _Ambiguous included
         return None
     for path in VOLATILE_RAW.get(source_id, ()):
         node = data

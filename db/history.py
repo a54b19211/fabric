@@ -513,9 +513,9 @@ def _current_version(conn, run, item):
     first sight, then the source's own update time)."""
     return conn.execute(
         text(
-            "SELECT version_id,payload FROM history_versions "
+            "SELECT version_id,payload FROM " + _VERSIONS + " "
             "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
-            "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
+            "AND " + _ROLE + "!='context_reference' "
             "ORDER BY COALESCE(proof_available_at,first_seen_at) DESC,"
             + _SOURCE_UPDATED_ORDER
             + " DESC NULLS LAST,published_seq DESC LIMIT 1"
@@ -820,6 +820,13 @@ def _publish(
                     "seq": seq,
                     "payload": payload.model_dump_json(),
                 },
+            )
+            conn.execute(
+                text(
+                    _DERIVE + " FROM history_versions h WHERE h.version_id=:id AND NOT EXISTS "
+                    "(SELECT 1 FROM history_version_rank r WHERE r.version_id=h.version_id)"
+                ),
+                {"id": version_id},
             )
             new_count += 1
         version_ids.append(version_id)
@@ -1202,12 +1209,41 @@ def _read_filters(
 
 
 # 同一归档可见点内只用已解析的来源修订日期排先后，不用本地导入顺序冒充源顺序。
-_SOURCE_UPDATED_ORDER = """CASE payload->'source_updated_at'->>'precision'
+_SOURCE_UPDATED_FROM_PAYLOAD = """CASE payload->'source_updated_at'->>'precision'
  WHEN 'instant' THEN (payload->'source_updated_at'->>'value')::timestamptz
  WHEN 'day' THEN (((payload->'source_updated_at'->>'value')::date + interval '1 day' - interval '1 microsecond') AT TIME ZONE 'UTC')
  WHEN 'month' THEN ((((payload->'source_updated_at'->>'value') || '-01')::date + interval '1 month' - interval '1 microsecond') AT TIME ZONE 'UTC')
  WHEN 'year' THEN ((((payload->'source_updated_at'->>'value') || '-01-01')::date + interval '1 year' - interval '1 microsecond') AT TIME ZONE 'UTC')
  ELSE NULL END"""
+_ROLE_FROM_PAYLOAD = "COALESCE(payload->'facts'->>'publication_role','source_record')"
+# V021: ranking reads the derived keys; a version not derived yet (no rank row, publication_role NULL) is
+# ranked from its payload, the same values, so a partial backfill changes no result.
+_VERSIONS = "history_versions LEFT JOIN history_version_rank USING (version_id)"
+_ROLE = "COALESCE(publication_role," + _ROLE_FROM_PAYLOAD + ")"
+_SOURCE_UPDATED_ORDER = (
+    "(CASE WHEN publication_role IS NULL THEN " + _SOURCE_UPDATED_FROM_PAYLOAD + " ELSE source_updated_rank END)"
+)
+_DERIVE = (
+    "INSERT INTO history_version_rank(version_id,publication_role,source_updated_rank) SELECT version_id,"
+    + _ROLE_FROM_PAYLOAD
+    + ","
+    + _SOURCE_UPDATED_FROM_PAYLOAD
+)
+
+
+def backfill_rank(source_id, *, batch=500):
+    """Derive the ranking keys of up to `batch` versions of one source written before V021; returns how
+    many were added (0 when done). Idempotent; reads each payload once; history_versions is not touched."""
+    with history_engine().begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '30000ms'"))
+        return conn.execute(
+            text(
+                _DERIVE + " FROM history_versions WHERE version_id IN (SELECT h.version_id FROM history_versions h "
+                "LEFT JOIN history_version_rank r ON r.version_id=h.version_id "
+                "WHERE h.source_id=:source AND r.version_id IS NULL LIMIT :batch)"
+            ),
+            {"source": source_id, "batch": batch},
+        ).rowcount
 
 
 def list_records(
@@ -1265,10 +1301,12 @@ def list_records(
                 "该读取清单已改变，请重新开始读取；旧游标不切换范围",
                 409,
             )
-        base = "SELECT * FROM history_versions WHERE " + where
+        base = "SELECT * FROM " + _VERSIONS + " WHERE " + where
         eligible = (
             _eligibility(mode)
-            + " AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference'"
+            + " AND "
+            + _ROLE
+            + "!='context_reference'"
         )
         counts = (
             conn.execute(
@@ -1474,9 +1512,9 @@ def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
         heads = conn.execute(
             text(
                 "SELECT DISTINCT ON (source_record_id) source_record_id,version_id "
-                "FROM history_versions WHERE source_id=:source AND is_demo=:demo "
+                "FROM " + _VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
                 "AND published_seq<=:max_seq AND source_record_id=ANY(:ids) "
-                "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
+                "AND " + _ROLE + "!='context_reference' "
                 "ORDER BY source_record_id,COALESCE(proof_available_at,first_seen_at) DESC,"
                 + _SOURCE_UPDATED_ORDER
                 + " DESC NULLS LAST,published_seq DESC"

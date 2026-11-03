@@ -433,3 +433,16 @@ def test_the_same_json_in_another_key_order_is_not_a_record_change():
     swapped = dict(record, authorList={"author": [{"fullName": "B"}, {"fullName": "A"}]})
     assert sources.stable_raw("europe_pmc", json.dumps(record)) != sources.stable_raw("europe_pmc", json.dumps(swapped))
     assert sources.stable_raw("pubmed", "<PubmedArticle/>") is None  # not JSON: compared by its raw hash
+
+
+def test_json_another_parser_may_read_differently_is_compared_by_its_raw():
+    """Codex r46: duplicate keys, NaN/Infinity and numbers a float cannot hold fall back to the raw hash."""
+    assert sources.stable_raw("europe_pmc", '{"a": 1, "a": 2}') is None
+    assert sources.stable_raw("europe_pmc", '{"a": NaN}') is None
+    assert sources.stable_raw("europe_pmc", '{"a": -Infinity}') is None
+    assert sources.stable_raw("europe_pmc", '{"a": 0.10000000000000000001}') is None
+    assert sources.stable_raw("europe_pmc", '{"a": 1e400}') is None
+    # equal numbers written differently are one value; large integers stay exact
+    assert sources.stable_raw("europe_pmc", '{"a": 1.0}') == sources.stable_raw("europe_pmc", '{"a": 1.00}')
+    assert sources.stable_raw("europe_pmc", '{"a": 12345678901234567890}') != sources.stable_raw(
+        "europe_pmc", '{"a": 12345678901234567891}')

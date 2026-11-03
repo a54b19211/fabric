@@ -13,7 +13,11 @@ def migrate_history():
     directory = Path(__file__).parent / "versions"
     sql = "\n".join(
         (directory / name).read_text()
-        for name in ("V017__history_records.sql", "V018__graph_record_kind.sql")
+        for name in (
+            "V017__history_records.sql",
+            "V018__graph_record_kind.sql",
+            "V021__history_version_rank.sql",
+        )
     )
     with history_engine().begin() as conn:
         for statement in sql.split(";"):

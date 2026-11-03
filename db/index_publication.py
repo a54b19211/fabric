@@ -148,9 +148,9 @@ def _current_state(row):
                 return "revoked", None
             raise
         current = conn.execute(text(
-            "SELECT version_id,payload FROM history_versions "
+            "SELECT version_id,payload FROM " + history._VERSIONS + " "
             "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
-            "AND COALESCE(payload->'facts'->>'publication_role','source_record')!='context_reference' "
+            "AND " + history._ROLE + "!='context_reference' "
             "ORDER BY COALESCE(proof_available_at,first_seen_at) DESC,"
             + history._SOURCE_UPDATED_ORDER
             + " DESC NULLS LAST,published_seq DESC LIMIT 1"

@@ -100,7 +100,7 @@ def pg(pg_engine, monkeypatch):
     monkeypatch.setattr(migration, "history_engine", lambda: pg_engine)
     migration.migrate_history()
     with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE history_versions,history_runs"))
+        conn.execute(text("TRUNCATE history_versions,history_runs,history_version_rank"))
         conn.execute(
             text("UPDATE history_sources SET published_seq=0,read_enabled=true")
         )
@@ -1109,3 +1109,35 @@ def test_the_same_europe_pmc_record_in_another_key_order_is_not_a_new_version(pg
     assert changed.version_ids != first.version_ids
     current = store.list_records("europe_pmc", False, "current", datetime.now().astimezone())
     assert current.items[0].version_id == changed.version_ids[0]
+
+
+def _ranks(pg):
+    with pg.begin() as conn:
+        return conn.execute(text(
+            "SELECT h.source_record_id, r.publication_role FROM history_versions h "
+            "LEFT JOIN history_version_rank r ON r.version_id=h.version_id ORDER BY h.published_seq")).all()
+
+
+def test_ranking_keys_are_derived_with_each_version_and_a_partial_backfill_changes_nothing(pg):
+    """Live 2026-11-03: listing Europe PMC decompressed every payload (2s a pass) and timed out. V021 keeps
+    each version's ranking keys in history_version_rank; a version without them is ranked from its payload,
+    same result. history_versions itself takes no UPDATE."""
+    for abstract, key in (("A", "rank-1"), ("B", "rank-2")):
+        _fetch_europe_pmc_revision(abstract, key)
+    assert [r[1] for r in _ranks(pg)] == ["source_record", "source_record"]  # written at publish
+    now = datetime.now().astimezone()
+    derived = store.list_records("europe_pmc", False, "current", now)
+    changes = store.list_changes("europe_pmc", False)
+    with pg.begin() as conn:  # as before V021 was installed
+        conn.execute(text("TRUNCATE history_version_rank"))
+    raw = store.list_records("europe_pmc", False, "current", now)
+    assert [i.version_id for i in raw.items] == [i.version_id for i in derived.items]
+    assert store.list_changes("europe_pmc", False)["current_version_ids"] == changes["current_version_ids"]
+    assert store.backfill_rank("europe_pmc", batch=1) == 1  # one derived, one still ranked from its payload
+    half = store.list_records("europe_pmc", False, "current", now)
+    assert [i.version_id for i in half.items] == [i.version_id for i in derived.items]
+    assert store.backfill_rank("europe_pmc", batch=10) == 1 and store.backfill_rank("europe_pmc") == 0
+    assert [r[1] for r in _ranks(pg)] == ["source_record", "source_record"]
+    with pg.begin() as conn:  # derived keys are as immutable as the versions they come from
+        conn.execute(text("UPDATE history_version_rank SET publication_role='context_reference'"))
+    assert [r[1] for r in _ranks(pg)] == ["source_record", "source_record"]
