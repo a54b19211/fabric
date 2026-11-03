@@ -316,6 +316,29 @@ def crl_id(data: dict) -> str:
     return name + "#" + sha256(canonical(components))[:24]
 
 
+# Fields a source rewrites in every response although the record did not change: ClinicalTrials stamps
+# each study with the date of its data snapshot. Version identity ignores them; the raw is kept as seen.
+VOLATILE_RAW = {"clinicaltrials": (("derivedSection", "miscInfoModule", "versionHolder"),)}
+
+
+def stable_raw(source_id, raw):
+    """The raw without the source's volatile fields, for comparing two observations; None if the source
+    has none or the raw is not the expected JSON."""
+    paths = VOLATILE_RAW.get(source_id)
+    if not paths:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    for path in paths:
+        node = data
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(path[-1], None)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
 def project_record(source_id: str, item: ArchiveRecord) -> dict:
     if source_id == "pubmed" and item.raw_media_type == "application/xml":
         return _project_pubmed(item)

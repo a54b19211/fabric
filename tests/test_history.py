@@ -400,3 +400,19 @@ def test_epmc_empty_first_page_with_hits_is_not_eof(monkeypatch):
     result = sources.read_public(FetchRequest(source_id="europe_pmc", query="alpha"))
     assert result["error"]["code"] == "invalid_source_pagination"
     assert not result["upstream_pagination_exhausted"]
+
+
+def test_clinicaltrials_daily_data_date_is_not_a_record_change():
+    """Live 2026-11-03: every refresh made a new version of all 516 trials; only versionHolder differed."""
+    import json
+
+    def raw(holder, status="RECRUITING"):
+        return json.dumps({"protocolSection": {"identificationModule": {"nctId": "NCT01234567"},
+                                               "statusModule": {"overallStatus": status}},
+                           "derivedSection": {"miscInfoModule": {"versionHolder": holder}}})
+
+    assert sources.stable_raw("clinicaltrials", raw("2026-11-02")) == sources.stable_raw("clinicaltrials", raw("2026-11-03"))
+    assert sources.stable_raw("clinicaltrials", raw("2026-11-02")) != sources.stable_raw(
+        "clinicaltrials", raw("2026-11-03", status="COMPLETED"))
+    assert sources.stable_raw("europe_pmc", raw("2026-11-02")) is None
+    assert sources.stable_raw("clinicaltrials", "not json") is None

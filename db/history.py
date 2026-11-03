@@ -32,7 +32,7 @@ from biz_rules.history_models import (
     source_time,
     utc,
 )
-from biz_rules.history_sources import project_record
+from biz_rules.history_sources import stable_raw, project_record
 
 
 @lru_cache(maxsize=2)
@@ -719,7 +719,25 @@ def _publish(
             text("SELECT version_id FROM history_versions WHERE version_id=:id"),
             {"id": version_id},
         ).first()
-        if run["kind"] == "fetch" and existing is not None:
+        stable = stable_raw(run["source_id"], item.raw_content) if run["kind"] == "fetch" else None
+        unchanged = False
+        if existing is None and stable is not None:
+            # 只差来源每次都改写的字段（如 ClinicalTrials 的数据日期）时，仍是当前版本；原件保留首次所见
+            current = conn.execute(
+                text(
+                    "SELECT version_id,payload FROM history_versions "
+                    "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
+                    "ORDER BY published_seq DESC LIMIT 1"
+                ),
+                {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
+            ).mappings().first()
+            if current is not None and stable_raw(
+                run["source_id"], current["payload"].get("raw_content")
+            ) == stable and all(
+                canonical(current["payload"].get(key)) == canonical(projected[key]) for key in projected
+            ):
+                version_id, existing, unchanged = current["version_id"], (current["version_id"],), True
+        if run["kind"] == "fetch" and existing is not None and not unchanged:
             # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。
             # 档案导入仍按原件/证明去重，不把迟到的旧档案改成当前状态。
             current = conn.execute(
