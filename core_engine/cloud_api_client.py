@@ -121,25 +121,6 @@ def _mineru_parse(file_path: str, base: str | None = None, content_list: bool = 
         return {"markdown": "", "success": False, "error": str(e)}
 
 
-@task(
-    name="mineru_pdf_to_markdown",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
-def mineru_pdf_to_markdown(pdf_path: str) -> dict:
-    """
-    调用自部署 MinerU 同步接口将 PDF / DOC / DOCX / XLS / XLSX 解析为 Markdown。
-        POST /file_parse → 直接返回结果
-
-    参数:
-        pdf_path: 本地文件路径（.pdf / .doc / .docx / .xls / .xlsx）
-
-    返回:
-        dict: {"markdown": "...", "success": True/False, "error": ""}
-    """
-    return _mineru_parse(pdf_path)
-
-
 # ===================================================================
 #  Qwen 大模型 API —— Markdown → 结构化 JSON
 # ===================================================================

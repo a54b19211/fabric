@@ -19,8 +19,6 @@ import trafilatura
 
 from config.crawler_settings import SITE_PROFILES
 from biz_rules.cleaners import remove_extra_whitespace, clean_title
-from core_engine.cloud_api_client import mineru_pdf_to_markdown
-from core_engine.pdf_meta_sniffer import sniff_pdf_metadata
 
 
 def _identify_site(url: str) -> str:
@@ -120,53 +118,3 @@ def route_webpage(page_data: dict, site_key: str = None) -> dict:
 
     return result
 
-
-@task(name="route_pdf")
-def route_pdf(pdf_info: dict) -> dict:
-    """
-    PDF 解析：MinerU 转 Markdown → 嗅探元信息。
-    不调 LLM，title 从 MinerU 输出或文件名嗅探。
-    """
-    doc_uuid = pdf_info["uuid"]
-    pdf_path = pdf_info["local_path"]
-    source_url = pdf_info.get("source_url", "")
-    parent_uuid = pdf_info.get("parent_uuid", "")
-    source_site = pdf_info.get("source_site", "local")
-
-    result = {
-        "uuid": doc_uuid,
-        "title": "",
-        "publish_date": "",
-        "markdown": "",
-        "structured_data": {},
-        "parse_method": "mineru",
-        "attachment_links": [],
-        "source_url": source_url,
-        "source_site": source_site,
-        "parent_uuid": parent_uuid,
-        "sniffed_meta": {},
-    }
-
-    logger.info(f"[PDF] MinerU 解析: {pdf_path}")
-    mineru_result = mineru_pdf_to_markdown.fn(pdf_path)
-    if not mineru_result["success"]:
-        logger.error(f"[PDF] MinerU 失败: {mineru_result['error']}")
-        return result
-
-    markdown = mineru_result["markdown"]
-    result["markdown"] = markdown
-
-    # 从 Markdown 内容嗅探标题（规则匹配，无 LLM）
-    sniffed = sniff_pdf_metadata(markdown)
-    result["sniffed_meta"] = sniffed
-    if sniffed.get("sniffed_title"):
-        result["title"] = sniffed["sniffed_title"]
-
-    result["structured_data"] = {
-        "title": result["title"],
-        "publish_date": "",
-        "category": "",
-        "summary": "",
-    }
-
-    return result

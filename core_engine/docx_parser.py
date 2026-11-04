@@ -13,21 +13,10 @@ Word 文档解析器（.doc / .docx → Markdown）
 import platform
 import subprocess
 import time
-import uuid as _uuid
 from pathlib import Path
-from datetime import datetime, timezone
 
 from loguru import logger
 
-from core_engine.cloud_api_client import mineru_pdf_to_markdown
-
-
-def _make_uuid(seed: str) -> str:
-    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, seed))
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ── [旧方案已注释] win32com 解析 ─────────────────────────────────────────────
@@ -251,109 +240,4 @@ def _doc_to_pdf(file_path: str) -> str:
 
 # ── MinerU 解析（当前方案：doc/docx → PDF → MinerU）─────────────────────────
 
-def _parse_doc(file_path: str) -> str:
-    """.doc/.docx 转 PDF，再交给 MinerU 解析（跨平台）。"""
-    logger.info(f"[DOCX] 开始转换: {file_path}")
-    pdf_path = _doc_to_pdf(file_path)
-    logger.info(f"[DOCX] 转换完成，PDF: {pdf_path}")
-
-    result = mineru_pdf_to_markdown.fn(pdf_path)
-    if not result["success"]:
-        raise RuntimeError(f"MinerU 解析失败: {result['error']}")
-    return result["markdown"]
-
-
 # ── 对外接口 ──────────────────────────────────────────────────────────────────
-
-def route_docx(att_info: dict, parent_parsed: dict | None = None) -> dict:
-    """
-    解析 .doc/.docx 附件，返回标准 parsed_result。
-    若传入 parent_parsed，则继承父文档的元数据。
-    """
-    file_path = att_info.get("local_path", "")
-    doc_uuid = att_info.get("uuid", _make_uuid(file_path))
-    source_url = att_info.get("source_url", "")
-    parent_uuid = att_info.get("parent_uuid", "")
-    source_site = att_info.get("source_site", "")
-
-    parent_title = ""
-    parent_publish_date = ""
-    parent_doc_type = ""
-    parent_language = ""
-    parent_source_url = ""
-    if parent_parsed:
-        parent_title = parent_parsed.get("title", "")
-        parent_publish_date = parent_parsed.get("publish_date", "")
-        parent_doc_type = parent_parsed.get("doc_type", "")
-        parent_language = parent_parsed.get("language", "")
-        parent_source_url = parent_parsed.get("source_url", "")
-        if not source_site:
-            source_site = parent_parsed.get("source_site", "")
-
-    result = {
-        "uuid": doc_uuid,
-        "title": "",
-        "publish_date": parent_publish_date,
-        "markdown": "",
-        "structured_data": {},
-        "parse_method": "mineru_doc",
-        "attachment_links": [],
-        "source_url": source_url,
-        "source_site": source_site,
-        "parent_uuid": parent_uuid,
-        "sniffed_meta": {},
-        "timestamp": _now_iso(),
-        "doc_type": parent_doc_type,
-        "language": parent_language,
-    }
-
-    if not file_path or not Path(file_path).exists():
-        logger.warning(f"[DOCX] 文件不存在: {file_path}")
-        return result
-
-    logger.info(f"[DOCX] 解析: {file_path}")
-    try:
-        markdown = _parse_doc(file_path)
-    except Exception as e:
-        logger.error(f"[DOCX] 解析失败: {file_path} | {e}")
-        return result
-
-    if not markdown:
-        logger.warning(f"[DOCX] 提取内容为空: {file_path}")
-        return result
-
-    file_name = Path(file_path).stem
-    title = file_name
-
-    fm_lines = ["---"]
-    fm_lines.append(f'title: "{title}"')
-    if parent_publish_date:
-        fm_lines.append(f"publish_date: {parent_publish_date}")
-    if source_site:
-        fm_lines.append(f"source_site: {source_site}")
-    if parent_doc_type:
-        fm_lines.append(f"doc_type: {parent_doc_type}")
-    if parent_language:
-        fm_lines.append(f"language: {parent_language}")
-    if source_url:
-        fm_lines.append(f"source_url: {source_url}")
-    if parent_uuid:
-        fm_lines.append(f"parent_uuid: {parent_uuid}")
-    if parent_title:
-        fm_lines.append(f'parent_title: "{parent_title}"')
-    if parent_source_url:
-        fm_lines.append(f"parent_source_url: {parent_source_url}")
-    fm_lines.append("---")
-    frontmatter = "\n".join(fm_lines)
-
-    result["title"] = title
-    result["markdown"] = f"{frontmatter}\n\n# {title}\n\n{markdown}"
-    result["structured_data"] = {
-        "title": title,
-        "publish_date": parent_publish_date,
-        "category": "",
-        "summary": markdown[:200],
-    }
-
-    logger.info(f"[DOCX] 解析完成: {file_path}，字符数: {len(markdown)}")
-    return result

@@ -310,28 +310,3 @@ def download_pdf(
         "skipped": skipped,
     }
 
-
-@task(name="scan_local_pdfs")
-def scan_local_pdfs(directory: str) -> list:
-    """
-    批量扫描本地目录中的 PDF 文件。
-    """
-    pdf_dir = Path(directory)
-    if not pdf_dir.exists():
-        logger.warning(f"扫描目录不存在: {directory}")
-        return []
-
-    results = []
-    for pdf_file in sorted(pdf_dir.rglob("*.pdf")):
-        file_uuid = make_uuid(str(pdf_file))
-        results.append({
-            "uuid": file_uuid,
-            "local_path": str(pdf_file),
-            "source_url": "",
-            "parent_uuid": "",
-            "source_site": "local",
-            "timestamp": _now_iso(),
-        })
-
-    logger.info(f"扫描到 {len(results)} 个本地 PDF: {directory}")
-    return results
