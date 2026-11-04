@@ -372,6 +372,10 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
+    if source_id in {"nmpa", "cde", "chictr"}:
+        from collection.legacy_sites import project_capture
+
+        return project_capture(source_id, item)
     data = parse_json(item.raw_content)
     if source_id == "sec_companyfacts":
         from biz_rules.sec_xbrl import project_sec
@@ -1198,8 +1202,16 @@ def _read_pubmed(request, client, began):
         }
 
 
+def _read_legacy_site(request):
+    # 旧 ETL 站点插件依赖浏览器抓取器等较重的库，用到时才加载
+    from collection import legacy_sites
+
+    return legacy_sites.read_site(request)
+
+
 # 来源插件注册表：插件名 → 读取函数。来源目录（collection.catalog）只引用插件名。
 PLUGINS = {
+    "legacy_site_crawler": _read_legacy_site,
     "public_api_reader": _read_public_api,
     "who_don": _read_who,
     "sec_xbrl": _read_sec,

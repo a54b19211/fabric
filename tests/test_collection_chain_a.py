@@ -31,11 +31,14 @@ def test_watchable_set_equals_previous_allowlist():
 
 def test_blocked_and_declared_sources_are_visible_gaps_not_fetchable():
     gaps = {g["source_id"]: g for g in catalog.gaps()}
-    for source in ("cde_ctr", "chictr", "nmpa", "cde", "cninfo", "hkex", "biorxiv", "drugs_fda"):
+    for source in ("cde_ctr", "cninfo", "hkex", "biorxiv", "drugs_fda"):
         assert source in gaps and source not in catalog.FETCHABLE
-    assert "反爬" in gaps["cde_ctr"]["reason"] or "脚本挑战" in gaps["cde_ctr"]["reason"]
+    assert "脚本挑战" in gaps["cde_ctr"]["reason"]
+    # 旧 ETL 的三个站已迁入为插件：可按需读取，但不进固定刷新、标为未经本系统实测
+    for source in ("chictr", "nmpa", "cde"):
+        assert source in catalog.FETCHABLE and source not in gaps and not catalog.spec(source).verified
     with pytest.raises(ValueError):
-        FetchRequest.model_validate({"source_id": "chictr", "query": "x"})
+        FetchRequest.model_validate({"source_id": "cde_ctr", "query": "x"})
 
 
 def test_every_spec_declares_decision_rate_group_and_incremental_semantics():

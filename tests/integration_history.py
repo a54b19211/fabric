@@ -102,7 +102,7 @@ def pg(pg_engine, monkeypatch):
     migration.migrate_history()
     with pg_engine.begin() as conn:
         conn.execute(text(
-            "TRUNCATE derived_registry_changes,derived_registry_diff_runs,history_versions,history_runs,"
+            "TRUNCATE derived_clean_text,derived_registry_changes,derived_registry_diff_runs,history_versions,history_runs,"
             "history_version_rank"
         ))
         conn.execute(
@@ -1233,3 +1233,95 @@ def test_registry_diff_backfill_pairs_existing_versions_once(pg):
     assert got[a]["state"] == "first_adoption" and got[b]["pairing"] == "backfill_published_seq"
     enrollment = {c["field"]: c for c in got[b]["changes"]}["enrollment"]
     assert enrollment["detail"]["delta"] == -200 and enrollment["material"]
+
+
+# ——附件（V023）：旧站点插件的附件版本 → 加工层 attachment_parse → 派生正文——
+
+
+def _fetch_attachment(tmp_path, monkeypatch, key, content=b"%PDF-1.4 synthetic notice"):
+    import hashlib
+
+    monkeypatch.setenv(
+        "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
+        '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc","nmpa"]',
+    )
+    from collection.legacy_sites import attachment_record_id
+
+    path = tmp_path / (key + ".pdf")
+    path.write_bytes(content)
+    url = "https://www.nmpa.gov.cn/directory/web/nmpa/images/" + key + ".pdf"
+    raw = json.dumps({
+        "schema_version": "datafabric.attachment.v1", "role": "attachment", "site": "nmpa", "url": url,
+        "parent_record_id": "https://www.nmpa.gov.cn/xxgk/ggtg/1.html", "file_name": "附件1", "file_ext": ".pdf",
+        "sha256": hashlib.sha256(content).hexdigest(), "size": len(content), "store_path": str(path),
+        "discovered_from": "legacy_attachments_table", "status": "stored",
+    }, ensure_ascii=False, sort_keys=True)
+    request = FetchRequest(source_id="nmpa", query="legacy_attachments",
+                           source_record_ids=["https://www.nmpa.gov.cn/xxgk/ggtg/1.html"])
+    run, _ = store.create_fetch(request, key)
+    store.job_input(run.id, run.attempt)
+    done = store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id=attachment_record_id("https://www.nmpa.gov.cn/xxgk/ggtg/1.html", url),
+                                  record_kind="document", raw_content=raw)],
+        "complete": False, "upstream_pagination_exhausted": True, "stop_reason": "upstream_exhausted",
+        "requests": 1, "bytes": len(content), "source_total": None, "error": None,
+    })
+    return done.version_ids[0], path
+
+
+def test_attachment_parsed_once_with_retry_on_failure_and_read_with_visibility(pg, tmp_path, monkeypatch):
+    from db import derived_text
+    from processing import attachment_parse as ap
+
+    version, path = _fetch_attachment(tmp_path, monkeypatch, "att-1")
+    answers = iter([{"success": False, "markdown": "", "error": "timeout"},
+                    {"success": True, "markdown": "# 附件\n\n药品注册证书信息。", "error": ""}])
+    monkeypatch.setattr(ap, "_mineru", lambda p: next(answers))
+    assert derived_text.process(batch=10, retry_after_seconds=0) == {"parsed": 0, "failed": 1, "unsupported": 0}
+    now = datetime.now(timezone.utc)
+    got = derived_text.for_versions("nmpa", False, [version], "current", now)["versions"][version]
+    assert got["status"] == "failed" and got["error"] == "parser_failed" and got["attempt"] == 1
+    assert derived_text.process(batch=10, retry_after_seconds=0) == {"parsed": 1, "failed": 0, "unsupported": 0}
+    assert derived_text.process(batch=10, retry_after_seconds=0) == {"parsed": 0, "failed": 0, "unsupported": 0}
+    got = derived_text.for_versions("nmpa", False, [version], "current", now + timedelta(seconds=0))["versions"][version]
+    assert got["status"] == "parsed" and got["attempt"] == 2 and got["text"].endswith("药品注册证书信息。")
+    assert got["parse_method"] == "mineru" and got["processor_version"] == ap.PROCESSOR_VERSION
+    hidden = derived_text.for_versions("nmpa", False, [version], "current", date("2020-01-01T00:00:00Z"))
+    assert hidden["versions"][version] == {"state": "not_visible_or_not_processed"}
+    with pg.begin() as conn:
+        assert conn.execute(text("DELETE FROM derived_clean_text")).rowcount == 0
+
+
+def test_attachment_failures_stop_after_the_attempt_limit(pg, tmp_path, monkeypatch):
+    from db import derived_text
+    from processing import attachment_parse as ap
+
+    version, path = _fetch_attachment(tmp_path, monkeypatch, "att-2")
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": False, "markdown": "", "error": "x"})
+    for _ in range(derived_text.MAX_ATTEMPTS + 2):
+        derived_text.process(batch=10, retry_after_seconds=0)
+    with pg.begin() as conn:
+        assert conn.execute(text("SELECT count(*) FROM derived_clean_text WHERE version_id=:v"),
+                            {"v": version}).scalar_one() == derived_text.MAX_ATTEMPTS
+    # 原件被改动：摘要不符，直接记失败、不调解析服务
+    version3, path3 = _fetch_attachment(tmp_path, monkeypatch, "att-3")
+    path3.write_bytes(b"tampered")
+    monkeypatch.setattr(ap, "_mineru", lambda p: pytest.fail("must not parse a tampered original"))
+    derived_text.process(batch=10, retry_after_seconds=0)
+    got = derived_text.for_versions("nmpa", False, [version3], "current", datetime.now(timezone.utc))
+    assert got["versions"][version3]["error"] == "original_digest_mismatch"
+
+
+def test_same_file_twice_is_parsed_once(pg, tmp_path, monkeypatch):
+    from db import derived_text
+    from processing import attachment_parse as ap
+
+    calls = []
+    monkeypatch.setattr(ap, "_mineru", lambda p: calls.append(p) or {"success": True, "markdown": "# 同一份", "error": ""})
+    first, _ = _fetch_attachment(tmp_path, monkeypatch, "same-a", content=b"%PDF-1.4 identical")
+    second, _ = _fetch_attachment(tmp_path, monkeypatch, "same-b", content=b"%PDF-1.4 identical")
+    derived_text.process(batch=10, retry_after_seconds=0)
+    derived_text.process(batch=10, retry_after_seconds=0)
+    got = derived_text.for_versions("nmpa", False, [first, second], "current", datetime.now(timezone.utc))["versions"]
+    assert len(calls) == 1 and got[first]["text"] == got[second]["text"] == "# 同一份"
+    assert {got[first]["parse_method"], got[second]["parse_method"]} == {"mineru", "reused_same_sha256:mineru"}

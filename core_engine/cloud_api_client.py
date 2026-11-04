@@ -59,18 +59,20 @@ from config.settings import APP
 _MIME_MAP = {
     ".pdf":  "application/pdf",
     ".doc":  "application/pdf",   # MinerU 服务端只认 application/pdf，强制覆盖
-    ".docx": "application/pdf",   # 同上
+    # 自部署 MinerU 3.4 原生解析 docx（11-04 实测），按真实类型发；.doc 仍不支持，由加工层另走云端或转 PDF
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xls":  "application/vnd.ms-excel",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 
-def _mineru_parse(file_path: str) -> dict:
+def _mineru_parse(file_path: str, base: str | None = None) -> dict:
     """
     通用 MinerU 解析内核，根据文件扩展名自动选择 MIME type。
     支持 .pdf / .doc / .docx / .xls / .xlsx。
     """
-    base = APP.MINERU_API_BASE.rstrip("/")
+    # base 可由调用方给（加工层 attachment_parse 用 DATAFABRIC_MINERU_URL）；默认沿用旧配置
+    base = (base or APP.MINERU_API_BASE).rstrip("/")
     path_obj = Path(file_path)
     fname = path_obj.name
     mime = _MIME_MAP.get(path_obj.suffix.lower(), "application/octet-stream")

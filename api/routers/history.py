@@ -303,6 +303,20 @@ def registry_changes(
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
 
+@router.get("/derived-text", dependencies=[Depends(require_read)])
+def derived_text(
+    source_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+):
+    """一页版本的加工层派生正文（附件解析结果，含失败原因）。"""
+    from db.derived_text import for_versions
+
+    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+
+
 @router.get("/collection/catalog", dependencies=[Depends(require_read)])
 def collection_catalog():
     """来源目录：已接通、已登记未接通、被拒绝（含原因）的来源，缺口如实列出。"""

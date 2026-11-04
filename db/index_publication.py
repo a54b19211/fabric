@@ -7,7 +7,13 @@ from uuid import uuid4
 from pydantic import Field
 from sqlalchemy import text
 
-from biz_rules.history_models import HistoryError, HistoryRecord, Model, canonical, sha256
+from biz_rules.history_models import (
+    HistoryError,
+    HistoryRecord,
+    Model,
+    canonical,
+    sha256,
+)
 from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
 from db import history
 
@@ -36,7 +42,27 @@ def targets():
         raise HistoryError("index_target_configuration", "来源到知识库的索引配置无效", 503) from None
 
 
-def _manifest(target, record):
+ATTACHMENT_TEXT_SQL = (
+    "SELECT text FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv AND status='parsed' "
+    "ORDER BY attempt DESC LIMIT 1"
+)
+
+
+def _is_attachment(record):
+    return (record.facts or {}).get("role") == "attachment"
+
+
+def _content(conn, record):
+    """索引正文：一般版本用投影的清洗正文；附件版本用加工层解析出的派生正文（没有则为空）。"""
+    if not _is_attachment(record):
+        return record.clean_text
+    from processing.attachment_parse import PROCESSOR_VERSION
+
+    return conn.execute(text(ATTACHMENT_TEXT_SQL), {"v": record.version_id, "pv": PROCESSOR_VERSION}).scalar() or ""
+
+
+def _manifest(target, record, content=None):
+    content = record.clean_text if content is None else content
     identity = {
         "source_instance": target["source_instance"], "source_id": record.source_id,
         "source_record_id": record.source_record_id, "version_id": record.version_id,
@@ -47,8 +73,46 @@ def _manifest(target, record):
         "source_scope": target["source_scope"],
         "raw_locator": {k: identity[k] for k in identity if k != "raw_sha256"},
         "title": (record.title or record.source_record_id)[:255],
-        "content_sha256": sha256(record.clean_text),
+        "content_sha256": sha256(content),
+        # 附件：正文来自加工层，写明出处和父页面，检索命中能回指“附件版本 + 父页面”
+        **(
+            {"content_kind": "attachment_text", "parent_record_id": record.facts.get("parent_record_id")}
+            if _is_attachment(record)
+            else {}
+        ),
     }
+
+
+def _enqueue(conn, target, record, content):
+    manifest = _manifest(target.model_dump(), record, content)
+    conn.execute(text("""
+        INSERT INTO index_publications
+          (id,target_id,version_id,source_record_id,remote_id,manifest)
+        VALUES (:id,:target,:version,:native,:remote,CAST(:manifest AS jsonb))
+        ON CONFLICT(target_id,version_id) DO NOTHING
+    """), {"id": sha256(canonical([target.key(), record.version_id])), "target": target.key(),
+            "version": record.version_id, "native": record.source_record_id,
+            "remote": publication_id(manifest), "manifest": canonical(manifest)})
+
+
+def enqueue_attachment(conn, version_id):
+    """附件解析成功后（db.derived_text.process 同一事务）把它放进已启用索引目标的待办。"""
+    if not os.environ.get("DATAFABRIC_INDEX_TARGETS"):
+        return 0
+    payload = conn.execute(
+        text("SELECT payload FROM history_versions WHERE version_id=:v"), {"v": version_id}
+    ).scalar_one()
+    record = HistoryRecord.model_validate(payload)
+    content = _content(conn, record)
+    if not content.strip():
+        return 0
+    enabled = {row[0] for row in conn.execute(text("SELECT id FROM index_targets WHERE enabled"))}
+    count = 0
+    for target in targets():
+        if (target.source_id, target.is_demo) == (record.source_id, record.is_demo) and target.key() in enabled:
+            _enqueue(conn, target, record, content)
+            count += 1
+    return count
 
 
 def scan_committed(*, batch_size=25):
@@ -91,16 +155,14 @@ def scan_committed(*, batch_size=25):
                 record = HistoryRecord.model_validate(version["payload"])
                 if record.record_kind == "graph":
                     continue
-                manifest = _manifest(target.model_dump(), record)
-                key = sha256(canonical([target.key(), record.version_id]))
-                conn.execute(text("""
-                    INSERT INTO index_publications
-                      (id,target_id,version_id,source_record_id,remote_id,manifest)
-                    VALUES (:id,:target,:version,:native,:remote,CAST(:manifest AS jsonb))
-                    ON CONFLICT(target_id,version_id) DO NOTHING
-                """), {"id": key, "target": target.key(), "version": record.version_id,
-                        "native": record.source_record_id, "remote": publication_id(manifest),
-                        "manifest": canonical(manifest)})
+                if _is_attachment(record):
+                    # 附件正文由加工层产出；已解析的现在入队，其余在解析成功时由 enqueue_attachment 入队
+                    content = _content(conn, record)
+                    if not content.strip():
+                        continue
+                    _enqueue(conn, target, record, content)
+                else:
+                    _enqueue(conn, target, record, record.clean_text)
                 count += 1
             if versions:
                 conn.execute(text("""
@@ -262,15 +324,17 @@ def process_once(*, client=None, sent=None):
                 and receipt.get("vector_count") == 0
             )
             return _finish(row, "disabled" if confirmed else "disabling", desired, receipt=receipt, delay=300 if confirmed else 15)
-        if not record.clean_text.strip() or len(record.clean_text.encode()) > 2000000:
+        with history.history_engine().begin() as conn:
+            content = _content(conn, record)
+        if not content.strip() or len(content.encode()) > 2000000:
             raise HistoryError("index_content_budget", "正文为空或超过索引单条预算，原件仍保留", 422)
-        if sha256(record.clean_text) != row["manifest"]["content_sha256"]:
+        if sha256(content) != row["manifest"]["content_sha256"]:
             raise HistoryError("index_content_changed", "固定原件的清洗正文与冻结摘要不符", 409)
         if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
             _sent(row)
             # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
             receipt = client.publish({**row["manifest"], "title": row["manifest"]["title"][:255],
-                                      "content": record.clean_text})
+                                      "content": content})
         _validate_receipt(row, receipt)
         verified_receipt = receipt
         # 网络请求期间可能撤权/换头版；不能以旧资格确认ready。

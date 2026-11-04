@@ -53,7 +53,7 @@ def pg(pg_engine, monkeypatch):
     index_migration.migrate_index()
     with pg_engine.begin() as conn:
         assert conn.execute(text("SELECT current_schema()")).scalar_one().startswith("test_index_")
-        conn.execute(text("TRUNCATE derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,history_versions,history_runs"))
+        conn.execute(text("TRUNCATE derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,history_versions,history_runs"))
         conn.execute(text("UPDATE history_sources SET published_seq=0,read_enabled=true"))
     set_targets(monkeypatch)
     return pg_engine
@@ -470,3 +470,42 @@ def test_a_sent_job_is_confirmed_even_behind_a_backlog_of_new_uploads(pg):
     assert index.process_once(client=client, sent=True)["state"] == "ready"
     assert job(pg, first)["state"] == "ready"
     assert index.process_once(client=client, sent=False)["state"] in {"ready", "indexing"}  # new uploads still move
+
+
+def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg, monkeypatch, tmp_path):
+    """v3 3.3a/3.6：附件正文在加工层；解析成功后才进索引，发布的是派生正文，回指附件版本。"""
+    from db import derived_text
+    from integration_history import _fetch_attachment
+    from processing import attachment_parse as ap
+
+    version, _ = _fetch_attachment(tmp_path, monkeypatch, "idx-att")
+    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
+        "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
+        "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
+    index.scan_committed()
+    assert rows(pg, "SELECT * FROM index_publications") == []  # 还没有正文：不入索引待办
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 附件\n\n批准文号 国药准字H00000000。", "error": ""})
+    assert derived_text.process(batch=5, retry_after_seconds=0)["parsed"] == 1
+    queued = job(pg, version)
+    assert queued["manifest"]["content_kind"] == "attachment_text"
+    assert queued["manifest"]["parent_record_id"] == "https://www.nmpa.gov.cn/xxgk/ggtg/1.html"
+    client = JournalClient()
+    assert index.process_once(client=client)["state"] == "ready"
+    assert client.bodies[-1]["content"].endswith("国药准字H00000000。")
+    index.scan_committed()  # 再扫描不重复建待办
+    assert len(rows(pg, "SELECT * FROM index_publications")) == 1
+
+
+def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
+    from db import derived_text
+    from integration_history import _fetch_attachment
+    from processing import attachment_parse as ap
+
+    _fetch_attachment(tmp_path, monkeypatch, "idx-att-fail")
+    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
+        "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
+        "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": False, "markdown": "", "error": "x"})
+    derived_text.process(batch=5, retry_after_seconds=0)
+    index.scan_committed()
+    assert rows(pg, "SELECT * FROM index_publications") == []

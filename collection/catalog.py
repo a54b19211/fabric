@@ -48,6 +48,8 @@ class CollectionSpec:
     coverage: dict = field(default_factory=dict)
     # 支持不带时间窗的全量回填（续页标记可靠、按页可续）
     backfill: bool = False
+    # False：插件是从旧 ETL 迁入的，本系统没有对原站做过实测（主持人 11-04 接受）
+    verified: bool = True
     blocked_reason: str | None = None
     notes: str = ""
 
@@ -158,43 +160,51 @@ SPECS: tuple[CollectionSpec, ...] = (
         rate_group="chinadrugtrials.org.cn",
         min_interval_seconds=10.0,
         blocked_reason="2026-11-04 实测：首页 200，检索列表返回 202 脚本挑战页；普通无头浏览器同样只得到 39 字节空页。"
-        "不做规避反爬的伪装，等官方数据渠道或授权。",
+        "旧 ETL 没有这个站的采集代码；等官方数据渠道或授权。",
     ),
+    # ——从旧 ETL 迁入（config/sites/* + core_engine），统一走 legacy_site_crawler 插件——
+    # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件按旧方式（含旧的浏览器抓取器）运行，
+    # 本系统未对原站实测（verified=False）。没有可靠增量键，只按需读取/按列表入口续页，不进固定刷新。
+    # 附件：详情页附件各成独立版本，正文由加工层 attachment_parse（自部署 MinerU）产出。
     CollectionSpec(
         source_id="chictr",
         name="中国临床试验注册中心",
-        status="blocked",
-        plugin=None,
+        status="active",
+        plugin="legacy_site_crawler",
         evidence_types=("registry_record",),
         decisions=("A", "E"),
         incremental=_NO_INCREMENT,
         rate_group="chictr.org.cn",
-        min_interval_seconds=10.0,
-        blocked_reason="2026-11-04 实测：普通无头浏览器 405。旧库存 12.3 万篇按真实来源回填，新增等授权渠道。",
+        min_interval_seconds=2.0,
+        coverage={"metadata": "登记详情页", "fulltext": "详情页正文", "attachments": "详情页附件"},
+        verified=False,
+        notes="旧库存 12.3 万篇另按真实来源回填",
     ),
     CollectionSpec(
         source_id="nmpa",
         name="国家药品监督管理局",
-        status="blocked",
-        plugin=None,
+        status="active",
+        plugin="legacy_site_crawler",
         evidence_types=("regulatory_notice",),
         decisions=("A", "C"),
         incremental=_NO_INCREMENT,
         rate_group="nmpa.gov.cn",
-        min_interval_seconds=10.0,
-        blocked_reason="2026-11-04 实测：普通无头浏览器 412。旧库存按真实来源回填，新增等授权渠道。",
+        min_interval_seconds=1.0,
+        coverage={"metadata": "公告页", "fulltext": "公告正文", "attachments": "公告附件（直链 11-04 实测 200）"},
+        verified=False,
     ),
     CollectionSpec(
         source_id="cde",
         name="国家药品审评中心",
-        status="blocked",
-        plugin=None,
+        status="active",
+        plugin="legacy_site_crawler",
         evidence_types=("regulatory_notice",),
         decisions=("A",),
         incremental=_NO_INCREMENT,
         rate_group="cde.org.cn",
-        min_interval_seconds=10.0,
-        blocked_reason="2026-11-04 实测：普通无头浏览器 202 脚本挑战空页。旧库存按真实来源回填，新增等授权渠道。",
+        min_interval_seconds=2.0,
+        coverage={"metadata": "新闻/政策页", "fulltext": "正文", "attachments": "附件（需页面会话 cookies）"},
+        verified=False,
     ),
     CollectionSpec(
         source_id="cninfo",
