@@ -148,6 +148,19 @@ def _derived_mode(source_id, mode):
         )
 
 
+def _evidence_text(conn, row, locator):
+    """证据定位所指的那份正文：投影正文，或该版本按处理器版本+哈希指认的派生清洗正文。"""
+    if locator.basis != "derived_clean_text":
+        return row["clean_text"]
+    derived = conn.execute(text(
+        "SELECT text, text_sha256 FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv "
+        "ORDER BY attempt DESC LIMIT 1"), {"v": row["version_id"], "pv": locator.text_processor_version}
+    ).mappings().first()
+    if derived is None or derived["text_sha256"] != locator.text_sha256:
+        raise HistoryError("graph_quote_mismatch", "图证据指认的派生清洗正文不存在或已不一致")
+    return derived["text"] or ""
+
+
 def _validate_derived(conn, run, item, now, proof):
     from biz_rules.history_sources import parse_json
     from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, StoredDocument
@@ -260,9 +273,8 @@ def _validate_derived(conn, run, item, now, proof):
                 "graph_evidence_outside_manifest", "图证据不属于本包声明的文档版本"
             )
         locator = ref.locator
-        if original["clean_text"][
-            locator.start : locator.end
-        ] != ref.quote or locator.end > len(original["clean_text"]):
+        body = _evidence_text(conn, original, locator)
+        if body[locator.start : locator.end] != ref.quote or locator.end > len(body):
             raise HistoryError(
                 "graph_quote_mismatch", "图证据与冻结原文字符范围不一致，不能标记已绑定"
             )
@@ -1673,11 +1685,11 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
                 evidence.origin_doc_uuid,
             )
         )
+        body = _evidence_text(conn, original, evidence.locator) if original is not None else ""
         if (
             original is None
-            or original["clean_text"][evidence.locator.start : evidence.locator.end]
-            != evidence.quote
-            or evidence.locator.end > len(original["clean_text"])
+            or body[evidence.locator.start : evidence.locator.end] != evidence.quote
+            or evidence.locator.end > len(body)
         ):
             raise HistoryError(
                 "graph_quote_mismatch", "图证据不属于同截止下可见的冻结原文"

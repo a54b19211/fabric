@@ -869,3 +869,23 @@ def test_oversized_input_is_blocked_for_one_hour_without_losing_fifo_or_other_do
     )
     publication.publisher_heartbeat("running")
     assert publication.publication_status()["counts"]["blocked"] == 1
+
+
+
+def test_reconcile_against_a_fixed_high_watermark(databases):
+    source, _target = databases
+    first, second = snapshot("recon-1"), snapshot("recon-2")
+    insert_document(source, first)
+    insert_document(source, second)
+    with source.begin() as conn:
+        hw = conn.execute(text("SELECT max(id) FROM documents")).scalar()
+    before = publication.reconcile(hw)
+    assert before["documents"]["in_flight"] == 2 and not before["switchable"]  # 待办还没发表
+    while publication.publish_once()["state"] == "published":
+        pass
+    done = publication.reconcile(hw)
+    assert done["documents"] == {"matched": 2, "unpublished": 0, "stale": 0, "in_flight": 0}
+    assert done["switchable"]
+    # 高水位之后的新行不算进这次对账
+    insert_document(source, snapshot("recon-3"))
+    assert publication.reconcile(hw)["documents"]["matched"] == 2

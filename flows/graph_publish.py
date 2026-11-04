@@ -455,8 +455,11 @@ def build_document_bundle(observation, documents, document_refs):
         batch_offset=observation.get("batch_offset", 0),
         selected_document_uuids=selected,
         next_document_offset=observation.get("next_document_offset"),
+        # 依赖 = 引用到的版本所属来源；documents 库存的冻结版本再加它的原站许可
         dependency_source_ids=sorted(
-            {"legacy_documents"} | {doc.source_site for doc in documents}
+            {ref.source_id for ref in document_refs}
+            | {doc_map[ref.origin_doc_uuid].source_site for ref in document_refs
+               if ref.source_id == "legacy_documents"}
         ),
         document_refs=document_refs,
         selection_truncated=truncated,

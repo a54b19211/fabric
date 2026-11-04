@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """LLM 抽取触发接口"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from loguru import logger
 
 from api.schemas.request import ExtractionTriggerRequest, PendingExtractRequest
@@ -8,9 +9,10 @@ from api.schemas.response import (
     ExtractionTriggerResponse, ExtractionStatusResponse, ExtractionStatsResponse,
     WorkerStatsResponse, WorkerItem, ReExtractResponse,
 )
+from api.routers.history import require_admin
 from db.session import get_session
 from db.models import Document
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 
 router = APIRouter(prefix="/api/extraction", tags=["extraction"])
 
@@ -66,8 +68,9 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                 filters = [
                     Document.extraction_status == "pending",
                     Document.is_deleted == False,
-                    Document.raw_content != "",
-                    Document.raw_content.isnot(None),
+                    # documents 库存要有正文；history 固定版本的正文在 history 里
+                    or_(and_(Document.raw_content != "", Document.raw_content.isnot(None)),
+                        Document.history_version_id.isnot(None)),
                 ]
                 if body.source_site:
                     filters.append(Document.source_site == body.source_site)
@@ -353,7 +356,7 @@ def re_extract_document(uuid: str):
         if doc.extraction_status in ("queued", "processing"):
             raise HTTPException(status_code=409, detail="文档正在排队或抽取中，请等待完成后再重试")
 
-        if not doc.raw_content or not doc.raw_content.strip():
+        if not doc.history_version_id and (not doc.raw_content or not doc.raw_content.strip()):
             raise HTTPException(status_code=400, detail="文档 raw_content 为空，无法抽取")
 
         doc.extraction_status = "queued"
@@ -420,3 +423,22 @@ def get_extraction_status(uuid: str):
     except Exception as e:
         logger.error(f"[API] 抽取状态查询失败: {uuid} | {e}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+class HistoryVersionSubject(BaseModel):
+    source_id: str
+    record_id: str
+    version_id: str
+    is_demo: bool = False
+
+
+@router.post("/history-version", dependencies=[Depends(require_admin)])
+def trigger_history_version(body: HistoryVersionSubject):
+    """把 history 的一个固定版本交给抽取（只在 history 里、没有 documents 行的新材料也走这里）。"""
+    from biz_rules.history_models import HistoryError
+    from db.extraction_subjects import enqueue_version
+
+    try:
+        return enqueue_version(body.source_id, body.record_id, body.version_id, is_demo=body.is_demo)
+    except HistoryError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message}) from None

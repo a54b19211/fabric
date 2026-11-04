@@ -16,6 +16,8 @@ from db.index_publication import index_tick
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--reconcile", type=int, metavar="HIGH_WATERMARK",
+                        help="只读对账：documents id≤高水位的每一行都已按当前内容发表，打印结果后退出")
     parser.add_argument("--poll-seconds", type=float, default=5)
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument(
@@ -25,6 +27,11 @@ def main():
         help="每轮存量最多补录数；0只处理已捕获待办",
     )
     args = parser.parse_args()
+    if args.reconcile is not None:
+        from db.publication import reconcile
+
+        print(json.dumps(reconcile(args.reconcile), ensure_ascii=False))
+        return
     if (
         not 1 <= args.poll_seconds <= 60
         or not 1 <= args.batch_size <= 100

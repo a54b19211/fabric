@@ -104,14 +104,19 @@ class GraphDocumentRef(Model):
 
 
 class GraphLocator(Model):
-    basis: Literal["clean_text"] = "clean_text"
+    # clean_text：版本记录的投影正文；derived_clean_text：该版本的一份派生清洗正文（按处理器版本 + 哈希指认）
+    basis: Literal["clean_text", "derived_clean_text"] = "clean_text"
     start: int = Field(ge=0)
     end: int = Field(ge=1)
+    text_processor_version: str | None = Field(default=None, max_length=120)
+    text_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def ordered(self):
         if self.end <= self.start:
             raise ValueError("证据字符范围必须非空")
+        if (self.basis == "derived_clean_text") != bool(self.text_processor_version and self.text_sha256):
+            raise ValueError("派生清洗正文定位必须写明处理器版本和哈希，投影正文定位不能写")
         return self
 
 

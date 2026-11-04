@@ -467,6 +467,8 @@ def _graph_input(conn, uuid, fallback=None):
 def _prepare(engine, row):
     if row["prepared"] is not None:
         prepared = row["prepared"]
+        if prepared.get("history_subject") is not None:
+            return prepared
         if prepared["document_request"]["is_demo"] is not is_demo():
             raise HistoryError(
                 "publication_demo_scope_changed",
@@ -492,6 +494,21 @@ def _prepare(engine, row):
                 conn, row["source_doc_uuid"], row["snapshot"].get("document")
             )
         frozen, reason = inputs["document"], "graph_reference"
+        if frozen.get("history_version_id"):
+            # 主体是 history 固定版本：原件就在 history，不冻结；许可按该来源核对
+            subject = {k: frozen.get(k) for k in ("uuid", "title", "source_url", "history_source_id",
+                                                  "history_record_id", "history_version_id",
+                                                  "history_text_version", "history_text_sha256",
+                                                  "history_is_demo")}
+            with history.history_engine().begin() as conn:
+                history._source(conn, subject["history_source_id"])
+            prepared = {"history_subject": subject, "graph_input": inputs, "document_request": None,
+                        "existing_document_version": None,
+                        "idempotency_prefix": "auto-publication:" + sha256(
+                            os.environ.get("DATAFABRIC_PUBLICATION_NAMESPACE", "datafabric.zktest") + "\n"
+                            + row["event_key"])}
+            _save_prepared(engine, row, prepared)
+            return prepared
     if frozen.get("source_site") not in source_sites():
         raise HistoryError(
             "publication_source_blocked",
@@ -558,6 +575,8 @@ def _publish_graph(engine, row, prepared, document_run):
             ArchiveImport.model_validate(prepared["graph_request"]),
             prepared["idempotency_prefix"] + ":graph",
         )
+    if prepared.get("history_subject") is not None:
+        return _publish_subject_graph(engine, row, prepared)
     request = ArchiveImport.model_validate(prepared["document_request"])
     document = CollectedDocument.model_validate_json(request.records[0].raw_content)
     version_ids = (
@@ -742,7 +761,11 @@ def publish_once(engine=None):
                 503,
             )
         prepared = _prepare(engine, row)
-        if prepared.get("existing_document_version") is not None:
+        if prepared.get("history_subject") is not None:
+            result = None
+            receipt = {"document_run_id": None,
+                       "document_version_ids": [prepared["history_subject"]["history_version_id"]]}
+        elif prepared.get("existing_document_version") is not None:
             result = None
             receipt = {
                 "document_run_id": None,
@@ -917,3 +940,108 @@ def publication_status(source_id="legacy_documents", engine=None):
             "暂停/失败保留待办；没有changes不证明源生产器或发表器正常",
         ],
     }
+
+
+def _publish_subject_graph(engine, row, prepared):
+    """history 固定版本主体上的审核结果 → 审核图：文档引用就是那个版本，证据按抽取时读的那份派生清洗正文
+    精确唯一匹配定位（basis=derived_clean_text，带处理器版本和哈希）；匹配不上的关系如实标未绑定。"""
+    from biz_rules.reviewed_graph import GraphLocator
+    from db.extraction_subjects import _clean_text
+    from flows.graph_publish import build_document_bundle
+
+    subject = prepared["history_subject"]
+    clean = _clean_text(subject["history_version_id"], subject["history_text_version"])
+    if clean is None or clean["text_sha256"] != subject["history_text_sha256"]:
+        raise HistoryError("subject_text_changed", "主体引用的清洗正文不存在或已不一致", 409)
+    body = clean["text"] or ""
+    demo = bool(subject.get("history_is_demo"))  # 主体自己的 demo 标记，不取发表服务的配置
+    version = history.read_version(subject["history_version_id"], subject["history_source_id"],
+                                   subject["history_record_id"], demo, "current", datetime.now(timezone.utc))
+    ref = GraphDocumentRef(source_id=version.source_id, source_record_id=version.source_record_id,
+                           version_id=version.version_id, raw_sha256=version.raw_sha256,
+                           origin_doc_uuid=subject["uuid"])
+    original = StoredDocument(source_doc_uuid=subject["uuid"], source_site=subject["history_source_id"],
+                              title=subject.get("title") or subject["uuid"], source_url=subject.get("source_url") or None,
+                              original_raw_content=body, original_raw_sha256=sha256(body))
+    observation = {**prepared["graph_input"]["observation"], "is_demo": demo}
+    bundle = build_document_bundle(observation, [original], [ref])
+
+    def bound(items):
+        out = []
+        for evidence in items:
+            start = body.find(evidence.quote)
+            if start >= 0 and body.find(evidence.quote, start + 1) < 0:
+                out.append(evidence.model_copy(update={"locator": GraphLocator(
+                    basis="derived_clean_text", start=start, end=start + len(evidence.quote),
+                    text_processor_version=subject["history_text_version"],
+                    text_sha256=subject["history_text_sha256"])}))
+        return out
+
+    for node in bundle.nodes:
+        node.evidence = bound(node.evidence)
+    for edge in bundle.edges:
+        edge.evidence = bound(edge.evidence)
+        if not edge.evidence:
+            edge.binding_status = "unbound"
+            edge.unbound_reason = "来源句子在抽取所用的清洗正文中缺失或多处出现，未作模糊定位"
+    graph_request = ArchiveImport(
+        source_id="reviewed_graph", is_demo=demo, scope_description=bundle.scope_description,
+        declared_count=1, declared_complete=False,
+        records=[ArchiveRecord(source_record_id="auto:" + bundle.namespace + ":" + subject["uuid"],
+                               record_kind="graph", raw_content=bundle.model_dump_json())],
+    )
+    prepared = {**prepared, "graph_request": graph_request.model_dump(mode="json")}
+    _save_prepared(engine, row, prepared)
+    return history.import_archive(graph_request, prepared["idempotency_prefix"] + ":graph")
+
+
+def reconcile(high_watermark: int, *, batch: int = 5000, engine=None) -> dict:
+    """documents 里 id ≤ 高水位、属于发表站点、不是 history 固定版本主体的每一行：当前内容的指纹必须等于
+    这篇文档最后一次成功发表的指纹。只读、按 id 分批；返回逐类计数和前 20 个问题样例（只给 uuid/id）。
+    状态：matched 已对上 / unpublished 从未成功发表 / stale 发表过但当前内容又变了 / in_flight 有待办在处理。"""
+    if high_watermark < 0 or not 1 <= batch <= 20000:
+        raise HistoryError("reconcile_budget", "高水位或批量不合法")
+    sites = sorted(source_sites())
+    counts = {"matched": 0, "unpublished": 0, "stale": 0, "in_flight": 0}
+    samples = []
+    last = 0
+    with (engine or publication_engine()).begin() as conn:
+        conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))  # 一个快照里逐批核对
+        while last < high_watermark:
+            rows = conn.execute(text("""
+                WITH d AS (
+                  SELECT id, uuid, encode(sha256(convert_to((publication_document_snapshot(to_jsonb(x))
+                           - ARRAY['updated_at','created_at'])::text,'UTF8')),'hex') AS fingerprint
+                  FROM documents x
+                  WHERE id > :last AND id <= :hw AND source_site = ANY(:sites)
+                    AND COALESCE(history_version_id, '') = ''
+                  ORDER BY id LIMIT :n)
+                SELECT d.id, d.uuid, d.fingerprint,
+                  (SELECT o.snapshot->>'content_fingerprint' FROM publication_outbox o
+                    WHERE o.kind='document' AND o.source_doc_uuid=d.uuid AND o.state='published'
+                    ORDER BY o.id DESC LIMIT 1) AS published,
+                  EXISTS (SELECT 1 FROM publication_outbox o WHERE o.kind='document' AND o.source_doc_uuid=d.uuid
+                    AND o.state IN ('pending','processing','failed','blocked')) AS open
+                FROM d ORDER BY d.id
+            """), {"last": last, "hw": high_watermark, "sites": sites, "n": batch}).mappings().all()
+            if not rows:
+                break
+            for r in rows:
+                if r["published"] == r["fingerprint"]:
+                    state = "matched"
+                elif r["open"]:
+                    state = "in_flight"
+                elif r["published"] is None:
+                    state = "unpublished"
+                else:
+                    state = "stale"
+                counts[state] += 1
+                if state != "matched" and len(samples) < 20:
+                    samples.append({"id": r["id"], "uuid": r["uuid"], "state": state})
+            last = rows[-1]["id"]
+        open_rows = {r["state"]: r["n"] for r in conn.execute(text(
+            "SELECT state, count(*) AS n FROM publication_outbox WHERE kind IN ('document','graph') "
+            "AND state <> 'published' GROUP BY state")).mappings()}
+    return {"high_watermark": high_watermark, "sites": sites, "documents": counts,
+            "open_outbox": open_rows, "problems_sample": samples,
+            "switchable": counts["unpublished"] == counts["stale"] == counts["in_flight"] == 0 and not open_rows}

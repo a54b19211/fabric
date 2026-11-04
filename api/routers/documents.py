@@ -7,6 +7,7 @@ from loguru import logger
 from api.schemas.response import (
     DocumentListResponse, DocumentDetailResponse,
     DocumentItem, AttachmentItem, )
+from db.extraction_subjects import subject_text
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
 from sqlalchemy import func as sqlfunc
@@ -158,7 +159,10 @@ def get_document(uuid: str):
                 id=doc.id,
                 uuid=doc.uuid,
                 title=doc.title or "",
-                raw_content=doc.raw_content or "",
+                raw_content=subject_text(doc),
+                history_ref={"source_id": doc.history_source_id, "record_id": doc.history_record_id,
+                             "version_id": doc.history_version_id, "text_processor_version": doc.history_text_version,
+                             "text_sha256": doc.history_text_sha256} if doc.history_version_id else None,
                 source_site=doc.source_site or "",
                 publish_date=doc.publish_date or "",
                 doc_status=doc.doc_status or "",

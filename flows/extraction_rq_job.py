@@ -9,8 +9,7 @@ def extraction_job(uuid: str) -> bool:
     任务内部自行更新 extraction_status，无需回调。
     返回 True/False 表示成功/失败，RQ 会记录 job result。
     """
-    from db.session import get_session
-    from db.models import Document
+    from db.extraction_subjects import load_subject
     from db.repository import update_extraction_status
     from flows.extraction_flow import extract_single_document
     from core_engine.task_queue import is_extraction_paused
@@ -35,20 +34,11 @@ def extraction_job(uuid: str) -> bool:
     update_extraction_status(uuid, "processing")
 
     try:
-        with get_session() as session:
-            if session is None:
-                update_extraction_status(uuid, "failed", error="DB未连接")
-                return False
-            doc = session.query(Document).filter(
-                Document.uuid == uuid,
-                Document.is_deleted == False,
-            ).first()
-            if doc is None:
-                update_extraction_status(uuid, "failed", error="文档不存在")
-                return False
-            raw_content = doc.raw_content or ""
-            source_site = doc.source_site or ""
-            doc_type = doc.doc_type or ""
+        subject = load_subject(uuid)
+        if subject is None:
+            update_extraction_status(uuid, "failed", error="文档不存在")
+            return False
+        raw_content, source_site, doc_type = subject
 
         if not raw_content.strip():
             update_extraction_status(uuid, "failed", error="文档raw_content为空")

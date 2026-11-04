@@ -16,7 +16,7 @@ import threading
 import queue
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 from loguru import logger
 
 from config.settings import APP
@@ -79,8 +79,6 @@ class MemoryWorker:
 
     def _process(self, task: ExtractionTask) -> None:
         from flows.extraction_flow import extract_single_document
-        from db.session import get_session
-        from db.models import Document
         from db.repository import update_extraction_status
 
         logger.info(
@@ -92,20 +90,13 @@ class MemoryWorker:
         update_extraction_status(task.uuid, "processing")
 
         try:
-            with get_session() as session:
-                if session is None:
-                    update_extraction_status(task.uuid, "failed", error="DB未连接")
-                    return
-                doc = session.query(Document).filter(
-                    Document.uuid == task.uuid,
-                    Document.is_deleted == False,
-                ).first()
-                if doc is None:
-                    update_extraction_status(task.uuid, "failed", error="文档不存在")
-                    return
-                raw_content = doc.raw_content or ""
-                source_site = doc.source_site or ""
-                doc_type = doc.doc_type or ""
+            from db.extraction_subjects import load_subject
+
+            subject = load_subject(task.uuid)
+            if subject is None:
+                update_extraction_status(task.uuid, "failed", error="文档不存在")
+                return
+            raw_content, source_site, doc_type = subject
 
             if not raw_content.strip():
                 update_extraction_status(task.uuid, "failed", error="文档raw_content为空")

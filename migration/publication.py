@@ -7,9 +7,10 @@ from db.publication import publication_engine
 
 
 def migrate_publication():
-    sql = (
-        Path(__file__).parent / "versions" / "V019__publication_outbox.sql"
-    ).read_text()
+    directory = Path(__file__).parent / "versions"
+    # V026 在 V019 之后：documents 增加 history 固定版本主体的引用列，触发器跳过这类主体的冻结
+    sql = "\n".join((directory / name).read_text()
+                    for name in ("V019__publication_outbox.sql", "V026__history_extraction_subjects.sql"))
     # 函数体含分号；整份SQL交给psycopg2，不用历史迁移的简单分号切分器。
     with publication_engine().begin() as conn:
         conn.exec_driver_sql("SET LOCAL lock_timeout='3s'")
