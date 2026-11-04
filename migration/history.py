@@ -20,6 +20,9 @@ def migrate_history():
         )
     )
     with history_engine().begin() as conn:
+        # 现役有读请求时不无限等锁：等不到就整笔回滚，稍后再跑
+        conn.exec_driver_sql("SET LOCAL lock_timeout='3s'")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='60s'")
         for statement in sql.split(";"):
             statement = "\n".join(
                 line
