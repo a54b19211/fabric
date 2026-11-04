@@ -158,3 +158,90 @@ def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows
     assert got["clean"]["processor_version"] == "synthetic.clean_text.v9"
     assert got["profile"]["text_processor_version"] == "synthetic.clean_text.v9"
     assert rows(pg, "SELECT count(*) AS n FROM derived_profiles WHERE version_id=:v", v=ct)[0]["n"] == 2  # 旧行保留
+
+
+# ——规模化运行方式：分块认领、按输入复用、死信、水位（主持人：海量数据要够硬）——
+
+
+def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    calls = []
+    real = clean_text.clean_literature
+    monkeypatch.setattr(clean_text, "clean_literature", lambda raw: calls.append(raw) or real(raw))
+    record = {"source": "MED", "id": "123", "title": "Same", "abstractText": "No change in the abstract."}
+    _fetch_europe_pmc_raw(json.dumps(record), "reuse-1")
+    _fetch_europe_pmc_raw(json.dumps({**record, "citedByCount": 7}), "reuse-2")  # 元数据变了，摘要没变
+    counts = clean_stage.process(chunk_seqs=1)
+    # 第二个版本只改了引用数：清洗器只读标题和摘要，输入相同，复用，不再清洗
+    assert counts["profiled"] == 2 and counts["cleaned"] == 1 and counts["reused"] == 1 and len(calls) == 1
+
+
+def test_identical_cleaner_input_on_another_version_is_reused(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    page_a = nmpa_page("# 公告\n\n同一份正文，未见异常。", "reuse-page-a")
+    page_b = nmpa_page("# 公告\n\n同一份正文，未见异常。", "reuse-page-b")  # 另一个栏目地址，正文相同
+    counts = clean_stage.process()
+    assert counts["cleaned"] == 1 and counts["reused"] == 1
+    a = clean_stage.for_versions("nmpa", False, [page_a, page_b], "current", NOW())["versions"]
+    assert a[page_a]["clean"]["text"] == a[page_b]["clean"]["text"]
+
+
+def test_two_workers_never_process_the_same_chunk(pg, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from db import clean_stage
+
+    allow(monkeypatch)
+    for i in range(12):
+        _fetch_study(f"NCT0999{i:04d}", f"conc-{i}")
+    with ThreadPoolExecutor(3) as pool:
+        results = list(pool.map(lambda _: clean_stage.process(chunk_seqs=2), range(3)))
+    assert sum(r["profiled"] for r in results) == 12
+    assert rows(pg, "SELECT count(*) AS n FROM derived_profiles")[0]["n"] == 12
+    assert rows(pg, "SELECT count(DISTINCT version_id) AS n FROM derived_clean_text")[0]["n"] == 12
+
+
+def test_an_abandoned_chunk_is_reclaimed_after_its_lease(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    _fetch_study("NCT09998881", "lease-1")
+    chunk = clean_stage._claim(pg, clean_stage.stage_key(), 10, 60)  # 认领后进程“死了”
+    assert chunk and clean_stage.process()["profiled"] == 0  # 租约未到期：别人不碰
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE derived_stage_chunks SET lease_until=clock_timestamp()-interval '1 second'"))
+    assert clean_stage.process()["profiled"] == 1
+
+
+def test_a_failing_chunk_is_dead_lettered_with_its_reason_and_retried_a_bounded_number_of_times(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    _fetch_study("NCT09998882", "fail-1")
+    monkeypatch.setattr(clean_text, "clean_registry", lambda *a, **k: 1 / 0)
+    for _ in range(clean_stage.MAX_CHUNK_ATTEMPTS + 2):
+        clean_stage.process()
+    [chunk] = rows(pg, "SELECT state, attempts, error FROM derived_stage_chunks")
+    assert chunk["state"] == "failed" and chunk["attempts"] == clean_stage.MAX_CHUNK_ATTEMPTS
+    assert chunk["error"]["type"] == "ZeroDivisionError"
+    status = clean_stage.stage_status()
+    ct = next(s for s in status["sources"] if s["source_id"] == "clinicaltrials")
+    assert ct["failed"] == 1 and ct["lag"] == 1  # 失败不推进水位，积压如实可见
+
+
+def test_watermark_and_lag(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    for i in range(5):
+        _fetch_study(f"NCT0997{i:04d}", f"wm-{i}")
+    clean_stage.process(chunk_seqs=2, max_chunks=2)
+    ct = next(s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials")
+    assert ct["published_seq"] == 5 and ct["watermark"] == 4 and ct["lag"] == 1
+    clean_stage.process(chunk_seqs=2)
+    ct = next(s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials")
+    assert ct["watermark"] == 5 and ct["lag"] == 0 and ct["versions_per_second"]

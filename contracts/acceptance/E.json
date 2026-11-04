@@ -6,6 +6,10 @@
     "chain": null,
     "work_mode": "judgment_update",
     "design_ref": "v3 1.2 判断E 验收案例1",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": "new_material_auto",
+    "expected_outcome": "revise",
     "question": "已发布判断引用的一篇文献被撤稿，判断该维持还是修订？",
     "required_evidence": [
       "primary_research"
@@ -19,7 +23,9 @@
       "撤稿日期"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [],
@@ -77,11 +83,26 @@
         "detail": "修订后的判断版本可以接着追问"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明第一句写明判断维持还是修订"
+      },
+      {
+        "kind": "auto_triggered_by_new_version",
+        "detail": "撤稿声明入库后自动发起对依赖命题的复核，不靠人工发起"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一篇真实的撤稿文献，并构造一个引用它的历史判断；未选定前不写编号。",
     "synthetic_components": []
   },
@@ -92,6 +113,10 @@
     "chain": null,
     "work_mode": "judgment_update",
     "design_ref": "v3 1.2 判断E 验收案例2",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": "new_material_auto",
+    "expected_outcome": "revise",
     "question": "一个来源被撤权后，依赖它的判断和已存报告怎么处理？",
     "required_evidence": [
       "registry",
@@ -108,6 +133,7 @@
       "nmpa",
       "chictr"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [],
     "must_say": [
       "主要判断",
@@ -158,11 +184,22 @@
         "detail": "修订说明写明依据被撤权"
       },
       {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明第一句写明判断维持还是修订"
+      },
+      {
+        "kind": "auto_triggered_by_new_version",
+        "detail": "撤权事件生效后自动发起对依赖命题的复核，不靠人工发起"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "撤权可在测试环境对真实来源模拟执行；具体来源和判断待选定。",
     "synthetic_components": []
   },
@@ -173,7 +210,11 @@
     "chain": "A",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路A 判断E",
-    "question": "上月报告说“三期大概率成功”，现在中期分析暂停了，判断该怎么修订？",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": "user_follow_up",
+    "expected_outcome": "revise",
+    "question": "用户追问：上月报告说“三期大概率成功”，现在中期分析暂停了，这个判断还成立吗？",
     "required_evidence": [
       "registry",
       "company_disclosure",
@@ -190,6 +231,7 @@
     "sources_available": [
       "clinicaltrials"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "cde_ctr",
       "company_ir"
@@ -241,11 +283,15 @@
       },
       {
         "kind": "follow_up_supported",
-        "detail": "修订后的判断可以接着追问"
+        "detail": "用户追问时调出旧判断版本并给出修订；修订后的判断可以接着追问"
       },
       {
         "kind": "states_next_evidence",
         "detail": "写明下一条会改变判断的披露"
+      },
+      {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明第一句写明判断维持还是修订"
       },
       {
         "kind": "cites_fixed_version",
@@ -256,7 +302,10 @@
         "detail": "CDE CTR、企业 IR 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "例子来自 v3 1.1；需找一个真实的中期分析暂停并构造暂停前的历史判断。",
     "synthetic_components": []
   },
@@ -267,6 +316,10 @@
     "chain": "B",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路B 判断E",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": "new_material_auto",
+    "expected_outcome": "revise",
     "question": "早先评为“证据升级”的一个机制，独立重复研究给出了反对结果，判断该维持还是修订？",
     "required_evidence": [
       "primary_research",
@@ -281,7 +334,9 @@
       "实验体系"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [
@@ -336,6 +391,18 @@
         "detail": "旧判断版本仍可按版本号读出"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明第一句写明判断维持还是修订"
+      },
+      {
+        "kind": "auto_triggered_by_new_version",
+        "detail": "独立重复研究入库后自动发起对原命题的复核，不靠人工发起"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -344,7 +411,10 @@
         "detail": "bioRxiv 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一个真实的重复失败案例并构造先前的判断版本。",
     "synthetic_components": []
   },
@@ -355,6 +425,10 @@
     "chain": "C",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路C 判断E",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": "new_material_auto",
+    "expected_outcome": "maintain",
     "question": "新一季财报到来，已有的赛道判断该维持还是修订？",
     "required_evidence": [
       "financial",
@@ -368,7 +442,8 @@
       "单位",
       "分母"
     ],
-    "sources_available": [
+    "sources_available": [],
+    "sources_status_unknown": [
       "sec_companyfacts"
     ],
     "sources_gap": [
@@ -424,6 +499,18 @@
         "detail": "加入新季度后的变点结果列出"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明第一句写明判断维持还是修订"
+      },
+      {
+        "kind": "auto_triggered_by_new_version",
+        "detail": "新季度测量入库后自动发起对赛道判断的复核，不靠人工发起"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -432,8 +519,11 @@
         "detail": "巨潮、港交所未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "需选一个真实赛道和一份历史判断；新季度数据到位后填入。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "需选一个真实赛道和一份历史判断；新季度数据到位后填入。SEC 生产状态待证。",
     "synthetic_components": []
   },
   {
@@ -443,7 +533,11 @@
     "chain": "D",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路D 判断E",
-    "question": "此前判断“需要核查”的威胁线索，官方后来确认或否认，判断怎么更新？",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": "historical_replay",
+    "expected_outcome": "either_with_reason",
+    "question": "按历史回放：此前判断“需要核查”的威胁线索，官方后来确认或否认，判断在当时应怎么更新？",
     "required_evidence": [
       "official_notice",
       "social",
@@ -460,6 +554,7 @@
     "sources_available": [
       "who_don"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "health_commissions",
       "social_media"
@@ -476,7 +571,8 @@
       "可以追问"
     ],
     "must_not": [
-      "重写一份没有历史的报告"
+      "重写一份没有历史的报告",
+      "把最早报警当作成功指标"
     ],
     "positive": {
       "scenario": "官方通报确认或否认了此前的线索",
@@ -513,6 +609,22 @@
         "detail": "新增转发不改变独立证实数"
       },
       {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明第一句写明判断维持还是修订"
+      },
+      {
+        "kind": "visibility_cutoff_respected",
+        "detail": "回放每一步只读当时已可见的版本，官方通报只在其可见之后进入"
+      },
+      {
+        "kind": "visibility_proof_bound",
+        "detail": "进入回放的每份材料都有与内容绑定的可见性证明，没有就不进"
+      },
+      {
+        "kind": "judged_correctly_first",
+        "detail": "按 13.5 口径比谁先判断对：当时可见材料下的事实判断、置信与核实优先级、误报漏报和修订"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -521,8 +633,11 @@
         "detail": "卫健委通报、社媒未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "需选一个真实的“线索→官方确认/否认”事件并构造先前判断。",
+    "data_basis": "real_public_replay",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "需选真实的“线索→官方确认/否认”事件，并有内容绑定的可见性证明；结果两可，需写理由。",
     "synthetic_components": []
   }
 ]

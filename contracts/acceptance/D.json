@@ -6,7 +6,11 @@
     "chain": null,
     "work_mode": "discovery",
     "design_ref": "v3 1.2 判断D 验收案例1",
-    "question": "回放到 2019 年底武汉，只用截止时间前可见的版本，雷达能否及时给出需要核查的威胁判断？",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
+    "question": "回放 2019 年底武汉，只用截止前可见且有可见性证明的版本，能否按当时材料先判断对？",
     "required_evidence": [
       "official_notice",
       "media",
@@ -24,6 +28,7 @@
     "sources_available": [
       "who_don"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "china_cdc",
       "health_commissions",
@@ -41,14 +46,15 @@
       "核实优先级"
     ],
     "must_not": [
-      "广泛转发算成多份独立证实"
+      "广泛转发算成多份独立证实",
+      "把最早报警当作成功指标"
     ],
     "positive": {
       "scenario": "按回放截止时间逐日推进，只读当时可见的官方和非官方材料",
       "expected": [
-        "可见材料足以提示时给出“需要核查”，并给出核实优先级",
+        "可见材料足以提示时给出“需要核查”，并给出置信与核实优先级",
         "并列竞争性解释，与基线比较",
-        "误报、漏报、核实延迟一起评价"
+        "误报、漏报、修订一起评价；时效只在有早期公开材料证明时作附加指标"
       ],
       "must_not_conclude": []
     },
@@ -80,11 +86,19 @@
       },
       {
         "kind": "timeliness_evaluated",
-        "detail": "评测同时记录误报、漏报和核实延迟"
+        "detail": "评测记录误报、漏报和核实延迟；时效只作附加指标"
       },
       {
         "kind": "same_origin_not_independent",
         "detail": "转发和转述不计为独立证实"
+      },
+      {
+        "kind": "visibility_proof_bound",
+        "detail": "进入 2019 截止前的每份材料都有与内容绑定的可见性证明（内容哈希+证明时间）；没有就不进"
+      },
+      {
+        "kind": "judged_correctly_first",
+        "detail": "按 13.5 口径比谁先判断对：事实判断、置信与核实优先级、误报漏报和修订；最早报警不是成功指标"
       },
       {
         "kind": "cites_fixed_version",
@@ -96,7 +110,10 @@
       }
     ],
     "data_basis": "real_public_replay",
-    "material_note": "公开历史回放；WHO DON 只采近 30 天，2019 年材料和社媒原帖是缺口，具体材料待找。",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "目标公开回放，现状待找：无内容绑定的可见证明，不可执行、未通过；合成只验流程。",
     "synthetic_components": []
   },
   {
@@ -106,6 +123,10 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 1.2 判断D 验收案例2",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "一条广泛转发、后来证实是误传的社媒疫情线索，要不要核查，什么时候撤回提醒？",
     "required_evidence": [
       "social",
@@ -123,6 +144,7 @@
     "sources_available": [
       "who_don"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "social_media",
       "news_media",
@@ -189,7 +211,10 @@
         "detail": "社媒、媒体、卫健委通报未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一条真实的、后来被证伪的社媒线索，并保留原帖版本和删除记录；社媒来源未接入。",
     "synthetic_components": []
   },
@@ -200,6 +225,12 @@
     "chain": "D",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路D 正例",
+    "related_cases": [
+      "E-06"
+    ],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "WHO DON 加一个社媒或媒体来源，能否走完“线索→核实→判断时机”？",
     "required_evidence": [
       "official_notice",
@@ -216,6 +247,7 @@
     "sources_available": [
       "who_don"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "news_media",
       "social_media"
@@ -273,7 +305,10 @@
         "detail": "媒体和社媒来源未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一个先有媒体线索、后有 WHO DON 的真实事件；媒体或社媒来源需先接入一个。",
     "synthetic_components": []
   },
@@ -284,6 +319,10 @@
     "chain": "D",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路D 更正",
+    "related_cases": [],
+    "correction_trigger": "notice_count_or_definition_change",
+    "trigger": null,
+    "expected_outcome": null,
     "question": "官方通报更正了病例数或口径，雷达能否只重算受影响的时期和威胁判断？",
     "required_evidence": [
       "official_notice"
@@ -297,6 +336,7 @@
     "sources_available": [
       "who_don"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "health_commissions",
       "china_cdc"
@@ -311,7 +351,8 @@
       "核实优先级"
     ],
     "must_not": [
-      "广泛转发算成多份独立证实"
+      "广泛转发算成多份独立证实",
+      "只报告“文件变了”而不判断维持还是修订"
     ],
     "positive": {
       "scenario": "通报 v2 调整了病例数，或改变了病例定义",
@@ -348,6 +389,18 @@
         "detail": "重算后的基线比较与更正前对照列出"
       },
       {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "写明威胁判断维持还是修订，并给理由"
+      },
+      {
+        "kind": "old_citations_kept",
+        "detail": "旧判断里指向通报 v1 的引用仍可解析"
+      },
+      {
+        "kind": "affected_computations_updated",
+        "detail": "受影响时期的病例序列和基线比较用 v2 值或新定义重算，列出改前改后"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -356,7 +409,10 @@
         "detail": "卫健委通报、中国疾控未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需找一个真实的通报更正，固定 v1/v2 后填入；不编造病例数。",
     "synthetic_components": []
   },
@@ -367,6 +423,10 @@
     "chain": "D",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路D 异常",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "弱信号采集遇到重启、半途失败或同一线索反复抓到时，会不会重复计数或丢掉删除记录？",
     "required_evidence": [
       "official_notice",
@@ -382,6 +442,7 @@
     "sources_available": [
       "who_don"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "social_media"
     ],
@@ -395,10 +456,11 @@
       "核实优先级"
     ],
     "must_not": [
-      "广泛转发算成多份独立证实"
+      "广泛转发算成多份独立证实",
+      "把注入的隔离故障写成生产事故"
     ],
     "positive": {
-      "scenario": "合成线索：采集重启；原帖被修改后又删除；同一 DON 条目被多次抓取",
+      "scenario": "注入采集重启；同一 DON 条目被多次抓取；合成原帖被修改后又删除",
       "expected": [
         "重启后不重复",
         "修改、删除作为新版本记录保留",
@@ -438,22 +500,28 @@
         "detail": "转发帖归为同源"
       },
       {
+        "kind": "fault_not_reported_as_incident",
+        "detail": "运行记录和报告把重启、半途失败标为注入的隔离故障，不写成生产事故或来源故障"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
       {
         "kind": "no_real_coverage_claim",
-        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+        "detail": "运行记录和报告标明合成部分，不出现“已覆盖真实场景”的表述"
       },
       {
         "kind": "gap_stated",
         "detail": "社媒来源未接入，写成缺口"
       }
     ],
-    "data_basis": "synthetic_flow_only",
-    "material_note": "用明确标为合成的线索和注入的故障跑流程；只证明流程，不证明真实覆盖。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": true,
+    "status": "to_be_sourced",
+    "material_note": "在 WHO DON 真实固定版本上做隔离故障注入；社媒未接入，原帖修改删除部分为合成。",
     "synthetic_components": [
-      "注入的重启和失败",
       "合成社媒原帖及其修改、删除记录"
     ]
   }

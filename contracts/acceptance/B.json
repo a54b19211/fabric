@@ -6,6 +6,12 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 1.2 判断B 验收案例1",
+    "related_cases": [
+      "E-01"
+    ],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "一个曾被报道为“突破”、后来被撤稿或无法重复的发现，雷达当时和之后各怎么判断？",
     "required_evidence": [
       "primary_research",
@@ -23,7 +29,9 @@
       "撤稿日期"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [
@@ -82,6 +90,10 @@
         "detail": "论文数和报道数不出现在证据等级的理由里"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -90,7 +102,10 @@
         "detail": "bioRxiv、medRxiv、会议摘要未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一个真实的、后来撤稿或重复失败的“突破”，固定撤稿前后版本；未选定前不写编号。",
     "synthetic_components": []
   },
@@ -101,6 +116,10 @@
     "chain": null,
     "work_mode": "discovery",
     "design_ref": "v3 1.2 判断B 验收案例2",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "一个早期预印本信号后来被证实，雷达能否早期发现它，同时不过早认定突破？",
     "required_evidence": [
       "preprint",
@@ -116,7 +135,9 @@
       "实验体系"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [
@@ -172,6 +193,10 @@
         "detail": "预印本阶段写明什么证据会让等级升级"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -180,7 +205,10 @@
         "detail": "bioRxiv、medRxiv、arXiv 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一个真实的预印本信号及其后续发表；bioRxiv 未接入前只能部分验证。",
     "synthetic_components": []
   },
@@ -191,6 +219,12 @@
     "chain": "B",
     "work_mode": "investigation",
     "design_ref": "v3 第四部分 链路B 正例",
+    "related_cases": [
+      "E-04"
+    ],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "就某项多靶点技术，文献链路能否从主张抽取走到证据分级，并区分体外、动物、人体证据？",
     "required_evidence": [
       "primary_research",
@@ -207,7 +241,9 @@
       "发表日期"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [
@@ -258,6 +294,10 @@
         "detail": "写明转化上的局限和竞争路线"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -266,7 +306,10 @@
         "detail": "bioRxiv 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一项真实的多靶点技术及其代表性文献，固定版本后填入。",
     "synthetic_components": []
   },
@@ -277,7 +320,11 @@
     "chain": "B",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路B 更正",
-    "question": "一篇已入库文献发布勘误、改了关键数值，雷达能否只重算依赖该数值的主张和判断？",
+    "related_cases": [],
+    "correction_trigger": "erratum_number_change",
+    "trigger": null,
+    "expected_outcome": null,
+    "question": "一篇已入库文献发布勘误、改了关键数值，判断该维持还是修订，依赖该数值的计算是否已更新？",
     "required_evidence": [
       "primary_research"
     ],
@@ -289,7 +336,9 @@
       "判断版本"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [],
@@ -304,13 +353,14 @@
       "反证"
     ],
     "must_not": [
-      "按新闻热度或论文数量认定突破"
+      "按新闻热度或论文数量认定突破",
+      "只报告“文件变了”而不判断维持还是修订"
     ],
     "positive": {
       "scenario": "某文献 v2 勘误修改了一个效应值",
       "expected": [
-        "只重算引用该数值的主张、证据等级和命题",
-        "旧判断保留，修订说明指向勘误版本"
+        "只重算引用该数值的主张、证据等级和命题，并列出改前改后",
+        "明确判断维持还是修订；旧引用仍指向勘误前版本，修订说明指向勘误版本"
       ],
       "must_not_conclude": []
     },
@@ -341,11 +391,30 @@
         "detail": "修订说明写出改前改后数值和勘误版本"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "按改后数值写明证据等级和判断维持还是修订，并给理由"
+      },
+      {
+        "kind": "old_citations_kept",
+        "detail": "旧判断里指向勘误前版本的引用仍可解析，不被改指勘误版本"
+      },
+      {
+        "kind": "affected_computations_updated",
+        "detail": "依赖被改数值的效应量、证据等级用新值重算，列出改前改后"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一篇真实的数值勘误文献，固定原文和勘误版本后填入。",
     "synthetic_components": []
   },
@@ -356,6 +425,10 @@
     "chain": "B",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路B 异常",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "同一篇文献同时出现在多个文献来源时，重启或失败后会不会重复计数？",
     "required_evidence": [
       "primary_research",
@@ -369,7 +442,9 @@
       "处理器版本"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [
@@ -386,10 +461,11 @@
       "反证"
     ],
     "must_not": [
-      "按新闻热度或论文数量认定突破"
+      "按新闻热度或论文数量认定突破",
+      "把注入的隔离故障写成生产事故"
     ],
     "positive": {
-      "scenario": "合成的同一 DOI 文献分别从两个来源进入；抽取分块中途失败；采集重启",
+      "scenario": "同一 DOI 文献分别从两个来源进入；注入抽取分块中途失败；注入采集重启",
       "expected": [
         "同一 PMID/DOI 只计一次，各来源证据各自保留",
         "失败分块记为覆盖缺口并能补做",
@@ -424,23 +500,31 @@
         "detail": "同一 PMID/DOI 的文献在证据计数中只加一"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "fault_not_reported_as_incident",
+        "detail": "运行记录和报告把重启、半途失败标为注入的隔离故障，不写成生产事故或来源故障"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
       {
         "kind": "no_real_coverage_claim",
-        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+        "detail": "故障注入跑通只证明容错流程，不据此宣布来源已覆盖真实场景"
       },
       {
         "kind": "gap_stated",
         "detail": "bioRxiv 未接入，写成缺口"
       }
     ],
-    "data_basis": "synthetic_flow_only",
-    "material_note": "用明确标为合成的文献记录和注入的故障跑流程；只证明流程，不证明真实覆盖。",
-    "synthetic_components": [
-      "注入的重启和分块失败",
-      "合成文献记录（编号明确标为合成）"
-    ]
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": true,
+    "status": "to_be_sourced",
+    "material_note": "优先在 Europe PMC 真实固定版本上做隔离故障注入；同一 DOI 双来源样本待选。",
+    "synthetic_components": []
   }
 ]

@@ -308,10 +308,23 @@ def test_literature_offsets_point_at_string_literal(dump):
         assert ct.normalize_whitespace(ct.strip_simple_html(RECORD[key])) == seg_text(out, seg)
 
 
-def test_literature_sup_sub_flattening_is_flagged():
+def test_literature_sup_sub_keep_their_meaning():
     out = ct.clean_literature(lit({"title": "IC<sub>50</sub> of 10<sup>-3</sup> M", "abstractText": "x"}))
-    assert out["text"].startswith("IC50 of 10-3 M")
-    assert "html_sup_sub_flattened" in out["warnings"]
+    assert out["text"].startswith("IC_(50) of 10^(-3) M")
+    assert "html_sup_sub_unpaired" not in out["warnings"]
+
+
+def test_sup_sub_variants():
+    assert ct.strip_simple_html("CO<SUB>2</SUB>, Ca<sup>2+</sup>, x<inf>i</inf>") == "CO_(2), Ca^(2+), x_(i)"
+    assert ct.strip_simple_html("10<sup class='a'><i>-3</i></sup>") == "10^(-3)"
+    assert ct.strip_simple_html("p<sup></sup>") == "p"  # 空上标不留空括号
+    assert ct.strip_simple_html("p < 0.05 and ALT>3") == "p < 0.05 and ALT>3"  # 比较符不是标签
+
+
+def test_unpaired_sup_sub_is_flagged():
+    out = ct.clean_literature(lit({"title": "dose 10<sup>-3 M", "abstractText": "x"}))
+    assert "html_sup_sub_unpaired" in out["warnings"]
+    assert "<sup>" not in out["text"]
 
 
 def test_literature_no_abstract():

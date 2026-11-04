@@ -24,7 +24,7 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v2"
+PROCESSOR_VERSION = "datafabric.clean_text.v3"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -364,16 +364,33 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
 # - 行内标签（i/b/em/strong/u/sup/sub/span/sc/small）直接去掉，不加空格，避免把一个词拆开；
 # - 块级标签（p/br/h1-h6/div/li）替换为一个空格，避免“BACKGROUND</h4>Patients”粘成一个词；随后空白规范化。
 # 只认白名单里的标签名，“p < 0.05”“ALT>3×ULN”这类比较符号不会被当成标签。
-# sup/sub 去标签后“10<sup>-3</sup>”会变成“10-3”，含义可能改变：
-# 出现时记 html_sup_sub_flattened，提醒下游回看原件。
+# 上下标不能直接去标签：“10<sup>-3</sup>”变成“10-3”、“IC<sub>50</sub>”变成“IC50”会改含义（Codex r63）。
+# 成对的 sup 写成 ^(…)，sub/inf 写成 _(…)；括号总是加上，“10^(-3)”不会和“10^-3 M”的读法混淆。
+# 不成对的（缺闭合、嵌套被截断）记 html_sup_sub_unpaired，提醒下游回看原件。
 _INLINE_TAG = re.compile(r"(?i)</?(?:i|b|em|strong|u|sup|sub|span|sc|small|inf)(?:\s[^<>]*)?/?>")
 _BLOCK_TAG = re.compile(r"(?i)</?(?:p|br|h[1-6]|div|li|ul|ol)(?:\s[^<>]*)?/?>")
-_SUP_SUB = re.compile(r"(?i)<(?:sup|sub)\b")
+_SCRIPT = re.compile(r"(?is)<(sup|sub|inf)(?:\s[^<>]*)?>(.*?)</\1\s*>")
+_SCRIPT_TAG = re.compile(r"(?i)</?(?:sup|sub|inf)\b")
+
+
+def _mark_scripts(text: str) -> str:
+    def mark(m):
+        inner = normalize_whitespace(_INLINE_TAG.sub("", _BLOCK_TAG.sub(" ", m.group(2))))
+        if not inner:
+            return ""
+        return ("^(" if m.group(1).lower() == "sup" else "_(") + inner + ")"
+
+    return _SCRIPT.sub(mark, text)
+
+
+def scripts_unpaired(text: str) -> bool:
+    """成对替换之后仍留有 sup/sub/inf 标签：不成对或嵌套，替换结果不可靠。"""
+    return bool(_SCRIPT_TAG.search(_mark_scripts(text)))
 
 
 def strip_simple_html(text: str) -> str:
-    """去掉白名单内的简单 HTML 标签、保留其中文字；不解码实体（&lt; 等原样保留）。"""
-    return _INLINE_TAG.sub("", _BLOCK_TAG.sub(" ", text))
+    """上下标写成 ^(…)/_(…)；再去掉白名单内的其他简单 HTML 标签、保留其中文字；不解码实体（&lt; 等原样保留）。"""
+    return _INLINE_TAG.sub("", _BLOCK_TAG.sub(" ", _mark_scripts(text)))
 
 
 def _escape_pointer(token: str) -> str:
@@ -457,8 +474,8 @@ def clean_literature(raw_json: str) -> dict:
         cleaned = normalize_whitespace(strip_simple_html(value))
         if not cleaned:
             continue
-        if _SUP_SUB.search(value) and "html_sup_sub_flattened" not in warnings:
-            warnings.append("html_sup_sub_flattened")
+        if scripts_unpaired(value) and "html_sup_sub_unpaired" not in warnings:
+            warnings.append("html_sup_sub_unpaired")
         start, end = spans["/" + key]
         pieces.append((cleaned, kind, {"start": start, "end": end, "json_pointer": "/" + key}))
 

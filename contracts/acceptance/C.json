@@ -6,6 +6,10 @@
     "chain": null,
     "work_mode": "judgment_update",
     "design_ref": "v3 1.2 判断C 验收案例1",
+    "related_cases": [],
+    "correction_trigger": "filing_measurement_or_caliber_change",
+    "trigger": null,
+    "expected_outcome": null,
     "question": "一家公司发布口径更正后的财报，雷达能否只重算受影响报告期的指标和赛道判断？",
     "required_evidence": [
       "financial",
@@ -21,7 +25,8 @@
       "分母",
       "更正日期"
     ],
-    "sources_available": [
+    "sources_available": [],
+    "sources_status_unknown": [
       "sec_companyfacts"
     ],
     "sources_gap": [
@@ -80,6 +85,22 @@
         "detail": "重算后的变点与更正前对照列出"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "写明赛道判断维持还是修订，并给理由"
+      },
+      {
+        "kind": "old_citations_kept",
+        "detail": "旧判断里指向更正前财报版本的引用仍可解析"
+      },
+      {
+        "kind": "affected_computations_updated",
+        "detail": "受影响报告期的指标、趋势和变点用更正后的值重算，列出改前改后"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -88,8 +109,11 @@
         "detail": "巨潮、港交所、SEC filing 原文未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "需找一份真实的口径更正财报，固定更正前后版本；未找到前不写公司。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "需找一份真实的口径更正财报，固定更正前后版本；未找到前不写公司。SEC 生产状态待证。",
     "synthetic_components": []
   },
   {
@@ -99,6 +123,10 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 1.2 判断C 验收案例2",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "某赛道“订单大增”公告集中出现，但实际收入没跟上，这算不算结构性变化？",
     "required_evidence": [
       "company_disclosure",
@@ -114,7 +142,8 @@
       "单位",
       "分母"
     ],
-    "sources_available": [
+    "sources_available": [],
+    "sources_status_unknown": [
       "sec_companyfacts"
     ],
     "sources_gap": [
@@ -178,6 +207,10 @@
         "detail": "写明下一期哪项收入数据会改变判断"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -186,8 +219,11 @@
         "detail": "巨潮、港交所、行业媒体未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "需找一个真实的“订单大增、收入未跟上”赛道样本，固定公告和财报版本后填入。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "需找真实的“订单大增、收入未跟上”赛道样本，固定公告和财报版本。SEC 生产状态待证。",
     "synthetic_components": []
   },
   {
@@ -197,7 +233,13 @@
     "chain": "C",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路C 正例",
-    "question": "旧库存量与财报测量能否形成带口径的时期序列，并自动发现变点？",
+    "related_cases": [
+      "E-05"
+    ],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
+    "question": "旧库存量（状态）与财报测量能否形成带口径的时期序列，并自动发现变点？",
     "required_evidence": [
       "regulatory_decision",
       "financial",
@@ -216,7 +258,9 @@
     "sources_available": [
       "nmpa",
       "cde",
-      "openfda",
+      "openfda"
+    ],
+    "sources_status_unknown": [
       "sec_companyfacts"
     ],
     "sources_gap": [
@@ -239,7 +283,7 @@
       "合同额当作收入"
     ],
     "positive": {
-      "scenario": "NMPA/CDE/openFDA 旧库存量的批准或受理记录，加上港交所或巨潮财报的测量值",
+      "scenario": "NMPA/CDE 旧库存量、openFDA 说明书与召回旧库存量，加上财报测量值",
       "expected": [
         "测量进入时期序列，口径对齐后给出趋势和变点",
         "旧库记录的可见时间记为“旧系统报告的爬取时间”，不倒填 first_seen_at"
@@ -269,6 +313,10 @@
         "detail": "批准或公告条数不进入产业指标序列"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -277,8 +325,11 @@
         "detail": "港交所、巨潮未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "需从旧库存量中选一组真实记录，并找到对应公司的财报；未选定前不写公司。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "从旧库存量选一组真实记录并找到对应财报；未选定前不写公司。SEC 生产状态待证。",
     "synthetic_components": []
   },
   {
@@ -288,7 +339,11 @@
     "chain": "C",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路C 更正",
-    "question": "公告附件出现新版本（替换了数据表），雷达能否只重算受该附件影响的测量？",
+    "related_cases": [],
+    "correction_trigger": "filing_measurement_or_caliber_change",
+    "trigger": null,
+    "expected_outcome": null,
+    "question": "公告或附件出现新版本、改了测量值或口径，判断该维持还是修订，受影响的测量和序列重算了吗？",
     "required_evidence": [
       "company_disclosure",
       "financial",
@@ -305,6 +360,7 @@
     "sources_available": [
       "nmpa"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "cninfo",
       "hkex"
@@ -322,30 +378,32 @@
     ],
     "must_not": [
       "公告变多等于产业增长",
-      "合同额当作收入"
+      "合同额当作收入",
+      "只报告“文件变了”而不判断维持还是修订"
     ],
     "positive": {
-      "scenario": "父公告不变，附件内容哈希变化（v3 3.3a：附件变了就是新版本）",
+      "scenario": "父公告不变，附件新版本改了某个测量值，或改了它的口径（范围、单位、分母）",
       "expected": [
-        "只重算引用旧附件的测量和受影响时期",
-        "报告引用回指“附件版本+页码”，旧判断保留"
+        "只重算引用旧附件的测量、受影响时期和变点，列出改前改后",
+        "明确判断维持还是修订；旧引用仍回指“旧附件版本+页码”，新引用回指新版本",
+        "口径变了时先对齐或标为不可比，再决定是否修订"
       ],
       "must_not_conclude": []
     },
     "counterexample": {
-      "scenario": "附件下载失败或解析失败",
+      "scenario": "附件出现新版本，但只改了排版或页眉，测量值和口径都没变；或附件解析失败",
       "expected": [
-        "记为覆盖缺口“附件未解析”，父文档照常可用"
+        "记为新版本（解析失败记为覆盖缺口“附件未解析”），判断维持并写明理由，不重算测量"
       ],
       "must_not_conclude": [
-        "父文档就是全部内容",
+        "文件变了就要修订判断",
         "附件解析失败等于数据没变"
       ]
     },
     "checks": [
       {
         "kind": "recompute_only_affected",
-        "detail": "重算清单只含引用旧附件版本的测量"
+        "detail": "重算清单只含引用旧附件版本、且测量值或口径确有变化的测量"
       },
       {
         "kind": "keeps_old_judgment",
@@ -356,6 +414,22 @@
         "detail": "附件中的测量带报告期、单位、分母"
       },
       {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "写明赛道判断维持还是修订；只有排版变化时写维持及理由"
+      },
+      {
+        "kind": "old_citations_kept",
+        "detail": "旧判断里指向旧附件版本+页码的引用仍可解析"
+      },
+      {
+        "kind": "affected_computations_updated",
+        "detail": "受影响的测量、序列和变点用新值或新口径重算，列出改前改后"
+      },
+      {
+        "kind": "change_point_reported",
+        "detail": "重算后的变点与更正前对照列出"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -364,8 +438,11 @@
         "detail": "附件未解析和巨潮、港交所未接入都写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "需找一个真实的附件被替换的公告，固定两个附件版本后填入。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "需找一个真实的、附件新版本改了测量值或口径的公告，固定两个附件版本后填入。",
     "synthetic_components": []
   },
   {
@@ -375,6 +452,10 @@
     "chain": "C",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路C 异常",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "财报测量遇到重启、半途失败或同一指标多处披露时，会不会重复计数？",
     "required_evidence": [
       "financial",
@@ -388,7 +469,8 @@
       "version_id",
       "处理器版本"
     ],
-    "sources_available": [
+    "sources_available": [],
+    "sources_status_unknown": [
       "sec_companyfacts"
     ],
     "sources_gap": [
@@ -408,10 +490,11 @@
     ],
     "must_not": [
       "公告变多等于产业增长",
-      "合同额当作收入"
+      "合同额当作收入",
+      "把注入的隔离故障写成生产事故"
     ],
     "positive": {
-      "scenario": "合成的同一公司、同一报告期、同一指标出现在正文和摘要两处；任务中途重启",
+      "scenario": "同一公司、同一报告期、同一指标出现在正文和摘要两处；注入任务中途重启",
       "expected": [
         "同一公司+报告期+指标只计一次，来源各自保留",
         "重启后从检查点续做",
@@ -446,23 +529,31 @@
         "detail": "同一公司+报告期+指标在序列中只出现一个点"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "fault_not_reported_as_incident",
+        "detail": "运行记录和报告把重启、半途失败标为注入的隔离故障，不写成生产事故或来源故障"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
       {
         "kind": "no_real_coverage_claim",
-        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+        "detail": "故障注入跑通只证明容错流程，不据此宣布来源已覆盖真实场景"
       },
       {
         "kind": "gap_stated",
         "detail": "巨潮、港交所未接入，写成缺口"
       }
     ],
-    "data_basis": "synthetic_flow_only",
-    "material_note": "用明确标为合成的财报测量和注入的故障跑流程；只证明流程，不证明真实覆盖。",
-    "synthetic_components": [
-      "注入的重启和失败",
-      "合成财报测量"
-    ]
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": true,
+    "status": "to_be_sourced",
+    "material_note": "优先在真实财报测量固定版本上做隔离故障注入；SEC companyfacts 生产状态未知，样本待选。",
+    "synthetic_components": []
   }
 ]

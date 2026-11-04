@@ -125,8 +125,20 @@ class Derived(Strict):
         return self
 
 
+class Relation(Strict):
+    """关联而不是输入：派生结果没有读它的内容，所以不参与可见时间计算（Codex r63）。
+    例如附件解析正文只读附件本身，所在公告页是关联；固定版本未知时 version_id 为空并写明依据。"""
+
+    kind: Literal["attachment_of"]
+    source_id: str = Field(min_length=1, max_length=80)
+    record_id: str = Field(min_length=1, max_length=400)
+    version_id: str | None = Field(default=None, pattern=VERSION_ID)
+    basis: str = Field(min_length=1, max_length=80)
+
+
 class CleanText(Derived):
     kind: Literal["clean_text"] = "clean_text"
+    relations: list[Relation] = Field(default_factory=list)
     text_sha256: str = Field(pattern=VERSION_ID)
     chars: int = Field(ge=0)
     segments: int = Field(ge=0)
@@ -188,9 +200,25 @@ class DomainEvent(Derived):
     corrections: list[VersionRef] = Field(default_factory=list)
 
     def independent_support_count(self) -> int:
-        """独立支持数：同源组只算一份，unknown 不算独立（广泛转发不能算多份独立证实）。"""
+        """独立支持数：同源组只算一份，unknown 不算独立（广泛转发不能算多份独立证实）；
+        同一记录的多个版本也只算一份（修订不是另一次证实）。"""
+        records = {(s.ref.source_id, s.ref.record_id) for s in self.support if s.independence == "independent"}
         groups = {s.origin_group for s in self.support if s.independence == "same_origin"}
-        return sum(1 for s in self.support if s.independence == "independent") + len(groups)
+        return len(records) + len(groups)
+
+    @model_validator(mode="after")
+    def support_is_provenance(self):
+        """支持和更正引用的版本必须也在输入里：这样它们才进入权限来源、撤权遮蔽和可见时间的计算
+        （Codex r63：否则一个不可见或已撤权的版本也能给事件“作证”）。同一版本在支持里只能出现一次。"""
+        inputs = {(r.source_id, r.record_id, r.version_id) for r in self.inputs}
+        outside = [r.version_id for r in [x.ref for x in self.support] + list(self.corrections)
+                   if (r.source_id, r.record_id, r.version_id) not in inputs]
+        if outside:
+            raise ValueError("支持或更正引用了不在输入里的版本")
+        versions = [x.ref.version_id for x in self.support]
+        if len(versions) != len(set(versions)):
+            raise ValueError("同一版本在支持里只能出现一次")
+        return self
 
     @model_validator(mode="after")
     def unmapped_is_flagged(self):
@@ -242,17 +270,24 @@ class JudgmentVersion(Strict):
         return self
 
 
-def merge_visibility(first_seen: list[datetime], proofs: list[datetime | None]) -> Visibility:
-    """多个输入的可见时间：首次所见取最晚；证明只有全部输入都有时才取最晚，否则没有证明。"""
-    proof = max(proofs) if proofs and all(p is not None for p in proofs) else None
-    return Visibility(first_seen_at=max(first_seen), proof_available_at=proof)
+def merge_visibility(inputs: list[VersionRef], times: dict[str, tuple[datetime, datetime | None]]) -> Visibility:
+    """多个输入的可见时间。times 按版本号给出每个输入自己的（首次所见, 历史证明时间）：
+    必须和输入一一对应，缺一个或多一个都报错，不能拿别的版本的时间顶替（Codex r63）。
+    首次所见取最晚；证明只有全部输入都有时才取最晚，否则没有证明。"""
+    wanted = [ref.version_id for ref in inputs]
+    if not wanted or set(times) != set(wanted):
+        raise ValueError("可见时间必须逐个对应输入版本")
+    seen = [times[v][0] for v in wanted]
+    proofs = [times[v][1] for v in wanted]
+    proof = max(proofs) if all(p is not None for p in proofs) else None
+    return Visibility(first_seen_at=max(seen), proof_available_at=proof)
 
 
 # ——现有派生结果映射进契约——
 
 
 def from_registry_change(change: dict, *, source_id: str, record_id: str, from_seen, to_seen,
-                         processor_version: str, description: str) -> Claim:
+                         processor_version: str, description: str, from_proof=None, to_proof=None) -> Claim:
     """登记差分的一行（derived_registry_changes）→ 观测。两版都是输入，定位是两版各自的 JSON 路径。"""
     # 已投影字段用它的 JSON 路径；投影外的变化（unmapped_change）用差分记下的变化路径定位
     pointers = [change["json_pointer"]] if change.get("json_pointer") else list(
@@ -273,7 +308,8 @@ def from_registry_change(change: dict, *, source_id: str, record_id: str, from_s
         processing=Processing(processor_version=processor_version),
         locators=locators,
         permission_sources=[source_id],
-        visibility=merge_visibility([from_seen, to_seen], [None, None]),
+        visibility=merge_visibility(refs, {change["from_version_id"]: (from_seen, from_proof),
+                                           change["to_version_id"]: (to_seen, to_proof)}),
         status=Status(state="unmapped", reason="原件在已投影字段之外有变化，需读两版原件")
         if unmapped
         else Status(state="ok"),
@@ -283,13 +319,16 @@ def from_registry_change(change: dict, *, source_id: str, record_id: str, from_s
     )
 
 
-def from_attachment_text(row: dict, *, source_id: str, record_id: str, seen, links: list[dict]) -> CleanText:
-    """附件派生正文（derived_clean_text 最新一次）→ 清洗正文。父页面固定版本已知时也是输入。"""
+def from_attachment_text(row: dict, *, source_id: str, record_id: str, seen, links: list[dict],
+                         proof=None) -> CleanText:
+    """附件派生正文（derived_clean_text 最新一次）→ 清洗正文。解析只读附件本身，输入只有附件版本；
+    所在公告页是关联（Relation），固定版本未知时如实写空和依据，不参与可见时间。"""
     refs = [VersionRef(source_id=source_id, record_id=record_id, version_id=row["version_id"])]
-    for link in links:
-        if link.get("parent_version_id"):
-            refs.append(VersionRef(source_id=source_id, record_id=link["parent_record_id"],
-                                   version_id=link["parent_version_id"], role="parent"))
+    relations = [
+        Relation(kind="attachment_of", source_id=source_id, record_id=link["parent_record_id"],
+                 version_id=link.get("parent_version_id"), basis=link.get("link_basis") or "unknown")
+        for link in links
+    ]
     kind = row.get("locator_kind") or "unavailable"
     segments = row.get("segments") or []
     if kind in ("pdf_page", "converted_page") and segments and segments[0].get("page"):
@@ -304,18 +343,14 @@ def from_attachment_text(row: dict, *, source_id: str, record_id: str, seen, lin
     else:
         locators = [Locator(kind="unavailable", version_id=row["version_id"])]
     state = {"parsed": "ok", "failed": "failed", "unsupported": "unknown"}[row["status"]]
-    unknown_parent = any(not link.get("parent_version_id") for link in links)
     return CleanText(
         inputs=refs,
+        relations=relations,
         processing=Processing(processor_version=row["processor_version"]),
         locators=locators,
         permission_sources=[source_id],
-        visibility=merge_visibility([seen], [None]),
-        status=Status(state=state, reason=row.get("error") or ("父页面固定版本未知" if unknown_parent else None))
-        if state != "ok"
-        else Status(state="partial", reason="父页面固定版本未知（按旧库链接补抓）")
-        if unknown_parent
-        else Status(state="ok"),
+        visibility=merge_visibility(refs, {row["version_id"]: (seen, proof)}),
+        status=Status(state=state, reason=row.get("error") or "解析未成功") if state != "ok" else Status(state="ok"),
         text_sha256=row["text_sha256"],
         chars=row.get("chars") or 0,
         segments=len(segments),

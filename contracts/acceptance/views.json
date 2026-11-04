@@ -6,6 +6,10 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 6.4 使用视角1 国家层",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "某一关键药品或技术链（对象由任务方选定）对少数供应方的集中依赖程度多高，替代能力如何？",
     "required_evidence": [
       "regulatory_decision",
@@ -25,7 +29,9 @@
     ],
     "sources_available": [
       "nmpa",
-      "cde",
+      "cde"
+    ],
+    "sources_status_unknown": [
       "sec_companyfacts"
     ],
     "sources_gap": [
@@ -44,12 +50,18 @@
       "主要判断及其影响",
       "支持和反对的证据以及证据缺口",
       "情景或可选行动及其代价、前提和风险",
-      "需补充的关键资料与重新复核条件"
+      "需补充的关键资料与重新复核条件",
+      "决策对象",
+      "口径",
+      "内部底册缺口",
+      "行动条件",
+      "不确定性"
     ],
     "must_not": [
       "把合成资料当作已覆盖真实场景",
       "没接入的来源写成已覆盖",
-      "只凭新闻数量、海关大类或政策前后曲线下因果结论"
+      "只凭新闻数量、海关大类或政策前后曲线下因果结论",
+      "面向更高层级时把不确定性写成确定结论"
     ],
     "positive": {
       "scenario": "公开监管和企业披露材料，加上明确标为合成的全国供需台账",
@@ -113,12 +125,23 @@
         "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "uncertainty_not_upgraded",
+        "detail": "面向更高层级时，来源可靠性、主张可信度、依据信心、发生可能性分别交代，不被压成确定结论"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "公开部分待选少量可核对材料；内部台账为合成，只测权限和缺口显示。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "公开部分待选少量可核对材料；内部台账为合成，只测权限和缺口显示。SEC 生产状态待证。",
     "synthetic_components": [
       "全国供需与产能内部台账（合成）"
     ]
@@ -130,6 +153,10 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 6.4 使用视角2 省级",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "某省拟布局的一个赛道（由任务方选定），与本地企业、园区、产线基础是否匹配？",
     "required_evidence": [
       "financial",
@@ -147,8 +174,10 @@
       "单位"
     ],
     "sources_available": [
-      "sec_companyfacts",
       "clinicaltrials"
+    ],
+    "sources_status_unknown": [
+      "sec_companyfacts"
     ],
     "sources_gap": [
       "local_industry_ledger",
@@ -165,11 +194,17 @@
       "主要判断及其影响",
       "支持和反对的证据以及证据缺口",
       "情景或可选行动及其代价、前提和风险",
-      "需补充的关键资料与重新复核条件"
+      "需补充的关键资料与重新复核条件",
+      "决策对象",
+      "口径",
+      "内部底册缺口",
+      "行动条件",
+      "不确定性"
     ],
     "must_not": [
       "把合成资料当作已覆盖真实场景",
-      "没接入的来源写成已覆盖"
+      "没接入的来源写成已覆盖",
+      "面向更高层级时把不确定性写成确定结论"
     ],
     "positive": {
       "scenario": "公开财报、公告、临床登记，加上明确标为合成的辖区底册",
@@ -226,12 +261,23 @@
         "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "uncertainty_not_upgraded",
+        "detail": "面向更高层级时，来源可靠性、主张可信度、依据信心、发生可能性分别交代，不被压成确定结论"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       }
     ],
-    "data_basis": "to_be_sourced",
-    "material_note": "公开部分待选少量可核对材料；辖区底册为合成，只测权限和缺口显示。",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
+    "material_note": "公开部分待选少量可核对材料；辖区底册为合成，只测权限和缺口显示。SEC 生产状态待证。",
     "synthetic_components": [
       "辖区企业/园区/产线底册（合成）"
     ]
@@ -243,6 +289,10 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 6.4 使用视角3 高校/科研机构",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "某高校的一个学科平台（由任务方选定）下一步往哪投，有哪些可转化机会和合作缺口？",
     "required_evidence": [
       "primary_research",
@@ -263,7 +313,9 @@
       "基金号"
     ],
     "sources_available": [
-      "europe_pmc",
+      "europe_pmc"
+    ],
+    "sources_status_unknown": [
       "pubmed"
     ],
     "sources_gap": [
@@ -282,12 +334,18 @@
       "主要判断及其影响",
       "支持和反对的证据以及证据缺口",
       "情景或可选行动及其代价、前提和风险",
-      "需补充的关键资料与重新复核条件"
+      "需补充的关键资料与重新复核条件",
+      "决策对象",
+      "口径",
+      "内部底册缺口",
+      "行动条件",
+      "不确定性"
     ],
     "must_not": [
       "把合成资料当作已覆盖真实场景",
       "没接入的来源写成已覆盖",
-      "用高被引或论文数量代替研究质量和转化价值"
+      "用高被引或论文数量代替研究质量和转化价值",
+      "面向更高层级时把不确定性写成确定结论"
     ],
     "positive": {
       "scenario": "公开论文，加上明确标为合成的授权台账，并与基金、专利关联",
@@ -348,11 +406,22 @@
         "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "PubMed 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "uncertainty_not_upgraded",
+        "detail": "面向更高层级时，来源可靠性、主张可信度、依据信心、发生可能性分别交代，不被压成确定结论"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "公开部分待选少量可核对材料；授权台账为合成，只测权限和缺口显示。",
     "synthetic_components": [
       "项目/经费/成果授权台账（合成）"

@@ -82,19 +82,26 @@ def test_real_attachment_text_fits_and_says_the_parent_version_is_unknown():
         links=[{"parent_record_id": ATT_RECORD.split("#")[0], "parent_version_id": None,
                 "link_basis": "parent_version_unknown"}],
     )
-    assert text.status.state == "partial" and "父页面固定版本未知" in text.status.reason
+    # 解析只读附件本身：正文是完整的；公告页是关联，版本未知如实写空和依据
+    assert text.status.state == "ok" and [r.role for r in text.inputs] == ["primary"]
+    [rel] = text.relations
+    assert rel.version_id is None and rel.basis == "parent_version_unknown"
     [loc] = text.locators
     assert loc.kind == "converted_page" and loc.page == 1
     assert loc.derived_text_sha256 == REAL_ATTACHMENT["text_sha256"]
 
 
-def test_attachment_with_known_parent_has_the_parent_as_input():
+def test_attachment_parent_is_a_relation_not_an_input():
+    seen, proof = datetime(2026, 11, 4, tzinfo=UTC), datetime(2026, 11, 4, 1, tzinfo=UTC)
     text = do.from_attachment_text(
-        REAL_ATTACHMENT, source_id="nmpa", record_id=ATT_RECORD, seen=datetime(2026, 11, 4, tzinfo=UTC),
+        REAL_ATTACHMENT, source_id="nmpa", record_id=ATT_RECORD, seen=seen, proof=proof,
         links=[{"parent_record_id": ATT_RECORD.split("#")[0], "parent_version_id": B,
                 "link_basis": "same_run_parent_version"}],
     )
-    assert text.status.state == "ok" and [r.role for r in text.inputs] == ["primary", "parent"]
+    assert [r.version_id for r in text.inputs] == [REAL_ATTACHMENT["version_id"]]
+    assert [r.version_id for r in text.relations] == [B]
+    # 可见时间只来自附件版本自己；父页面的时间不参与，也不能被拿来顶替
+    assert text.visibility.first_seen_at == seen and text.visibility.proof_available_at == proof
 
 
 def test_literature_claim_keeps_negation_and_qualifiers():
@@ -134,8 +141,35 @@ def test_weak_signal_reposts_count_as_one_independent_source():
         "support": reposts + [official],
     })
     assert event.independent_support_count() == 2  # 三条转发只算一份
+    data = event.model_dump()
+    with pytest.raises(ValidationError):  # 支持引用了不在输入里的版本：不能绕过权限和可见时间
+        do.DomainEvent.model_validate({**data, "inputs": data["inputs"][:-1], "permission_sources": ["social"],
+                                       "locators": [{"kind": "char_span", "version_id": A, "start": 0, "end": 1}]})
+    with pytest.raises(ValidationError):  # 更正同理
+        do.DomainEvent.model_validate({**data, "corrections": [{"source_id": "who_don", "record_id": "DON2",
+                                                                 "version_id": "e" * 64}]})
+    with pytest.raises(ValidationError):  # 同一版本重复列两次
+        do.DomainEvent.model_validate({**data, "support": data["support"] + [data["support"][-1]]})
     with pytest.raises(ValidationError):  # 未映射却标 ok
         do.DomainEvent.model_validate({**event.model_dump(), "schema_mapping": "unmapped"})
+
+
+def test_two_versions_of_one_record_are_one_independent_support():
+    e = "e" * 64
+    refs = [{"source_id": "who_don", "record_id": "DON1", "version_id": D},
+            {"source_id": "who_don", "record_id": "DON1", "version_id": e}]
+    event = do.DomainEvent.model_validate({
+        "inputs": refs,
+        "processing": {"processor_version": "synthetic.events.v1"},
+        "locators": [{"kind": "char_span", "version_id": D, "start": 0, "end": 30}],
+        "permission_sources": ["who_don"],
+        "visibility": {"first_seen_at": "2026-11-01T00:00:00Z"},
+        "status": {"state": "ok"},
+        "event_type": "outbreak_report", "schema_mapping": "mapped", "subjects": ["某地"],
+        "support": [{"ref": r, "independence": "independent"} for r in refs],
+        "corrections": [refs[1]],
+    })
+    assert event.independent_support_count() == 1  # 原报告和它的更新版是同一份来源
 
 
 def test_provenance_must_be_closed():
@@ -152,9 +186,19 @@ def test_provenance_must_be_closed():
 
 def test_visibility_takes_the_latest_input_and_proof_only_when_all_have_one():
     t1, t2 = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
-    assert do.merge_visibility([t1, t2], [t1, None]).proof_available_at is None
-    v = do.merge_visibility([t1, t2], [t1, t2])
+    refs = [do.VersionRef(source_id="s", record_id="r", version_id=v) for v in (A, B)]
+    assert do.merge_visibility(refs, {A: (t1, t1), B: (t2, None)}).proof_available_at is None
+    v = do.merge_visibility(refs, {A: (t1, t1), B: (t2, t2)})
     assert v.first_seen_at == t2 and v.proof_available_at == t2
+
+
+def test_visibility_times_must_match_the_inputs_one_to_one():
+    t = datetime(2026, 1, 1, tzinfo=UTC)
+    refs = [do.VersionRef(source_id="s", record_id="r", version_id=v) for v in (A, B)]
+    with pytest.raises(ValueError):  # 少给一个输入的时间
+        do.merge_visibility(refs, {A: (t, t)})
+    with pytest.raises(ValueError):  # 拿不是输入的版本的时间顶替
+        do.merge_visibility(refs, {A: (t, t), C: (t, t)})
 
 
 def test_judgment_revision_must_say_why():

@@ -34,3 +34,28 @@ CREATE OR REPLACE RULE derived_identifiers_no_update AS ON UPDATE TO derived_ide
 CREATE OR REPLACE RULE derived_identifiers_no_delete AS ON DELETE TO derived_identifiers DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE derived_profiles_no_update AS ON UPDATE TO derived_profiles DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE derived_profiles_no_delete AS ON DELETE TO derived_profiles DO INSTEAD NOTHING;
+-- 工作队列（可更新的运行状态，不是派生数据）：按（阶段键, 来源, published_seq 分块）认领，带租约。
+CREATE TABLE IF NOT EXISTS derived_stage_chunks (
+  stage_key text NOT NULL,
+  source_id text NOT NULL,
+  chunk_start bigint NOT NULL,
+  chunk_end bigint NOT NULL,
+  state text NOT NULL CHECK (state IN ('leased','done','failed')),
+  lease_token text,
+  lease_until timestamptz,
+  attempts integer NOT NULL DEFAULT 0,
+  stats jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error jsonb,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (stage_key, source_id, chunk_start),
+  CHECK (chunk_end >= chunk_start)
+);
+CREATE INDEX IF NOT EXISTS derived_stage_chunks_state ON derived_stage_chunks (stage_key, state, lease_until);
+-- 附件还没解析完：先记下，不卡住块；之后每次运行先补做
+CREATE TABLE IF NOT EXISTS derived_stage_waiting (
+  stage_key text NOT NULL,
+  version_id char(64) NOT NULL,
+  reason text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (stage_key, version_id)
+);

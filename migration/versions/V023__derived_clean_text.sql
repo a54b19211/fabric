@@ -29,6 +29,9 @@ ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS locator_kind text;
 ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS segments jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS language text;
 ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS warnings jsonb NOT NULL DEFAULT '[]'::jsonb;
+-- 清洗器输入的摘要：同一清洗器版本下见过的输入直接复用结果（v3 3.3“原文没变就复用”）
+ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS input_sha256 char(64);
+CREATE INDEX IF NOT EXISTS derived_clean_text_input ON derived_clean_text (input_sha256, processor_version);
 CREATE INDEX IF NOT EXISTS derived_clean_text_source ON derived_clean_text (source_id, is_demo, status);
 CREATE OR REPLACE RULE derived_clean_text_no_update AS ON UPDATE TO derived_clean_text DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE derived_clean_text_no_delete AS ON DELETE TO derived_clean_text DO INSTEAD NOTHING;

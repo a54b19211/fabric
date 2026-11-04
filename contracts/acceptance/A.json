@@ -6,6 +6,10 @@
     "chain": null,
     "work_mode": "discovery",
     "design_ref": "v3 1.2 判断A 验收案例1",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "登记新版本出现试验终止或主要终点修改，雷达能否主动发现并说清对跟进判断的影响？",
     "required_evidence": [
       "registry",
@@ -29,6 +33,7 @@
       "clinicaltrials",
       "chictr"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "cde_ctr",
       "company_ir",
@@ -93,7 +98,10 @@
         "detail": "CDE CTR、企业 IR、会议摘要未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "从 CT.gov 历史版本找一个真实的终止或终点修改，固定 v1/v2 后填入；不编造试验号。",
     "synthetic_components": []
   },
@@ -104,6 +112,10 @@
     "chain": null,
     "work_mode": "investigation",
     "design_ref": "v3 1.2 判断A 验收案例2",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "一条宣传热度很高但数据单薄的管线，值不值得继续跟进？",
     "required_evidence": [
       "registry",
@@ -127,6 +139,7 @@
       "clinicaltrials",
       "europe_pmc"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "company_ir",
       "conference_abstracts",
@@ -193,7 +206,10 @@
         "detail": "企业 IR、会议摘要、CDE CTR 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一条真实的高热度、数据单薄管线，并固定其登记和报道版本；未选定前不写名称。",
     "synthetic_components": []
   },
@@ -204,6 +220,12 @@
     "chain": "A",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路A 正例",
+    "related_cases": [
+      "E-03"
+    ],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "结构化登记新版本能否走完“状态差分→观测→专题→报告”，并经图谱找齐竞品？",
     "required_evidence": [
       "registry",
@@ -219,7 +241,11 @@
       "登记变更日期"
     ],
     "sources_available": [
-      "clinicaltrials"
+      "clinicaltrials",
+      "openfda"
+    ],
+    "sources_status_unknown": [
+      "fda_crl"
     ],
     "sources_gap": [
       "cde_ctr",
@@ -271,6 +297,14 @@
         "detail": "竞品按同口径列出证据成熟度"
       },
       {
+        "kind": "source_status_verified",
+        "detail": "FDA CRL 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
+      },
+      {
+        "kind": "same_upstream_not_independent",
+        "detail": "openFDA 说明书/召回与 FDA CRL 同出 api.fda.gov，在独立证实数中合计为一"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -279,7 +313,10 @@
         "detail": "CDE CTR、Drugs@FDA 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需选一个有别名、有同靶点竞品的真实登记样本，固定版本后填入。",
     "synthetic_components": []
   },
@@ -290,6 +327,10 @@
     "chain": "A",
     "work_mode": "judgment_update",
     "design_ref": "v3 第四部分 链路A 更正",
+    "related_cases": [],
+    "correction_trigger": "registry_field_correction",
+    "trigger": null,
+    "expected_outcome": null,
     "question": "登记 v2 更正了 v1 的某个字段，雷达能否只重算受影响部分并保留旧判断？",
     "required_evidence": [
       "registry"
@@ -304,6 +345,7 @@
     "sources_available": [
       "clinicaltrials"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "cde_ctr"
     ],
@@ -321,7 +363,8 @@
     ],
     "must_not": [
       "用“到了几期”或“COMPLETED”代替疗效",
-      "整题推倒重算"
+      "整题推倒重算",
+      "只报告“文件变了”而不判断维持还是修订"
     ],
     "positive": {
       "scenario": "试验登记 v2 更正了 v1 的入组人数或主要终点描述",
@@ -354,6 +397,18 @@
         "detail": "修订说明引用 v1、v2 版本号和变化字段"
       },
       {
+        "kind": "judgment_maintained_or_revised",
+        "detail": "修订说明写明判断维持还是修订；字段更正不改结论时也要写维持及理由"
+      },
+      {
+        "kind": "old_citations_kept",
+        "detail": "旧判断里指向 v1 的引用仍可解析到 v1，不被改指 v2"
+      },
+      {
+        "kind": "affected_computations_updated",
+        "detail": "依赖被更正字段的观测和指标用 v2 值重算，列出改前改后"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
@@ -362,7 +417,10 @@
         "detail": "CDE CTR 未接入，写成缺口"
       }
     ],
-    "data_basis": "to_be_sourced",
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": false,
+    "status": "to_be_sourced",
     "material_note": "需在 CT.gov 历史版本中找一个真实的字段更正，固定 v1/v2 后填入。",
     "synthetic_components": []
   },
@@ -373,6 +431,10 @@
     "chain": "A",
     "work_mode": "discovery",
     "design_ref": "v3 第四部分 链路A 异常",
+    "related_cases": [],
+    "correction_trigger": null,
+    "trigger": null,
+    "expected_outcome": null,
     "question": "登记采集与差分遇到重启、半途失败、重复编号时，会不会重复计数或形成回路？",
     "required_evidence": [
       "registry"
@@ -388,6 +450,7 @@
     "sources_available": [
       "clinicaltrials"
     ],
+    "sources_status_unknown": [],
     "sources_gap": [
       "cde_ctr"
     ],
@@ -404,10 +467,11 @@
       "下一个里程碑"
     ],
     "must_not": [
-      "用“到了几期”或“COMPLETED”代替疗效"
+      "用“到了几期”或“COMPLETED”代替疗效",
+      "把注入的隔离故障写成生产事故"
     ],
     "positive": {
-      "scenario": "采集中途强制重启；差分任务处理到一半失败；同一 NCT 在多个查询窗口里出现",
+      "scenario": "在真实固定版本上注入：采集中途重启；差分处理到一半失败；同一 NCT 在多个查询窗口出现",
       "expected": [
         "重启后不重复落盘、不重复产出观测",
         "从检查点接着做，欠账可见",
@@ -443,23 +507,27 @@
         "detail": "同一 NCT 在多个窗口出现时，试验计数只加一"
       },
       {
+        "kind": "fault_not_reported_as_incident",
+        "detail": "运行记录和报告把重启、半途失败标为注入的隔离故障，不写成生产事故或来源故障"
+      },
+      {
         "kind": "cites_fixed_version",
         "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
       },
       {
         "kind": "no_real_coverage_claim",
-        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+        "detail": "故障注入跑通只证明容错流程，不据此宣布来源已覆盖真实场景"
       },
       {
         "kind": "gap_stated",
         "detail": "CDE CTR 未接入，写成缺口"
       }
     ],
-    "data_basis": "synthetic_flow_only",
-    "material_note": "用明确标为合成的登记记录和注入的故障跑流程；只证明流程，不证明真实覆盖。",
-    "synthetic_components": [
-      "注入的重启和失败",
-      "合成登记记录（编号明确标为合成）"
-    ]
+    "data_basis": "real_fixed_version",
+    "data_truth": "to_be_sourced",
+    "fault_injected": true,
+    "status": "to_be_sourced",
+    "material_note": "优先在 CT.gov 真实固定版本上做隔离故障注入（重启、半途失败、重复窗口）；版本待选。",
+    "synthetic_components": []
   }
 ]
