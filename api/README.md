@@ -1,6 +1,6 @@
 # ZK Data Fabric 审核后台 API
 
-FastAPI 后端，提供文档查询、LLM 抽取触发、审核操作、WeKnora 同步（文档 + 图数据）等接口。
+FastAPI 后端，提供文档查询、LLM 抽取触发、审核操作、图数据推送到 WeKnora 的 Neo4j 拷贝库，以及正文索引发布（正文进 WeKnora 的唯一路径）的管理接口。
 
 ## 启动
 
@@ -22,8 +22,11 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ## 接口列表
 
 ### 文档模块
+- `GET /api/documents/sites` - 文档库里实际出现的来源站点
 - `GET /api/documents` - 文档列表（分页 + 筛选）
 - `GET /api/documents/{uuid}` - 文档详情
+
+文档只读；重爬、上传 MD 的接口已删除，新资料只经采集框架（`collection/`）入 History。
 
 ### LLM 抽取模块
 - `POST /api/extraction/trigger` - 触发抽取
@@ -39,16 +42,37 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 - `POST /api/review/relations/{id}/approve` - 审核通过
 - `POST /api/review/relations/{id}/reject` - 审核拒绝
 
-### WeKnora 同步模块
-- `GET /api/weknora/pending` - 待同步文档列表
-- `POST /api/weknora/sync/{uuid}` - 单篇同步
-- `POST /api/weknora/sync-batch` - 批量同步文档
+### WeKnora 图数据推送模块
 - `POST /api/weknora/graph/sync-entity-dict` - 同步实体字典
 - `POST /api/weknora/graph/init-copies` - 初始化 PrimeKG 副本
 - `POST /api/weknora/graph/sync-entities` - 同步图实体
 - `POST /api/weknora/graph/sync-relations` - 同步图关系
+- `POST /api/weknora/graph/sync-all` - 依次执行以上推送
 - `GET /api/weknora/graph/stats` - 图同步状态统计
-- `GET /api/weknora/stats` - 文档同步状态统计
+
+这里只推图数据。正文（文档原文/清洗正文）进 WeKnora 只有一条路径：`db/index_publication.py` + 桥接服务，
+管理接口见下文“正文索引发布”。旧的文档同步接口（`/api/weknora` 下的待同步列表、单篇同步、批量同步、文档同步统计）已删除，不要再调用。
+
+### 正文索引发布（`/api/history/index`，正文进 WeKnora 的唯一路径）
+
+后台由发表循环里的 `index_tick` 自动处理：扫描已提交原件 → 建 `index_publications` 作业 → 经桥接服务发送并核对回执。
+以下接口都要 `Authorization: Bearer <DATAFABRIC_HISTORY_ADMIN_TOKEN>`；缺凭据 401，不是管理员凭据 403。
+前端入口：导航“同步 → 正文索引发布”（`/index-publications`），页面就是调用这三个接口。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/history/index/counts` | 各状态作业数：`{"states": {...}, "total": n}`，没出现的状态记 0 |
+| `GET /api/history/index/status` | 作业列表，按更新时间倒序。参数：`limit`（1–100，默认100）、`state`、`source_id`、`cursor`；返回 `{"items": [...], "next_cursor": ...}`，`next_cursor` 不为空就把它原样作为 `cursor` 取下一页 |
+| `POST /api/history/index/{id}/retry` | 把受阻（`blocked`）作业放回待重试；`id` 是 Fabric 作业编号（64 位十六进制），不是 WeKnora 知识条目编号 |
+
+作业状态：`queued` 待发送、`sending` 发送中、`indexing` 桥接服务解析/向量化中、`ready` 已就绪、
+`waiting` 失败后自动退避重试、`blocked` 连续失败 6 次不再自动重发、`disabling` 停用中、`disabled` 已停用（来源撤权、出了新版本或原件撤回）。
+每条作业带 `error`（`{code, message}`，最近一次失败原因）、`attempts`、`remote_id`、`version_id`、`artifact_key`（附件正文产物）、`source`（索引目标配置）、`read_permitted`（来源当前是否仍有许可）。
+
+失败重试：`waiting` 不用管，会自动退避重试；`blocked` 要先按 `error.code` 修好原因，再调 retry（或在页面点“重试”）。
+retry 返回 `{"scheduled": true, "state": "waiting"}` 表示已放回队列，下一轮 `index_tick` 处理，处理时仍先向桥接服务核对已发请求，不会重复上传；
+`{"scheduled": false, "reason": "not_blocked"}` 表示作业不是受阻状态、没有改动；`reason: "leased"` 表示正被处理，稍后再试；作业编号不存在 404，格式不对 422。
+参数错误（状态值、续页标记不对）返回 422；数据库不可用返回 503 `history_service_failed`。
 
 ## 依赖
 
@@ -146,7 +170,8 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 | `GET /graph/{version_id}/paths` | 固定图包内查路径，最多 4 跳，限制路径数和展开数 | History 读取凭据 |
 | `GET /graph/{version_id}/subgraph` | 返回指定对象间的有界子图 | History 读取凭据 |
 | `POST /graph/native/capture` | 将 1 至 20 个已采用 CT 固定版本投成登记字段图 | History 管理凭据 |
-| `GET /index/status` | 查看任务与上传、解析、向量、绑定状态 | History 管理凭据 |
+| `GET /index/counts` | 正文索引作业各状态计数 | History 管理凭据 |
+| `GET /index/status` | 查看任务与上传、解析、向量、绑定状态；可按 `state`、`source_id` 过滤，`cursor` 续页 | History 管理凭据 |
 | `POST /index/{id}/retry` | 恢复被阻断任务，仍先核对已发请求 | History 管理凭据 |
 
 图查询须给 `source_id`、`source_record_id`、`is_demo`、`mode`、`cutoff`，对象为 `namespace|id`。新路径和子图接口默认 `review_scope=reviewed`；`with_candidates` 才含待审或未绑定候选，仍保留原状态。原邻居和解析接口增加同名可选参数，旧调用兼容，新业务应显式选择范围。

@@ -170,6 +170,20 @@ def _save_original(path: Path, content: bytes, digest: str) -> bool:
     return reused
 
 
+def store_original(content: bytes, identifier: str, source_site: str, file_ext: str) -> dict:
+    """按字节摘要固定一份原件：<RAW_DIR>/<来源>/<uuid5(身份)>.<sha256><后缀>，校验、fsync、不覆盖。
+    远程附件（download_pdf）、PMC 全文（collection.pubmed_fulltext）、本地导入（collection.local_files）
+    共用这一种落盘写法。skipped=True 表示本地已有相同字节。"""
+    if not content:
+        raise ValueError("原件为空")
+    save_dir = APP.RAW_DIR / source_site
+    save_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(content).hexdigest()
+    save_path = save_dir / f"{make_uuid(identifier)}.{digest}{file_ext}"
+    skipped = _save_original(save_path, content, digest)
+    return {"local_path": str(save_path), "sha256": digest, "size": len(content), "skipped": skipped}
+
+
 # ---------------------------------------------------------------------------
 #  Prefect Tasks
 # ---------------------------------------------------------------------------
@@ -294,9 +308,8 @@ def download_pdf(
         raise ValueError("附件响应为空，未采用旧缓存")
     # PDF文件头比可能变化的响应头可靠；其余类型沿用已有判别规则。
     file_ext = ".pdf" if content.startswith(b"%PDF") else _ext_from_response(resp, pdf_url)
-    digest = hashlib.sha256(content).hexdigest()
-    save_path = save_dir / f"{file_uuid}.{digest}{file_ext}"
-    skipped = _save_original(save_path, content, digest)
+    stored = store_original(content, pdf_url, source_site, file_ext)
+    save_path, skipped = stored["local_path"], stored["skipped"]
 
     logger.info(f"附件已核对远端并保留原件: {pdf_url} → {save_path}")
     return {
@@ -306,6 +319,8 @@ def download_pdf(
         "parent_uuid": parent_uuid,
         "source_site": source_site,
         "file_ext": file_ext,
+        "sha256": stored["sha256"],
+        "size": stored["size"],
         "timestamp": _now_iso(),
         "skipped": skipped,
     }

@@ -60,10 +60,18 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 | 采集 | `POST /api/history/fetch`、`db/source_refresh.py` | 读取插件见 `biz_rules/history_sources.py` 的 `PLUGINS`；网站和站点接口统一走 `collection/site_crawler.py` |
 | 附件 | `flows/process_attachments.py` | 附件是独立版本，正文由 `processing/attachment_parse.py`（MinerU）产出 |
 | 清洗 | `flows/clean_stage.py` | `processing/clean_text.py`、`identifiers.py`、`profile.py`，分块租约并行 |
-| 索引 | `db/index_publication.py` | 唯一的进 WeKnora 路径 |
+| 索引 | `db/index_publication.py` | 唯一的进 WeKnora 路径；操作入口见下 |
 | 发表 | `flows/history_publish.py` | 审核图发布与 documents 库存冻结 |
 
 本地导入文件（原 `--mode local`）用 `POST /api/history/archives`；重抓页面用 `query=by_url` 的读取请求。
+
+正文索引的操作入口：前端“同步 → 正文索引发布”（`/index-publications`），或直接调
+`GET /api/history/index/counts`、`GET /api/history/index/status?state=blocked&source_id=…`（`next_cursor` 续页）、
+`POST /api/history/index/{id}/retry`（History 管理员凭据）。发送和失败退避由发表循环里的 `index_tick` 自动做；
+连续失败 6 次的作业变为 `blocked`，修好 `error.code` 指出的原因后再重试。细节见 `api/README.md`“正文索引发布”。
+
+已删除、不要再用的旧入口：WeKnora 文档同步接口（待同步列表、单篇/批量同步、文档同步统计）、文档重爬与上传接口，
+以及旧的 ETL、WeKnora 同步、WeKnora 重解析、反馈导入命令行脚本。正文进 WeKnora 只走上面的索引发布；新资料只经采集框架入 History。
 
 ---
 
@@ -435,6 +443,7 @@ python -m flows.graph_publish capture-primekg --node-type gene/protein \
 ## 落库后自动发表与雷达增量衔接
 
 本轮把原有网页、CLI、API上传和批量SQL的实际写库接上不可变版本，不再要求每批手动capture。
+（已过时：其中的 API 上传、重爬接口和旧 ETL 命令行入口已于 2026-11 删除，见“运行”一节。）
 原流程继续采集、清洗和质检；只有原数据库事务真正提交的内容才会进入待发表。
 文本先发表，不等待实体抽取或图审核。图审核/身份资格变更后另发固定图版本。
 

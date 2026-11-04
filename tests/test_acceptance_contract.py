@@ -6,12 +6,13 @@
 - 每个案例都有反例和可机检的断言，禁止的捷径写进 must_not；
 - 证据类型和来源编号只能用约定的词表，缺口必须如实列出；
 - 夹具里不出现编造的真实世界编号（NCT、PMID、DOI 等），材料没找到就标 to_be_sourced。
-审阅 8 条裁定各有对应测试：来源按数据集分开与同上游、采集状态与部署分栏、更正看判断结果、E 只定义一次、
+审阅 8 条裁定各有对应测试：来源按数据集分开与供给系统重叠、来源事实三栏、更正看判断结果、E 只定义一次、
 E 的触发与结果覆盖、材料真实性与故障注入分开、目标与现状分开、内参保留不确定性。
 纯本地测试，不联网、不连库。
 """
 
 import copy
+import inspect
 import json
 import re
 import shutil
@@ -29,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from collection.catalog import CATALOG  # noqa: E402
 from contracts import acceptance as acc  # noqa: E402
+from contracts.evidence_types import CATEGORIES  # noqa: E402
 
 FIXTURE_DIR = ROOT / "contracts" / "acceptance"
 FILES = ["A.json", "B.json", "C.json", "D.json", "E.json", "views.json"]
@@ -62,6 +64,8 @@ def test_evidence_vocabulary_matches_v3_1_4():
         ("financial", "财务"), ("policy", "政策"), ("official_notice", "官方通报"),
         ("media", "媒体"), ("social", "社媒"), ("patent", "专利"),
     ]
+    # 只有一份注册表：验收用的就是 contracts.evidence_types 的大类，不是自己另抄的一份
+    assert acc.EVIDENCE_TYPES is CATEGORIES
 
 
 def listed_sources(case):
@@ -101,8 +105,32 @@ def test_collection_state_derived_from_catalog():
         assert acc.collection_state(sid) == want, sid
 
 
+def test_source_facts_are_three_separate_columns():
+    # 审阅 389：采集插件状态（目录推出）、导入能力、本次实测覆盖（DEPLOYMENT）三栏分开，不分“新/老实现”
+    assert acc.source_facts("nmpa") == {"collection_state": "plugin_unverified",
+                                        "import_routes": ("documents_stock_bridge",),
+                                        "deployment": "stock_only"}
+    assert acc.source_facts("hkex") == {"collection_state": "plugin_unverified", "import_routes": (),
+                                        "deployment": "no"}
+    # 有导入能力不等于有库存或在采：cde_xxgk 能经库存冻结桥导入，但本次没有实测覆盖记录
+    assert acc.source_facts("cde_xxgk")["import_routes"] == ("documents_stock_bridge",)
+    assert acc.deployment("cde_xxgk").live == "unknown"
+    # 本地导入是目录里的 local_files 来源本身的导入能力
+    assert acc.import_routes("local_files") == ("local_import",)
+    assert get_args(acc.ImportRoute) == ("documents_stock_bridge", "local_import")
+    assert set(acc.IMPORT_ROUTES) <= set(CATALOG)
+    # 只有库存的来源都要有导入通道
+    for sid, d in acc.DEPLOYMENT.items():
+        if d.live == "stock_only" or d.stock_docs:
+            assert acc.import_routes(sid), sid
+    with pytest.raises(ValueError, match="导入能力"):
+        acc.check_deployment({"hkex": acc.Deployment("stock_only")})
+    with pytest.raises(ValueError, match="made_up_source"):
+        acc.check_deployment({}, {"made_up_source": ("local_import",)})
+
+
 def test_source_status_is_two_separate_columns():
-    # 裁定 2：采集状态（目录推出）与生产部署（DEPLOYMENT）分开，不知道写 unknown
+    # 裁定 2：采集状态（目录推出）与本次实测覆盖（DEPLOYMENT）分开，不知道写 unknown
     assert status2("hkex") == ("plugin_unverified", "no")
     assert status2("sec_companyfacts") == ("active_verified", "unknown")
     assert "需要证据" in acc.DEPLOYMENT["sec_companyfacts"].note
@@ -158,27 +186,77 @@ def test_openfda_split_by_dataset_with_stock_per_source():
     assert acc.DEPLOYMENT["fda_api_enforcement"].stock_docs == {"fda_api_enforcement": 17684}
 
 
-def test_openfda_and_crl_share_upstream_never_two_confirmations():
-    assert CATALOG["fda_api_drug_label"].upstream == CATALOG["fda_crl"].upstream == "api.fda.gov"
-    assert acc.count_independent_upstreams(["fda_api_drug_label", "fda_crl"]) == 1
-    assert acc.count_independent_upstreams(["fda_api_drug_label", "fda_api_enforcement", "fda_crl"]) == 1
-    assert acc.count_independent_upstreams(["fda_api_drug_label", "clinicaltrials"]) == 2
-    assert acc.count_independent_upstreams(["fda_crl", "fda_crl"]) == 1
+def test_supply_system_overlap_is_recorded_not_counted():
+    # 目录只记录供给系统重叠；不再有按主机/限速组合并来源、数“独立证实”的函数
+    assert not hasattr(acc, "count_independent_upstreams")
+    for name in ("upstream", "upstream_system"):
+        assert not hasattr(CATALOG["fda_crl"], name), name
+    openfda = ["fda_api_drug_label", "fda_api_enforcement", "fda_crl"]
+    assert {acc.supply_system(s) for s in openfda} == {"openfda"}
+    assert acc.shared_supply_systems(["fda_api_drug_label", "fda_crl"]) == {
+        "openfda": ["fda_api_drug_label", "fda_crl"]}
+    assert acc.shared_supply_systems(openfda + ["clinicaltrials"]) == {"openfda": sorted(openfda)}
+    assert acc.shared_supply_systems(["fda_api_drug_label", "clinicaltrials"]) == {}
+    assert acc.shared_supply_systems(["fda_crl", "fda_crl"]) == {}
+    # 供给系统不回退到限速组：同在 fda.gov 限速组的新闻稿与 Drugs@FDA 不算供给重叠
+    assert CATALOG["fda_press"].rate_group == CATALOG["drugs_fda"].rate_group
+    assert acc.shared_supply_systems(["fda_press", "drugs_fda"]) == {}
+    # PubMed 与 Europe PMC 是两个供给系统；同一论文在两边各一条仍是一份，那要按材料（PMID/DOI）判断
+    assert acc.shared_supply_systems(["pubmed", "europe_pmc"]) == {}
+    assert acc.shared_supply_systems(["biorxiv", "medrxiv"]) == {"openrxiv": ["biorxiv", "medrxiv"]}
+    assert acc.shared_supply_systems(["sec_companyfacts", "sec_filings"]) == {
+        "sec_edgar": ["sec_companyfacts", "sec_filings"]}
 
 
-def test_rejects_shared_upstream_without_check(cases):
-    shared = [c for c in cases if acc.count_independent_upstreams(listed_sources(c)) < len(listed_sources(c))]
-    ids = {c.id for c in shared}
-    # A-03 用 openFDA 说明书 + CRL 演示同上游规则；C-03 同时用说明书与召回
-    assert {"A-03", "C-03"} <= ids
-    assert {"fda_api_drug_label", "fda_crl"} <= set(listed_sources(next(c for c in shared if c.id == "A-03")))
-    for c in shared:
-        assert "same_upstream_not_independent" in kinds(c), c.id
-    for name, cid in (("A.json", "A-03"), ("C.json", "C-03")):
+def test_independence_is_judged_on_material_not_topology():
+    # 只按四个依据判断；故意不收主机、端点、供给系统
+    assert set(acc.INDEPENDENCE_BASES) == {"same_study_or_discloser", "same_fixed_material",
+                                           "citation_or_reprint", "same_origin_group"}
+    assert list(inspect.signature(acc.independence).parameters) == ["bases"]
+    none_apply = dict.fromkeys(acc.INDEPENDENCE_BASES, False)
+    # 两项没有共同样本/试验来源、互不引用的研究：同在一个论文平台上也是两份
+    assert acc.independence(none_apply) == "independent"
+    # 同一论文在 PubMed 与 Europe PMC 各一条：同一固定材料，不独立
+    assert acc.independence({**none_apply, "same_fixed_material": True}) == "not_independent"
+    # openFDA 两个端点上同一产品的记录，披露主体相同：不独立
+    assert acc.independence({**none_apply, "same_study_or_discloser": True}) == "not_independent"
+    # 判不了就是 unknown，不按“同主机”补成一份，也不按“不同端点”补成两份
+    assert acc.independence({**none_apply, "citation_or_reprint": None}) == "unknown"
+    assert acc.independence({}) == "unknown"
+    with pytest.raises(ValueError, match="same_host"):
+        acc.independence({"same_host": True})
+
+
+SHARED_SUPPLY_CASES = {"A-03", "B-01", "B-02", "C-01", "C-03"}
+
+
+def test_rejects_shared_supply_without_check(cases):
+    shared = {c.id: c for c in cases if acc.shared_supply_systems(listed_sources(c))}
+    assert set(shared) == SHARED_SUPPLY_CASES
+    assert {"fda_api_drug_label", "fda_crl"} <= set(listed_sources(shared["A-03"]))
+    for c in shared.values():
+        details = [k.detail for k in c.checks if k.kind == "shared_supply_not_independent"]
+        assert details, c.id
+        # 措辞：供给相同不能凭端点算两份，判不了写 unknown；不再写“合计为一”
+        assert all("unknown" in d and "合计为一" not in d for d in details), c.id
+    for name, cid in (("A.json", "A-03"), ("B.json", "B-01"), ("C.json", "C-03")):
         raw = [r for r in raw_cases(name) if r["id"] == cid][0]
-        raw["checks"] = [k for k in raw["checks"] if k["kind"] != "same_upstream_not_independent"]
-        with pytest.raises(ValueError, match="same_upstream_not_independent"):
+        raw["checks"] = [k for k in raw["checks"] if k["kind"] != "shared_supply_not_independent"]
+        with pytest.raises(ValueError, match="shared_supply_not_independent"):
             acc.validate_case(raw)
+    for name in FILES:
+        assert "same_upstream" not in (FIXTURE_DIR / name).read_text(encoding="utf-8"), name
+    rule = acc.CHECK_KINDS["shared_supply_not_independent"]
+    assert "不能仅凭" in rule and "unknown" in rule and "同主机" in rule
+
+
+def test_same_paper_on_two_hosts_is_one(cases):
+    # 同一论文在 PubMed 与 Europe PMC 各有一条仍是一份：B-01、B-02 用编号去重断言写明
+    for cid in ("B-01", "B-02"):
+        c = next(x for x in cases if x.id == cid)
+        assert {"pubmed", "europe_pmc"} <= set(listed_sources(c))
+        assert any("PubMed" in k.detail and "Europe PMC" in k.detail
+                   for k in c.checks if k.kind == "identifier_not_double_counted"), cid
 
 
 @pytest.mark.parametrize("sid", ["sec_companyfacts", "hkex"])
@@ -540,7 +618,31 @@ def test_wuhan_replay_target_vs_status(cases):
     assert not w.executable
     assert {"visibility_cutoff_respected", "visibility_proof_bound", "judged_correctly_first"} <= kinds(w)
     assert "把最早报警当作成功指标" in w.must_not
-    assert "13.5" in " ".join(k.detail for k in w.checks if k.kind == "judged_correctly_first")
+    assert "归档报告 13.5" in " ".join(k.detail for k in w.checks if k.kind == "judged_correctly_first")
+
+
+def test_judged_first_cites_archive_not_v3(cases):
+    # “不比谁先报警，比谁先判断对”出自归档报告 13.5 实验 D（第 554–558 行），不能假托 v3 章节
+    src = acc.JUDGED_FIRST_SOURCE
+    assert "/.branch-archive-20261101/opus 5.5报告.md" in src and "第 554–558 行" in src
+    assert "sha256=687718eaaa63409dc0ed3053db02ad515208a754f9d3da1248f867335b6c4928" in src
+    assert "JUDGED_FIRST_SOURCE" in acc.CHECK_KINDS["judged_correctly_first"]
+    details = [k.detail for c in cases for k in c.checks if k.kind == "judged_correctly_first"]
+    assert details and all("归档报告 13.5" in d and "非 v3" in d for d in details)
+    texts = [(FIXTURE_DIR / f).read_text(encoding="utf-8") for f in FILES]
+    texts.append((ROOT / "contracts" / "acceptance.py").read_text(encoding="utf-8"))
+    for t in texts:
+        assert "13.5 口径" not in t and not re.search(r"v3[^\n]{0,4}13\.5", t)
+
+
+def test_openfda_enforcement_is_drug_but_not_claimed_collecting():
+    # 产品类别是 drug（旧站点配置指向 drug/enforcement.json），这只是配置能力，不代表在采
+    enf = CATALOG["fda_api_enforcement"]
+    assert enf.datasets == ("api.fda.gov/drug/enforcement.json",)
+    note = acc.DEPLOYMENT["fda_api_enforcement"].note
+    assert "drug" in note and "不代表在采" in note and "待核实" not in note
+    assert acc.deployment("fda_api_enforcement").live == "stock_only"
+    assert "不代表在采" in enf.notes and "待核实" not in enf.notes
 
 
 def test_rejects_public_replay_without_proof_or_first_correct():
@@ -629,6 +731,27 @@ def test_rejects_unknown_evidence_slug():
     c = good_case()
     c["required_evidence"] = c["required_evidence"] + ["blog"]
     with pytest.raises(ValueError, match="blog"):
+        acc.validate_case(c)
+
+
+@pytest.mark.parametrize("fine,category", [
+    ("registry_record", "registry"), ("filing_fact", "financial"),
+    ("regulatory_letter", "regulatory_decision"),
+])
+def test_rejects_fine_type_instead_of_category(fine, category):
+    # required_evidence 只用大类；细类（来源目录用的）被拒绝，并提示它属于哪个大类
+    c = good_case()
+    c["required_evidence"] = c["required_evidence"] + [fine]
+    with pytest.raises(ValueError, match=f"{fine}（细类，属于大类 {category}）"):
+        acc.validate_case(c)
+
+
+@pytest.mark.parametrize("level", ["abstract", "metadata", "fulltext"])
+def test_rejects_coverage_level_as_evidence(level):
+    # 覆盖层级不是证据类别
+    c = good_case()
+    c["required_evidence"] = c["required_evidence"] + [level]
+    with pytest.raises(ValueError, match=level):
         acc.validate_case(c)
 
 

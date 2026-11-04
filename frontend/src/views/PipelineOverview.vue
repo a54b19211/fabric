@@ -10,6 +10,8 @@
             <span v-if="stageDesc(stage.key)" class="stage-desc">{{ stageDesc(stage.key) }}</span>
           </div>
           <div class="stage-header-right">
+            <!-- 这里只有计数；正文索引的列表、错误与重试在“正文索引发布”页 -->
+            <router-link v-if="stage.key === 'sync'" to="/index-publications" class="stage-manage-link">索引管理 →</router-link>
             <span class="stage-total">{{ formatNum(stage.total) }}</span>
           </div>
         </div>
@@ -407,6 +409,12 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.stage-manage-link {
+  font-size: 12px;
+  color: var(--dp-primary);
+  text-decoration: none;
 }
 
 .stage-total {

@@ -55,7 +55,7 @@
         </el-col>
         <el-col :span="4">
           <el-select v-model="filterSourceSite" placeholder="来源站点" clearable filterable>
-            <el-option v-for="s in SITES" :key="s" :label="s" :value="s" />
+            <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
         </el-col>
         <el-col :span="4">
@@ -250,13 +250,22 @@ import {
   type AgentRunRecord, type DocumentRunSummary,
 } from '@/api/agent'
 import ReasoningTimeline from '@/components/ReasoningTimeline.vue'
+import { getCollectionCatalog } from '@/api/history'
+import { getSourceSites } from '@/api/documents'
 
-const SITES = [
-  'nmpa', 'cde', 'cde_zdyz', 'cde_xxgk', 'fda_press', 'fda_drug_safety',
-  'fda_api_drug_label', 'fda_api_enforcement', 'chictr', 'clinicaltrials',
-  'pubmed', 'drugbank', 'hkex', 'fiercepharma',
-  'phirda_policy', 'phirda_industry', 'phirda_rd', 'phirda_healthcare_reform', 'roche',
-]
+// 来源选项：优先读来源目录（GET /api/history/collection/catalog，需 History 凭据）；
+// 本标签页没有凭据时退回文档库里实际出现的 source_site（/api/documents/sites）。不再硬编码。
+const siteOptions = ref<{ value: string; label: string }[]>([])
+
+async function loadSiteOptions() {
+  try {
+    const catalog = await getCollectionCatalog()
+    siteOptions.value = catalog.sources.map(s => ({ value: s.source_id, label: `${s.source_id} · ${s.name}` }))
+  } catch {
+    const res = await getSourceSites()
+    siteOptions.value = res.sites.map(s => ({ value: s, label: s }))
+  }
+}
 
 // 工具栏
 const batchLimit = ref(50)
@@ -301,6 +310,7 @@ const detailRun = ref<AgentRunRecord | null>(null)
 onMounted(() => {
   loadCurrentView()
   loadStats()
+  loadSiteOptions()
 })
 
 watch([viewMode], () => {

@@ -109,8 +109,8 @@
         "detail": "巨潮、SEC filing 原文未接入，港交所插件未实测且生产不在采，写成缺口"
       },
       {
-        "kind": "same_upstream_not_independent",
-        "detail": "SEC companyfacts 与 SEC filing 原文同出 sec.gov，在独立证实数中合计为一"
+        "kind": "shared_supply_not_independent",
+        "detail": "companyfacts 与 filing 原文同属 SEC EDGAR：同一份 filing 的事实不算两份；判不了写 unknown"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -318,8 +318,8 @@
         "detail": "批准或公告条数不进入产业指标序列"
       },
       {
-        "kind": "same_upstream_not_independent",
-        "detail": "openFDA 说明书与召回同出 api.fda.gov，在独立证实数中合计为一"
+        "kind": "shared_supply_not_independent",
+        "detail": "说明书与召回同属 openFDA：同一产品不凭两端点算两份，不同产品不因同主机合并；判不了 unknown"
       },
       {
         "kind": "source_status_verified",

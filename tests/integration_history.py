@@ -1506,3 +1506,17 @@ def _publish_fixture_graph(observation, key):
     )
     return graph_run
 
+
+
+
+def test_migration_refreshes_site_source_descriptions_but_not_access(pg):
+    from biz_rules.history_sources import SOURCE_CATALOG
+
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET catalog=catalog || CAST(:m AS jsonb) WHERE source_id='nmpa'"),
+                     {"m": json.dumps({"name": "旧说明", "acquisition_channel": "legacy_database", "access": "kept"})})
+    migration.migrate_history()
+    with pg.begin() as conn:
+        catalog = conn.execute(text("SELECT catalog FROM history_sources WHERE source_id='nmpa'")).scalar_one()
+    assert catalog["name"] == SOURCE_CATALOG["nmpa"]["name"] and catalog["acquisition_channel"] == "site_plugin"
+    assert catalog["access"] == "kept"  # 许可字段不被迁移改动

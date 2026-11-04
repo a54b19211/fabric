@@ -79,7 +79,7 @@
       },
       {
         "kind": "replication_counted",
-        "detail": "独立重复数单列，同源材料不计入"
+        "detail": "独立重复数单列：同源不计入；无共同样本/试验来源的研究同在 EPMC 也各算一份"
       },
       {
         "kind": "retraction_tracked",
@@ -102,8 +102,12 @@
         "detail": "bioRxiv、medRxiv、会议摘要未接入，写成缺口"
       },
       {
-        "kind": "same_upstream_not_independent",
-        "detail": "bioRxiv 与 medRxiv 同出 openRxiv 接口，在独立证实数中合计为一"
+        "kind": "shared_supply_not_independent",
+        "detail": "bioRxiv、medRxiv 同属 openRxiv：不凭两个服务器算两份，按原始研究判断；判不了写 unknown"
+      },
+      {
+        "kind": "identifier_not_double_counted",
+        "detail": "同一论文在 PubMed 与 Europe PMC 各有一条，按 PMID/DOI 只算一份"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -209,8 +213,12 @@
         "detail": "bioRxiv、medRxiv、arXiv 未接入，写成缺口"
       },
       {
-        "kind": "same_upstream_not_independent",
-        "detail": "bioRxiv 与 medRxiv 同出 openRxiv 接口，在独立证实数中合计为一"
+        "kind": "shared_supply_not_independent",
+        "detail": "bioRxiv、medRxiv 同属 openRxiv，不凭两服务器算两份；预印本与正式版同一研究；判不了 unknown"
+      },
+      {
+        "kind": "identifier_not_double_counted",
+        "detail": "同一论文在 PubMed 与 Europe PMC 各有一条，按 PMID/DOI 只算一份"
       }
     ],
     "data_basis": "real_fixed_version",

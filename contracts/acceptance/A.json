@@ -301,8 +301,8 @@
         "detail": "FDA CRL 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
       },
       {
-        "kind": "same_upstream_not_independent",
-        "detail": "openFDA 说明书（fda_api_drug_label）与 FDA CRL 同出 api.fda.gov，在独立证实数中合计为一"
+        "kind": "shared_supply_not_independent",
+        "detail": "说明书与 CRL 同属 openFDA，不凭两端点算两份；同一申请同为 FDA 披露不互证；判不了写 unknown"
       },
       {
         "kind": "cites_fixed_version",

@@ -1,5 +1,7 @@
 # ZK_Data Fabric 开发任务清单
 
+> **已过时（2026-11）**：本文是 2026-05 的原始规划，保留作历史记录。其中的 WeKnora 文档同步接口和同步脚本改造已删除，正文进 WeKnora 现只走 `db/index_publication.py`；当前接口见 `api/README.md`。
+
 > 更新时间：2026-05-13
 > 爬取监控 UI 由 **Prefect 自带 Dashboard** 覆盖，无需自行开发。
 > 需要自行开发的部分：数据库补全、数据操作层、审核后台 API + 前端、WeKnora 对接接口。

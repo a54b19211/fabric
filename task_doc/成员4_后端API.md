@@ -19,9 +19,12 @@
 第五阶段（推图）← 触发入口
   └─ POST /api/neo4j/sync
 
-并行下游（RAG）← 触发入口
-  └─ POST /api/weknora/sync
+并行下游（RAG）← 自动进行，只提供查看与重试
+  └─ GET /api/history/index/status、POST /api/history/index/{id}/retry
 ```
+
+> 2026-11 更新：正文进 WeKnora 只有一条路径 `db/index_publication.py` + 桥接服务（发表循环里的 `index_tick` 自动发送）。
+> 旧的 WeKnora 文档同步接口（待同步列表、单篇/批量同步、统计）已删除，不要再实现；见下文第 5 节。
 
 ---
 
@@ -36,7 +39,7 @@ api/
     extraction.py  # LLM 抽取触发
     review.py      # 审核操作
     neo4j.py       # Neo4j 推送
-    weknora.py     # WeKnora 同步
+    weknora.py     # WeKnora 图数据推送（只推图；正文索引在 history.py 的 /api/history/index）
   schemas/
     request.py     # 请求体 Pydantic 模型
     response.py    # 响应体 Pydantic 模型
@@ -354,58 +357,51 @@ limit: int = 50
 
 ---
 
-### 5. WeKnora 同步模块（routers/weknora.py）
+### 5. 正文索引发布模块（routers/history.py，`/api/history/index`）
 
-#### GET /api/weknora/pending
-待同步文档列表。
+正文进 WeKnora 只有这一条路径：`db/index_publication.py` 建 `index_publications` 作业，发表循环里的 `index_tick`
+自动发送并核对桥接服务回执。这里**没有**“手动同步一篇/一批”的接口，也不要另写一套正文同步；接口只负责查看和恢复受阻作业。
+三个接口都要 `Authorization: Bearer <DATAFABRIC_HISTORY_ADMIN_TOKEN>`：缺凭据 401 `authentication_required`，不是管理员凭据 403 `admin_required`。
+错误响应是 FastAPI 的 `{"detail": {"code": "...", "message": "..."}}`。
 
-响应体：
+#### GET /api/history/index/counts
+各状态作业数，没出现的状态记 0。
+
+```json
+{"states": {"queued": 3, "sending": 0, "indexing": 1, "ready": 4890, "waiting": 2, "blocked": 1, "disabling": 0, "disabled": 7}, "total": 4904}
+```
+
+#### GET /api/history/index/status
+作业列表，按更新时间倒序。查询参数：`limit`（1–100，默认 100）、`state`（上面八种之一）、`source_id`（来源编号，取自
+`GET /api/history/collection/catalog`）、`cursor`（上一页返回的 `next_cursor`）。参数不对返回 422。
+
 ```json
 {
-  "total": 234,
   "items": [
     {
-      "uuid": "xxx",
-      "title": "...",
-      "source_site": "nmpa",
-      "publish_date": "2026-01-15"
+      "id": "<64位作业编号>", "state": "blocked", "desired_state": "active",
+      "source_record_id": "NCT00000001", "version_id": "<64位>", "artifact_key": "",
+      "remote_id": "<64位>", "knowledge_id": null, "title": "...",
+      "error": {"code": "index_unavailable", "message": "索引处理暂不可用；已发送请求保留对账状态"},
+      "attempts": 6, "first_send_at": null, "next_check_at": "...", "updated_at": "...",
+      "source": {"source_id": "clinicaltrials", "is_demo": false, "knowledge_base_id": "...", "source_scope": "...", "source_instance": "..."},
+      "read_permitted": true, "receipt": {}
     }
-  ]
+  ],
+  "next_cursor": "2026-11-04T08:00:00.123456+00:00|<64位作业编号>"
 }
 ```
 
-#### POST /api/weknora/sync/{uuid}
-手动触发单篇文档同步到 WeKnora。
+#### POST /api/history/index/{id}/retry
+只对 `blocked` 作业生效：状态改回 `waiting`、尝试次数清零、立即到期，下一轮 `index_tick` 处理；处理时仍先向桥接服务核对已发请求，不会重复上传。
 
-响应体：
 ```json
-{"success": true, "message": "同步成功"}
+{"id": "...", "scheduled": true, "state": "waiting"}
+{"id": "...", "scheduled": false, "state": "ready", "reason": "not_blocked"}
+{"id": "...", "scheduled": false, "state": "blocked", "reason": "leased"}
 ```
 
-#### POST /api/weknora/sync-batch
-批量触发同步。
-
-请求体：
-```json
-{"limit": 100}
-```
-
-响应体：
-```json
-{"triggered": 100}
-```
-
-#### GET /api/weknora/stats
-同步状态统计。
-
-响应体：
-```json
-{
-  "pending": 234,
-  "synced": 4890,
-  "failed": 12
-}
-```
+编号不存在 404 `index_publication_not_found`，格式不是 64 位小写十六进制 422 `index_publication_id`。
 
 ---
 

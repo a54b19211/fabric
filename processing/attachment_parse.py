@@ -6,13 +6,17 @@
 - DOC / PPT / PPTX：配置了云端 token → 云端原生解析（processing.mineru_cloud）；否则 LibreOffice 转 PDF
   （core_engine.docx_parser._doc_to_pdf，在临时目录里转）再交自部署 MinerU；
 - XLS / XLSX：openpyxl / xlrd 直读成 Markdown 表格（core_engine.excel_parser.excel_to_markdown）；
-- 扩展名未知（.bin）时按文件头判断（core_engine.scrapling_client._sniff_bytes）。
+- 扩展名未知（.bin）时按文件头判断（core_engine.scrapling_client._sniff_bytes）；
+- XML（PMC 全文 JATS）：processing.jats_text 直读结构，不调外部服务；不是 JATS 文章记 unsupported。
+  加 XML 不改变其他格式的结果，此前也没有 .xml 附件（download_pdf 只产出 pdf/doc/docx/xls/xlsx/bin），
+  所以处理器版本不升。
 
 定位（Codex r59）：按格式给实际能给的定位，不强行编页码。
 - 原生 PDF：MinerU content_list 的 page_idx → pdf_page；
 - DOC/PPT 经转换（LibreOffice 或云端内部转换）得到的页码 → converted_page，注明不是原文件页码；
 - DOCX 原生解析没有分页（11-04 实测所有块 page_idx=0）→ block（第几个内容块）；
 - Excel → sheet；
+- JATS → jats_section（节路径 + JATS 路径，没有页码）；
 - 解析服务没给 content_list → locator_kind=unavailable，正文仍可用，但不能回指页码。
 正文由 content_list 的块按顺序拼成，换页处插入“〔第N页〕”（只在有真实页码时），segments 记每块在正文里的
 起止偏移和定位。
@@ -36,6 +40,7 @@ CLOUD_NATIVE = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
 CONVERTIBLE = {".doc", ".ppt", ".pptx"}
 EXCEL_EXTS = {".xls", ".xlsx"}
 SUPPORTED = SELF_HOSTED_NATIVE | CLOUD_NATIVE | EXCEL_EXTS
+JATS_EXTS = {".xml"}
 SKIP_BLOCKS = {"page_number", "header", "footer", "page_header", "page_footer", "discarded"}
 
 
@@ -172,6 +177,21 @@ def _plan(ext):
     return [("libreoffice_pdf+mineru", lambda p: _mineru(_doc_to_pdf(p)), "converted_page")]
 
 
+def _jats(path: Path, ext: str) -> dict:
+    from processing import jats_text
+
+    try:
+        parsed = jats_text.parse(path)
+    except (ValueError, OSError):
+        return _result("failed", method="jats_xml", error="invalid_xml", ext=ext, attempts=["jats_xml:invalid_xml"])
+    if parsed is None:
+        return _result("unsupported", ext=ext, attempts=["jats_xml:not_jats"])
+    if not parsed["text"].strip():
+        return _result("failed", method="jats_xml", error="empty_text", ext=ext, attempts=["jats_xml:empty_text"])
+    return _result("parsed", text=parsed["text"], method="jats_xml", ext=ext, attempts=["jats_xml:ok"],
+                   segments=parsed["segments"], locator_kind=parsed["locator_kind"])
+
+
 def parse_file(*, store_path: str, sha256: str, file_ext: str | None = None, **_ignored) -> dict:
     path = Path(store_path or "")
     if not store_path or not path.is_file():
@@ -181,6 +201,8 @@ def parse_file(*, store_path: str, sha256: str, file_ext: str | None = None, **_
     if _sha256_file(path) != sha256:
         return _result("failed", error="original_digest_mismatch", ext=file_ext)
     ext = (file_ext or path.suffix or "").lower()
+    if ext in JATS_EXTS:
+        return _jats(path, ext)
     if ext not in SUPPORTED:
         with path.open("rb") as stream:
             ext = _sniff(stream.read(4 * 1024 * 1024))

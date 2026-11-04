@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+from datetime import datetime
 from uuid import uuid4
 
 from pydantic import Field
@@ -433,14 +435,55 @@ def index_tick(*, batch_size=5):
     return {"state": "running", **scanned, "processed": states}
 
 
-def status(*, limit=100):
+# index_publications.state 的全部取值（流水线总览和管理页按这个顺序显示）
+STATES = ("queued", "sending", "indexing", "ready", "waiting", "blocked", "disabling", "disabled")
+_JOB_ID = re.compile(r"[0-9a-f]{64}")
+
+
+def _job_id(key):
+    if not isinstance(key, str) or not _JOB_ID.fullmatch(key):
+        raise HistoryError("index_publication_id", "索引作业编号须为64位小写十六进制", 422)
+    return key
+
+
+def _cursor(value):
+    """续页标记是上一页最后一条的“更新时间|作业编号”；格式不对就拒绝，不猜。"""
+    try:
+        stamp, key = value.rsplit("|", 1)
+        moment = datetime.fromisoformat(stamp)
+        if moment.tzinfo is None:
+            raise ValueError()
+        return moment, _job_id(key)
+    except (ValueError, AttributeError, HistoryError):
+        raise HistoryError("index_cursor", "索引列表续页标记无效", 422) from None
+
+
+def status(*, limit=100, state=None, source_id=None, cursor=None):
+    """索引作业列表：按更新时间倒序，可按状态、来源过滤；next_cursor 不为空时还有下一页。"""
     if not 1 <= limit <= 100:
         raise HistoryError("index_budget", "索引状态最多读取100项")
+    if state is not None and state not in STATES:
+        raise HistoryError("index_filter", "索引状态过滤值无效", 422)
+    if source_id is not None and not 1 <= len(source_id) <= 80:
+        raise HistoryError("index_filter", "来源编号过滤值无效", 422)
+    where, params = [], {"limit": limit + 1}
+    if state is not None:
+        where.append("p.state=:state")
+        params["state"] = state
+    if source_id is not None:
+        where.append("t.config->>'source_id'=:source")
+        params["source"] = source_id
+    if cursor is not None:
+        params["before_at"], params["before_id"] = _cursor(cursor)
+        where.append("(p.updated_at,p.id)<(:before_at,:before_id)")
     with history.history_engine().begin() as conn:
-        rows = conn.execute(text("""
-            SELECT p.*,t.config FROM index_publications p JOIN index_targets t ON t.id=p.target_id
-            ORDER BY p.updated_at DESC,p.id LIMIT :limit
-        """), {"limit": limit}).mappings().all()
+        rows = conn.execute(text(
+            "SELECT p.*,t.config FROM index_publications p JOIN index_targets t ON t.id=p.target_id"
+            + (" WHERE " + " AND ".join(where) if where else "")
+            + " ORDER BY p.updated_at DESC,p.id DESC LIMIT :limit"
+        ), params).mappings().all()
+        more = len(rows) > limit
+        rows = rows[:limit]
         result = []
         for row in rows:
             permitted = True
@@ -452,9 +495,13 @@ def status(*, limit=100):
                 permitted = False
             result.append({k: row[k] for k in [
                 "id","target_id","version_id","source_record_id","remote_id","state","desired_state",
-                "knowledge_id","receipt","error","attempts","next_check_at","updated_at",
-            ]} | {"source": row["config"], "read_permitted": permitted})
-        return result
+                "knowledge_id","receipt","error","attempts","first_send_at","next_check_at","updated_at",
+            ]} | {"artifact_key": row.get("artifact_key") or "",
+                  "title": (row["manifest"] or {}).get("title"),
+                  "source": row["config"], "read_permitted": permitted})
+        last = rows[-1] if more else None
+        return {"items": result,
+                "next_cursor": last["updated_at"].isoformat() + "|" + last["id"] if last else None}
 
 
 def state_counts():
@@ -465,9 +512,22 @@ def state_counts():
 
 
 def retry(key):
+    """把受阻（blocked）的作业放回待重试：尝试次数清零、立即到期，由发表循环里的 index_tick 处理；
+    处理时仍先向桥接服务核对已发请求，不会二次裸上传。其余状态不动，如实返回当前状态。"""
+    key = _job_id(key)
     with history.history_engine().begin() as conn:
         result = conn.execute(text("""
-            UPDATE index_publications SET state='waiting',attempts=0,next_check_at=clock_timestamp()
+            UPDATE index_publications SET state='waiting',attempts=0,next_check_at=clock_timestamp(),
+              updated_at=clock_timestamp()
             WHERE id=:id AND state='blocked' AND (lease_until IS NULL OR lease_until<clock_timestamp())
         """), {"id": key})
-        return {"id": key, "scheduled": result.rowcount == 1}
+        if result.rowcount == 1:
+            return {"id": key, "scheduled": True, "state": "waiting"}
+        row = conn.execute(text(
+            "SELECT state,(lease_until IS NOT NULL AND lease_until>=clock_timestamp()) AS leased "
+            "FROM index_publications WHERE id=:id"
+        ), {"id": key}).mappings().first()
+        if row is None:
+            raise HistoryError("index_publication_not_found", "没有这条索引作业", 404)
+        reason = "leased" if row["state"] == "blocked" and row["leased"] else "not_blocked"
+        return {"id": key, "scheduled": False, "state": row["state"], "reason": reason}

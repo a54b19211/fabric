@@ -17,7 +17,7 @@ const router = createRouter({
       path: '/documents',
       name: 'Documents',
       component: () => import('@/views/DocumentList.vue'),
-      meta: { title: '文档列表', description: '管理采集文档，触发 LLM 抽取、重爬与上传' },
+      meta: { title: '文档列表', description: '管理采集文档，触发 LLM 抽取' },
     },
     {
       path: '/documents/:uuid',
@@ -66,6 +66,12 @@ const router = createRouter({
       name: 'IdentityMergeProposals',
       component: () => import('@/views/IdentityMergeProposals.vue'),
       meta: { title: '身份合并提案', description: '人工确认精细消歧（Agent D）生成的身份合并提案（链接/拒绝/新建）' },
+    },
+    {
+      path: '/index-publications',
+      name: 'IndexPublications',
+      component: () => import('@/views/IndexPublications.vue'),
+      meta: { title: '正文索引发布', description: '正文进 WeKnora 的唯一路径（index_publications）：状态计数、作业列表、错误与受阻作业重试' },
     },
     {
       path: '/neo4j',

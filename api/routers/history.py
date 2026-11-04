@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -182,6 +182,24 @@ def archive(
     body: ArchiveImport, idempotency_key: str = Header(alias="Idempotency-Key")
 ):
     return _call(store.import_archive, body, idempotency_key)
+
+
+@router.post("/local-files", response_model=RunView, dependencies=[Depends(require_admin)])
+def local_file(
+    file: UploadFile = File(...),
+    collection: str = Form(min_length=1, max_length=120),
+    is_demo: bool = Form(False),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+):
+    """本地文件原件导入（multipart：file、collection、is_demo）。原件按 sha256 落盘 → 一条附件版本
+    （来源 local_files）→ 加工层附件解析。类型白名单与大小上限见 collection.local_files。"""
+    from collection.local_files import import_upload, max_upload_bytes
+
+    limit = max_upload_bytes()
+    content = file.file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail={"code": "file_too_large", "message": "文件超过上传上限"})
+    return _call(import_upload, content, file.filename or "", collection, is_demo, idempotency_key)
 
 
 @router.post("/fetch", response_model=RunView, dependencies=[Depends(require_admin)])
@@ -508,10 +526,25 @@ def native_graph(body: NativeGraphRequest,
 
 
 @router.get("/index/status", dependencies=[Depends(require_admin)])
-def index_status(limit: int = Query(default=100, ge=1, le=100)):
+def index_status(
+    limit: int = Query(default=100, ge=1, le=100),
+    state: str | None = Query(default=None, max_length=16),
+    source_id: str | None = Query(default=None, min_length=1, max_length=80),
+    cursor: str | None = Query(default=None, max_length=128),
+):
+    """正文进 WeKnora 的唯一路径（index_publications）的作业列表；按状态/来源过滤，next_cursor 续页。"""
     from db.index_publication import status
 
-    return _call(status, limit=limit)
+    return _call(status, limit=limit, state=state, source_id=source_id, cursor=cursor)
+
+
+@router.get("/index/counts", dependencies=[Depends(require_admin)])
+def index_counts():
+    """各状态作业数，未出现的状态记0。"""
+    from db.index_publication import STATES, state_counts
+
+    counts = _call(state_counts)
+    return {"states": {s: counts.get(s, 0) for s in STATES} | counts, "total": sum(counts.values())}
 
 
 @router.post("/index/{publication_id}/retry", dependencies=[Depends(require_admin)])

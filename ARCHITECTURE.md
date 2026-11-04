@@ -89,12 +89,13 @@ LLM 结构化抽取（实体 + 关系）→ 实体消歧 →
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     前端 frontend/（Vue3）                    │
-│  文档列表/审核工作台/图谱审核/实体消歧/合并/Neo4j/WeKnora/Agent │
+│  文档列表/审核/图谱审核/消歧/合并/正文索引发布/Neo4j/Agent     │
 └──────────────────────────┬──────────────────────────────────┘
                            │ Axios /api/*
 ┌──────────────────────────▼──────────────────────────────────┐
-│                 后端 API（api/，FastAPI，89 个端点）           │
-│  documents / extraction / review / weknora / agent 五个路由    │
+│                 后端 API（api/，FastAPI）                     │
+│  documents / extraction / review / weknora(图) / agent /      │
+│  research / history（含正文索引发布 /api/history/index）       │
 └──────┬──────────────┬──────────────┬──────────────┬──────────┘
        │              │              │              │
 ┌──────▼──────┐ ┌─────▼─────┐ ┌──────▼──────┐ ┌─────▼─────────┐
@@ -154,7 +155,9 @@ PostgreSQL，共 **15 张表**（`db/models.py` + 迁移），全局风格：**�
 | `documents.extraction_status` | `pending` → `queued` → `processing` → `done` / `failed` |
 | `extracted_entities.review_status` | `pending` → `auto_approved` / `approved` / `rejected` |
 | `entity_relations.review_status` | `pending` → `approved` / `rejected` |
-| `documents.weknora_sync_status` / `entity_dict.weknora_sync_status` | `pending` / `synced` / `failed` |
+| `index_publications.state`（正文进 WeKnora 的唯一路径） | `queued` → `sending` → `indexing` → `ready`；失败 `waiting`（自动退避）→ 6 次后 `blocked`（人工重试）；`disabling` → `disabled` |
+| `documents.weknora_sync_status` | 旧文档同步的遗留字段，接口已删除，不再更新 |
+| `entity_dict.weknora_sync_status` | `pending` / `synced` / `failed`（实体字典镜像推送） |
 | `extracted_entities/relations.weknora_graph_status` | `pending` / `pushed` / `failed` |
 | `documents.doc_status` | `AUTO_PROCESSED` / `PENDING_REVIEW` / `REVIEWED` |
 | `entity_merge_queue.resolution` | `pending` → `accept_new` / `keep_existing` / `custom` / `resolved_*` |
@@ -225,7 +228,9 @@ Step6 LLM 兜底精排 —— ⚠️ 当前被注释禁用（方案决策：降�
 
 ### 6.6 WeKnora 同步与 Neo4j 图投影
 
-- 文档全文 → WeKnora 知识库（RAG），`documents.weknora_sync_status` 追踪。
+- 正文 → WeKnora 知识库（RAG）只有一条路径：`db/index_publication.py`（`index_publications` 作业）+ 桥接服务，由发表循环里的 `index_tick` 自动推进。
+  操作入口：前端“同步 → 正文索引发布”（`/index-publications`）；接口 `GET /api/history/index/counts`、`GET /api/history/index/status`（按状态/来源过滤、续页）、
+  `POST /api/history/index/{id}/retry`（只对 `blocked` 生效），均需 History 管理员凭据。旧的 `/api/weknora` 文档同步接口和旧 WeKnora 同步页已删除。
 - 审核通过的实体/关系 → WeKnora 的 Neo4j 拷贝库（`core_engine/weknora_graph_client.py`），`weknora_graph_status` 追踪。
 - 分三步：`entity_dict` 镜像 → `graph_entities` → `graph_relations`，可单步或全量同步。
 
@@ -315,7 +320,7 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
 | 路由 | 页面 | 用途 |
 |---|---|---|
 | `/overview` | PipelineOverview | 数据面板：6 阶段流水线总览 + 站点分布扇形图 |
-| `/documents` | DocumentList | 文档列表 + 批量抽取/重爬/上传 MD |
+| `/documents` | DocumentList | 文档列表 + 批量抽取 |
 | `/documents/:uuid` | DocumentDetail | 文档详情 + Cytoscape 单文档图谱 |
 | `/review/:uuid` | ReviewWorkbench | 单文档人工审核 |
 | `/batch-review` | BatchReviewWorkbench | 多文档批量审核 |
@@ -325,7 +330,7 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
 | `/review/field-conflict` | FieldConflict | 属性冲突裁决 |
 | `/review/identity-merge` | IdentityMergeProposals | Agent 身份合并提案确认 |
 | `/neo4j` | Neo4jManager | Neo4j 图数据推送 |
-| `/weknora` | WeknoraManager | WeKnora 知识库同步 |
+| `/index-publications` | IndexPublications | 正文索引发布：状态计数、作业列表、错误、受阻作业重试 |
 | `/agent` | AutoReviewDashboard | Agent 运行记录仪表盘 |
 | `/agent/document-review` | DocumentReview | 文档维度 Agent 审核 |
 
@@ -360,7 +365,7 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
         │
         ▼
 ⑥ 同步（出口）
-   前端动作：WeKnora 同步 /weknora（文档推知识库）、Neo4j 图推送 /neo4j（实体/关系推图库）
+   前端动作：正文索引发布 /index-publications（查看作业与错误、重试受阻作业；发送由 index_tick 自动做）、Neo4j 图推送 /neo4j（实体/关系推图库）
 ```
 
 **前端动作 → 数据字段变化对照**：
@@ -374,7 +379,8 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
 | ④ 消歧确认 | 身份合并提案页 | 确认链接 / 拒绝 | `extracted_entities.dict_id` + proposal.status |
 | ⑤ 归并 | 实体身份合并页 | 合并字典实体 | `entity_dict` + `entity_merge_log` |
 | ⑤ 冲突裁决 | 属性冲突处理页 | 字段裁决 | `entity_dict.canonical_data` + `entity_merge_queue.resolution` |
-| ⑥ 同步 | WeKnora / Neo4j 页 | 触发同步 | `documents.weknora_sync_status` / `extracted_entities.weknora_graph_status` |
+| ⑥ 正文索引 | 正文索引发布页 | 重试受阻作业 | `index_publications.state` blocked → waiting、`attempts` 清零 |
+| ⑥ 图推送 | Neo4j 页 | 触发推送 | `extracted_entities.weknora_graph_status` |
 
 **数据面板逐阶段 → 表 → 字段对照**（`GET /api/agent/pipeline/overview`，仅读 7 张表）：
 
@@ -391,7 +397,7 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
 | ⑤ 归并 | conflict_pending | `entity_merge_queue` | `resolution='pending'` | — |
 | ⑤ 字典现状 | PrimeKG/抽取 字典实体数（`by_dict`）| `entity_dict` | `is_verified` | `is_deleted=false` |
 | ⑤ 字典现状 | 强ID重复组数（`by_dict`）| `entity_dict` | `external_ids` 强ID字段按 `entity_type` 分组 count>1 | `is_deleted=false` |
-| ⑥ 同步 | 文档 weknora_pending/synced/failed | `documents` | `weknora_sync_status` | `is_deleted=false` |
+| ⑥ 同步 | 正文索引 index_queued/…/index_blocked/index_disabled | `index_publications` | `state` | — |
 | ⑥ 同步 | 实体 graph_entity_pending/pushed/failed | `extracted_entities` | `weknora_graph_status` | `is_deleted=false` |
 | ⑥ 同步 | 关系 graph_relation_pending/pushed/failed | `entity_relations` | `weknora_graph_status` | `is_deleted=false` |
 
@@ -408,13 +414,13 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
 
 ## 9. 现有基础盘点（已具备的能力）
 
-1. **采集能力完整**：19 个药学数据源（NMPA/CDE/FDA/CHICTR/ClinicalTrials/PubMed/DrugBank/NCCN/HKEX/FiercePharma/PHIRDA 等），支持网页/PDF(MinerU)/Excel/DOCX/Markdown 上传。
+1. **采集能力完整**：19 个药学数据源（NMPA/CDE/FDA/CHICTR/ClinicalTrials/PubMed/DrugBank/NCCN/HKEX/FiercePharma/PHIRDA 等），支持网页/PDF(MinerU)/Excel/DOCX 解析（文档上传接口已删除，新资料只经采集框架入 History）。
 2. **抽取链路成熟**：16 类实体 + 25 类关系，来源专属 prompt 模板，智能分块 + 跨块去重，可插拔任务队列。
 3. **消歧引擎**：强 ID + 别名 + 规则 + pgvector 向量召回 + Reranker 精排，六阶段流水线。
 4. **审核体系完善**：单文档/批量/图谱三种审核入口，实体/关系/合并冲突全覆盖，元数据编辑。
 5. **实体字典与归并**：canonical 数据合并规则（数组追加、状态优先级覆盖、快照时间覆盖）、属性冲突队列、身份合并 + 快照回滚。
 6. **Agent 自动审核**：5 种 Agent，Pipeline + ReAct 两种编排，联网检索工具，SSE 流式推理可视化。
-7. **下游同步**：WeKnora 全文 RAG + Neo4j 图投影，状态可追踪、可重试。
+7. **下游同步**：正文经 `index_publications` 进 WeKnora（状态可查、受阻可重试，入口 `/index-publications`）+ Neo4j 图投影。
 8. **审计与运维**：review_log + operation_log 双审计，crawl_log 爬取日志，迁移器 + 15 个版本迁移，DB 连接池/Worker/队列状态监控端点。
 9. **前端体验**：统一 Teal 主题、图可视化（G6/Cytoscape）、统计卡片、推理时间线等。
 
@@ -463,4 +469,4 @@ Agent 体系与 Step 6 的关系是**「职责迁移 + 增强」，而非「放�
 
 - 实体类型（16）：Company、Drug、Target、Indication、ClinicalTrial、DealEvent、DealItem、ApprovalEvent、Policy、SafetyEvent、RecallEvent、TCMFormula、Compound、Pathway、DevelopmentProject、TrialIndication。
 - 关系类型（25）：DEVELOPS、PARTICIPATES_IN、INVESTED_IN、SUBSIDIARY_OF、SPONSORS、ISSUES、APPROVES、PARTICIPATES_IN_PROJECT、TARGETS、TREATS、IN_TRIAL、HAS_APPROVAL、HAS_ITEM、INVOLVES_DRUG、EVALUATES、FOR_INDICATION、IN_PATHWAY、ASSOCIATED_WITH、HOMOLOG_OF、SUBTYPE_OF、AFFECTS、DEVELOPED_BY、CONTAINS、RELATED_TO 等。
-- API 端点共 **89 个**：documents 7、extraction 8、review 27、weknora 10、agent 21、main 1（`/health`）。
+- API 端点（2026-11-04 本分支）：documents 3（站点/列表/详情，只读）、extraction 10、review 27、weknora 6（只推图数据）、agent 23、research 2、history（`/api/history`，含正文索引发布 counts/status/retry）、main 1（`/health`）。重爬、上传、文档同步接口已删除。

@@ -2,7 +2,8 @@
 
 调度（db.source_refresh）、限速（collection.rate）、增量窗口（collection.windows）、读取插件、
 来源许可目录（biz_rules.history_sources 按它生成站点来源的许可项）、加工层的文档类型和业务验收
-（contracts.acceptance 的来源状态）都只读这里。业务需要但还没接的来源也登记在这里（declared）。学生扩源时改这里、加必要的解析插件和契约样例，不动调度、
+（contracts.acceptance 的来源状态）都只读这里。业务需要但还没接的来源也登记在这里（declared）。
+证据细类（evidence_types）和内容覆盖层级（coverage 的键）只用 contracts.evidence_types 的注册表。学生扩源时改这里、加必要的解析插件和契约样例，不动调度、
 图谱和雷达核心。
 
 status 的三种取值如实区分：
@@ -15,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
+
+from contracts.evidence_types import COVERAGE, FINE_TYPES
 
 IncrementalKind = Literal[
     "source_updated_window",  # 来源自己的“更新日期”字段按窗口过滤
@@ -39,13 +42,15 @@ class CollectionSpec:
     name: str
     status: Literal["active", "declared", "blocked"]
     plugin: str | None
+    # 证据细类：只能用 contracts.evidence_types.FINE_TYPES（每个细类映射到 v3 1.4 的一个大类或 unmapped）；
+    # 一个来源可以覆盖多个细类。元数据/摘要/全文是覆盖层级，写在 coverage，不写在这里
     evidence_types: tuple[str, ...]
     # 服务的业务判断（v3 第一部分矩阵）：A 管线跟进 B 突破 C 产业结构 D 公卫威胁 E 判断更新
     decisions: tuple[str, ...]
     incremental: Incremental
     rate_group: str
     min_interval_seconds: float
-    # 元数据、摘要、全文各自覆盖到哪一层，如实写
+    # 元数据、摘要、全文各自覆盖到哪一层，如实写；键只能用 contracts.evidence_types.COVERAGE
     coverage: dict = field(default_factory=dict)
     # 支持不带时间窗的全量回填（续页标记可靠、按页可续）
     backfill: bool = False
@@ -53,15 +58,13 @@ class CollectionSpec:
     verified: bool = False
     blocked_reason: str | None = None
     notes: str = ""
-    # 上游系统：同一上游的两个来源（如 openFDA 的说明书端点与 CRL 端点）永远不算两份独立证实。
-    # 不写时取限速组（同一主机），见 upstream_system
-    upstream: str = ""
+    # 供给系统：同一系统经不同端点/栏目供给的来源编号写同一个值（如 openFDA 的说明书、召回、CRL）。
+    # 只记录供给重叠，不判断独立性：两个端点不能仅凭接口不同算两份独立证实，但同一主机上没有
+    # 共同样本/试验来源的两项研究也不因此合并。独立与否由 contracts.acceptance 按原始研究/披露主体、
+    # 固定材料、引用/转载关系、同源组判断。空 = 自成一个供给系统；不回退到限速组或主机名。
+    supply_system: str = ""
     # 这个来源编号实际覆盖的数据集/端点
     datasets: tuple[str, ...] = ()
-
-    @property
-    def upstream_system(self) -> str:
-        return self.upstream or self.rate_group
 
     @property
     def fetchable(self) -> bool:
@@ -99,7 +102,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         name="Europe PMC",
         status="active",
         plugin="public_api_reader",
-        evidence_types=("literature_metadata", "abstract"),
+        evidence_types=("primary_research", "review", "preprint"),
         decisions=("B", "E"),
         incremental=Incremental(
             "source_updated_window",
@@ -135,19 +138,27 @@ SPECS: tuple[CollectionSpec, ...] = (
         rate_group="sec.gov",
         min_interval_seconds=1.0,  # 沿用原读取循环的每秒一请求
         coverage={"metadata": "XBRL 标准事实", "fulltext": "无（filing 原文另接）"},
+        supply_system="sec_edgar",
     ),
     CollectionSpec(
         source_id="pubmed",
         name="PubMed",
         status="active",
         plugin="public_api_reader",
-        evidence_types=("literature_metadata", "abstract"),
+        evidence_types=("primary_research", "review", "preprint"),
         decisions=("B",),
         incremental=_NO_INCREMENT,
         rate_group="ncbi.nlm.nih.gov",
         min_interval_seconds=0.4,
-        coverage={"metadata": "EFetch", "abstract": "有则取", "fulltext": "不下载"},
-        notes="只支持按需读取；增量窗口（EDAT/MHDA）未接，暂不进固定刷新",
+        coverage={
+            "metadata": "EFetch",
+            "abstract": "有则取",
+            "fulltext": "PMC efetch 的 JATS 声明 CC/公共领域许可时保存；否则 Unpaywall 许可明确的 OA PDF"
+            "（需配置 DATAFABRIC_UNPAYWALL_EMAIL）；许可不明或不可取得的记缺失",
+            "attachments": "PMC 全文 XML / OA PDF 各成附件版本（collection.pubmed_fulltext）",
+        },
+        notes="只支持按需读取；增量窗口（EDAT/MHDA）未接，暂不进固定刷新。全文路径 11-04 只对 PMC 真实请求过，"
+        "未跑完整发布链",
     ),
     CollectionSpec(
         source_id="fda_crl",
@@ -161,8 +172,24 @@ SPECS: tuple[CollectionSpec, ...] = (
         min_interval_seconds=0.4,
         coverage={"metadata": "原生字段", "fulltext": "信函文本"},
         notes="只支持按需读取；openFDA 无可靠变更流",
-        upstream="api.fda.gov",
+        supply_system="openfda",
         datasets=("api.fda.gov/transparency/crl.json",),
+    ),
+    CollectionSpec(
+        source_id="local_files",
+        name="本地文件原件导入（PDF / Office）",
+        status="active",
+        plugin="local_file_import",
+        evidence_types=("uploaded_document",),
+        decisions=("A", "B", "C", "E"),
+        incremental=_NO_INCREMENT,
+        rate_group="local_files",  # 不发对外请求；目录要求每个来源有限速组
+        min_interval_seconds=0.1,
+        coverage={"metadata": "文件名、大小、sha256", "fulltext": "加工层附件解析（MinerU / Excel 直读）",
+                  "attachments": "原件本身（按 sha256 固定版本）"},
+        verified=False,
+        notes="入口：POST /api/history/local-files（multipart）或 /fetch query=inbox（服务器收件目录）。"
+        "许可由上传者负责；真实 PG 与 MinerU 的整链集成测试已写未跑",
     ),
     # ——以下为业务必需、尚未接通的来源。登记在目录里，是为了让缺口可见，不是宣称已覆盖。——
     CollectionSpec(
@@ -221,6 +248,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         min_interval_seconds=2.0,
         coverage={"metadata": "新闻/政策页", "fulltext": "正文", "attachments": "附件（需页面会话 cookies）"},
         verified=False,
+        supply_system="cde_website",
     ),
     *(
         CollectionSpec(
@@ -236,7 +264,11 @@ SPECS: tuple[CollectionSpec, ...] = (
             coverage=coverage,
             verified=False,
             notes=notes,
-            upstream=group if group == "api.fda.gov" else "",
+            supply_system={"fda_api_drug_label": "openfda", "fda_api_enforcement": "openfda",
+                           "cde_xxgk": "cde_website", "cde_zdyz": "cde_website",
+                           "phirda_industry": "phirda_website", "phirda_policy": "phirda_website",
+                           "phirda_rd": "phirda_website", "phirda_healthcare_reform": "phirda_website",
+                           "fda_press": "fda_website", "fda_drug_safety": "fda_website"}.get(source_id, ""),
             datasets={"fda_api_drug_label": ("api.fda.gov/drug/label.json",),
                       "fda_api_enforcement": ("api.fda.gov/drug/enforcement.json",)}.get(source_id, ()),
         )
@@ -259,10 +291,12 @@ SPECS: tuple[CollectionSpec, ...] = (
              {"metadata": "安全通讯页", "fulltext": "正文"}, ""),
             ("fda_api_drug_label", "openFDA 药品说明书（drug/label）", ("regulatory_label",), ("A",),
              "api.fda.gov", 0.5, {"metadata": "说明书接口记录", "fulltext": "接口字段"},
-             "query=records；与 fda_api_enforcement、fda_crl 同上游 api.fda.gov，不算两份独立证实"),
+             "query=records；与 fda_api_enforcement、fda_crl 同属 openFDA 供给系统，不能仅凭端点不同算两份独立证实"),
             ("fda_api_enforcement", "openFDA 药品召回执行报告（drug/enforcement）", ("regulatory_notice",), ("A",),
              "api.fda.gov", 0.5, {"metadata": "召回接口记录", "fulltext": "接口字段"},
-             "query=records；与 fda_api_drug_label 同上游"),
+             "query=records；产品类别 drug（站点配置 config/sites/fda/api_enforcement.py 指向 "
+             "api.fda.gov/drug/enforcement.json），只证明配置能读，不代表在采；与 fda_api_drug_label、fda_crl "
+             "同属 openFDA 供给系统"),
             ("hkex", "港交所披露易", ("corporate_filing",), ("A", "C"), "hkexnews.hk", 2.0,
              {"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, "query=records；医药公司清单见站点配置"),
             ("fiercepharma", "Fierce Pharma（RSS）", ("industry_media",), ("A", "C"), "fiercepharma.com", 2.0,
@@ -296,6 +330,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         incremental=_NO_INCREMENT,
         rate_group="biorxiv.org",
         min_interval_seconds=1.0,
+        supply_system="openrxiv",
     ),
     CollectionSpec(
         source_id="drugs_fda",
@@ -315,7 +350,7 @@ SPECS: tuple[CollectionSpec, ...] = (
 _DECLARED = (
     ("ema", "EMA", ("regulatory_approval",), ("A",), "ema.europa.eu"),
     ("company_ir", "企业 IR 管线页和财报演示（不是独立无偏来源）", ("company_disclosure",), ("A", "C"), "company_ir"),
-    ("conference_abstracts", "会议摘要", ("abstract",), ("A", "B"), "conference_abstracts"),
+    ("conference_abstracts", "会议摘要", ("conference_abstract",), ("A", "B"), "conference_abstracts"),
     ("patents", "专利", ("patent",), ("A", "B"), "patents"),
     ("medrxiv", "medRxiv", ("preprint",), ("B",), "medrxiv.org"),  # 与 bioRxiv 同一 openRxiv 接口，见下
     ("arxiv", "arXiv 相关类别（AI 制药等不限于 q-bio）", ("preprint",), ("B",), "arxiv.org"),
@@ -342,7 +377,7 @@ _DECLARED = (
 SPECS = SPECS + tuple(
     CollectionSpec(source_id=sid, name=name, status="declared", plugin=None, evidence_types=evidence,
                    decisions=decisions, incremental=_NO_INCREMENT, rate_group=group, min_interval_seconds=1.0,
-                   upstream="biorxiv.org" if sid == "medrxiv" else "")
+                   supply_system={"medrxiv": "openrxiv", "sec_filings": "sec_edgar"}.get(sid, ""))
     for sid, name, evidence, decisions, group in _DECLARED
 )
 
@@ -351,6 +386,28 @@ FETCHABLE = frozenset(s.source_id for s in SPECS if s.fetchable)
 WATCHABLE = frozenset(s.source_id for s in SPECS if s.watchable)
 # 由站点插件采集的来源（投影和读取都按这个集合分派）
 SITE_SOURCES = frozenset(s.source_id for s in SPECS if s.plugin == "site_crawler")
+
+
+def _check_evidence_registry() -> None:
+    """目录里的证据细类和覆盖层级只用 contracts.evidence_types 的注册表，不另立词表。"""
+    errors = []
+    for s in SPECS:
+        bad = [t for t in s.evidence_types if t not in FINE_TYPES]
+        if bad:
+            errors.append(f"{s.source_id} 的 evidence_types 有未注册的细类 {bad}")
+        bad = [k for k in s.coverage if k not in COVERAGE]
+        if bad:
+            errors.append(f"{s.source_id} 的 coverage 有未注册的覆盖层级 {bad}")
+    if errors:
+        raise ValueError("；".join(errors))
+
+
+_check_evidence_registry()
+# 有附件版本的来源（加工层 db.derived_text 只解析这些来源的 role=attachment 版本）：站点插件，加上目录里
+# 声明了附件覆盖的已接通来源（PubMed 全文、本地导入）
+ATTACHMENT_SOURCES = SITE_SOURCES | frozenset(
+    s.source_id for s in SPECS if s.fetchable and "attachments" in s.coverage
+)
 
 
 def spec(source_id: str) -> CollectionSpec:

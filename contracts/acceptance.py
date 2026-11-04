@@ -5,19 +5,22 @@
   6.4 给了国家/省级/高校三种使用视角。这些只写在文档里时，最容易被“文风像内参”“又加了几个站点”替代。
 - 这里每个案例都绑定 v3 原文出处（design_ref），每个出处恰好对应一个案例；
   案例必须有反例（counterexample），必须有可机检的断言（checks），禁止的捷径写进 must_not。
-- 证据类型只用 v3 1.4 的 12 种（英文 slug），来源编号只用 collection.catalog 里的编号，
-  缺口必须如实列出；本模块不另立来源目录，只补目录不可能知道的部署事实（DEPLOYMENT）。
+- 证据类型只用 v3 1.4 的 12 个大类（英文 slug，定义在 contracts.evidence_types，与来源目录、
+  画像共用一份注册表），来源编号只用 collection.catalog 里的编号，缺口必须如实列出；
+  本模块不另立来源目录，只补目录不可能知道的事实：导入能力（IMPORT_ROUTES）、本次实测覆盖（DEPLOYMENT）。
 - 夹具不编造真实世界事实：没找到的真实材料标 to_be_sourced；合成资料只验证流程（6.4），
   不能据此宣布覆盖了真实场景。
 
-v2 按审阅 8 条裁定修订：
-1. 来源按覆盖的数据集分开（openFDA 说明书、召回、CRL 是三个编号），同上游不算两份独立证实；
-2. 采集状态（由目录推出）与生产部署（DEPLOYMENT）分栏，不知道写 unknown；
+v2 按审阅 8 条裁定修订（v3 契约收窄了第 1 条的独立性规则，见 shared_supply_systems）：
+1. 来源按覆盖的数据集分开（openFDA 说明书、召回、CRL 是三个编号）；同一供给系统的两个端点
+   不能仅凭端点不同算两份独立证实，但独立与否按材料判断，不按主机或接口合并；
+2. 来源事实分三栏：采集插件状态（目录推出）、导入能力、本次实测覆盖（DEPLOYMENT），不知道写 unknown；
 3. 更正验收看判断维持还是修订、旧引用保留、受影响计算更新，不只看“文件变了”；
 4. E 案例只在 E.json 定义，其他链路用 related_cases 引用，计分只算一次；
 5. E 的触发方式覆盖新材料自动触发、用户追问、历史回放，结果维持和修订都要验；
 6. 材料真实性（data_truth）与故障注入（fault_injected）分开标，合成永远不算真实覆盖；
-7. 目标材料（data_basis）与执行状态（status）分开，公开回放要有内容绑定的可见性证明，比谁先判断对；
+7. 目标材料（data_basis）与执行状态（status）分开，公开回放要有内容绑定的可见性证明，比谁先判断对
+   （这条口径出自归档报告 13.5 实验 D，不是 v3 章节，见 JUDGED_FIRST_SOURCE）；
 8. 内参除 1.3 五项外保留决策对象、口径、内部底册缺口、行动条件和不确定性，上报不把不确定写成确定。
 
 本模块只定义契约和校验，不跑雷达；以后雷达的报告/运行记录按 checks 逐条判定。
@@ -35,46 +38,47 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from collection.catalog import CATALOG
+from contracts.evidence_types import CATEGORIES, FINE_TYPES, category_of
 
-CONTRACT_VERSION = "bioradar.acceptance.v2"
+CONTRACT_VERSION = "bioradar.acceptance.v3"
 
 # ---------- 词表 ----------
 
-# v3 1.4 的 12 种证据类型，顺序与原文一致。用英文 slug 是为了让程序和夹具不受中文写法差异影响，
-# 中文名留着给报告和人读。
-EVIDENCE_TYPES: dict[str, str] = {
-    "registry": "登记",
-    "regulatory_decision": "监管决定",
-    "primary_research": "原始研究",
-    "preprint": "预印本",
-    "conference": "会议",
-    "company_disclosure": "公司披露",
-    "financial": "财务",
-    "policy": "政策",
-    "official_notice": "官方通报",
-    "media": "媒体",
-    "social": "社媒",
-    "patent": "专利",
-}
+# 证据类型只有一份注册表（contracts.evidence_types）：这里用的是其中 v3 1.4 的 12 个大类，
+# 顺序与原文一致。来源目录的细类（registry_record、filing_fact…）和覆盖层级（metadata/abstract/fulltext）
+# 不能写进 required_evidence。
+EVIDENCE_TYPES: dict[str, str] = CATEGORIES
 
-# 来源只有一份目录：名称、上游、数据集、采集状态都从 collection.catalog.CATALOG 取（裁定 1、2）。
-# 采集状态由目录推出：active 且实测过 / active 但插件未对原站实测 / 只登记 / 被来源拒绝。
+# 来源事实分三栏（审阅 389），每栏各有出处，不混写：
+# 1. 采集插件状态：由目录推出——active 且实测过 / active 但插件未对原站实测 / 只登记 / 被来源拒绝；
 CollectionState = Literal["active_verified", "plugin_unverified", "declared", "blocked"]
-# 生产部署事实是目录不可能知道的另一栏：在采且已索引 / 只有库存 / 没有 / 不知道（要证据，不能当“是”）
+# 2. 导入能力：不经采集插件、把已有材料导进来的通道——documents 库存冻结桥 / 本地导入；
+ImportRoute = Literal["documents_stock_bridge", "local_import"]
+# 3. 本次实测覆盖：在采且已索引 / 只有库存 / 没有 / 不知道（要证据，不能当“是”）
 Live = Literal["collecting_and_indexed", "stock_only", "no", "unknown"]
 Availability = Literal["has_material", "unknown", "gap"]
+
+# 导入能力只写有出处的。documents 库存冻结桥：README“既有 clinicaltrials、fda_api_drug_label、chictr、
+# fda_api_enforcement、nmpa、cde_xxgk、cde 可逐源许可后自动桥接”。本地导入：目录里的 local_files
+# （上传原件，入口见其 notes）。有导入能力只说明“能导”，不说明库存有多少、是否已导：那是第 3 栏。
+IMPORT_ROUTES: dict[str, tuple[ImportRoute, ...]] = {
+    **{sid: ("documents_stock_bridge",)
+       for sid in ("clinicaltrials", "fda_api_drug_label", "chictr", "fda_api_enforcement", "nmpa",
+                   "cde_xxgk", "cde")},
+    "local_files": ("local_import",),
+}
 
 
 @dataclass(frozen=True)
 class Deployment:
-    """一个来源在生产上的部署事实。stock_docs 只记已核对过的库存条数（库存集合名 → 条数）。"""
+    """一个来源本次实测的覆盖事实。stock_docs 只记已核对过的库存条数（库存集合名 → 条数）。"""
 
     live: Live
     stock_docs: dict[str, int] = field(default_factory=dict)
     note: str = ""
 
 
-# 只写已知的部署事实。没写进来的：declared/blocked 视为 live=no（没有插件就不可能在采）；
+# 只写实测过的覆盖事实。没写进来的：declared/blocked 视为 live=no（没有插件就不可能在采）；
 # active 视为 live=unknown（插件能读不等于生产在采，要拿 watch 配置、采集记录或索引计数）。
 _STOCK_ONLY = "生产无新采集，只有库存"
 DEPLOYMENT: dict[str, Deployment] = {
@@ -87,7 +91,11 @@ DEPLOYMENT: dict[str, Deployment] = {
     "chictr": Deployment("stock_only", note=_STOCK_ONLY),
     "hkex": Deployment("no", note="生产不在采"),
     "fda_api_drug_label": Deployment("stock_only", {"fda_api_drug_label": 258915}, _STOCK_ONLY),
-    "fda_api_enforcement": Deployment("stock_only", {"fda_api_enforcement": 17684}, _STOCK_ONLY),
+    # 产品类别是 drug：站点配置 config/sites/fda/api_enforcement.py 指向 api.fda.gov/drug/enforcement.json。
+    # 这只证明配置能读 drug 召回，不代表在采。
+    "fda_api_enforcement": Deployment(
+        "stock_only", {"fda_api_enforcement": 17684},
+        _STOCK_ONLY + "；产品类别 drug（配置指向 drug/enforcement.json），只证明配置能力，不代表在采"),
 }
 
 
@@ -98,14 +106,30 @@ def collection_state(source_id: str) -> CollectionState:
     return s.status
 
 
+def import_routes(source_id: str) -> tuple[ImportRoute, ...]:
+    return IMPORT_ROUTES.get(source_id, ())
+
+
 def deployment(source_id: str) -> Deployment:
     default = Deployment("unknown" if CATALOG[source_id].status == "active" else "no", note="未登记部署事实")
     return DEPLOYMENT.get(source_id, default)
 
 
-def check_deployment(table: dict[str, Deployment]) -> None:
-    """部署表与目录一致：编号在目录里；未实测、只登记或被拒的来源不能写在采；有库存就不是 no。"""
+def source_facts(source_id: str) -> dict[str, Any]:
+    """一个来源的三栏事实：采集插件状态、导入能力、本次实测覆盖。三栏各自独立，不合成一个“新/老”结论。"""
+    return {"collection_state": collection_state(source_id), "import_routes": import_routes(source_id),
+            "deployment": deployment(source_id).live}
+
+
+def check_deployment(table: dict[str, Deployment],
+                     routes: dict[str, tuple[ImportRoute, ...]] | None = None) -> None:
+    """三栏一致：编号在目录里；未实测、只登记或被拒的来源不能写在采；有库存就不是 no；
+    只有库存的来源必须有导入能力（没有导入通道，库存就读不进来）。"""
+    routes = IMPORT_ROUTES if routes is None else routes
     errors = []
+    for sid in routes:
+        if sid not in CATALOG:
+            errors.append(f"导入能力里的 {sid} 不在 collection.catalog 里")
     for sid, d in table.items():
         if sid not in CATALOG:
             errors.append(f"{sid} 不在 collection.catalog 里")
@@ -115,6 +139,8 @@ def check_deployment(table: dict[str, Deployment]) -> None:
             errors.append(f"{sid}：采集状态 {state} 时不能写 collecting_and_indexed")
         if d.stock_docs and d.live == "no":
             errors.append(f"{sid}：有库存时 live 不能是 no")
+        if (d.live == "stock_only" or d.stock_docs) and not routes.get(sid):
+            errors.append(f"{sid}：写了库存但没有导入能力")
     if errors:
         raise ValueError("；".join(errors))
 
@@ -131,10 +157,54 @@ def availability(source_id: str) -> Availability:
     return "unknown" if d.live == "unknown" else "gap"
 
 
-def count_independent_upstreams(source_ids: list[str]) -> int:
-    """按目录里的上游系统合并后，还剩几份可能独立的来源。同一上游的多个来源编号只算一份，
-    这样 openFDA 说明书、召回和同出 api.fda.gov 的 CRL 永远不会被算成多份独立证实。"""
-    return len({CATALOG[s].upstream_system for s in source_ids})
+# ---------- 独立性：供给重叠只触发断言，独立与否按材料判断 ----------
+
+# 目录只记录供给系统（CollectionSpec.supply_system）的重叠，不据此计数。HTTP 拓扑不是情报判断：
+# - 同一供给系统的两个端点（如 openFDA 说明书与召回）不能仅凭接口不同算两份独立证实；
+# - 但同一主机/限速组也不等于同一份：同一论文在 PubMed 与 Europe PMC 各有一条仍是一份，
+#   两项没有共同样本/试验来源的研究即使同在一个论文平台上也是两份。
+# 两份材料是否独立，只按下面四个依据逐条判断；任一依据成立就不独立，全部排除才独立，其余写 unknown。
+INDEPENDENCE_BASES: dict[str, str] = {
+    "same_study_or_discloser": "研究材料看是否同一原始研究（共同样本/试验来源），披露材料看是否同一披露主体",
+    "same_fixed_material": "同一固定材料（同一原件的不同记录、版本或镜像）",
+    "citation_or_reprint": "引用、转载或转述关系",
+    "same_origin_group": "已判定的同源组（同一线索的转发链等）",
+}
+Independence = Literal["independent", "not_independent", "unknown"]
+
+
+def supply_system(source_id: str) -> str:
+    """来源编号所属的供给系统；目录没写就是它自己。不回退到限速组或主机名。"""
+    return CATALOG[source_id].supply_system or source_id
+
+
+def shared_supply_systems(source_ids: list[str]) -> dict[str, list[str]]:
+    """一组来源里，供给系统相同的不同来源编号（供给系统 → 编号）。只说明“供给重叠”，
+    不返回独立证实数：独立与否要按 INDEPENDENCE_BASES 在材料层面判断。"""
+    groups: dict[str, set[str]] = {}
+    for sid in source_ids:
+        groups.setdefault(supply_system(sid), set()).add(sid)
+    return {k: sorted(v) for k, v in sorted(groups.items()) if len(v) > 1}
+
+
+def independence(bases: dict[str, bool | None]) -> Independence:
+    """两份材料是否互为独立证实。只看 INDEPENDENCE_BASES 的四个依据（True 成立 / False 排除 / None 判不了），
+    故意不收主机、端点、供给系统：任一依据成立 → not_independent；四个都排除 → independent；否则 unknown。"""
+    unknown = sorted(set(bases) - set(INDEPENDENCE_BASES))
+    if unknown:
+        raise ValueError(f"未知的独立性依据 {unknown}（只能用 INDEPENDENCE_BASES）")
+    if any(bases.get(b) is True for b in INDEPENDENCE_BASES):
+        return "not_independent"
+    if all(bases.get(b) is False for b in INDEPENDENCE_BASES):
+        return "independent"
+    return "unknown"
+
+
+# “不比谁先报警，比谁先判断对”的出处：归档报告 13.5 实验 D，不是 v3 章节（不能假托 v3）
+JUDGED_FIRST_SOURCE = (
+    "/home/zk_test/zk_projects/.branch-archive-20261101/opus 5.5报告.md 第 554–558 行"
+    "（sha256=687718eaaa63409dc0ed3053db02ad515208a754f9d3da1248f867335b6c4928）"
+)
 
 # 断言种类：以后判定一份报告或一次运行是否合格时，每种都要有确定的判定程序。
 # 只收 v3 点名的要求，故意不收“文风像内参”之类的主观项（6.4：评价不看文风）。
@@ -189,8 +259,11 @@ CHECK_KINDS: dict[str, str] = {
     "no_precise_figure_without_denominator": "没有分母时不报精确的依赖度或比例",
     "comparison_controls_caliber": "区域之间、机构之间比较时控制口径、规模和时间",
     "no_real_coverage_claim": "合成资料只验证流程，不据此宣布已覆盖真实场景",
-    # 审阅裁定 1、2：来源关系与状态
-    "same_upstream_not_independent": "同一上游的不同来源编号（如 openFDA 与 FDA CRL）在独立证实数中合计为一",
+    # 审阅裁定 1、2（v3 收窄）：来源关系与状态
+    "shared_supply_not_independent": (
+        "同一供给系统的不同来源编号/端点（如 openFDA 说明书、召回、CRL）不能仅凭端点不同算两份独立证实；"
+        "是否独立按原始研究/披露主体、固定材料、引用/转载关系、同源组判断（INDEPENDENCE_BASES），"
+        "无法判定写 unknown；也不因同主机就把没有共同样本/试验来源的研究合并"),
     "source_status_verified": "状态未知的来源先拿证据（watch 配置、采集记录、索引计数），拿不到就按缺口写",
     # 审阅裁定 3：更正看判断结果，不只看文件变了
     "judgment_maintained_or_revised": "明确写出判断是维持还是修订，并给出理由；只报告“文件变了”不算",
@@ -202,7 +275,7 @@ CHECK_KINDS: dict[str, str] = {
     "fault_not_reported_as_incident": "注入的隔离故障在运行记录和报告里标为注入，不写成生产事故或来源故障",
     # 审阅裁定 7：公开回放
     "visibility_proof_bound": "进截止前的每份材料都有与内容绑定的可见性证明（内容哈希+证明时间），没有就不进",
-    "judged_correctly_first": "比“谁先判断对”而不是谁最早报警（13.5 口径）",
+    "judged_correctly_first": "比“谁先判断对”而不是谁最早报警（归档报告 13.5，见 JUDGED_FIRST_SOURCE）",
     # 审阅裁定 8：内参
     "uncertainty_not_upgraded": "面向更高层级时不确定性原样保留，四件事分别交代，不压成确定结论或精确百分比",
 }
@@ -407,7 +480,7 @@ class AcceptanceCase(BaseModel):
     design_ref: str
     # 具体的业务问题（中文）；回答不了它的报告不合格
     question: str = Field(min_length=1)
-    # 需要的证据类型（v3 1.4 词表 slug）；来源目录按证据类型组织，不按单一 P 级
+    # 需要的证据大类（v3 1.4 的 12 类 slug，contracts.evidence_types.CATEGORIES）；不按单一 P 级
     required_evidence: list[str] = Field(min_length=1)
     # 需要的编号和时间字段；时间和实体对不上，同口径比较和同源判断都做不了
     required_entities_and_times: list[str] = Field(min_length=1)
@@ -472,9 +545,13 @@ class AcceptanceCase(BaseModel):
     @field_validator("required_evidence")
     @classmethod
     def _known_evidence(cls, v: list[str]) -> list[str]:
-        bad = [x for x in v if x not in EVIDENCE_TYPES]
+        fine = [f"{x}（细类，属于大类 {category_of(x)}）"
+                for x in v if x in FINE_TYPES and x not in CATEGORIES]
+        if fine:
+            raise ValueError(f"required_evidence 只能用证据大类，不能用细类：{fine}")
+        bad = [x for x in v if x not in CATEGORIES]
         if bad:
-            raise ValueError(f"未知证据类型 {bad}（只能用 EVIDENCE_TYPES 的英文 slug）")
+            raise ValueError(f"未知证据类型 {bad}（只能用证据大类 CATEGORIES 的英文 slug）")
         return v
 
     @field_validator("sources_available", "sources_status_unknown", "sources_gap")
@@ -549,8 +626,8 @@ class AcceptanceCase(BaseModel):
             need_checks.add("gap_stated")
         if self.sources_status_unknown:
             need_checks.add("source_status_verified")
-        if count_independent_upstreams(listed) < len(listed):
-            need_checks.add("same_upstream_not_independent")
+        if shared_supply_systems(listed):
+            need_checks.add("shared_supply_not_independent")
         if self.fault_injected:
             need_checks.add("fault_not_reported_as_incident")
         if self.trigger:

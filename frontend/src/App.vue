@@ -64,6 +64,7 @@ import {
   Switch,
   Share,
   DataAnalysis,
+  Promotion,
 } from '@element-plus/icons-vue'
 
 // 默认收起，鼠标移入侧边栏展开
@@ -108,6 +109,7 @@ const navGroups = [
   {
     title: '同步',
     items: [
+      { path: '/index-publications', label: '正文索引发布', icon: Promotion },
       { path: '/neo4j', label: 'Neo4j 图推送', icon: Share },
     ],
   },

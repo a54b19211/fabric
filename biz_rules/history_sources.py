@@ -62,8 +62,12 @@ SOURCE_CATALOG = {
         "license_url": "https://www.ncbi.nlm.nih.gov/home/about/policies/",
         "history_coverage": "本应用采用后版本；无匿名十年完整快照保证",
         "native_id": "PMID",
-        "read_scope": "EFetch元数据、摘要和更正关系；不下载未授权全文",
-        "limitations": ["同PMID/DOI跨库不构成独立研究证据"],
+        "read_scope": "EFetch元数据、摘要和更正关系；全文只保存许可明确的（PMC JATS声明CC/公共领域许可、"
+        "Unpaywall许可明确的OA PDF），各成附件版本；许可不明或不可取得的记缺失",
+        "limitations": [
+            "同PMID/DOI跨库不构成独立研究证据",
+            "全文许可按原件<license>或Unpaywall声明判定，未经人工核实；Unpaywall需配置联系邮箱",
+        ],
     },
     "fda_crl": {
         "name": "FDA Complete Response Letters",
@@ -105,6 +109,21 @@ SOURCE_CATALOG = {
             "DON是选择性公告，不是全球疫情全量；零公告不证明没有暴发",
             "发布/更新日期不是暴发开始；不从叙述推病例数、发病率或专业确认",
             "本API无结构化人群分母，仅供公告事件模式；不能生成发病率/病例数序列",
+        ],
+    },
+    "local_files": {
+        "name": "本地文件原件导入（PDF / Office）",
+        "business_types": ["literature", "regulatory", "trials_pipeline"],
+        "acquisition_channel": "institutional_upload",
+        "access": "controlled_import",
+        "license_url": None,
+        "history_coverage": "上传/导入后的不可变版本；文件日期不是来源发布日期",
+        "native_id": "local-file:<集合>/<文件名>；版本按原件sha256固定",
+        "read_scope": "管理员上传或服务器收件目录中的单个原件；正文由加工层附件解析产出（页/块/表定位）",
+        "limitations": [
+            "许可与来源由上传者负责，系统不核实",
+            "集合名和文件名由上传者给出，不是来源原生编号",
+            "不推断发布日期、作者或专业结论",
         ],
     },
     "legacy_documents": {
@@ -375,12 +394,17 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
-    from collection.catalog import SITE_SOURCES
+    from collection.catalog import ATTACHMENT_SOURCES, SITE_SOURCES
 
     if source_id in SITE_SOURCES:
         from collection.site_crawler import project_capture
 
         return project_capture(source_id, item)
+    if source_id in ATTACHMENT_SOURCES:
+        # 站点以外有附件版本的来源（PubMed 全文、本地导入）：与站点附件同一契约
+        from collection.attachments import project_attachment
+
+        return project_attachment(source_id, item)
     data = parse_json(item.raw_content)
     if source_id == "sec_companyfacts":
         from biz_rules.sec_xbrl import project_sec
@@ -811,7 +835,7 @@ def _read_public_api(request: FetchRequest) -> dict:
     HTTP异常绝不伪装EOF。翻页之间按来源目录的限速组等待。"""
     from collection.catalog import spec
 
-    declared = spec(request.source_id)
+    spec(request.source_id)  # 来源必须在采集目录里（不在则 KeyError）
     records, seen, requests_count, source_total = [], {}, 0, None
     exhausted, error, stop = False, None, "record_budget"
     began = time.monotonic()
@@ -1098,7 +1122,8 @@ def _bounded_text(client, url, params, began, deadline, budget):
 
 
 def _read_pubmed(request, client, began):
-    # 新历史链用EFetch真实摘要，不复用ESummary不存在的summary字段；不抓PMC/PDF。
+    # 新历史链用EFetch真实摘要，不复用ESummary不存在的summary字段。全文（PMC JATS / Unpaywall OA PDF）
+    # 按许可另成附件版本，见 collection.pubmed_fulltext；每个请求同样过共享限速、计入本次预算。
     records = []
     try:
         base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
@@ -1177,17 +1202,30 @@ def _read_pubmed(request, client, began):
             records.append(item)
         if {item.source_record_id for item in records} != set(ids):
             raise ValueError("missing_ids")
+        from collection.pubmed_fulltext import attach_fulltext
+
+        articles = []
+        for item in records:
+            facts = _project_pubmed(item)["facts"]
+            articles.append((item.source_record_id, facts.get("pmcid"), facts.get("doi")))
+        attachments, coverage, more_requests, more_bytes = attach_fulltext(
+            client,
+            articles,
+            requests_left=request.max_pages * 10 - (calls + 1),
+            deadline=began + request.deadline_seconds,
+        )
         return {
-            "records": records,
+            "records": records + attachments,
             "complete": False,
             "upstream_pagination_exhausted": count <= len(records),
             "stop_reason": "upstream_exhausted"
             if count <= len(records)
             else "record_budget",
             "error": None,
-            "requests": calls + 1,
-            "bytes": len(raw_xml.encode()),
+            "requests": calls + 1 + more_requests,
+            "bytes": len(raw_xml.encode()) + more_bytes,
             "source_total": count,
+            "attachment_coverage": coverage,
         }
     except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
         return {
@@ -1212,9 +1250,16 @@ def _read_site(request):
     return site_crawler.read_site(request)
 
 
+def _read_local(request):
+    from collection.local_files import read_local
+
+    return read_local(request)
+
+
 # 来源插件注册表：插件名 → 读取函数。来源目录（collection.catalog）只引用插件名。
 PLUGINS = {
     "site_crawler": _read_site,
+    "local_file_import": _read_local,
     "public_api_reader": _read_public_api,
     "who_don": _read_who,
     "sec_xbrl": _read_sec,

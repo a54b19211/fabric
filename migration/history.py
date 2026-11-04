@@ -57,6 +57,17 @@ def migrate_history():
                         ),
                     },
                 )
+            if catalog.get("acquisition_channel") == "site_plugin":
+                # 站点来源的说明文字随采集目录更新（已有行 ON CONFLICT 不会改）；只改描述字段，
+                # 不动 access、依赖和许可状态
+                conn.execute(
+                    text(
+                        "UPDATE history_sources SET catalog=catalog || CAST(:metadata AS jsonb) WHERE source_id=:id"
+                    ),
+                    {"id": source_id, "metadata": canonical({k: catalog[k] for k in (
+                        "name", "business_types", "acquisition_channel", "history_coverage", "native_id",
+                        "read_scope", "limitations") if k in catalog})},
+                )
             if source_id == "primekg_graph":
                 # 只更新当前能力说明，不重置已持久来源依赖/许可或版本。
                 conn.execute(

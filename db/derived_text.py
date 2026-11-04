@@ -22,7 +22,7 @@ from sqlalchemy import text
 from biz_rules.history_models import HistoryError
 from processing import attachment_parse
 
-from collection.catalog import SITE_SOURCES as ATTACHMENT_SOURCES  # noqa: E402  站点来源才有附件版本
+from collection.catalog import ATTACHMENT_SOURCES  # noqa: E402  有附件版本的来源：站点、PubMed 全文、本地导入
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 900
 
@@ -229,7 +229,7 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
         "limitations": [
             "派生正文由解析器从原件生成；表格、扫描件的识别可能有误，引用时以原件为准",
             "locator_kind=converted_page 的页码是转换后 PDF 的页码，不是原文件页码；block/sheet 没有页码；"
-            "unavailable 表示解析服务没给定位",
+            "jats_section（PMC 全文 XML）按节路径和 JATS 路径定位，也没有页码；unavailable 表示解析服务没给定位",
             "failed / unsupported 表示附件内容没有进入正文，不表示附件为空",
             "parent_version_id 为空表示父页面的固定版本未知（例如按旧库链接补抓）",
         ],

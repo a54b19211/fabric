@@ -22,7 +22,7 @@
   └─ Neo4j 推送管理页：查看推送状态，触发推送/重试
 
 并行下游（RAG）← 你提供操作界面
-  └─ WeKnora 同步管理页
+  └─ 正文索引发布页（查看作业、错误，重试受阻作业；发送本身由后台 index_tick 自动做）
 ```
 
 ---
@@ -138,25 +138,36 @@
 
 ---
 
-### 5. WeKnora 同步管理页（/weknora）
+### 5. 正文索引发布页（/index-publications，已实现：`frontend/src/views/IndexPublications.vue`）
 
-**顶部统计卡片**（调 `GET /api/weknora/stats`）：
-- 待同步 N 条 / 已同步 N 条 / 失败 N 条
+> 2026-11 更新：原“WeKnora 同步管理页”（/weknora）和它调用的文档同步接口已删除。正文进 WeKnora 只有一条路径：
+> `index_publications` 作业 + 桥接服务。这个页面只做查看与重试，不能另加“手动同步正文”的按钮或接口。
 
-**文档列表**（调 `GET /api/weknora/pending`）：
+接口都在 `/api/history` 下，需 `Authorization: Bearer <History 管理员凭据>`（`frontend/src/api/history.ts` 已封装：
+页面上填一次，只存在本标签页的 sessionStorage；401/403 时清掉凭据并提示重新填写）。
+
+**顶部状态计数**（调 `GET /api/history/index/counts`）：
+- queued 待发送 / sending 发送中 / indexing 索引中 / ready 已就绪 / waiting 待重试 / blocked 受阻 / disabling 停用中 / disabled 已停用；点卡片按该状态过滤
+
+**过滤**：状态；来源（选项读 `GET /api/history/collection/catalog`，不要硬编码站点列表）
+
+**作业列表**（调 `GET /api/history/index/status?limit=50&state=&source_id=`，`next_cursor` 不为空时“加载更多”带上 `cursor`）：
 
 | 列 | 说明 |
 |----|------|
-| 标题 | 文档标题 |
-| 来源站点 | |
-| 发布日期 | |
-| 同步状态 | pending / synced / failed |
-| 失败原因 | 仅 failed 时显示 |
-| 操作 | 手动触发同步 / 重试 |
+| 状态 | `state`；`desired_state` 不是 active 时一并显示 |
+| 来源 | `source.source_id`、演示标志、知识库；`read_permitted=false` 显示“来源已撤权” |
+| 原件 / 版本 | `title`、`source_record_id`、`version_id`、附件产物 `artifact_key` |
+| remote_id / 作业 | `remote_id`、作业 `id`、`knowledge_id` |
+| 错误 | `error.code` + `error.message`（最近一次失败原因） |
+| 尝试次数 | `attempts` |
+| 更新 / 下次检查 | `updated_at`、`next_check_at` |
+| 操作 | 仅 `blocked` 显示“重试” |
 
 **操作**：
-- 批量同步按钮（调 `POST /api/weknora/sync-batch`）
-- 单条重试按钮（调 `POST /api/weknora/sync/{uuid}`）
+- 单条重试（调 `POST /api/history/index/{id}/retry`）：`scheduled=true` 提示已放回待重试；`reason=not_blocked` / `leased` 如实提示未改动
+- 重试列表中全部受阻（逐条调同一接口，先确认失败原因已修好）
+- `waiting` 不需要人工操作，后台按退避自动重试
 
 ---
 
