@@ -65,59 +65,15 @@
           <el-button type="success" plain @click="batchTriggerByCount" :loading="triggeringByCount">
             {{ filters.extraction_status === 'failed' ? '批量重抽' : '批量抽取' }}
           </el-button>
-          <el-button type="warning" @click="batchRecrawl" :loading="batchRecrawling" :disabled="selectedUuids.length === 0">
-            批量重爬 ({{ selectedUuids.length }})
-          </el-button>
           <el-button :type="workerPaused ? 'success' : 'danger'" plain @click="togglePause" :loading="pausing">
             {{ workerPaused ? '继续抽取' : '暂停抽取' }}
           </el-button>
           <el-button type="success" @click="batchReview" :disabled="doneSelectedCount === 0">
             批量审核 ({{ doneSelectedCount }})
           </el-button>
-          <el-button type="primary" plain @click="uploadDialogVisible = true">
-            <el-icon><Upload /></el-icon>上传 MD
-          </el-button>
         </el-form-item>
       </el-form>
     </el-card>
-
-    <!-- 上传对话框 -->
-    <el-dialog v-model="uploadDialogVisible" title="上传本地 Markdown 文件" width="540px" :close-on-click-modal="false">
-      <el-form label-width="100px">
-        <el-form-item label="选择文件">
-          <el-upload
-            ref="uploadRef"
-            :auto-upload="false"
-            multiple
-            accept=".md,.markdown"
-            @change="onUploadChange"
-            @remove="onUploadRemove"
-            drag
-          >
-            <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-            <div class="el-upload__text">拖拽 .md 文件到此处，或点击选择（支持多选）</div>
-          </el-upload>
-        </el-form-item>
-        <el-form-item label="来源站点">
-          <el-select v-model="uploadSourceSite" clearable filterable allow-create placeholder="可选（默认留空，支持自定义输入）" style="width:100%">
-            <el-option v-for="s in sites" :key="s" :label="s" :value="s" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="uploadResults.length > 0" label="上传结果">
-          <div class="upload-results">
-            <el-tag v-for="r in uploadResults" :key="r.filename" :type="r.success ? 'success' : 'danger'" size="small" style="margin:2px">
-              {{ r.filename }} {{ r.success ? '✓' : '✗ ' + r.error }}
-            </el-tag>
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="uploadDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="doUpload" :loading="uploading" :disabled="uploadFiles.length === 0">
-          上传 ({{ uploadFiles.length }})
-        </el-button>
-      </template>
-    </el-dialog>
 
     <!-- 数据表格 -->
     <el-card shadow="never">
@@ -174,12 +130,6 @@
                 style="background-color:var(--dp-success-dark);border-color:var(--dp-success-dark);color:#fff"
                 @click="$router.push({ path: `/review/${row.uuid}`, query: $route.query })"
               >审核</el-button>
-              <el-button
-                size="small"
-                style="color:var(--dp-warning-dark);border-color:var(--dp-warning-dark)"
-                :loading="recrawlingUuids.has(row.uuid)"
-                @click="recrawlOne(row.uuid)"
-              >重爬</el-button>
             </div>
           </template>
         </el-table-column>
@@ -202,8 +152,8 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Upload, UploadFilled } from '@element-plus/icons-vue'
-import { getDocuments, recrawlDocument, batchRecrawlDocuments, uploadDocument, batchUploadDocuments, getSourceSites, type DocumentItem } from '@/api/documents'
+import { Search, Refresh } from '@element-plus/icons-vue'
+import { getDocuments, getSourceSites, type DocumentItem } from '@/api/documents'
 import { triggerExtraction, getExtractionStats, triggerPendingExtraction, getWorkerStats, pauseExtraction, resumeExtraction, type ExtractionStats } from '@/api/extraction'
 import { relativeTime } from '@/utils/time'
 
@@ -220,7 +170,6 @@ const loading = ref(false)
 const triggering = ref(false)
 const triggeringByCount = ref(false)
 const batchCount = ref(100)
-const recrawlingUuids = ref<Set<string>>(new Set())
 const dateRange = ref<[string, string] | null>(
   route.query.date_from && route.query.date_to
     ? [route.query.date_from as string, route.query.date_to as string]
@@ -231,60 +180,7 @@ const workerPaused = ref(false)
 const pausing = ref(false)
 
 const selectedUuids = ref<string[]>([])
-const batchRecrawling = ref(false)
 const tableRef = ref<any>(null)
-
-// 上传相关
-const uploadDialogVisible = ref(false)
-const uploadSourceSite = ref('')
-const uploading = ref(false)
-const uploadRef = ref<any>(null)
-const uploadFiles = ref<File[]>([])
-const uploadResults = ref<{ filename: string; success: boolean; error: string }[]>([])
-
-function onUploadChange(_file: any, fileList: any[]) {
-  uploadFiles.value = fileList.map((f: any) => f.raw).filter((f: File) => f.name.endsWith('.md') || f.name.endsWith('.markdown'))
-}
-
-function onUploadRemove(_file: any, fileList: any[]) {
-  uploadFiles.value = fileList.map((f: any) => f.raw).filter((f: File) => f.name.endsWith('.md') || f.name.endsWith('.markdown'))
-}
-
-async function doUpload() {
-  const files = uploadFiles.value
-  if (files.length === 0) {
-    ElMessage.warning('请先选择文件')
-    return
-  }
-  uploading.value = true
-  uploadResults.value = []
-  try {
-    const source = uploadSourceSite.value || undefined
-    let res: any
-    if (files.length === 1) {
-      res = await uploadDocument(files[0], source)
-      uploadResults.value = [{ filename: files[0].name, success: res.success, error: '' }]
-    } else {
-      res = await batchUploadDocuments(files, source)
-      uploadResults.value = res.items
-    }
-    const failedCount = uploadResults.value.filter(r => !r.success).length
-    if (failedCount === 0) {
-      ElMessage.success(`全部上传成功 (${uploadResults.value.length} 篇)`)
-      uploadDialogVisible.value = false
-      uploadRef.value?.clearFiles()
-      uploadFiles.value = []
-      uploadSourceSite.value = ''
-      uploadResults.value = []
-    } else {
-      ElMessage.warning(`${uploadResults.value.length - failedCount} 成功 / ${failedCount} 失败`)
-    }
-    loadData()
-    loadStats()
-  } finally {
-    uploading.value = false
-  }
-}
 
 const filters = ref({
   source_site: (route.query.source_site as string) || '',
@@ -446,58 +342,12 @@ async function batchTriggerByCount() {
   }
 }
 
-async function batchRecrawl() {
-  if (selectedUuids.value.length === 0) {
-    ElMessage.warning('请先选择需要重爬的文档')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确认批量重爬选中的 ${selectedUuids.value.length} 个文档？`,
-      '确认批量重爬',
-      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
-    )
-  } catch {
-    return // 用户点击取消
-  }
-  batchRecrawling.value = true
-  try {
-    const res = await batchRecrawlDocuments(selectedUuids.value)
-    ElMessage.success(res.message)
-    clearSelection()
-    setTimeout(() => { loadData(); loadStats() }, 1000)
-  } finally {
-    batchRecrawling.value = false
-  }
-}
-
 function batchReview() {
   if (selectedUuids.value.length === 0) {
     ElMessage.warning('请先选择需要审核的文档')
     return
   }
   router.push({ path: '/batch-review', query: { uuids: selectedUuids.value.join(',') } })
-}
-
-async function recrawlOne(uuid: string) {
-  try {
-    await ElMessageBox.confirm(
-      '确认重新爬取该文档？',
-      '确认重爬',
-      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' }
-    )
-  } catch {
-    return // 用户点击取消
-  }
-  recrawlingUuids.value = new Set([...recrawlingUuids.value, uuid])
-  try {
-    const res = await recrawlDocument(uuid)
-    ElMessage.success(res.message || '重爬任务已提交')
-    // 延迟 1s 刷新，让后台有时间更新状态
-    setTimeout(() => { loadData(); loadStats() }, 1000)
-  } finally {
-    recrawlingUuids.value = new Set([...recrawlingUuids.value].filter(id => id !== uuid))
-  }
 }
 
 function resetFilters() {
@@ -608,10 +458,5 @@ onUnmounted(() => {
   margin: 0;
   padding: 4px 8px;
   font-size: 12px;
-}
-.upload-results {
-  max-height: 150px;
-  overflow-y: auto;
-  line-height: 1.8;
 }
 </style>

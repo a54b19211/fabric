@@ -62,7 +62,6 @@ import {
   Select,
   Aim,
   Switch,
-  FolderOpened,
   Share,
   DataAnalysis,
 } from '@element-plus/icons-vue'
@@ -109,7 +108,6 @@ const navGroups = [
   {
     title: '同步',
     items: [
-      { path: '/weknora', label: 'WeKnora 同步', icon: FolderOpened },
       { path: '/neo4j', label: 'Neo4j 图推送', icon: Share },
     ],
   },

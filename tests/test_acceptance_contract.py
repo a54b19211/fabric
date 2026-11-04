@@ -6,7 +6,7 @@
 - 每个案例都有反例和可机检的断言，禁止的捷径写进 must_not；
 - 证据类型和来源编号只能用约定的词表，缺口必须如实列出；
 - 夹具里不出现编造的真实世界编号（NCT、PMID、DOI 等），材料没找到就标 to_be_sourced。
-审阅 8 条裁定各有对应测试：来源三栏状态与同上游、更正看判断结果、E 只定义一次、
+审阅 8 条裁定各有对应测试：来源按数据集分开与同上游、采集状态与部署分栏、更正看判断结果、E 只定义一次、
 E 的触发与结果覆盖、材料真实性与故障注入分开、目标与现状分开、内参保留不确定性。
 纯本地测试，不联网、不连库。
 """
@@ -19,6 +19,7 @@ import sys
 import unicodedata
 from collections import Counter
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from collection.catalog import CATALOG  # noqa: E402
 from contracts import acceptance as acc  # noqa: E402
 
 FIXTURE_DIR = ROOT / "contracts" / "acceptance"
@@ -62,106 +64,129 @@ def test_evidence_vocabulary_matches_v3_1_4():
     ]
 
 
-GIVEN_SOURCES = [
-    "clinicaltrials", "europe_pmc", "pubmed", "who_don", "sec_companyfacts", "fda_crl",
-    "nmpa", "cde", "chictr", "cde_ctr", "cninfo", "hkex", "biorxiv", "drugs_fda",
-]
+def listed_sources(case):
+    return case.sources_available + case.sources_status_unknown + case.sources_gap
 
 
-def status3(sid):
-    s = acc.KNOWN_SOURCES[sid]
-    return (s.old_implementation_exists, s.new_framework_connected, s.live_collecting_or_indexed)
+def status2(sid):
+    return acc.collection_state(sid), acc.deployment(sid).live
 
 
-def test_known_source_ids_given_and_introduced():
-    given = set(GIVEN_SOURCES)
-    introduced = {sid for sid, s in acc.KNOWN_SOURCES.items() if s.introduced_here}
-    # 本模块新增的编号必须显式标出来，且不和给定编号重叠
-    assert introduced and not (introduced & given)
-    assert set(acc.KNOWN_SOURCES) == given | introduced
-    for sid in acc.KNOWN_SOURCES:
-        assert re.fullmatch(r"[a-z][a-z0-9_]*", sid), sid
+def test_sources_come_only_from_catalog(cases):
+    # 来源只有一份目录：本模块不再自带来源表，夹具里每个编号都必须在 collection.catalog 里
+    for name in ("KNOWN_SOURCES", "SourceInfo", "_src", "_V3_GAP"):
+        assert not hasattr(acc, name), name
+    assert set(acc.DEPLOYMENT) <= set(CATALOG)
+    for c in cases:
+        for sid in listed_sources(c):
+            assert sid in CATALOG, (c.id, sid)
+    for name in FILES:
+        assert '"openfda"' not in (FIXTURE_DIR / name).read_text(encoding="utf-8"), name
 
 
-def test_source_status_is_three_separate_fields():
-    # 裁定 2：旧实现 / 新框架接通 / 生产在采或已索引 分三栏写，不再用一个 coverage 混写
-    assert "coverage" not in acc.SourceInfo.model_fields
-    for f in ("old_implementation_exists", "new_framework_connected", "live_collecting_or_indexed"):
-        assert f in acc.SourceInfo.model_fields, f
+def test_status_vocabulary_has_no_old_or_new():
+    assert get_args(acc.CollectionState) == ("active_verified", "plugin_unverified", "declared", "blocked")
+    assert get_args(acc.Live) == ("collecting_and_indexed", "stock_only", "no", "unknown")
+    words = get_args(acc.CollectionState) + get_args(acc.Live)
+    assert not [w for w in words if re.search(r"legacy|old|new", w)]
+    text = (ROOT / "contracts" / "acceptance.py").read_text(encoding="utf-8")
+    assert not re.search(r"legacy|旧实现|新框架|old_stock|new_framework", text)
 
 
-def test_source_status_facts_from_review():
-    # 审阅给出的事实；不知道的写 unknown，不拿 v3 或旧目录当唯一真相
-    assert status3("hkex") == ("yes", "declared_not_connected", "no")
-    assert status3("sec_companyfacts")[1:] == ("active", "unknown")
+def test_collection_state_derived_from_catalog():
+    for sid, s in CATALOG.items():
+        want = s.status
+        if s.status == "active":
+            want = "active_verified" if s.verified else "plugin_unverified"
+        assert acc.collection_state(sid) == want, sid
+
+
+def test_source_status_is_two_separate_columns():
+    # 裁定 2：采集状态（目录推出）与生产部署（DEPLOYMENT）分开，不知道写 unknown
+    assert status2("hkex") == ("plugin_unverified", "no")
+    assert status2("sec_companyfacts") == ("active_verified", "unknown")
+    assert "需要证据" in acc.DEPLOYMENT["sec_companyfacts"].note
     for sid in ("clinicaltrials", "europe_pmc", "who_don"):
-        assert status3(sid)[1:] == ("active", "collecting_and_indexed"), sid
-    for sid in ("nmpa", "cde", "chictr"):
-        assert status3(sid) == ("yes", "legacy_plugin_unverified", "old_stock_only"), sid
-    assert status3("cde_ctr") == ("no", "no", "no")
-    # 审阅没给事实的给定来源，不得写成在采
+        assert status2(sid) == ("active_verified", "collecting_and_indexed"), sid
+    for sid in ("nmpa", "cde", "chictr", "fda_api_drug_label", "fda_api_enforcement"):
+        assert status2(sid) == ("plugin_unverified", "stock_only"), sid
+    assert status2("cde_ctr") == ("blocked", "no")
+    assert status2("cninfo") == ("declared", "no")
+    # 没写部署事实的 active 来源不得当成在采
     for sid in ("pubmed", "fda_crl"):
-        assert acc.KNOWN_SOURCES[sid].live_collecting_or_indexed == "unknown", sid
-    assert "需要证据" in acc.KNOWN_SOURCES["sec_companyfacts"].note
+        assert sid not in acc.DEPLOYMENT and acc.deployment(sid).live == "unknown", sid
+
+
+def test_unlisted_deployment_defaults():
+    for sid, s in CATALOG.items():
+        if sid not in acc.DEPLOYMENT:
+            assert acc.deployment(sid).live == ("unknown" if s.status == "active" else "no"), sid
 
 
 def test_source_availability_derived_from_status():
-    av = {sid: s.availability for sid, s in acc.KNOWN_SOURCES.items()}
+    av = {sid: acc.availability(sid) for sid in CATALOG}
     assert av["clinicaltrials"] == "has_material"
-    assert av["nmpa"] == "has_material"  # 旧库存量是状态，不是来源定义
-    assert av["openfda"] == "has_material"
-    assert av["sec_companyfacts"] == "unknown"
-    assert av["hkex"] == "gap" and av["cde_ctr"] == "gap"
+    assert av["nmpa"] == "has_material"  # 库存是部署状态，不是来源定义
+    assert av["fda_api_drug_label"] == av["fda_api_enforcement"] == "has_material"
+    assert av["sec_companyfacts"] == av["pubmed"] == av["fda_crl"] == "unknown"
+    assert av["hkex"] == av["cde_ctr"] == av["cninfo"] == "gap"
 
 
-def test_rejects_inconsistent_source_status():
-    # 未实测的旧插件、只声明未接通的插件，都不能写成生产在采
-    for new in ("legacy_plugin_unverified", "declared_not_connected", "no"):
+def test_rejects_inconsistent_deployment():
+    # 未实测的插件、只登记的、被拒的来源，都不能写成生产在采
+    for sid in ("hkex", "cninfo", "cde_ctr"):
         with pytest.raises(ValueError, match="collecting_and_indexed"):
-            acc.SourceInfo(name="x", old_implementation_exists="yes", new_framework_connected=new,
-                           live_collecting_or_indexed="collecting_and_indexed")
-    with pytest.raises(ValueError, match="old_implementation_exists"):
-        acc.SourceInfo(name="x", old_implementation_exists="no", new_framework_connected="no",
-                       live_collecting_or_indexed="old_stock_only")
+            acc.check_deployment({sid: acc.Deployment("collecting_and_indexed")})
+    acc.check_deployment({"who_don": acc.Deployment("collecting_and_indexed")})  # 实测过的才可以
+    with pytest.raises(ValueError, match="collecting_and_indexed"):  # 没写 verified 的不会被当成实测过
+        acc.check_deployment({"pubmed": acc.Deployment("collecting_and_indexed")})
+    with pytest.raises(ValueError, match="库存"):
+        acc.check_deployment({"nmpa": acc.Deployment("no", {"nmpa": 1})})
+    with pytest.raises(ValueError, match="made_up_source"):
+        acc.check_deployment({"made_up_source": acc.Deployment("no")})
 
 
-def test_openfda_states_real_endpoints_and_stock():
-    # 裁定 1：openfda 写清真实端点/数据类型和旧库存量；“旧库存量”只是状态
-    o = acc.KNOWN_SOURCES["openfda"]
-    text = " ".join(o.datasets)
-    assert "drug/label" in text and "enforcement" in text
-    assert o.old_stock_docs == {"fda_api_drug_label": 258915, "fda_api_enforcement": 17684}
-    assert "旧库存量" not in o.name
-    crl = acc.KNOWN_SOURCES["fda_crl"]
+def test_openfda_split_by_dataset_with_stock_per_source():
+    # 裁定 1：openFDA 说明书、召回、CRL 是目录里的三个编号，按数据集分开，库存记在各自编号下
+    label, enf, crl = (CATALOG[s] for s in ("fda_api_drug_label", "fda_api_enforcement", "fda_crl"))
+    assert any("drug/label" in d for d in label.datasets)
+    assert any("enforcement" in d for d in enf.datasets)
     assert any("transparency/crl" in d for d in crl.datasets)
-    # 两者按覆盖的数据集分开表达，数据集不重叠
-    assert not set(o.datasets) & set(crl.datasets)
+    sets = [set(x.datasets) for x in (label, enf, crl)]
+    assert all(sets) and not (sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+    assert acc.DEPLOYMENT["fda_api_drug_label"].stock_docs == {"fda_api_drug_label": 258915}
+    assert acc.DEPLOYMENT["fda_api_enforcement"].stock_docs == {"fda_api_enforcement": 17684}
 
 
 def test_openfda_and_crl_share_upstream_never_two_confirmations():
-    o, crl = acc.KNOWN_SOURCES["openfda"], acc.KNOWN_SOURCES["fda_crl"]
-    assert o.upstream and o.upstream == crl.upstream
-    assert acc.count_independent_upstreams(["openfda", "fda_crl"]) == 1
-    assert acc.count_independent_upstreams(["openfda", "clinicaltrials"]) == 2
+    assert CATALOG["fda_api_drug_label"].upstream == CATALOG["fda_crl"].upstream == "api.fda.gov"
+    assert acc.count_independent_upstreams(["fda_api_drug_label", "fda_crl"]) == 1
+    assert acc.count_independent_upstreams(["fda_api_drug_label", "fda_api_enforcement", "fda_crl"]) == 1
+    assert acc.count_independent_upstreams(["fda_api_drug_label", "clinicaltrials"]) == 2
     assert acc.count_independent_upstreams(["fda_crl", "fda_crl"]) == 1
 
 
 def test_rejects_shared_upstream_without_check(cases):
-    both = [c for c in cases
-            if {"openfda", "fda_crl"} <= set(c.sources_available + c.sources_status_unknown + c.sources_gap)]
-    assert both, "至少一个案例同时用到 openfda 与 fda_crl，用来验同上游不算两份证实"
-    for c in both:
+    shared = [c for c in cases if acc.count_independent_upstreams(listed_sources(c)) < len(listed_sources(c))]
+    ids = {c.id for c in shared}
+    # A-03 用 openFDA 说明书 + CRL 演示同上游规则；C-03 同时用说明书与召回
+    assert {"A-03", "C-03"} <= ids
+    assert {"fda_api_drug_label", "fda_crl"} <= set(listed_sources(next(c for c in shared if c.id == "A-03")))
+    for c in shared:
         assert "same_upstream_not_independent" in kinds(c), c.id
-    raw = [r for r in raw_cases("A.json") if r["id"] == both[0].id][0]
-    raw["checks"] = [k for k in raw["checks"] if k["kind"] != "same_upstream_not_independent"]
-    with pytest.raises(ValueError, match="same_upstream_not_independent"):
-        acc.validate_case(raw)
+    for name, cid in (("A.json", "A-03"), ("C.json", "C-03")):
+        raw = [r for r in raw_cases(name) if r["id"] == cid][0]
+        raw["checks"] = [k for k in raw["checks"] if k["kind"] != "same_upstream_not_independent"]
+        with pytest.raises(ValueError, match="same_upstream_not_independent"):
+            acc.validate_case(raw)
 
 
-def test_rejects_unknown_status_source_listed_as_available():
+@pytest.mark.parametrize("sid", ["sec_companyfacts", "hkex"])
+def test_rejects_source_without_material_listed_as_available(sid):
+    # 状态未知的、插件在但生产不在采的，都不能列为有材料
     c = good_case()
-    c["sources_available"] = c["sources_available"] + ["sec_companyfacts"]
-    with pytest.raises(ValueError, match="sec_companyfacts"):
+    c["sources_available"] = c["sources_available"] + [sid]
+    with pytest.raises(ValueError, match=sid):
         acc.validate_case(c)
 
 

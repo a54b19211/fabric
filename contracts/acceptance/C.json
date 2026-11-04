@@ -106,7 +106,11 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "巨潮、港交所、SEC filing 原文未接入，写成缺口"
+        "detail": "巨潮、SEC filing 原文未接入，港交所插件未实测且生产不在采，写成缺口"
+      },
+      {
+        "kind": "same_upstream_not_independent",
+        "detail": "SEC companyfacts 与 SEC filing 原文同出 sec.gov，在独立证实数中合计为一"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -216,7 +220,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "巨潮、港交所、行业媒体未接入，写成缺口"
+        "detail": "巨潮、行业媒体未接入，港交所插件未实测且生产不在采，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -239,7 +243,7 @@
     "correction_trigger": null,
     "trigger": null,
     "expected_outcome": null,
-    "question": "旧库存量（状态）与财报测量能否形成带口径的时期序列，并自动发现变点？",
+    "question": "库存（stock_only）与财报测量能否形成带口径的时期序列，并自动发现变点？",
     "required_evidence": [
       "regulatory_decision",
       "financial",
@@ -258,7 +262,8 @@
     "sources_available": [
       "nmpa",
       "cde",
-      "openfda"
+      "fda_api_drug_label",
+      "fda_api_enforcement"
     ],
     "sources_status_unknown": [
       "sec_companyfacts"
@@ -283,10 +288,10 @@
       "合同额当作收入"
     ],
     "positive": {
-      "scenario": "NMPA/CDE 旧库存量、openFDA 说明书与召回旧库存量，加上财报测量值",
+      "scenario": "NMPA/CDE 库存、openFDA 说明书与召回库存，加上财报测量值",
       "expected": [
         "测量进入时期序列，口径对齐后给出趋势和变点",
-        "旧库记录的可见时间记为“旧系统报告的爬取时间”，不倒填 first_seen_at"
+        "库存记录的可见时间记为库存里记载的爬取时间，不倒填 first_seen_at"
       ],
       "must_not_conclude": []
     },
@@ -313,6 +318,10 @@
         "detail": "批准或公告条数不进入产业指标序列"
       },
       {
+        "kind": "same_upstream_not_independent",
+        "detail": "openFDA 说明书与召回同出 api.fda.gov，在独立证实数中合计为一"
+      },
+      {
         "kind": "source_status_verified",
         "detail": "SEC companyfacts 生产状态未知：跑之前拿出 watch 配置、采集记录或索引计数，拿不到就按缺口写"
       },
@@ -322,14 +331,14 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "港交所、巨潮未接入，写成缺口"
+        "detail": "巨潮未接入、港交所插件未实测且生产不在采，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
     "data_truth": "to_be_sourced",
     "fault_injected": false,
     "status": "to_be_sourced",
-    "material_note": "从旧库存量选一组真实记录并找到对应财报；未选定前不写公司。SEC 生产状态待证。",
+    "material_note": "从库存选一组真实记录并找到对应财报；未选定前不写公司。SEC 生产状态待证。",
     "synthetic_components": []
   },
   {
@@ -435,7 +444,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "附件未解析和巨潮、港交所未接入都写成缺口"
+        "detail": "附件未解析、巨潮未接入、港交所生产不在采都写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -546,7 +555,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "巨潮、港交所未接入，写成缺口"
+        "detail": "巨潮未接入、港交所插件未实测且生产不在采，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",

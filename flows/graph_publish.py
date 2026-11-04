@@ -295,7 +295,7 @@ def _evidence(original, ref, quote):
     )
 
 
-def build_legacy_bundle(observation, documents, document_refs):
+def build_document_bundle(observation, documents, document_refs):
     if observation.get("schema_version") != "datafabric.legacy.graph.observation.v1":
         raise HistoryError("legacy_observation_schema", "不支持的旧图观测格式")
     namespace = observation["namespace"]

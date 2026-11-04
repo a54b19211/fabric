@@ -24,7 +24,7 @@ from biz_rules.history_models import (
 from biz_rules.reviewed_graph import (
     GraphBundle,
     GraphDocumentRef,
-    LegacyDocument,
+    StoredDocument,
     document_native_id,
 )
 from db import history
@@ -96,7 +96,7 @@ def enqueue_changed_document(session, envelope):
     ).scalar_one()
     return {
         "publication_pending": pending != "published",
-        "legacy_cache_retained": True,
+        "documents_cache_retained": True,
     }
 
 
@@ -551,7 +551,7 @@ def _prepare(engine, row):
 
 
 def _publish_graph(engine, row, prepared, document_run):
-    from flows.graph_publish import build_legacy_bundle
+    from flows.graph_publish import build_document_bundle
 
     if prepared.get("graph_request") is not None:
         return history.import_archive(
@@ -598,7 +598,7 @@ def _publish_graph(engine, row, prepared, document_run):
             limitations=["源记录已撤回，旧图版本仅保留历史观察"],
         )
     else:
-        original = LegacyDocument(
+        original = StoredDocument(
             source_doc_uuid=document.source_doc_uuid,
             source_site=document.source_site,
             title=document.title,
@@ -607,7 +607,7 @@ def _publish_graph(engine, row, prepared, document_run):
             original_raw_sha256=document.original_raw_sha256,
         )
         observation = prepared["graph_input"]["observation"]
-        bundle = build_legacy_bundle(observation, [original], [ref])
+        bundle = build_document_bundle(observation, [original], [ref])
 
         # 清洗可能移除模板头/HTML，原MD偏移不能切clean_text。只接受原句的唯一精确匹配。
         def bound_evidence(items):

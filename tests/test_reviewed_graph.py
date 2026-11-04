@@ -14,7 +14,7 @@ from biz_rules.reviewed_graph import (
     GraphNode,
     GraphRef,
     GraphReview,
-    LegacyDocument,
+    StoredDocument,
     document_native_id,
     neighborhood,
     primekg_bundle,
@@ -177,7 +177,7 @@ def test_primekg_current_capture_is_background_and_has_more_is_not_complete():
 
 def test_legacy_document_preserves_raw_and_rejects_hash_mismatch():
     raw = "原文药物甲与蛋白乙。"
-    document = LegacyDocument(
+    document = StoredDocument(
         source_doc_uuid="uuid",
         source_site="clinicaltrials",
         title="old raw",
@@ -187,17 +187,17 @@ def test_legacy_document_preserves_raw_and_rejects_hash_mismatch():
     assert document.original_raw_content == raw
     assert document_native_id(document) == "legacy:clinicaltrials:uuid"
     with pytest.raises(ValidationError):
-        LegacyDocument.model_validate(
+        StoredDocument.model_validate(
             {**document.model_dump(), "original_raw_content": raw + "changed"}
         )
 
 
 def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
     from biz_rules.reviewed_graph import GraphDocumentRef
-    from flows.graph_publish import build_legacy_bundle
+    from flows.graph_publish import build_document_bundle
 
     raw = "manual and auto alias"
-    document = LegacyDocument(
+    document = StoredDocument(
         source_doc_uuid="selected",
         source_site="external_archive",
         title="明确合成",
@@ -240,7 +240,7 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
             },
         ],
     }
-    graph = build_legacy_bundle(observation, [document], [reference])
+    graph = build_document_bundle(observation, [document], [reference])
     assert len(graph.nodes) == 2
     canonical = next(
         node for node in graph.nodes if node.namespace.endswith(".entity_dict")
@@ -258,7 +258,7 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
     assert resolved.candidates == [proposed]
     observation["entities"].append(observation["entities"][1])
     with pytest.raises(HistoryError) as error:
-        build_legacy_bundle(observation, [document], [reference])
+        build_document_bundle(observation, [document], [reference])
     assert error.value.code == "duplicate_legacy_mention"
 
 
@@ -278,7 +278,7 @@ def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract
         for key, locator in projected["field_locators"].items()
     )
     assert projected["parser_version"] == "datafabric.graph.projection.v0.2"
-    document = LegacyDocument(
+    document = StoredDocument(
         source_doc_uuid="doc",
         source_site="clinicaltrials",
         title="legacy",

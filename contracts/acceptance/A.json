@@ -95,7 +95,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "CDE CTR、企业 IR、会议摘要未接入，写成缺口"
+        "detail": "CDE CTR（blocked）、企业 IR、会议摘要未接入，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -203,7 +203,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "企业 IR、会议摘要、CDE CTR 未接入，写成缺口"
+        "detail": "企业 IR、会议摘要、CDE CTR（blocked）未接入，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -242,7 +242,7 @@
     ],
     "sources_available": [
       "clinicaltrials",
-      "openfda"
+      "fda_api_drug_label"
     ],
     "sources_status_unknown": [
       "fda_crl"
@@ -302,7 +302,7 @@
       },
       {
         "kind": "same_upstream_not_independent",
-        "detail": "openFDA 说明书/召回与 FDA CRL 同出 api.fda.gov，在独立证实数中合计为一"
+        "detail": "openFDA 说明书（fda_api_drug_label）与 FDA CRL 同出 api.fda.gov，在独立证实数中合计为一"
       },
       {
         "kind": "cites_fixed_version",
@@ -310,7 +310,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "CDE CTR、Drugs@FDA 未接入，写成缺口"
+        "detail": "CDE CTR（blocked）、Drugs@FDA 未接入，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -414,7 +414,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "CDE CTR 未接入，写成缺口"
+        "detail": "CDE CTR（blocked）未接入，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -520,7 +520,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "CDE CTR 未接入，写成缺口"
+        "detail": "CDE CTR（blocked）未接入，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",

@@ -100,6 +100,10 @@
       {
         "kind": "gap_stated",
         "detail": "bioRxiv、medRxiv、会议摘要未接入，写成缺口"
+      },
+      {
+        "kind": "same_upstream_not_independent",
+        "detail": "bioRxiv 与 medRxiv 同出 openRxiv 接口，在独立证实数中合计为一"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -203,6 +207,10 @@
       {
         "kind": "gap_stated",
         "detail": "bioRxiv、medRxiv、arXiv 未接入，写成缺口"
+      },
+      {
+        "kind": "same_upstream_not_independent",
+        "detail": "bioRxiv 与 medRxiv 同出 openRxiv 接口，在独立证实数中合计为一"
       }
     ],
     "data_basis": "real_fixed_version",

@@ -5,13 +5,14 @@
   6.4 给了国家/省级/高校三种使用视角。这些只写在文档里时，最容易被“文风像内参”“又加了几个站点”替代。
 - 这里每个案例都绑定 v3 原文出处（design_ref），每个出处恰好对应一个案例；
   案例必须有反例（counterexample），必须有可机检的断言（checks），禁止的捷径写进 must_not。
-- 证据类型只用 v3 1.4 的 12 种（英文 slug），来源编号只用 KNOWN_SOURCES，覆盖缺口必须如实列出。
+- 证据类型只用 v3 1.4 的 12 种（英文 slug），来源编号只用 collection.catalog 里的编号，
+  缺口必须如实列出；本模块不另立来源目录，只补目录不可能知道的部署事实（DEPLOYMENT）。
 - 夹具不编造真实世界事实：没找到的真实材料标 to_be_sourced；合成资料只验证流程（6.4），
   不能据此宣布覆盖了真实场景。
 
 v2 按审阅 8 条裁定修订：
-1. 来源按覆盖的数据集分开表达（openfda 写清端点和旧库存量，CRL 单列），同上游不算两份独立证实；
-2. 来源状态分三栏（旧实现 / 新框架接通 / 生产在采或已索引），不知道写 unknown；
+1. 来源按覆盖的数据集分开（openFDA 说明书、召回、CRL 是三个编号），同上游不算两份独立证实；
+2. 采集状态（由目录推出）与生产部署（DEPLOYMENT）分栏，不知道写 unknown；
 3. 更正验收看判断维持还是修订、旧引用保留、受影响计算更新，不只看“文件变了”；
 4. E 案例只在 E.json 定义，其他链路用 related_cases 引用，计分只算一次；
 5. E 的触发方式覆盖新材料自动触发、用户追问、历史回放，结果维持和修订都要验；
@@ -27,10 +28,13 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from collection.catalog import CATALOG
 
 CONTRACT_VERSION = "bioradar.acceptance.v2"
 
@@ -53,165 +57,84 @@ EVIDENCE_TYPES: dict[str, str] = {
     "patent": "专利",
 }
 
-# 来源状态分三栏（审阅裁定 2）：旧实现在不在、新采集框架接没接通、生产上是否真的在采/已索引。
-# 以前一个 coverage 字段把三件事混在一起，“旧库存量”“旧配置”“已采通”互相冒充；分开后每栏只回答一件事，
-# 不知道就写 unknown，不拿 v3 正文或旧来源目录单独当真相。
-OldImplementation = Literal["yes", "no", "unknown"]
-NewFramework = Literal[
-    "active",  # 新框架里插件已启用
-    "legacy_plugin_unverified",  # 以 legacy 插件接入，但没对原站实测
-    "declared_not_connected",  # 只声明了，没接通
-    "no",
-    "unknown",
-]
-LiveStatus = Literal[
-    "collecting_and_indexed",  # 生产上在采且已索引
-    "old_stock_only",  # 没有新采集，只有旧库存量
-    "no",
-    "unknown",  # 需要证据，不能当“是”
-]
+# 来源只有一份目录：名称、上游、数据集、采集状态都从 collection.catalog.CATALOG 取（裁定 1、2）。
+# 采集状态由目录推出：active 且实测过 / active 但插件未对原站实测 / 只登记 / 被来源拒绝。
+CollectionState = Literal["active_verified", "plugin_unverified", "declared", "blocked"]
+# 生产部署事实是目录不可能知道的另一栏：在采且已索引 / 只有库存 / 没有 / 不知道（要证据，不能当“是”）
+Live = Literal["collecting_and_indexed", "stock_only", "no", "unknown"]
 Availability = Literal["has_material", "unknown", "gap"]
 
 
-class SourceInfo(BaseModel):
-    """来源目录里的一项。
+@dataclass(frozen=True)
+class Deployment:
+    """一个来源在生产上的部署事实。stock_docs 只记已核对过的库存条数（库存集合名 → 条数）。"""
 
-    - datasets 写这个来源编号实际覆盖的数据集/端点/数据类型（裁定 1）：来源按覆盖的数据集分开表达，
-      不能用一个笼统名字把几个端点混在一起；
-    - upstream 写上游系统：同一上游的两个来源编号（如 openFDA 的说明书端点与 CRL 端点）
-      永远不算两份独立证实；
-    - old_stock_docs 只记录已核对过的旧库存量条数；“旧库存量”是覆盖状态，不是来源定义。
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    name: str
-    old_implementation_exists: OldImplementation
-    new_framework_connected: NewFramework
-    live_collecting_or_indexed: LiveStatus
-    datasets: tuple[str, ...] = ()
-    upstream: str = ""
-    old_stock_docs: dict[str, int] = Field(default_factory=dict)
-    # True 表示编号是本模块按 v3 原文新加的（不在任务给定的编号表里），方便审阅时逐个核对
-    introduced_here: bool = False
+    live: Live
+    stock_docs: dict[str, int] = field(default_factory=dict)
     note: str = ""
 
-    @model_validator(mode="after")
-    def _status_consistent(self) -> SourceInfo:
-        # 没接通或未实测的插件，不能同时声称生产在采：这正是以前“已有”被夸大的地方
-        if (self.new_framework_connected in ("legacy_plugin_unverified", "declared_not_connected", "no")
-                and self.live_collecting_or_indexed == "collecting_and_indexed"):
-            raise ValueError(
-                f"{self.name}：new_framework_connected={self.new_framework_connected} 时不能写 "
-                "collecting_and_indexed")
-        # 有旧库存量就说明曾有旧实现；写 no 是自相矛盾
-        if ((self.live_collecting_or_indexed == "old_stock_only" or self.old_stock_docs)
-                and self.old_implementation_exists == "no"):
-            raise ValueError(f"{self.name}：有旧库存量时 old_implementation_exists 不能是 no")
-        return self
 
-    @property
-    def availability(self) -> Availability:
-        """验收时这个来源能不能提供材料：在采/已索引或有旧库存量才算有材料；
-        生产状态未知的单列为 unknown（要先拿证据），确定没有的才是缺口。"""
-        if self.live_collecting_or_indexed in ("collecting_and_indexed", "old_stock_only") \
-                or self.old_stock_docs:
-            return "has_material"
-        if self.live_collecting_or_indexed == "unknown":
-            return "unknown"
-        return "gap"
-
-
-def _src(name: str, old: OldImplementation, new: NewFramework, live: LiveStatus, note: str = "",
-         intro: bool = False, **kw: Any) -> SourceInfo:
-    return SourceInfo(name=name, old_implementation_exists=old, new_framework_connected=new,
-                      live_collecting_or_indexed=live, note=note, introduced_here=intro, **kw)
-
-
-# 下面“缺口依据 v3”的条目：生产不在采取自 v3 缺口清单和任务来源表，旧实现与新框架两栏未逐个核实，写 unknown。
-_V3_GAP = "缺口依据 v3；旧实现与新框架两栏未核实"
-
-KNOWN_SOURCES: dict[str, SourceInfo] = {
-    # 审阅给出的事实
-    "clinicaltrials": _src("ClinicalTrials.gov", "unknown", "active", "collecting_and_indexed",
-                           "新框架已接通；生产为窄 watch 在采，已索引"),
-    "europe_pmc": _src("Europe PMC", "unknown", "active", "collecting_and_indexed",
-                       "新框架已接通；生产为窄 watch 在采，已索引"),
-    "who_don": _src("WHO Disease Outbreak News", "unknown", "active", "collecting_and_indexed",
-                    "新框架已接通；生产为窄 watch 在采，已索引；v3 写只有最近 30 天"),
-    "sec_companyfacts": _src("SEC companyfacts", "unknown", "active", "unknown",
-                             "新框架插件已启用；生产 watch 是否配置未知（unknown，需要证据），不能写成在采"),
-    "nmpa": _src("NMPA", "yes", "legacy_plugin_unverified", "old_stock_only",
-                 "旧代码在；新框架以 legacy 插件接入但未对原站实测；生产无新采集，只有旧库存量"),
-    "cde": _src("CDE", "yes", "legacy_plugin_unverified", "old_stock_only",
-                "旧代码在；新框架以 legacy 插件接入但未对原站实测；生产无新采集，只有旧库存量"),
-    "chictr": _src("ChiCTR", "yes", "legacy_plugin_unverified", "old_stock_only",
-                   "旧代码在；新框架以 legacy 插件接入但未对原站实测；生产无新采集，只有旧库存量"),
-    "cde_ctr": _src("CDE 药物临床试验登记平台（CTR）", "no", "no", "no", "三栏都没有；与 ChiCTR 是两个平台"),
-    "hkex": _src("港交所披露", "yes", "declared_not_connected", "no",
-                 "旧配置在（config/sites/hkex.py）；新框架只声明未接通；生产不在采"),
-    # 任务给定、审阅未给事实：不知道的写 unknown
-    "pubmed": _src("PubMed", "unknown", "unknown", "unknown", "v3 写“旧配置”，三栏均未核实，需要证据"),
-    "fda_crl": _src(
-        "FDA 完整回复函（CRL）", "unknown", "unknown", "unknown",
-        "取自 openFDA transparency 端点（按审阅意见）；与 openfda 同上游，不算两份独立证实；"
-        "采集状态未核实，需要证据",
-        datasets=("CRL：api.fda.gov/transparency/crl.json",), upstream="api.fda.gov"),
-    "cninfo": _src("巨潮/沪深北交易所公告与财报", "unknown", "unknown", "no", _V3_GAP),
-    "biorxiv": _src("bioRxiv", "unknown", "unknown", "no", _V3_GAP),
-    "drugs_fda": _src("Drugs@FDA 批准数据", "unknown", "unknown", "no", _V3_GAP),
-    # 本模块按 v3 原文新加
-    "openfda": _src(
-        "openFDA 药品说明书与召回执行报告", "unknown", "unknown", "unknown",
-        "旧库存量是覆盖状态：fda_api_drug_label 258,915 条、fda_api_enforcement 17,684 条；"
-        "新框架是否接通、生产是否在采未核实；CRL 另列 fda_crl（同上游）",
-        intro=True, upstream="api.fda.gov",
-        datasets=("drug label：api.fda.gov/drug/label.json（药品说明书）",
-                  "enforcement：召回执行报告（旧库集合 fda_api_enforcement；对应哪类产品的 "
-                  "enforcement 端点待核实）"),
-        old_stock_docs={"fda_api_drug_label": 258915, "fda_api_enforcement": 17684}),
-    "ema": _src("EMA", "unknown", "unknown", "no", _V3_GAP + "（判断A）", intro=True),
-    "company_ir": _src("企业 IR 管线页和财报演示", "unknown", "unknown", "no",
-                       _V3_GAP + "（判断A）；不是独立无偏的验证来源", intro=True),
-    "conference_abstracts": _src("会议摘要", "unknown", "unknown", "no", _V3_GAP + "（判断A、B）",
-                                 intro=True),
-    "patents": _src("专利", "unknown", "unknown", "no", _V3_GAP + "（判断A；6.4 高校视角）", intro=True),
-    "medrxiv": _src("medRxiv", "unknown", "unknown", "no", _V3_GAP + "（判断B）", intro=True),
-    "arxiv": _src("arXiv 相关类别", "unknown", "unknown", "no",
-                  _V3_GAP + "（判断B：AI 制药等不限于 q-bio）", intro=True),
-    "guidelines": _src("指南", "unknown", "unknown", "no", _V3_GAP + "（判断B）", intro=True),
-    "sec_filings": _src("SEC filing 原文与交易披露", "unknown", "unknown", "no", _V3_GAP + "（判断C）",
-                        intro=True),
-    "nhsa": _src("国家医保局", "unknown", "unknown", "no", _V3_GAP + "（判断C）", intro=True),
-    "procurement_prices": _src("采购与价格资料", "unknown", "unknown", "no", _V3_GAP + "（判断C）",
-                               intro=True),
-    "industry_media": _src("行业媒体", "unknown", "unknown", "no", _V3_GAP + "（判断C）", intro=True),
-    "china_cdc": _src("中国疾控", "unknown", "unknown", "no", _V3_GAP + "（判断D）", intro=True),
-    "health_commissions": _src("国家和地方卫健委通报", "unknown", "unknown", "no", _V3_GAP + "（判断D）",
-                               intro=True),
-    "ecdc": _src("ECDC", "unknown", "unknown", "no", _V3_GAP + "（判断D）", intro=True),
-    "us_cdc": _src("US CDC", "unknown", "unknown", "no", _V3_GAP + "（判断D）", intro=True),
-    "promed": _src("ProMED", "unknown", "unknown", "no", _V3_GAP + "（判断D）", intro=True),
-    "news_media": _src("媒体线索", "unknown", "unknown", "no", _V3_GAP + "（判断D）", intro=True),
-    "social_media": _src("社媒线索", "unknown", "unknown", "no", _V3_GAP + "（判断D、1.4）", intro=True),
-    "national_supply_stats": _src("全国统一口径供需/产能/采购/贸易数据", "unknown", "unknown", "no",
-                                  _V3_GAP + "（6.4 国家层）", intro=True),
-    "policy_execution_data": _src("政策执行和结果数据", "unknown", "unknown", "no",
-                                  _V3_GAP + "（6.4 国家层）", intro=True),
-    "local_industry_ledger": _src("辖区企业/园区/产线底册（授权内部台账）", "unknown", "unknown", "no",
-                                  _V3_GAP + "（6.4 省级）", intro=True),
-    "research_institution_ledger": _src("项目/经费/设备/队伍/成果授权台账", "unknown", "unknown", "no",
-                                        _V3_GAP + "（6.4 高校/科研机构）", intro=True),
-    "grants": _src("公开的基金资助信息", "unknown", "unknown", "no", _V3_GAP + "（6.4 高校/科研机构）",
-                   intro=True),
+# 只写已知的部署事实。没写进来的：declared/blocked 视为 live=no（没有插件就不可能在采）；
+# active 视为 live=unknown（插件能读不等于生产在采，要拿 watch 配置、采集记录或索引计数）。
+_STOCK_ONLY = "生产无新采集，只有库存"
+DEPLOYMENT: dict[str, Deployment] = {
+    "clinicaltrials": Deployment("collecting_and_indexed", note="窄 watch 在采，已索引"),
+    "europe_pmc": Deployment("collecting_and_indexed", note="窄 watch 在采，已索引"),
+    "who_don": Deployment("collecting_and_indexed", note="窄 watch 在采，已索引；v3 写只有最近 30 天"),
+    "sec_companyfacts": Deployment("unknown", note="生产 watch 是否配置未知，需要证据，不能写成在采"),
+    "nmpa": Deployment("stock_only", note=_STOCK_ONLY),
+    "cde": Deployment("stock_only", note=_STOCK_ONLY),
+    "chictr": Deployment("stock_only", note=_STOCK_ONLY),
+    "hkex": Deployment("no", note="生产不在采"),
+    "fda_api_drug_label": Deployment("stock_only", {"fda_api_drug_label": 258915}, _STOCK_ONLY),
+    "fda_api_enforcement": Deployment("stock_only", {"fda_api_enforcement": 17684}, _STOCK_ONLY),
 }
 
 
+def collection_state(source_id: str) -> CollectionState:
+    s = CATALOG[source_id]
+    if s.status == "active":
+        return "active_verified" if s.verified else "plugin_unverified"
+    return s.status
+
+
+def deployment(source_id: str) -> Deployment:
+    default = Deployment("unknown" if CATALOG[source_id].status == "active" else "no", note="未登记部署事实")
+    return DEPLOYMENT.get(source_id, default)
+
+
+def check_deployment(table: dict[str, Deployment]) -> None:
+    """部署表与目录一致：编号在目录里；未实测、只登记或被拒的来源不能写在采；有库存就不是 no。"""
+    errors = []
+    for sid, d in table.items():
+        if sid not in CATALOG:
+            errors.append(f"{sid} 不在 collection.catalog 里")
+            continue
+        state = collection_state(sid)
+        if d.live == "collecting_and_indexed" and state != "active_verified":
+            errors.append(f"{sid}：采集状态 {state} 时不能写 collecting_and_indexed")
+        if d.stock_docs and d.live == "no":
+            errors.append(f"{sid}：有库存时 live 不能是 no")
+    if errors:
+        raise ValueError("；".join(errors))
+
+
+check_deployment(DEPLOYMENT)
+
+
+def availability(source_id: str) -> Availability:
+    """验收时这个来源能不能提供材料：在采/已索引或有库存才算有材料；
+    生产状态未知的单列为 unknown（要先拿证据），确定没有的才是缺口。"""
+    d = deployment(source_id)
+    if d.live in ("collecting_and_indexed", "stock_only") or d.stock_docs:
+        return "has_material"
+    return "unknown" if d.live == "unknown" else "gap"
+
+
 def count_independent_upstreams(source_ids: list[str]) -> int:
-    """按上游系统合并后，还剩几份可能独立的来源。同一上游的多个来源编号只算一份，
-    这样 openFDA 说明书和同出 api.fda.gov 的 CRL 永远不会被算成两份独立证实。"""
-    groups = {KNOWN_SOURCES[s].upstream or s for s in source_ids}
-    return len(groups)
+    """按目录里的上游系统合并后，还剩几份可能独立的来源。同一上游的多个来源编号只算一份，
+    这样 openFDA 说明书、召回和同出 api.fda.gov 的 CRL 永远不会被算成多份独立证实。"""
+    return len({CATALOG[s].upstream_system for s in source_ids})
 
 # 断言种类：以后判定一份报告或一次运行是否合格时，每种都要有确定的判定程序。
 # 只收 v3 点名的要求，故意不收“文风像内参”之类的主观项（6.4：评价不看文风）。
@@ -488,11 +411,11 @@ class AcceptanceCase(BaseModel):
     required_evidence: list[str] = Field(min_length=1)
     # 需要的编号和时间字段；时间和实体对不上，同口径比较和同源判断都做不了
     required_entities_and_times: list[str] = Field(min_length=1)
-    # 能提供材料的来源（生产在采/已索引，或有旧库存量）；只用来说明“能测什么”，不代表已实测
+    # 能提供材料的来源（生产在采/已索引，或有库存）；只用来说明“能测什么”，不代表已实测
     sources_available: list[str]
     # 生产状态未知的来源（如插件已启用但 watch 是否配置不明）：不能写进 available，要先拿证据
     sources_status_unknown: list[str]
-    # 需要但没接入的来源；必须如实列出，报告里也要写成缺口
+    # 需要但拿不到材料的来源（只登记、被拒、或插件在但生产不在采）；必须如实列出，报告里写成缺口
     sources_gap: list[str]
     # 报告必须说清的内容：1.3 五项 + 本判断点名项（+ 视角的内参结构）
     must_say: list[str] = Field(min_length=1)
@@ -557,9 +480,9 @@ class AcceptanceCase(BaseModel):
     @field_validator("sources_available", "sources_status_unknown", "sources_gap")
     @classmethod
     def _known_sources(cls, v: list[str]) -> list[str]:
-        bad = [x for x in v if x not in KNOWN_SOURCES]
+        bad = [x for x in v if x not in CATALOG]
         if bad:
-            raise ValueError(f"未知来源编号 {bad}")
+            raise ValueError(f"未知来源编号 {bad}（只能用 collection.catalog 的编号）")
         if len(set(v)) != len(v):
             raise ValueError(f"来源编号重复 {v}")
         return v
@@ -579,15 +502,15 @@ class AcceptanceCase(BaseModel):
                 f"design_ref {self.design_ref!r} 应为 judgment={ref.judgment} case_kind={ref.case_kind} "
                 f"chain={ref.chain}")
 
-        # 三个来源列表要与来源目录的状态一致：有材料的、状态未知的、缺口，各归各位（裁定 2）
+        # 三个来源列表要与目录状态加部署事实推出的可用性一致：有材料、状态未知、缺口各归各位（裁定 2）
         placement = (("sources_available", self.sources_available, "has_material"),
                      ("sources_status_unknown", self.sources_status_unknown, "unknown"),
                      ("sources_gap", self.sources_gap, "gap"))
-        for field, ids, want in placement:
+        for name, ids, want in placement:
             for sid in ids:
-                got = KNOWN_SOURCES[sid].availability
+                got = availability(sid)
                 if got != want:
-                    errors.append(f"{sid} 在来源目录里是 {got}，不能列为 {field}")
+                    errors.append(f"{sid} 的可用性是 {got}，不能列为 {name}")
         listed = self.sources_available + self.sources_status_unknown + self.sources_gap
         dup_src = sorted(s for s, n in Counter(listed).items() if n > 1)
         if dup_src:

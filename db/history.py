@@ -150,7 +150,7 @@ def _derived_mode(source_id, mode):
 
 def _validate_derived(conn, run, item, now, proof):
     from biz_rules.history_sources import parse_json
-    from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, LegacyDocument
+    from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, StoredDocument
 
     if run["source_id"] == "external_archive":
         data = parse_json(item.raw_content)
@@ -169,7 +169,7 @@ def _validate_derived(conn, run, item, now, proof):
 
             original = CollectedDocument.model_validate(data)
         else:
-            original = LegacyDocument.model_validate(data)
+            original = StoredDocument.model_validate(data)
         _source(conn, original.source_site)
         return {original.source_site}
 

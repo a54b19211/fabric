@@ -74,12 +74,6 @@ const router = createRouter({
       meta: { title: 'Neo4j 图数据推送', description: '推送实体关系到 Neo4j 图库' },
     },
     {
-      path: '/weknora',
-      name: 'Weknora',
-      component: () => import('@/views/WeknoraManager.vue'),
-      meta: { title: 'WeKnora 知识库同步', description: '文档同步到 WeKnora 知识库' },
-    },
-    {
       path: '/agent',
       name: 'AutoReview',
       component: () => import('@/views/AutoReviewDashboard.vue'),

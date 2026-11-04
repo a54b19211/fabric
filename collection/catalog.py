@@ -1,7 +1,8 @@
 """唯一采集框架的来源目录：每个来源一份声明。
 
-调度（db.source_refresh）、限速（collection.rate）、增量窗口（collection.windows）和读取插件
-（collection.plugins）都只读这里。学生扩源时改这里、加必要的解析插件和契约样例，不动调度、
+调度（db.source_refresh）、限速（collection.rate）、增量窗口（collection.windows）、读取插件、
+来源许可目录（biz_rules.history_sources 按它生成站点来源的许可项）、加工层的文档类型和业务验收
+（contracts.acceptance 的来源状态）都只读这里。业务需要但还没接的来源也登记在这里（declared）。学生扩源时改这里、加必要的解析插件和契约样例，不动调度、
 图谱和雷达核心。
 
 status 的三种取值如实区分：
@@ -48,10 +49,19 @@ class CollectionSpec:
     coverage: dict = field(default_factory=dict)
     # 支持不带时间窗的全量回填（续页标记可靠、按页可续）
     backfill: bool = False
-    # False：站点插件没有对原站做过实测（主持人 11-04 接受；NMPA/CDE/ChiCTR 等）
-    verified: bool = True
+    # 只有对真实来源跑通过的才写 True；默认 False，忘了写不会被当成实测过
+    verified: bool = False
     blocked_reason: str | None = None
     notes: str = ""
+    # 上游系统：同一上游的两个来源（如 openFDA 的说明书端点与 CRL 端点）永远不算两份独立证实。
+    # 不写时取限速组（同一主机），见 upstream_system
+    upstream: str = ""
+    # 这个来源编号实际覆盖的数据集/端点
+    datasets: tuple[str, ...] = ()
+
+    @property
+    def upstream_system(self) -> str:
+        return self.upstream or self.rate_group
 
     @property
     def fetchable(self) -> bool:
@@ -67,6 +77,7 @@ _NO_INCREMENT = Incremental("none", None, "尚未接通，没有增量键")
 SPECS: tuple[CollectionSpec, ...] = (
     CollectionSpec(
         source_id="clinicaltrials",
+        verified=True,  # 已对真实来源跑通（隔离与现役窄 watch）
         name="ClinicalTrials.gov",
         status="active",
         plugin="public_api_reader",
@@ -76,7 +87,7 @@ SPECS: tuple[CollectionSpec, ...] = (
             "source_updated_window",
             "LastUpdatePostDate",
             "登记方更新被 CT.gov 公布的日期（天精度）；不是方案生效日期，也不是状态实际改变的日期",
-        ),
+    ),
         rate_group="clinicaltrials.gov",
         min_interval_seconds=0.4,
         coverage={"metadata": "全部公开登记字段", "results": "登记结果表", "fulltext": "无（登记无正文）"},
@@ -84,6 +95,7 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     CollectionSpec(
         source_id="europe_pmc",
+        verified=True,  # 已对真实来源跑通（隔离与现役窄 watch）
         name="Europe PMC",
         status="active",
         plugin="public_api_reader",
@@ -93,13 +105,14 @@ SPECS: tuple[CollectionSpec, ...] = (
             "source_updated_window",
             "UPDATE_DATE",
             "Europe PMC 记录更新日期；元数据更正也会更新，不等于论文发表日期",
-        ),
+    ),
         rate_group="ebi.ac.uk",
         min_interval_seconds=0.4,
         coverage={"metadata": "core", "abstract": "有则取", "fulltext": "不自动抓，另核许可"},
     ),
     CollectionSpec(
         source_id="who_don",
+        verified=True,  # 已对真实来源跑通（隔离与现役窄 watch）
         name="WHO Disease Outbreak News",
         status="active",
         plugin="who_don",
@@ -112,6 +125,7 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     CollectionSpec(
         source_id="sec_companyfacts",
+        verified=True,  # 已对真实来源跑通（隔离与现役窄 watch）
         name="SEC XBRL 公司概念事实",
         status="active",
         plugin="sec_xbrl",
@@ -147,6 +161,8 @@ SPECS: tuple[CollectionSpec, ...] = (
         min_interval_seconds=0.4,
         coverage={"metadata": "原生字段", "fulltext": "信函文本"},
         notes="只支持按需读取；openFDA 无可靠变更流",
+        upstream="api.fda.gov",
+        datasets=("api.fda.gov/transparency/crl.json",),
     ),
     # ——以下为业务必需、尚未接通的来源。登记在目录里，是为了让缺口可见，不是宣称已覆盖。——
     CollectionSpec(
@@ -220,6 +236,9 @@ SPECS: tuple[CollectionSpec, ...] = (
             coverage=coverage,
             verified=False,
             notes=notes,
+            upstream=group if group == "api.fda.gov" else "",
+            datasets={"fda_api_drug_label": ("api.fda.gov/drug/label.json",),
+                      "fda_api_enforcement": ("api.fda.gov/drug/enforcement.json",)}.get(source_id, ()),
         )
         for source_id, name, evidence, decisions, group, interval, coverage, notes in (
             ("cde_xxgk", "国家药品审评中心·信息公开（表格页）", ("regulatory_notice",), ("A",), "cde.org.cn", 2.0,
@@ -240,7 +259,7 @@ SPECS: tuple[CollectionSpec, ...] = (
              {"metadata": "安全通讯页", "fulltext": "正文"}, ""),
             ("fda_api_drug_label", "openFDA 药品说明书（drug/label）", ("regulatory_label",), ("A",),
              "api.fda.gov", 0.5, {"metadata": "说明书接口记录", "fulltext": "接口字段"},
-             "query=records；与 fda_api_enforcement 同上游 api.fda.gov，不算两份独立证实"),
+             "query=records；与 fda_api_enforcement、fda_crl 同上游 api.fda.gov，不算两份独立证实"),
             ("fda_api_enforcement", "openFDA 药品召回执行报告（drug/enforcement）", ("regulatory_notice",), ("A",),
              "api.fda.gov", 0.5, {"metadata": "召回接口记录", "fulltext": "接口字段"},
              "query=records；与 fda_api_drug_label 同上游"),
@@ -269,7 +288,7 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     CollectionSpec(
         source_id="biorxiv",
-        name="bioRxiv / medRxiv",
+        name="bioRxiv",
         status="declared",
         plugin=None,
         evidence_types=("preprint",),
@@ -290,6 +309,41 @@ SPECS: tuple[CollectionSpec, ...] = (
         min_interval_seconds=1.0,
         notes="批准资料看 Drugs@FDA；说明书/召回覆盖数不能冒充批准覆盖",
     ),
+)
+
+# 业务验收和 v3 缺口清单点名需要、但还没有插件的来源：登记在目录里，gaps() 会把它们列成缺口
+_DECLARED = (
+    ("ema", "EMA", ("regulatory_approval",), ("A",), "ema.europa.eu"),
+    ("company_ir", "企业 IR 管线页和财报演示（不是独立无偏来源）", ("company_disclosure",), ("A", "C"), "company_ir"),
+    ("conference_abstracts", "会议摘要", ("abstract",), ("A", "B"), "conference_abstracts"),
+    ("patents", "专利", ("patent",), ("A", "B"), "patents"),
+    ("medrxiv", "medRxiv", ("preprint",), ("B",), "medrxiv.org"),  # 与 bioRxiv 同一 openRxiv 接口，见下
+    ("arxiv", "arXiv 相关类别（AI 制药等不限于 q-bio）", ("preprint",), ("B",), "arxiv.org"),
+    ("guidelines", "指南（NCCN、CDE 指导原则以外）", ("guideline",), ("B",), "guidelines"),
+    ("sec_filings", "SEC filing 原文与交易披露", ("corporate_filing",), ("C",), "sec.gov"),
+    ("nhsa", "国家医保局", ("policy",), ("C",), "nhsa.gov.cn"),
+    ("procurement_prices", "采购与价格资料", ("measurement",), ("C",), "procurement_prices"),
+    ("industry_media", "行业媒体（FiercePharma、药促会以外）", ("industry_media",), ("C",), "industry_media"),
+    ("china_cdc", "中国疾控", ("official_notice",), ("D",), "chinacdc.cn"),
+    ("health_commissions", "国家和地方卫健委通报", ("official_notice",), ("D",), "nhc.gov.cn"),
+    ("ecdc", "ECDC", ("official_notice",), ("D",), "ecdc.europa.eu"),
+    ("us_cdc", "US CDC", ("official_notice",), ("D",), "cdc.gov"),
+    ("promed", "ProMED", ("media",), ("D",), "promedmail.org"),
+    ("news_media", "媒体线索", ("media",), ("D",), "news_media"),
+    ("social_media", "社媒线索", ("social",), ("D",), "social_media"),
+    ("national_supply_stats", "全国统一口径供需/产能/采购/贸易数据", ("measurement",), ("C",), "national_supply_stats"),
+    ("policy_execution_data", "政策执行和结果数据", ("measurement",), ("C",), "policy_execution_data"),
+    ("local_industry_ledger", "辖区企业/园区/产线底册（授权内部台账）", ("internal_ledger",), ("C",),
+     "local_industry_ledger"),
+    ("research_institution_ledger", "项目/经费/设备/队伍/成果授权台账", ("internal_ledger",), ("B",),
+     "research_institution_ledger"),
+    ("grants", "公开的基金资助信息", ("funding",), ("B",), "grants"),
+)
+SPECS = SPECS + tuple(
+    CollectionSpec(source_id=sid, name=name, status="declared", plugin=None, evidence_types=evidence,
+                   decisions=decisions, incremental=_NO_INCREMENT, rate_group=group, min_interval_seconds=1.0,
+                   upstream="biorxiv.org" if sid == "medrxiv" else "")
+    for sid, name, evidence, decisions, group in _DECLARED
 )
 
 CATALOG: dict[str, CollectionSpec] = {s.source_id: s for s in SPECS}

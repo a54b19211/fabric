@@ -406,7 +406,7 @@ def source_health(source_id, engine=None):
     if runtime is not None:
         runtime["pending_counts"] = pending_counts
         runtime["counts_scope"] = (
-            "legacy_source_bridge" if pending_counts is not None else "not_applicable"
+            "documents_store_bridge" if pending_counts is not None else "not_applicable"
         )
     if runtime and runtime.get("last_heartbeat"):  # noqa: SIM102
         if (

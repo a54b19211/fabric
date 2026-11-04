@@ -42,7 +42,7 @@ CREDIBILITY = {
 }
 
 # 采集目录里的来源，文档类型就是目录写的第一种证据类型；目录外的只有 documents 库存的冻结桥
-NON_CATALOG_DOC_TYPES = {"legacy_documents": "legacy_document"}
+NON_CATALOG_DOC_TYPES = {"legacy_documents": "stored_document"}
 
 
 def _doc_type(source_id, role, pub_types):

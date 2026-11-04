@@ -59,12 +59,8 @@ def _cleaner_input(row):
     source, facts = row["source_id"], row["facts"] or {}
     if source == "clinicaltrials":
         # 摘要直接取原件 briefSummary：投影在没有摘要时用标题顶替，拿它当摘要会把标题定位到摘要路径上
-        try:
-            summary = (((json.loads(row["raw"] or "{}").get("protocolSection") or {})
-                        .get("descriptionModule") or {}).get("briefSummary"))
-        except (ValueError, AttributeError):
-            summary = None
-        return {"facts": facts, "locators": row["locators"] or {}, "summary": summary}, "registry_fields"
+        return {"facts": facts, "locators": row["locators"] or {}, "summary": row.get("brief_summary")}, \
+            "registry_fields"
     if source == "europe_pmc":
         # 只取清洗器用到的字段：只改引用数等元数据的新版本（EPMC 平均每篇 8 个版本）输入相同，直接复用。
         # 定位用 JSON 路径（/title、/abstractText），不随其他字段变化移动，在每个版本上都能回指。
@@ -114,12 +110,15 @@ def _final_attachment_texts(conn, version_ids):
             if r["status"] in ("parsed", "unsupported") or r["attempt"] >= MAX_ATTEMPTS}
 
 
-# 只取清洗需要的字段；原件只在 EPMC 和站点网页版本上取（其余来源的原件不读，省 IO）
+# 只取清洗需要的字段；原件只在 EPMC 和站点页面/记录版本上取，CT 只取原件里的 briefSummary（省 IO）
 _CHUNK_SQL = """
     SELECT version_id, source_id, is_demo, source_record_id, record_kind, published_seq,
            payload->'facts' AS facts, payload->'field_locators' AS locators, payload->>'clean_text' AS clean_text,
-           CASE WHEN source_id='europe_pmc' OR payload->'facts'->>'role'='web_capture'
-                THEN payload->>'raw_content' END AS raw
+           CASE WHEN source_id='europe_pmc' OR payload->'facts'->>'role' IN ('web_capture','site_record')
+                THEN payload->>'raw_content' END AS raw,
+           CASE WHEN source_id='clinicaltrials'
+                THEN (payload->>'raw_content')::jsonb #>> '{protocolSection,descriptionModule,briefSummary}'
+           END AS brief_summary
     FROM history_versions
     WHERE source_id=:source AND published_seq BETWEEN :start AND :end
     ORDER BY published_seq

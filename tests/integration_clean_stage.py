@@ -247,3 +247,17 @@ def test_watermark_and_lag(pg, monkeypatch):
     clean_stage.process(chunk_seqs=2)
     ct = next(s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials")
     assert ct["watermark"] == 5 and ct["lag"] == 0 and ct["versions_per_second"]
+
+
+def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch):
+    """CT 投影在没有摘要时用标题顶替；清洗只认原件 briefSummary：有摘要不报 summary_missing。"""
+    from db import clean_stage
+
+    allow(monkeypatch)
+    ct = _fetch_study("NCT09990014", "cs-summary", summary="A phase 3 study of drug X.").version_ids[0]
+    bare = _fetch_study("NCT09990015", "cs-no-summary").version_ids[0]
+    clean_stage.process(batch=50)
+    got = clean_stage.for_versions("clinicaltrials", False, [ct, bare], "current", NOW())["versions"]
+    assert "summary_missing" not in (got[ct]["clean"]["warnings"] or [])
+    assert "A phase 3 study of drug X." in got[ct]["clean"]["text"]
+    assert "summary_missing" in got[bare]["clean"]["warnings"]  # 没有摘要就如实报缺，不拿标题顶替

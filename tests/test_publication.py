@@ -107,10 +107,10 @@ def test_no_protocol_is_text_and_delete_is_explicit_tombstone_not_empty_success(
 
 
 def test_collected_old_wrappers_are_not_rewritten():
-    from biz_rules.reviewed_graph import LegacyDocument
+    from biz_rules.reviewed_graph import StoredDocument
 
     raw = "SYNTHETIC original"
-    old = LegacyDocument(
+    old = StoredDocument(
         source_doc_uuid="old",
         source_site="clinicaltrials",
         title="SYNTHETIC",

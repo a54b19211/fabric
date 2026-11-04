@@ -299,7 +299,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "CDE CTR、企业 IR 未接入，写成缺口"
+        "detail": "CDE CTR（blocked）、企业 IR 未接入，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",
@@ -516,7 +516,7 @@
       },
       {
         "kind": "gap_stated",
-        "detail": "巨潮、港交所未接入，写成缺口"
+        "detail": "巨潮未接入、港交所插件未实测且生产不在采，写成缺口"
       }
     ],
     "data_basis": "real_fixed_version",

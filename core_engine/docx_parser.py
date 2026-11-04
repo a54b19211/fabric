@@ -1,13 +1,6 @@
 """
-Word 文档解析器（.doc / .docx → Markdown）
-
-当前解析方式：
-  1. .doc/.docx → PDF（Windows: win32com / Linux: LibreOffice）
-  2. PDF → MinerU → Markdown
-
-已注释的旧方案：
-  1. win32com (Word COM) — 最准确，支持 .doc/.docx，需要 Windows + Word 已安装
-  2. mammoth              — 纯 Python，仅支持 .docx (Open XML)
+Word 文档转 PDF（.doc / .docx → PDF：Windows 用 win32com，Linux 用 LibreOffice）。
+processing.attachment_parse 在自部署 MinerU 不支持 .doc 且没有云端 token 时用它转换，再交 MinerU。
 """
 
 import platform
@@ -16,110 +9,6 @@ import time
 from pathlib import Path
 
 from loguru import logger
-
-
-
-# ── [旧方案已注释] win32com 解析 ─────────────────────────────────────────────
-
-# def _cell_text(cell) -> str:
-#     return cell.Range.Text.strip().rstrip("\r\x07")
-#
-#
-# def _table_to_md(table) -> str:
-#     num_rows = table.Rows.Count
-#     num_cols = table.Columns.Count
-#     rows = []
-#     for r in range(1, num_rows + 1):
-#         cells = []
-#         for c in range(1, num_cols + 1):
-#             try:
-#                 cells.append(_cell_text(table.Cell(r, c)))
-#             except Exception:
-#                 cells.append("")
-#         rows.append("| " + " | ".join(cells) + " |")
-#         if r == 1:
-#             rows.append("| " + " | ".join(["---"] * num_cols) + " |")
-#     return "\n".join(rows)
-#
-#
-# def _para_to_md(para) -> str:
-#     style = para.Style.NameLocal
-#     text = para.Range.Text.strip().rstrip("\r\x07")
-#     if not text:
-#         return ""
-#     if "标题 1" in style or style in ("Heading 1",):
-#         return f"# {text}"
-#     elif "标题 2" in style or style in ("Heading 2",):
-#         return f"## {text}"
-#     elif "标题 3" in style or style in ("Heading 3",):
-#         return f"### {text}"
-#     elif "标题 4" in style or style in ("Heading 4",):
-#         return f"#### {text}"
-#     return text
-#
-#
-# def _win32com_to_markdown(file_path: str) -> str:
-#     import win32com.client
-#     word = win32com.client.Dispatch("Word.Application")
-#     word.Visible = False
-#     try:
-#         doc_path = str(Path(file_path).resolve())
-#         doc = word.Documents.Open(doc_path)
-#         table_ranges = []
-#         table_mds = {}
-#         for tbl in doc.Tables:
-#             start = tbl.Range.Start
-#             end = tbl.Range.End
-#             table_ranges.append((start, end))
-#             table_mds[(start, end)] = _table_to_md(tbl)
-#         lines = []
-#         emitted_tables = set()
-#         for para in doc.Paragraphs:
-#             s = para.Range.Start
-#             matched = None
-#             for (ts, te) in table_ranges:
-#                 if ts <= s < te:
-#                     matched = (ts, te)
-#                     break
-#             if matched:
-#                 if matched not in emitted_tables:
-#                     lines.append("")
-#                     lines.append(table_mds[matched])
-#                     lines.append("")
-#                     emitted_tables.add(matched)
-#             else:
-#                 lines.append(_para_to_md(para))
-#         doc.Close(False)
-#         return "\n".join(lines).strip()
-#     finally:
-#         word.Quit()
-
-
-# ── [旧方案已注释] mammoth 解析（仅 .docx）──────────────────────────────────
-
-# def _mammoth_to_markdown(file_path: str) -> str:
-#     import mammoth
-#     with open(file_path, "rb") as f:
-#         result = mammoth.extract_raw_text(f)
-#     return result.value.strip()
-
-
-# ── [旧方案已注释] win32com → mammoth 降级链 ─────────────────────────────────
-
-# def _parse_doc_legacy(file_path: str) -> str:
-#     try:
-#         return _win32com_to_markdown(file_path)
-#     except ImportError:
-#         pass
-#     except Exception as e:
-#         logger.warning(f"[DOCX] win32com 失败，尝试降级: {e}")
-#     ext = Path(file_path).suffix.lower()
-#     if ext == ".docx":
-#         try:
-#             return _mammoth_to_markdown(file_path)
-#         except Exception as e:
-#             raise RuntimeError(f"mammoth 解析失败: {e}")
-#     raise RuntimeError("win32com 不可用且文件为 .doc 格式，无法解析")
 
 
 # ── win32com 转 PDF（Windows）─────────────────────────────────────────────────
@@ -236,8 +125,3 @@ def _doc_to_pdf(file_path: str) -> str:
         return _doc_to_pdf_win32com(file_path)
     else:
         return _doc_to_pdf_libreoffice(file_path)
-
-
-# ── MinerU 解析（当前方案：doc/docx → PDF → MinerU）─────────────────────────
-
-# ── 对外接口 ──────────────────────────────────────────────────────────────────

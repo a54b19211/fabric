@@ -159,7 +159,7 @@ def test_new_body_is_durable_without_overwriting_old_graph_cache(databases):
         confidence=ConfidenceInfo(score=1, reason="SYNTHETIC"),
     )
     result = upsert_document(envelope)
-    assert result["legacy_cache_retained"] and result["publication_pending"]
+    assert result["documents_cache_retained"] and result["publication_pending"]
     assert (
         rows(source, "SELECT raw_content FROM documents")[0]["raw_content"]
         == value["raw_content"]

@@ -131,9 +131,14 @@ const STATUS_LABELS: Record<string, string> = {
   proposal_approved: '提案通过',
   proposal_rejected: '提案拒绝',
   conflict_pending: '冲突待处理',
-  weknora_pending: '文档待同步',
-  weknora_synced: '文档已同步',
-  weknora_failed: '文档同步失败',
+  index_queued: '待索引',
+  index_sending: '索引发送中',
+  index_indexing: '索引中',
+  index_ready: '已索引',
+  index_waiting: '索引待重试',
+  index_blocked: '索引受阻',
+  index_disabling: '索引停用中',
+  index_disabled: '索引已停用',
   graph_entity_pending: '实体待推送',
   graph_entity_pushed: '实体已推送',
   graph_entity_failed: '实体推送失败',
@@ -160,9 +165,9 @@ function statusLabel(key: string) {
 }
 
 function statusColor(key: string) {
-  if (key.includes('failed') || key === 'rejected' || key === 'no_entity') return 'var(--dp-danger)'
-  if (key.includes('done') || key.includes('approved') || key.includes('synced') || key.includes('pushed') || key === 'linked' || key === 'auto_approved') return 'var(--dp-success, #67c23a)'
-  if (key === 'processing' || key === 'queued') return 'var(--dp-warning)'
+  if (key.includes('failed') || key === 'rejected' || key === 'no_entity' || key === 'index_blocked') return 'var(--dp-danger)'
+  if (key.includes('done') || key.includes('approved') || key.includes('pushed') || key === 'linked' || key === 'auto_approved' || key === 'index_ready') return 'var(--dp-success, #67c23a)'
+  if (key === 'processing' || key === 'queued' || key === 'index_waiting') return 'var(--dp-warning)'
   return 'var(--dp-primary)'
 }
 

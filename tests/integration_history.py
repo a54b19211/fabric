@@ -1158,6 +1158,7 @@ def _fetch_study(native, key, **status):
             "identificationModule": {"nctId": native, "briefTitle": "Example trial"},
             "statusModule": module,
             "designModule": {"enrollmentInfo": {"count": status.get("n", 400), "type": "ESTIMATED"}},
+            **({"descriptionModule": {"briefSummary": status["summary"]}} if status.get("summary") else {}),
         },
     }, sort_keys=True)
     request = FetchRequest(source_id="clinicaltrials", query="synthetic registry diff")
@@ -1411,12 +1412,12 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
 
 # ——测试用：把一批明确的 documents 原件和审核图写进 history（生产上由 db.publication 自动发表）——
 from biz_rules.history_models import ArchiveImport, ArchiveRecord, canonical, sha256  # noqa: E402,F811
-from biz_rules.reviewed_graph import GraphDocumentRef, LegacyDocument, document_native_id  # noqa: E402
-from flows.graph_publish import build_legacy_bundle  # noqa: E402
+from biz_rules.reviewed_graph import GraphDocumentRef, StoredDocument, document_native_id  # noqa: E402
+from flows.graph_publish import build_document_bundle  # noqa: E402
 
 
 def _fixture_document(value):
-    return LegacyDocument(
+    return StoredDocument(
         source_doc_uuid=value["uuid"],
         source_site=value["source_site"],
         title=value.get("title") or value["uuid"],
@@ -1475,7 +1476,7 @@ def _publish_fixture_graph(observation, key):
                 origin_doc_uuid=doc.source_doc_uuid,
             )
         )
-    bundle = build_legacy_bundle(observation, documents, refs)
+    bundle = build_document_bundle(observation, documents, refs)
     native = "legacy-graph:" + sha256(
         canonical(
             {

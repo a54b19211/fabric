@@ -316,7 +316,7 @@ class GraphNeighborhood(Model):
     limitations: list[str]
 
 
-class LegacyDocument(Model):
+class StoredDocument(Model):
     schema_version: Literal["datafabric.legacy.document.v1"] = (
         "datafabric.legacy.document.v1"
     )
@@ -578,7 +578,7 @@ def project_graph_record(source_id, item, data):
             from biz_rules.collected_document import project_collected
 
             return project_collected(item, data)
-        document = LegacyDocument.model_validate(data)
+        document = StoredDocument.model_validate(data)
         if (
             item.record_kind != "document"
             or item.source_record_id != document_native_id(document)
