@@ -7,21 +7,28 @@
   - 幂等性：upsert 基于 uuid ON CONFLICT
   - Session 管理：使用 db/session.py 提供的 get_session()
 """
-import re
 import json
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import text, func
+from sqlalchemy import func, text
 
 from db.models import (
-    Document, DocExtra, Attachment,
-    EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
-    CrawlLog, ReviewLog,
-    EntityMergeQueue, EntityMergeLog,
+    Attachment,
+    CrawlLog,
+    DocExtra,
+    Document,
+    EntityAlias,
+    EntityDict,
     EntityIdentityMergeProposal,
+    EntityMergeLog,
+    EntityMergeQueue,
+    EntityRelation,
+    ExtractedEntity,
     OperationLog,
+    ReviewLog,
 )
 
 # ── 来源优先级（canonical_data 合并用）──────────────────────────────────
@@ -279,6 +286,7 @@ def reset_stale_extractions(max_age_minutes: int = 0) -> int:
     适用场景：Worker 超时/崩溃后，RQ 已丢弃任务但 DB 仍显示 queued/processing。
     """
     from datetime import datetime, timedelta, timezone
+
     from db.session import get_session
 
     with get_session() as session:
@@ -3695,8 +3703,8 @@ def find_candidate_dicts_for_review(
     返回：[{dict_id, entity_type, name, aliases, canonical_source,
             is_verified, match_type, score}, ...]
     """
-    from db.session import get_session
     from core_engine.cloud_api_client import generate_embedding
+    from db.session import get_session
 
     entity_data = entity_data or {}
 
@@ -3812,6 +3820,7 @@ def _rerank_candidates(
     调用 BGE-Reranker 对候选 entity_dict 精排，返回 {dict_id: score}。
     """
     import requests
+
     from config.settings import APP
 
     if not raw_results:

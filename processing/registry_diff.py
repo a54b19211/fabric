@@ -1,19 +1,26 @@
-"""临床登记的确定性差分：同一登记号前后两个固定版本，逐字段比较已投影的登记字段。
+"""临床登记的确定性差分：同一登记号前后两个固定版本，比较已投影的登记字段、简介和原件其余部分。
 
-产出的是可核对的观测——“登记状态从 RECRUITING 改为 TERMINATED”，带两版的版本号和 JSON 路径。
+产出的是可核对的观测——“登记状态从 RECRUITING 改为 TERMINATED”，带两版的完整版本号和 JSON 路径。
 它不判断临床成败或疗效：登记状态改变不等于药物失败，日期推迟不等于方案出问题。
 
-material 只用于雷达分诊路由（哪些变化值得交给模型判断），不是事实结论。规则随处理器版本固定，
-改规则必须升 PROCESSOR_VERSION，旧结果保留。
+v2（Codex r58 反例后）：分诊路由从“列出值得判断的变化”改为“只有能证明不影响判断的变化才不送模型”。
+- 白名单（material=false）只有三种：字段值只差大小写/空白/列表顺序；地点列表只差联系人信息；
+  正式题目只差大小写或空白。
+- 其余任何变化——包括设计、入组标准、同名分组的描述（如剂量）、日期的任何移动——都 material=true。
+- 投影字段之外的变化也不放过：简介（briefSummary）变了记 description_change；原件（去掉来源每次
+  改写的数据日期）还有别处变了、但上面都没捕捉到，记 unmapped_change，都送模型。
+- 旧值缺失（present=false）就是未知，描述里写“原件无此字段”，不换算成 0。
+规则随处理器版本固定，改规则必须升 PROCESSOR_VERSION，旧结果保留。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date
 
-PROCESSOR_VERSION = "datafabric.registry_diff.v1"
+PROCESSOR_VERSION = "datafabric.registry_diff.v2"
 
 # 登记字段 → 变化类型。trial_id 是身份本身，不比较。
 FIELDS: dict[str, str] = {
@@ -50,11 +57,11 @@ FIELDS: dict[str, str] = {
     "results_outcome_measures": "results_data_change",
     "results_adverse_events": "results_data_change",
 }
+SUMMARY_POINTER = "/protocolSection/descriptionModule/briefSummary"
+SITE_CONTACT_KEYS = {"contacts"}
 
 # 值超过这个长度只存哈希和规模，完整值在两个固定版本里
 INLINE_CHARS = 2000
-DATE_SHIFT_MATERIAL_DAYS = 90
-ENROLLMENT_MATERIAL_RATIO = 0.10
 
 MISSING = {"present": False}
 
@@ -106,61 +113,67 @@ def _names(items) -> list[str]:
     return out
 
 
-def _detail(key: str, old, new) -> tuple[dict, bool, str | None]:
-    """(细节, 是否值得交给模型判断, 理由)。old/new 是原值（缺字段为 None）。"""
+def _loose(value):
+    """只用于判断“是否只差大小写/空白/列表顺序”：字符串小写并压空白，列表排序。"""
+    if isinstance(value, str):
+        return re.sub(r"\s+", " ", value).strip().casefold()
+    if isinstance(value, list):
+        return sorted((_loose(v) for v in value), key=_canonical)
+    if isinstance(value, dict):
+        return {k: _loose(v) for k, v in value.items()}
+    return value
+
+
+def _without_contacts(sites):
+    if not isinstance(sites, list):
+        return sites
+    return [{k: v for k, v in s.items() if k not in SITE_CONTACT_KEYS} if isinstance(s, dict) else s for s in sites]
+
+
+def immaterial_reason(key, old, new, old_present, new_present) -> str | None:
+    """能证明不影响判断时给出理由；否则 None（要送模型）。字段出现或消失一律不算。"""
+    if not (old_present and new_present):
+        return None
+    if _canonical(_loose(old)) == _canonical(_loose(new)):
+        return "case_spacing_or_order_only"
+    if key == "locations" and _canonical(_without_contacts(old)) == _canonical(_without_contacts(new)):
+        return "site_contacts_only"
+    return None
+
+
+def _detail(key, old, new, old_present, new_present) -> dict:
+    """描述用的细节（天数、增减、名称增删、地点数），只复述，不参与“是否送模型”。缺失就是未知。"""
     kind = FIELDS[key]
-    if kind in {"status_change", "why_stopped_change", "phase_change", "sponsor_change"}:
-        return {}, True, kind
-    if kind == "results_posted" or kind == "results_data_change":
-        return {}, True, kind
-    if kind == "results_flag_change":
-        return {}, new is True, "results_now_posted" if new is True else None
-    if kind == "enrollment_change":
-        if isinstance(old, int) and isinstance(new, int) and not isinstance(old, bool):
-            delta = new - old
-            ratio = abs(delta) / old if old else None
-            material = ratio is None or ratio >= ENROLLMENT_MATERIAL_RATIO
-            return {"delta": delta, "ratio": round(ratio, 4) if ratio is not None else None}, material, (
-                "enrollment_shift" if material else None
-            )
-        return {}, True, "enrollment_appeared_or_removed"
-    if kind == "enrollment_type_change":
-        return {}, new == "ACTUAL", "enrollment_now_actual" if new == "ACTUAL" else None
-    if kind == "date_change":
+    detail = {}
+    if kind == "enrollment_change" and isinstance(old, int) and isinstance(new, int):
+        detail["delta"] = new - old
+    elif kind == "date_change":
         a, pa = _parse_date(old)
         b, pb = _parse_date(new)
         if a and b:
             days = (b - a).days
-            precision = "day" if pa == pb == "day" else "month"
-            direction = "later" if days > 0 else "earlier" if days < 0 else "same_at_precision"
-            material = key != "start_date" and abs(days) >= DATE_SHIFT_MATERIAL_DAYS
-            return {"days": days, "precision": precision, "direction": direction}, material, (
-                "date_shift_" + direction if material else None
+            detail.update(
+                days=days,
+                precision="day" if pa == pb == "day" else "month",
+                direction="later" if days > 0 else "earlier" if days < 0 else "same_at_precision",
             )
-        return {}, key != "start_date", "date_appeared_or_removed" if key != "start_date" else None
-    if kind == "date_type_change":
-        # ESTIMATED → ACTUAL：计划日期变成实际发生
-        material = new == "ACTUAL" and key != "start_date_type"
-        return {}, material, "date_now_actual" if material else None
-    if kind in {"condition_change", "intervention_change", "arm_change", "primary_outcome_change"}:
+    elif kind in {"condition_change", "intervention_change", "arm_change", "primary_outcome_change",
+                  "secondary_outcome_change"}:
         before, after = _names(old), _names(new)
-        added = [x for x in after if x not in before]
-        removed = [x for x in before if x not in after]
-        detail = {"added": added[:20], "removed": removed[:20]}
-        # 只改了描述措辞（名称集合不变）的方案修订，不当成值得判断的变化；主要终点除外
-        material = bool(added or removed) or kind == "primary_outcome_change"
-        return detail, material, kind if material else None
-    if kind == "identifier_change":
-        return {}, True, "identifier_link_change"  # 新挂上的 CTR/ChiCTR/EudraCT 号是身份候选线索
-    if kind == "location_change":
-        before = len(old) if isinstance(old, list) else 0
-        after = len(new) if isinstance(new, list) else 0
-        return {"count_before": before, "count_after": after}, False, None
-    return {}, False, None
+        detail["added"] = [x for x in after if x not in before][:20]
+        detail["removed"] = [x for x in before if x not in after][:20]
+        if not detail["added"] and not detail["removed"]:
+            detail["same_names_content_changed"] = True  # 同名项内容变了（如剂量、描述），要看原件
+    elif kind == "location_change":
+        detail["count_before"] = len(old) if old_present and isinstance(old, list) else None
+        detail["count_after"] = len(new) if new_present and isinstance(new, list) else None
+    return detail
 
 
-def diff(old_facts: dict, new_facts: dict, locators: dict | None = None) -> list[dict]:
-    """两版登记字段的逐字段差异。两边相同（含都缺）的字段不出现。"""
+def diff(old_facts: dict, new_facts: dict, locators: dict | None = None, *, old_summary=None, new_summary=None,
+         old_raw_stable=None, new_raw_stable=None) -> list[dict]:
+    """两版的差异。两边相同（含都缺）的字段不出现。old/new_raw_stable 是去掉来源易变字段后的原件，
+    用来发现投影字段之外的变化。"""
     locators = locators or {}
     changes = []
     for key, kind in FIELDS.items():
@@ -168,7 +181,7 @@ def diff(old_facts: dict, new_facts: dict, locators: dict | None = None) -> list
         a, b = old_facts.get(key), new_facts.get(key)
         if a_present == b_present and _canonical(a) == _canonical(b):
             continue
-        detail, material, reason = _detail(key, a, b)
+        reason = immaterial_reason(key, a, b, a_present, b_present)
         changes.append(
             {
                 "field": key,
@@ -176,9 +189,36 @@ def diff(old_facts: dict, new_facts: dict, locators: dict | None = None) -> list
                 "json_pointer": (locators.get(key) or {}).get("json_pointer"),
                 "old_value": _stored(old_facts, key),
                 "new_value": _stored(new_facts, key),
-                "detail": detail,
-                "material": bool(material),
-                "material_reason": reason,
+                "detail": _detail(key, a, b, a_present, b_present),
+                "material": reason is None,
+                "material_reason": reason or "not_provably_immaterial",
+            }
+        )
+    if (old_summary or "") != (new_summary or ""):
+        summaries = {"brief_summary": old_summary}, {"brief_summary": new_summary}
+        changes.append(
+            {
+                "field": "brief_summary",
+                "change_kind": "description_change",
+                "json_pointer": SUMMARY_POINTER,
+                "old_value": _stored(summaries[0], "brief_summary") if old_summary is not None else MISSING,
+                "new_value": _stored(summaries[1], "brief_summary") if new_summary is not None else MISSING,
+                "detail": {},
+                "material": True,
+                "material_reason": "not_provably_immaterial",
+            }
+        )
+    if not changes and old_raw_stable is not None and new_raw_stable is not None and old_raw_stable != new_raw_stable:
+        changes.append(
+            {
+                "field": "_unmapped",
+                "change_kind": "unmapped_change",
+                "json_pointer": None,
+                "old_value": {"present": True, "sha256": hashlib.sha256(old_raw_stable.encode()).hexdigest()},
+                "new_value": {"present": True, "sha256": hashlib.sha256(new_raw_stable.encode()).hexdigest()},
+                "detail": {"note": "原件在已投影字段和简介之外有变化，需读两版原件"},
+                "material": True,
+                "material_reason": "not_provably_immaterial",
             }
         )
     return changes
@@ -191,15 +231,18 @@ def change_id(from_version_id: str, to_version_id: str, field: str) -> str:
 
 
 def describe(change: dict) -> str:
-    """一行中文说明，给雷达和报告用；只复述两版的值，不加推断。"""
+    """一行中文说明，给雷达和报告用；只复述两版的值，不加推断，缺失写缺失。"""
+
     def show(stored):
         if not stored.get("present"):
             return "（原件无此字段）"
         if "value" in stored:
             text = _canonical(stored["value"])
             return text if len(text) <= 200 else text[:200] + "…"
-        return f"（长字段，{stored.get('chars')} 字符）"
+        return f"（长字段，{stored.get('chars', '?')} 字符，见原件）"
 
+    if change["change_kind"] == "unmapped_change":
+        return "原件有变化，但不在已投影的登记字段和简介里（需读两版原件）"
     head = f"{change['field']}（{change.get('json_pointer') or '?'}）: {show(change['old_value'])} → {show(change['new_value'])}"
     d = change.get("detail") or {}
     if "days" in d:
@@ -208,6 +251,10 @@ def describe(change: dict) -> str:
         head += f"；变化 {d['delta']:+d}"
     if d.get("added") or d.get("removed"):
         head += f"；新增 {d.get('added')}，移除 {d.get('removed')}"
+    if d.get("same_names_content_changed"):
+        head += "；名称未变但内容改了（如剂量、描述），需读原件"
     if "count_before" in d:
-        head += f"；地点数 {d['count_before']} → {d['count_after']}"
+        before = "未知" if d["count_before"] is None else d["count_before"]
+        after = "未知" if d["count_after"] is None else d["count_after"]
+        head += f"；地点数 {before} → {after}"
     return head

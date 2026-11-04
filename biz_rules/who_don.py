@@ -161,6 +161,12 @@ def read_who(request):
                 budget = request.deadline_seconds - (time.monotonic() - started)
                 if budget <= 0:
                     raise HistoryError("source_deadline", "WHO公告读取超过时间预算")
+                from collection import rate
+
+                try:
+                    rate.wait_for_url(ENDPOINT, deadline=started + request.deadline_seconds)
+                except TimeoutError:
+                    raise HistoryError("source_deadline", "WHO公告读取超过时间预算") from None
                 with client.stream(
                     "GET", ENDPOINT, params=params, timeout=min(20, budget)
                 ) as response:

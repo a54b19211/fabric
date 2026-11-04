@@ -249,6 +249,8 @@ def download_pdf(
     source_site: str = "",
     force: bool = False,
     cookies: list[dict] | None = None,
+    max_bytes: int | None = None,
+    timeout: float = 120,
 ) -> dict:
     """
     下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx/xls/xlsx）。
@@ -271,11 +273,23 @@ def download_pdf(
             f"{c['name']}={c['value']}" for c in cookies if "name" in c
         )
 
-    with httpx.Client(headers=headers, follow_redirects=True, timeout=120) as client:
-        resp = client.get(pdf_url)
-        resp.raise_for_status()
+    # 流式读取并设上限（加工层预算）：超过 max_bytes 立即停止，不把超大文件读进内存
+    limit = max_bytes if max_bytes is not None else int(os.environ.get(
+        "DATAFABRIC_ATTACHMENT_MAX_BYTES", str(100 * 1024 * 1024)))
+    with httpx.Client(headers=headers, follow_redirects=True, timeout=timeout) as client:
+        with client.stream("GET", pdf_url) as resp:
+            resp.raise_for_status()
+            declared = resp.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > limit:
+                raise ValueError("attachment_too_large")
+            chunks, size = [], 0
+            for chunk in resp.iter_bytes():
+                size += len(chunk)
+                if size > limit:
+                    raise ValueError("attachment_too_large")
+                chunks.append(chunk)
 
-    content = resp.content
+    content = b"".join(chunks)
     if not content:
         raise ValueError("附件响应为空，未采用旧缓存")
     # PDF文件头比可能变化的响应头可靠；其余类型沿用已有判别规则。

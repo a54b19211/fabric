@@ -6,8 +6,14 @@ from db.history import history_engine
 
 
 def migrate_index():
-    sql = (Path(__file__).parent / "versions/V020__weknora_index.sql").read_text()
+    sql = "\n".join(
+        (Path(__file__).parent / "versions" / name).read_text()
+        for name in ("V020__weknora_index.sql", "V024__index_artifact.sql")
+    )
     with history_engine().begin() as conn:
+        # 现役有读写时不无限等锁：等不到就整笔回滚，稍后再跑
+        conn.exec_driver_sql("SET LOCAL lock_timeout='3s'")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='60s'")
         for statement in sql.split(";"):
             statement = "\n".join(s for s in statement.splitlines() if not s.lstrip().startswith("--")).strip()
             if statement:

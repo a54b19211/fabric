@@ -42,26 +42,41 @@ def targets():
         raise HistoryError("index_target_configuration", "来源到知识库的索引配置无效", 503) from None
 
 
-ATTACHMENT_TEXT_SQL = (
-    "SELECT text FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv AND status='parsed' "
-    "ORDER BY attempt DESC LIMIT 1"
-)
-
-
 def _is_attachment(record):
     return (record.facts or {}).get("role") == "attachment"
 
 
-def _content(conn, record):
-    """索引正文：一般版本用投影的清洗正文；附件版本用加工层解析出的派生正文（没有则为空）。"""
-    if not _is_attachment(record):
-        return record.clean_text
+def _artifact(conn, record, key=None):
+    """附件版本的派生正文产物：默认取当前处理器版本下最新一次成功结果；给 key（处理器版本:正文摘要）取那一份。"""
     from processing.attachment_parse import PROCESSOR_VERSION
 
-    return conn.execute(text(ATTACHMENT_TEXT_SQL), {"v": record.version_id, "pv": PROCESSOR_VERSION}).scalar() or ""
+    if key:
+        processor, digest = key.rsplit(":", 1)
+        row = conn.execute(text(
+            "SELECT text,processor_version,text_sha256,locator_kind FROM derived_clean_text WHERE version_id=:v "
+            "AND processor_version=:pv AND status='parsed' AND text_sha256=:sha ORDER BY attempt DESC LIMIT 1"
+        ), {"v": record.version_id, "pv": processor, "sha": digest}).mappings().first()
+    else:
+        row = conn.execute(text(
+            "SELECT text,processor_version,text_sha256,locator_kind FROM derived_clean_text WHERE version_id=:v "
+            "AND processor_version=:pv AND status='parsed' ORDER BY attempt DESC LIMIT 1"
+        ), {"v": record.version_id, "pv": PROCESSOR_VERSION}).mappings().first()
+    return dict(row) if row else None
 
 
-def _manifest(target, record, content=None):
+def _artifact_key(artifact):
+    return artifact["processor_version"] + ":" + artifact["text_sha256"]
+
+
+def _content(conn, record, artifact_key=""):
+    """索引正文：一般版本用投影的清洗正文；附件版本用加工层的派生正文产物（给 key 就取那一份）。"""
+    if not _is_attachment(record):
+        return record.clean_text
+    artifact = _artifact(conn, record, artifact_key or None)
+    return artifact["text"] if artifact else ""
+
+
+def _manifest(target, record, content=None, artifact=None):
     content = record.clean_text if content is None else content
     identity = {
         "source_instance": target["source_instance"], "source_id": record.source_id,
@@ -74,43 +89,67 @@ def _manifest(target, record, content=None):
         "raw_locator": {k: identity[k] for k in identity if k != "raw_sha256"},
         "title": (record.title or record.source_record_id)[:255],
         "content_sha256": sha256(content),
-        # 附件：正文来自加工层，写明出处和父页面，检索命中能回指“附件版本 + 父页面”
+        # 附件：正文来自加工层的某一份产物；写明产物（处理器版本、正文摘要、定位方式）和父页面，
+        # 检索命中能回指“附件版本 + 这份正文 + 父页面”
         **(
-            {"content_kind": "attachment_text", "parent_record_id": record.facts.get("parent_record_id")}
-            if _is_attachment(record)
+            {"artifact_key": _artifact_key(artifact),
+             "content_kind": "attachment_text", "parent_record_id": record.facts.get("parent_record_id"),
+             "processor_version": artifact["processor_version"], "artifact_sha256": artifact["text_sha256"],
+             "locator_kind": artifact.get("locator_kind")}
+            if artifact
             else {}
         ),
     }
 
 
-def _enqueue(conn, target, record, content):
-    manifest = _manifest(target.model_dump(), record, content)
-    conn.execute(text("""
+# 桥接服务（extensions/kdd Publication，extra=forbid）认识的字段；Fabric 清单里其余的说明字段只留在本地
+BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256", "artifact_key",
+                 "knowledge_base_id", "source_scope", "raw_locator", "content_sha256")
+
+
+def _bridge_body(manifest, content):
+    body = {k: manifest[k] for k in BRIDGE_FIELDS if k in manifest}
+    return {**body, "title": manifest["title"][:255], "content": content}
+
+
+def _enqueue(conn, target, record, content, artifact=None):
+    """一条（目标, 版本, 产物）的索引待办。非附件产物键为空串，id 与改造前相同。"""
+    key = _artifact_key(artifact) if artifact else ""
+    manifest = _manifest(target.model_dump(), record, content, artifact)
+    ident = [target.key(), record.version_id] + ([key] if key else [])
+    inserted = conn.execute(text("""
         INSERT INTO index_publications
-          (id,target_id,version_id,source_record_id,remote_id,manifest)
-        VALUES (:id,:target,:version,:native,:remote,CAST(:manifest AS jsonb))
-        ON CONFLICT(target_id,version_id) DO NOTHING
-    """), {"id": sha256(canonical([target.key(), record.version_id])), "target": target.key(),
+          (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key)
+        VALUES (:id,:target,:version,:native,:remote,CAST(:manifest AS jsonb),:key)
+        ON CONFLICT(target_id,version_id,artifact_key) DO NOTHING
+    """), {"id": sha256(canonical(ident)), "target": target.key(),
             "version": record.version_id, "native": record.source_record_id,
-            "remote": publication_id(manifest), "manifest": canonical(manifest)})
+            "remote": publication_id(manifest), "manifest": canonical(manifest), "key": key}).rowcount
+    if inserted and key:
+        # 同一附件版本的旧产物待办尽快复查：会被判为 superseded 并停用，记录保留
+        conn.execute(text("""
+            UPDATE index_publications SET next_check_at=clock_timestamp()
+            WHERE target_id=:target AND version_id=:version AND artifact_key<>:key
+        """), {"target": target.key(), "version": record.version_id, "key": key})
+    return inserted
 
 
 def enqueue_attachment(conn, version_id):
-    """附件解析成功后（db.derived_text.process 同一事务）把它放进已启用索引目标的待办。"""
+    """附件解析成功后（db.derived_text.process 同一事务）把这份正文产物放进已启用索引目标的待办。"""
     if not os.environ.get("DATAFABRIC_INDEX_TARGETS"):
         return 0
     payload = conn.execute(
         text("SELECT payload FROM history_versions WHERE version_id=:v"), {"v": version_id}
     ).scalar_one()
     record = HistoryRecord.model_validate(payload)
-    content = _content(conn, record)
-    if not content.strip():
+    artifact = _artifact(conn, record)
+    if not artifact or not artifact["text"].strip():
         return 0
     enabled = {row[0] for row in conn.execute(text("SELECT id FROM index_targets WHERE enabled"))}
     count = 0
     for target in targets():
         if (target.source_id, target.is_demo) == (record.source_id, record.is_demo) and target.key() in enabled:
-            _enqueue(conn, target, record, content)
+            _enqueue(conn, target, record, artifact["text"], artifact)
             count += 1
     return count
 
@@ -157,10 +196,10 @@ def scan_committed(*, batch_size=25):
                     continue
                 if _is_attachment(record):
                     # 附件正文由加工层产出；已解析的现在入队，其余在解析成功时由 enqueue_attachment 入队
-                    content = _content(conn, record)
-                    if not content.strip():
+                    artifact = _artifact(conn, record)
+                    if not artifact or not artifact["text"].strip():
                         continue
-                    _enqueue(conn, target, record, content)
+                    _enqueue(conn, target, record, artifact["text"], artifact)
                 else:
                     _enqueue(conn, target, record, record.clean_text)
                 count += 1
@@ -223,6 +262,11 @@ def _current_state(row):
         record = HistoryRecord.model_validate(current["payload"])
         if record.facts.get("publication_state") in {"withdrawn", "deleted", "retracted"}:
             return "withdrawn", None
+        if row.get("artifact_key"):
+            # 附件正文产物：有了更新的产物（处理器升级重跑）就停用旧的，记录保留
+            latest = _artifact(conn, record)
+            if latest is None or _artifact_key(latest) != row["artifact_key"]:
+                return "superseded", None
         return "active", record
 
 
@@ -247,6 +291,7 @@ def _validate_receipt(row, receipt):
         or any((receipt.get("identity") or {}).get(k) != expected[k]
                for k in ["source_instance", "source_id", "source_record_id", "version_id", "raw_sha256"])
         or receipt.get("raw_locator") != expected["raw_locator"]
+        or (receipt.get("identity") or {}).get("artifact_key") != expected.get("artifact_key")
     ):
         raise HistoryError("index_binding_mismatch", "索引回执与固定原件不符", 409)
 
@@ -325,7 +370,7 @@ def process_once(*, client=None, sent=None):
             )
             return _finish(row, "disabled" if confirmed else "disabling", desired, receipt=receipt, delay=300 if confirmed else 15)
         with history.history_engine().begin() as conn:
-            content = _content(conn, record)
+            content = _content(conn, record, row.get("artifact_key") or "")
         if not content.strip() or len(content.encode()) > 2000000:
             raise HistoryError("index_content_budget", "正文为空或超过索引单条预算，原件仍保留", 422)
         if sha256(content) != row["manifest"]["content_sha256"]:
@@ -333,8 +378,7 @@ def process_once(*, client=None, sent=None):
         if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
             _sent(row)
             # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
-            receipt = client.publish({**row["manifest"], "title": row["manifest"]["title"][:255],
-                                      "content": content})
+            receipt = client.publish(_bridge_body(row["manifest"], content))
         _validate_receipt(row, receipt)
         verified_receipt = receipt
         # 网络请求期间可能撤权/换头版；不能以旧资格确认ready。

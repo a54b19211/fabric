@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -132,7 +134,34 @@ def _record(record_id, data) -> ArchiveRecord:
     )
 
 
+class _Stop(Exception):
+    """预算用完：reason 是 stop_reason。已读到的材料保留，调用方给出续读位置。"""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _Resume(_Stop):
+    """预算在某一父项的附件中途用完：attachment 是下一个要读的附件序号。"""
+
+    def __init__(self, reason, attachment):
+        super().__init__(reason)
+        self.attachment = attachment
+
+
+def run_byte_budget() -> int:
+    return int(os.environ.get("DATAFABRIC_SITE_RUN_MAX_BYTES", str(256 * 1024 * 1024)))
+
+
 class _Reader:
+    """一次读取的预算（Codex r59）：
+    - 版本数 ≤ max_records（父页面和附件都算）；
+    - 对外请求数 ≤ max_pages × 10（列表页、详情页、附件下载都算，旧翻页驱动内部的请求也算）；
+    - 总字节 ≤ DATAFABRIC_SITE_RUN_MAX_BYTES，单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES；
+    - 截止时间 deadline_seconds。
+    任何一项用完就停：已读到的保留，stop_reason 写明是哪一项，给续读位置，不声称读到底。"""
+
     def __init__(self, request):
         self.request = request
         self.site = request.source_id
@@ -140,28 +169,40 @@ class _Reader:
         self.spec = spec(self.site)
         self.began = time.monotonic()
         self.deadline = self.began + request.deadline_seconds
-        self.records: list[ArchiveRecord] = []
+        self.records: list[ArchiveRecord | None] = []
         self.requests = 0
+        self.request_budget = request.max_pages * 10
         self.bytes = 0
+        self.byte_budget = run_byte_budget()
 
-    def gate(self):
-        rate.wait(self.spec.rate_group, self.spec.min_interval_seconds, deadline=self.deadline)
+    def before_request(self):
+        if self.requests >= self.request_budget:
+            raise _Stop("request_budget")
+        if self.bytes >= self.byte_budget:
+            raise _Stop("byte_budget")
+        try:
+            rate.wait(self.spec.rate_group, self.spec.min_interval_seconds, deadline=self.deadline)
+        except TimeoutError:
+            raise _Stop("deadline") from None
+        self.requests += 1
 
-    def out_of_time(self):
-        return time.monotonic() >= self.deadline
+    def before_record(self):
+        if len(self.records) >= self.request.max_records:
+            raise _Stop("record_budget")
 
     def attachment(self, link, parent_id, cookies, discovered):
-        """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。"""
+        """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。预算用完抛 _Stop。"""
         url = (link or {}).get("url") or ""
         record_id = attachment_record_id(parent_id, url)
         entry = {"record_id": record_id, "url": url, "text": (link or {}).get("text", ""), "status": "stored"}
+        self.before_record()
+        self.before_request()
         try:
-            self.gate()
-            self.requests += 1
             info = _download(url, parent_uuid=parent_id, source_site=self.site, cookies=cookies)
             sha, size = _sha256_file(info["local_path"])
-        except TimeoutError:
-            entry.update(status="not_attempted", error="deadline")
+        except ValueError as exc:
+            status = "too_large" if str(exc) == "attachment_too_large" else "download_failed"
+            entry.update(status=status, error=str(exc)[:80])
             return entry
         except Exception as exc:  # noqa: BLE001 -- 附件失败是覆盖缺口，不让父页面失败
             entry.update(status="download_failed", error=type(exc).__name__)
@@ -189,10 +230,12 @@ class _Reader:
         )
         return entry
 
-    def page(self, url):
+    def page(self, url, skip_attachments=0):
+        """读一个详情页和它的附件。skip_attachments：续读时这一页前面已读过的附件数。
+        预算在附件中途用完时，父页面照常保存（未读附件标 not_attempted），抛 _Resume。"""
         cfg = self.profile
-        self.gate()
-        self.requests += 1
+        self.before_record()
+        self.before_request()
         page_data = _fetch_page(
             url,
             delay=0,  # 间隔由共享限速组统一控制
@@ -227,67 +270,119 @@ class _Reader:
         index = len(self.records)
         self.records.append(None)  # 占位：父页面排在它的附件前面
         cookies = page_data.get("cookies") or []
-        for link in parsed.get("attachment_links") or []:
-            if link and link.get("url"):
+        links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
+        stopped = None
+        for position, link in enumerate(links):
+            if position < skip_attachments or stopped:
+                capture["attachments"].append(
+                    {
+                        "record_id": attachment_record_id(url, link["url"]),
+                        "url": link["url"],
+                        "text": link.get("text", ""),
+                        "status": "read_in_earlier_run" if position < skip_attachments else "not_attempted",
+                    }
+                )
+                continue
+            try:
                 capture["attachments"].append(self.attachment(link, url, cookies, "detail_page"))
+            except _Stop as stop:
+                stopped = (stop.reason, position)
+                capture["attachments"].append(
+                    {"record_id": attachment_record_id(url, link["url"]), "url": link["url"],
+                     "text": link.get("text", ""), "status": "not_attempted"}
+                )
         self.records[index] = _record(url, capture)
+        if stopped:
+            raise _Resume(*stopped)
+
+
+@contextmanager
+def _gated_driver(reader):
+    """旧翻页驱动内部用 fetch_page 取列表页：读取期间让它也过同一个闸门、计入请求预算。
+    js_click 型驱动（CDE）在一个浏览器会话里点击翻页，不经过 fetch_page，只按站点配置的间隔放慢。"""
+    import core_engine.pagination_driver as driver
+
+    real = driver.fetch_page
+
+    class Gated:
+        @staticmethod
+        def fn(*args, **kwargs):
+            reader.before_request()
+            kwargs["delay"] = 0
+            return real.fn(*args, **kwargs)
+
+    driver.fetch_page = Gated
+    try:
+        yield
+    finally:
+        driver.fetch_page = real
+
+
+def _cursor(request):
+    if not request.continuation:
+        return 0, 0
+    try:
+        value = json.loads(request.continuation.cursor)
+        return int(value["i"]), int(value["a"])
+    except (ValueError, KeyError, TypeError):
+        raise HistoryError("invalid_cursor", "续读位置无效") from None
 
 
 def read_site(request) -> dict:
-    """legacy_site_crawler 插件入口；返回值形状与 read_public 其他插件相同。"""
+    """legacy_site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
+    续读位置 cursor = {"i": 第几个父项（详情页 / 旧库父文档 / 列表里第几个详情页）, "a": 该父项下第几个附件}。"""
     reader = _Reader(request)
-    error, stop, exhausted, next_continuation = None, "record_budget", False, None
+    error, stop, exhausted, resume = None, "upstream_exhausted", False, None
+    position = 0
     try:
-        if request.query == "by_url":
-            stop = "upstream_exhausted"
+        start_i, start_a = _cursor(request)
+        position = start_i
+        if request.query in {"by_url", "legacy_attachments"}:
             for url in request.source_record_ids:
                 if not _on_site(reader.site, url):
                     raise HistoryError("url_outside_site", "链接不属于该来源站点")
-                if reader.out_of_time():
-                    stop = "deadline"
-                    break
-                reader.page(url)
-            exhausted = stop == "upstream_exhausted"
-        elif request.query == "legacy_attachments":
-            stop = "upstream_exhausted"
-            for parent in request.source_record_ids:
-                if not _on_site(reader.site, parent):
-                    raise HistoryError("url_outside_site", "链接不属于该来源站点")
-                for link in _legacy_attachment_links(reader.site, parent):
-                    if reader.out_of_time():
-                        stop = "deadline"
-                        break
-                    reader.attachment(link, parent, None, "legacy_attachments_table")
-            exhausted = stop == "upstream_exhausted"
+            for position in range(start_i, len(request.source_record_ids)):
+                url = request.source_record_ids[position]
+                skip = start_a if position == start_i else 0
+                if request.query == "by_url":
+                    reader.page(url, skip_attachments=skip)
+                    continue
+                for k, link in enumerate(_legacy_attachment_links(reader.site, url)):
+                    if k < skip:
+                        continue
+                    try:
+                        reader.attachment(link, url, None, "legacy_attachments_table")
+                    except _Stop as stop_here:
+                        raise _Resume(stop_here.reason, k) from None
+            exhausted = True
         else:
             if request.query not in reader.profile.get("start_urls", []):
                 raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
-            skip = request.continuation.read_count if request.continuation else 0
-            read, seen = 0, 0
+            with _gated_driver(reader):
+                seen = -1
+                for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
+                    seen += 1
+                    if seen < start_i:
+                        continue
+                    position = seen
+                    reader.page(url, skip_attachments=start_a if seen == start_i else 0)
             exhausted = True
-            for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
-                seen += 1
-                if seen <= skip:
-                    continue
-                if read >= request.max_records or reader.out_of_time():
-                    exhausted = False
-                    stop = "record_budget" if read >= request.max_records else "deadline"
-                    break
-                reader.page(url)
-                read += 1
-            if exhausted:
-                stop = "upstream_exhausted"
-            else:
-                next_continuation = {
-                    "scope_hash": request.scope_hash(),
-                    "cursor": "detail-index",
-                    "read_count": skip + read,
-                }
+    except _Resume as stopped:
+        stop, resume = stopped.reason, (position, stopped.attachment)
+    except _Stop as stopped:
+        stop, resume = stopped.reason, (position, 0)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
         error = {"code": "source_read_failed", "message": "站点读取失败：" + type(exc).__name__}
         stop = "source_failed"
+    next_continuation = None
+    if resume and error is None:
+        next_continuation = {
+            "scope_hash": request.scope_hash(),
+            "cursor": json.dumps({"i": resume[0], "a": resume[1]}),
+            "read_count": resume[0],
+        }
     return {
         "records": [r for r in reader.records if r is not None],
         "complete": False,
@@ -298,7 +393,7 @@ def read_site(request) -> dict:
         "bytes": reader.bytes,
         "source_total": None,
         "count_drift": None,
-        "next_continuation": next_continuation if error is None else None,
+        "next_continuation": next_continuation,
     }
 
 

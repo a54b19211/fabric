@@ -12,7 +12,8 @@ from processing import registry_diff
 DIFF_SOURCES = frozenset({"clinicaltrials"})
 
 
-def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, facts, locators, pairing):
+def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, facts, locators, pairing,
+           summary=None, raw=None):
     """记下一个新版本的差分。previous 是 {version_id, payload} 或 None（首次采用）。重复调用不重复写
     （表上有禁止改删的规则，PostgreSQL 不允许 ON CONFLICT，所以用 NOT EXISTS）。"""
     if source_id not in DIFF_SOURCES:
@@ -20,8 +21,18 @@ def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, fact
     version = registry_diff.PROCESSOR_VERSION
     changes = []
     if previous is not None:
-        old = (previous["payload"] or {}).get("facts") or {}
-        changes = registry_diff.diff(old, facts or {}, locators or {})
+        from biz_rules.history_sources import stable_raw
+
+        prior = previous["payload"] or {}
+        changes = registry_diff.diff(
+            prior.get("facts") or {},
+            facts or {},
+            locators or {},
+            old_summary=prior.get("clean_text"),
+            new_summary=summary,
+            old_raw_stable=stable_raw(source_id, prior.get("raw_content")) if prior.get("raw_content") else None,
+            new_raw_stable=stable_raw(source_id, raw) if raw else None,
+        )
     inserted = conn.execute(
         text("""
           INSERT INTO derived_registry_diff_runs
@@ -175,7 +186,8 @@ def backfill(source_id="clinicaltrials", *, batch=500):
             todo = conn.execute(
                 text("""
                   SELECT v.version_id,v.source_record_id,v.is_demo,v.published_seq,v.payload->'facts' AS facts,
-                         v.payload->'field_locators' AS locators
+                         v.payload->'field_locators' AS locators, v.payload->>'clean_text' AS summary,
+                         v.payload->>'raw_content' AS raw
                   FROM history_versions v
                   WHERE v.source_id=:source AND v.proof_available_at IS NULL
                     AND NOT EXISTS (SELECT 1 FROM derived_registry_diff_runs r
@@ -218,6 +230,8 @@ def backfill(source_id="clinicaltrials", *, batch=500):
                     to_version_id=row["version_id"],
                     facts=row["facts"],
                     locators=row["locators"],
+                    summary=row["summary"],
+                    raw=row["raw"],
                     pairing="skipped_archive_mix" if mixed else "backfill_published_seq",
                 )
                 done += 1

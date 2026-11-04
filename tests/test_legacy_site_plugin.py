@@ -119,7 +119,12 @@ def test_url_outside_the_site_is_refused(fake_web):
     assert batch["error"]["code"] == "url_outside_site" and batch["records"] == []
 
 
+def pages_of(batch):
+    return [r.source_record_id for r in batch["records"] if json.loads(r.raw_content)["role"] == "web_capture"]
+
+
 def test_list_mode_reuses_old_pagination_and_resumes(fake_web, monkeypatch):
+    """max_records 数的是版本（父页面和附件都算）：每页 1 个页面 + 2 个附件。"""
     urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(5)]
 
     class Driver:
@@ -128,15 +133,78 @@ def test_list_mode_reuses_old_pagination_and_resumes(fake_web, monkeypatch):
 
     start = legacy_sites.SITE_PROFILES["nmpa"]["start_urls"][0]
     monkeypatch.setattr(legacy_sites, "_make_driver", lambda site, profile, url: Driver())
-    first = read_public(FetchRequest(source_id="nmpa", query=start, max_records=2))
-    assert [r.source_record_id for r in first["records"] if json.loads(r.raw_content)["role"] == "web_capture"] == urls[:2]
+    first = read_public(FetchRequest(source_id="nmpa", query=start, max_records=5))
+    assert pages_of(first) == urls[:2] and len(first["records"]) == 5
+    assert first["stop_reason"] == "record_budget" and not first["upstream_pagination_exhausted"]
     cont = first["next_continuation"]
-    assert cont["read_count"] == 2 and not first["upstream_pagination_exhausted"]
-    second = read_public(
-        FetchRequest(source_id="nmpa", query=start, max_records=10, continuation=cont)
-    )
-    pages = [r.source_record_id for r in second["records"] if json.loads(r.raw_content)["role"] == "web_capture"]
-    assert pages == urls[2:] and second["upstream_pagination_exhausted"] and second["next_continuation"] is None
+    assert json.loads(cont["cursor"]) == {"i": 1, "a": 1}  # 第 2 页的第 2 个附件还没读
+    second = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, continuation=cont))
+    assert pages_of(second) == urls[1:] and second["upstream_pagination_exhausted"]
+    assert second["next_continuation"] is None
+    page2 = json.loads(second["records"][0].raw_content)
+    assert [a["status"] for a in page2["attachments"]] == ["read_in_earlier_run", "stored"]
+
+
+def test_codex_r59_record_budget_is_enforced_for_by_url(fake_web):
+    """r59 探针：max_records=1、三个合法站内 URL，以前返回 9 个版本并声称读到底。"""
+    urls = [PAGE, PAGE.replace("123.html", "124.html"), PAGE.replace("123.html", "125.html")]
+    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_records=1))
+    assert len(batch["records"]) == 1 and batch["stop_reason"] == "record_budget"
+    assert not batch["upstream_pagination_exhausted"]
+    page = json.loads(batch["records"][0].raw_content)
+    assert [a["status"] for a in page["attachments"]] == ["not_attempted", "not_attempted"]
+    assert json.loads(batch["next_continuation"]["cursor"]) == {"i": 0, "a": 0}
+
+
+def test_request_budget_counts_every_request(fake_web):
+    urls = [PAGE, PAGE.replace("123.html", "124.html")]
+    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_pages=1,
+                                     max_records=100))
+    # max_pages=1 → 10 个请求：两页各 1 个页面请求 + 2 个附件 = 6，没用完
+    assert batch["requests"] == 6 and batch["upstream_pagination_exhausted"]
+
+
+def test_byte_budget_stops_and_keeps_what_was_read(fake_web, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_SITE_RUN_MAX_BYTES", "10")
+    urls = [PAGE, PAGE.replace("123.html", "124.html")]
+    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_records=100))
+    assert batch["stop_reason"] == "byte_budget" and pages_of(batch) == [PAGE]
+    assert batch["next_continuation"] is not None
+
+
+def test_too_large_attachment_is_a_recorded_gap(fake_web, monkeypatch):
+    def too_large(*a, **k):
+        raise ValueError("attachment_too_large")
+
+    monkeypatch.setattr(legacy_sites, "_download", too_large)
+    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
+    page = json.loads(batch["records"][0].raw_content)
+    assert {a["status"] for a in page["attachments"]} == {"too_large"} and len(batch["records"]) == 1
+
+
+def test_list_pages_fetched_by_the_old_driver_go_through_the_gate(fake_web, monkeypatch):
+    import core_engine.pagination_driver as driver
+
+    seen = []
+
+    class Real:
+        @staticmethod
+        def fn(*args, **kwargs):
+            seen.append(kwargs.get("delay"))
+            return {"page": FakePage(), "url": "x", "uuid": "u", "timestamp": "t", "cookies": []}
+
+    monkeypatch.setattr(driver, "fetch_page", Real)
+
+    class Driver:
+        def iter_detail_urls(self):
+            driver.fetch_page.fn(url="list-1", delay=2.0)  # 旧驱动取列表页
+            yield PAGE
+
+    monkeypatch.setattr(legacy_sites, "_make_driver", lambda site, profile, url: Driver())
+    start = legacy_sites.SITE_PROFILES["nmpa"]["start_urls"][0]
+    batch = read_public(FetchRequest(source_id="nmpa", query=start))
+    assert seen == [0] and batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
+    assert driver.fetch_page is Real  # 读取结束后还原
 
 
 def test_list_mode_only_accepts_the_sites_declared_start_urls(fake_web):

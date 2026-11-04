@@ -66,7 +66,7 @@ _MIME_MAP = {
 }
 
 
-def _mineru_parse(file_path: str, base: str | None = None) -> dict:
+def _mineru_parse(file_path: str, base: str | None = None, content_list: bool = False, timeout: float = 300) -> dict:
     """
     通用 MinerU 解析内核，根据文件扩展名自动选择 MIME type。
     支持 .pdf / .doc / .docx / .xls / .xlsx。
@@ -82,18 +82,26 @@ def _mineru_parse(file_path: str, base: str | None = None) -> dict:
             resp = httpx.post(
                 f"{base}/file_parse",
                 files=[("files", (fname, f, mime))],
-                data={"return_md": "true", "backend": "pipeline"},
-                timeout=300,
+                # content_list 给出每个内容块的页码（page_idx），加工层用它做定位
+                data={"return_md": "true", "backend": "pipeline",
+                      **({"return_content_list": "true"} if content_list else {})},
+                timeout=timeout,
             )
         resp.raise_for_status()
 
         data = resp.json()
         markdown = ""
+        blocks = None
         if isinstance(data, dict):
             results = data.get("results", {})
             if isinstance(results, dict) and results:
                 first = next(iter(results.values()))
                 markdown = first.get("md_content") or first.get("md") or first.get("markdown") or ""
+                blocks = first.get("content_list")
+                if isinstance(blocks, str):
+                    import json as _json
+
+                    blocks = _json.loads(blocks)
             if not markdown:
                 markdown = data.get("md_content") or data.get("md") or data.get("markdown") or ""
         elif isinstance(data, list) and data:
@@ -104,7 +112,10 @@ def _mineru_parse(file_path: str, base: str | None = None) -> dict:
         if not markdown:
             return {"markdown": "", "success": False, "error": f"响应中未找到 markdown 内容，原始响应: {resp.text[:300]}"}
         logger.info(f"[MinerU] 解析完成，Markdown 长度: {len(markdown)}")
-        return {"markdown": markdown, "success": True, "error": ""}
+        out = {"markdown": markdown, "success": True, "error": ""}
+        if content_list:
+            out["content_list"] = blocks if isinstance(blocks, list) else None
+        return out
     except Exception as e:
         logger.error(f"[MinerU] 调用异常: {e}")
         return {"markdown": "", "success": False, "error": str(e)}

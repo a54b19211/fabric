@@ -102,7 +102,8 @@ def pg(pg_engine, monkeypatch):
     migration.migrate_history()
     with pg_engine.begin() as conn:
         conn.execute(text(
-            "TRUNCATE derived_clean_text,derived_registry_changes,derived_registry_diff_runs,history_versions,history_runs,"
+            "TRUNCATE derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,"
+            "derived_registry_diff_runs,history_versions,history_runs,"
             "history_version_rank"
         ))
         conn.execute(
@@ -1325,3 +1326,87 @@ def test_same_file_twice_is_parsed_once(pg, tmp_path, monkeypatch):
     got = derived_text.for_versions("nmpa", False, [first, second], "current", datetime.now(timezone.utc))["versions"]
     assert len(calls) == 1 and got[first]["text"] == got[second]["text"] == "# 同一份"
     assert {got[first]["parse_method"], got[second]["parse_method"]} == {"mineru", "reused_same_sha256:mineru"}
+
+
+def test_claims_keep_two_workers_apart_and_expired_leases_are_reclaimed(pg, tmp_path, monkeypatch):
+    """Codex r59：认领前先查待办再在事务外解析，两个实例会重复解析同一版本。"""
+    from db import derived_text
+
+    version, _ = _fetch_attachment(tmp_path, monkeypatch, "claim-1")
+    first = derived_text.claim(pg, version, lease_seconds=60)
+    assert first and derived_text.claim(pg, version, lease_seconds=60) is None
+    with pg.begin() as conn:  # 模拟持有者中断、租约过期
+        conn.execute(text("UPDATE derived_text_claims SET lease_until=clock_timestamp()-interval '1 second'"))
+    assert derived_text.claim(pg, version, lease_seconds=60) not in (None, first)
+
+
+def test_lost_lease_writes_nothing(pg, tmp_path, monkeypatch):
+    from db import derived_text
+    from processing import attachment_parse as ap
+
+    version, _ = _fetch_attachment(tmp_path, monkeypatch, "claim-2")
+
+    def slow_parse(p):  # 解析期间租约被别人接走
+        with pg.begin() as conn:
+            conn.execute(text("UPDATE derived_text_claims SET lease_token='someone-else'"))
+        return {"success": True, "markdown": "# x", "error": ""}
+
+    monkeypatch.setattr(ap, "_mineru", slow_parse)
+    assert derived_text.process(batch=5, retry_after_seconds=0)["lost_lease"] == 1
+    with pg.begin() as conn:
+        assert conn.execute(text("SELECT count(*) FROM derived_clean_text")).scalar_one() == 0
+
+
+def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_path, monkeypatch):
+    import hashlib
+
+    from collection.legacy_sites import ATT_SCHEMA, WEB_SCHEMA, attachment_record_id
+    from db import derived_text
+
+    monkeypatch.setenv(
+        "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
+        '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc","nmpa"]',
+    )
+    page_url = "https://www.nmpa.gov.cn/xxgk/ggtg/2.html"
+    att_url = "https://www.nmpa.gov.cn/directory/web/nmpa/images/p.pdf"
+    content = b"%PDF-1.4 parent link"
+    path = tmp_path / "p.pdf"
+    path.write_bytes(content)
+    rid = attachment_record_id(page_url, att_url)
+    page = json.dumps({"schema_version": WEB_SCHEMA, "role": "web_capture", "site": "nmpa", "url": page_url,
+                       "fetched_at": "t", "html_sha256": "0" * 64, "html": "<html></html>",
+                       "parsed": {"title": "公告", "publish_date": "2026-11-01", "markdown": "# 公告", "parse_method": "css",
+                                  "extra": {}},
+                       "attachments": [{"record_id": rid, "url": att_url, "status": "stored"}]}, sort_keys=True)
+    att = json.dumps({"schema_version": ATT_SCHEMA, "role": "attachment", "site": "nmpa", "url": att_url,
+                      "parent_record_id": page_url, "file_name": "p.pdf", "file_ext": ".pdf",
+                      "sha256": hashlib.sha256(content).hexdigest(), "size": len(content), "store_path": str(path),
+                      "discovered_from": "detail_page", "status": "stored"}, sort_keys=True)
+    request = FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[page_url])
+    run, _ = store.create_fetch(request, "link-1")
+    store.job_input(run.id, run.attempt)
+    done = store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id=page_url, record_kind="document", raw_content=page),
+                    ArchiveRecord(source_record_id=rid, record_kind="document", raw_content=att)],
+        "complete": False, "upstream_pagination_exhausted": True, "stop_reason": "upstream_exhausted",
+        "requests": 2, "bytes": len(content), "source_total": None, "error": None,
+    })
+    page_version, att_version = done.version_ids
+    from processing import attachment_parse as ap
+
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 正文", "error": "",
+                                                  "content_list": [{"type": "text", "text": "正文", "page_idx": 2}]})
+    derived_text.process(batch=5, retry_after_seconds=0)
+    got = derived_text.for_versions("nmpa", False, [att_version], "current", datetime.now(timezone.utc))
+    entry = got["versions"][att_version]
+    assert entry["attachment_of"] == [
+        {"parent_record_id": page_url, "parent_version_id": page_version, "link_basis": "same_run_parent_version"}
+    ]
+    assert entry["locator_kind"] == "pdf_page" and entry["segments"][0]["page"] == 3
+    assert entry["text"].startswith("〔第3页〕")
+    # 按旧库链接补抓（父页面没重读）：父版本未知，如实记录
+    legacy, _ = _fetch_attachment(tmp_path, monkeypatch, "link-legacy")
+    derived_text.process(batch=5, retry_after_seconds=0)
+    got = derived_text.for_versions("nmpa", False, [legacy], "current", datetime.now(timezone.utc))
+    assert got["versions"][legacy]["attachment_of"][0]["parent_version_id"] is None
+    assert got["versions"][legacy]["attachment_of"][0]["link_basis"] == "parent_version_unknown"

@@ -11,10 +11,14 @@ from biz_rules.history_models import HistoryError, canonical, sha256
 
 def publication_id(manifest):
     # weknora-kdd-v1 的公开身份算法；摘要不参与ID，但异摘要必须由服务拒绝。
-    return sha256(canonical([
+    parts = [
         manifest["knowledge_base_id"], manifest["source_instance"],
         manifest["source_id"], manifest["source_record_id"], manifest["version_id"],
-    ]))
+    ]
+    if manifest.get("artifact_key"):
+        # 同一固定版本的派生正文产物（附件）：桥接服务 feat/kdd-artifact-key 起把它算进身份；不带时与 v1 相同
+        parts.append(manifest["artifact_key"])
+    return sha256(canonical(parts))
 
 
 class IndexServiceError(HistoryError):

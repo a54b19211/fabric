@@ -32,7 +32,7 @@ from biz_rules.history_models import (
     source_time,
     utc,
 )
-from biz_rules.history_sources import stable_raw, project_record
+from biz_rules.history_sources import project_record, stable_raw
 from db import registry_changes
 
 
@@ -841,10 +841,13 @@ def _publish(
                     facts=projected.get("facts"),
                     locators=projected.get("field_locators"),
                     pairing="current_at_adoption",
+                    summary=projected.get("clean_text"),
+                    raw=item.raw_content,
                 )
             new_count += 1
         version_ids.append(version_id)
     _persist_dependencies(conn, source, dependencies)
+    _link_attachments(conn, run, prepared, version_ids)
     conn.execute(
         text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
         {"seq": seq, "id": run["source_id"]},
@@ -889,6 +892,34 @@ def _publish(
             "attempt": run["attempt"],
         },
     )
+
+
+def _link_attachments(conn, run, prepared, version_ids):
+    """附件版本 → 固定父版本（attachment_of）。父页面在同一次读取里就记下它这次的版本；不在（例如按旧库
+    链接补抓附件、父页面没有重抓）就如实记父版本未知，不猜。同一组关系只记一次。"""
+    by_record = {item.source_record_id: version for (item, _), version in zip(prepared, version_ids)}
+    for (item, projected), version in zip(prepared, version_ids):
+        facts = projected.get("facts") or {}
+        if facts.get("role") != "attachment" or not facts.get("parent_record_id"):
+            continue
+        parent = facts["parent_record_id"]
+        parent_version = by_record.get(parent)
+        conn.execute(
+            text("""
+              INSERT INTO history_attachment_links
+                (attachment_version_id,parent_record_id,parent_version_id,link_basis,run_id)
+              SELECT :a,:p,:pv,:basis,:run
+              WHERE NOT EXISTS (SELECT 1 FROM history_attachment_links WHERE attachment_version_id=:a
+                                AND parent_record_id=:p AND COALESCE(parent_version_id,'')=COALESCE(:pv,''))
+            """),
+            {
+                "a": version,
+                "p": parent,
+                "pv": parent_version,
+                "basis": "same_run_parent_version" if parent_version else "parent_version_unknown",
+                "run": run["id"],
+            },
+        )
 
 
 def create_fetch(request: FetchRequest, key: str):

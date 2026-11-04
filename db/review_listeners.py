@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """防护性事件监听 — review_status 应通过 repository 函数修改，不应直接赋值。"""
 
-import warnings
 import traceback
+import warnings
 
 from sqlalchemy import event
 

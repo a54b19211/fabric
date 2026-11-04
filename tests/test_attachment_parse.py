@@ -111,3 +111,57 @@ def test_unknown_type_is_unsupported(tmp_path, tools):
 def test_mineru_endpoint_is_configurable(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_MINERU_URL", "http://127.0.0.1:9/")
     assert ap.mineru_base() == "http://127.0.0.1:9"
+
+
+# ——v2：定位与大小上限（Codex r59）——
+
+
+def test_pdf_blocks_become_text_with_page_markers_and_offsets(tmp_path, monkeypatch):
+    blocks = [
+        {"type": "text", "text": "附件1", "page_idx": 0},
+        {"type": "page_number", "text": "1", "page_idx": 0},
+        {"type": "table", "table_caption": ["注销目录"], "table_body": "<table><tr><td>阿莫西林</td></tr></table>",
+         "page_idx": 1},
+    ]
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "md", "error": "", "content_list": blocks})
+    out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
+    assert out["locator_kind"] == "pdf_page"
+    assert out["text"].startswith("〔第1页〕") and "〔第2页〕" in out["text"]
+    assert "页码" not in out["text"] and out["text"].count("1") == out["text"].count("附件1") + 1  # 页码块已跳过
+    for seg in out["segments"]:
+        piece = out["text"][seg["start"]:seg["end"]]
+        assert piece and ("附件1" in piece or "阿莫西林" in piece)
+    assert [s["page"] for s in out["segments"]] == [1, 2]
+
+
+def test_docx_native_parse_has_no_pages_only_blocks(tmp_path, monkeypatch):
+    blocks = [{"type": "text", "text": "第一段", "page_idx": 0}, {"type": "text", "text": "第二段", "page_idx": 0}]
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "md", "error": "", "content_list": blocks})
+    out = ap.parse_file(**stored(tmp_path, "x.docx", b"PK\x03\x04 docx"))
+    assert out["locator_kind"] == "block" and "〔第" not in out["text"]
+    assert all("page" not in s for s in out["segments"])
+
+
+def test_converted_pages_are_labelled_as_converted(tmp_path, tools, monkeypatch):
+    monkeypatch.delenv("DATAFABRIC_MINERU_CLOUD_TOKEN", raising=False)
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "md", "error": "",
+                                                  "content_list": [{"type": "text", "text": "正文", "page_idx": 0}]})
+    out = ap.parse_file(**stored(tmp_path, "x.doc", DOC))
+    assert out["locator_kind"] == "converted_page"
+
+
+def test_no_content_list_means_locator_unavailable(tmp_path, tools):
+    out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
+    assert out["status"] == "parsed" and out["locator_kind"] == "unavailable" and out["segments"] == []
+
+
+def test_excel_is_located_by_sheet(tmp_path, monkeypatch):
+    monkeypatch.setattr(ap, "_excel", lambda p: "## 名单\n\n| a |\n\n## 附表\n\n| b |")
+    out = ap.parse_file(**stored(tmp_path, "x.xls", b"\xd0\xcf\x11\xe0 xls"))
+    assert out["locator_kind"] == "sheet" and [s["sheet"] for s in out["segments"]] == ["名单", "附表"]
+
+
+def test_too_large_is_refused_before_hashing_or_parsing(tmp_path, tools, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_ATTACHMENT_MAX_PARSE_BYTES", "4")
+    out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
+    assert out["status"] == "failed" and out["error"] == "too_large" and tools == []

@@ -6,16 +6,15 @@ CompanyConcept和CompanyFacts属于SEC同一XBRL API族。本入口使用单概�
 
 from __future__ import annotations
 
-from datetime import date
-from decimal import Decimal, InvalidOperation
 import os
 import re
 import time
+from datetime import date
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
 from biz_rules.history_models import ArchiveRecord, HistoryError
-
 
 SEC_PARSER = "datafabric.sec.companyconcept.v0.1"
 ENDPOINT = "https://data.sec.gov/api/xbrl/companyconcept/"
@@ -149,8 +148,7 @@ def read_sec(request):
         try:
             budget_count = min(len(selected), request.max_records, request.max_pages)
             for index, native in enumerate(selected[:budget_count]):
-                if index:
-                    time.sleep(1.0)  # 本读取循环不超过每秒一请求；不隐藏重试。
+                # 间隔由共享限速组 sec.gov 控制（每秒一请求，见来源目录），_bounded_text 内过闸
                 if time.monotonic() - started >= request.deadline_seconds:
                     stop = "deadline"
                     break

@@ -53,7 +53,7 @@ def pg(pg_engine, monkeypatch):
     index_migration.migrate_index()
     with pg_engine.begin() as conn:
         assert conn.execute(text("SELECT current_schema()")).scalar_one().startswith("test_index_")
-        conn.execute(text("TRUNCATE derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,history_versions,history_runs"))
+        conn.execute(text("TRUNCATE derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,history_versions,history_runs"))
         conn.execute(text("UPDATE history_sources SET published_seq=0,read_enabled=true"))
     set_targets(monkeypatch)
     return pg_engine
@@ -102,7 +102,8 @@ def add_collected(*, withdrawn=False):
 def receipt_for(body):
     return {"publication_id": publication_id(body), "knowledge_id": "knowledge-" + publication_id(body),
             "knowledge_base_id": body["knowledge_base_id"], "source_scope": body["source_scope"],
-            "identity": {key: body[key] for key in ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256")},
+            "identity": {key: body[key] for key in ("source_instance", "source_id", "source_record_id", "version_id",
+                                                    "raw_sha256", "artifact_key") if key in body},
             "raw_locator": copy.deepcopy(body["raw_locator"]), "content_sha256": body["content_sha256"],
             "upload_status": "uploaded", "parse_status": "completed", "vector_status": "ready", "index_status": "ready",
             "binding_status": "bound", "source_status": "active", "chunk_count": 1, "vector_count": 1}
@@ -509,3 +510,39 @@ def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
     derived_text.process(batch=5, retry_after_seconds=0)
     index.scan_committed()
     assert rows(pg, "SELECT * FROM index_publications") == []
+
+
+def test_processor_upgrade_supersedes_the_old_artifact_and_keeps_its_record(pg, monkeypatch, tmp_path):
+    """Codex r59：处理器升级后同一附件版本重跑，旧索引要停用、新正文要上线，旧记录保留。"""
+    from db import derived_text
+    from integration_history import _fetch_attachment
+    from processing import attachment_parse as ap
+
+    version, _ = _fetch_attachment(tmp_path, monkeypatch, "upgrade")
+    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
+        "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
+        "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
+    index.scan_committed()
+    monkeypatch.setattr(ap, "PROCESSOR_VERSION", "synthetic.attachment_parse.v1")
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 旧解析", "error": ""})
+    derived_text.process(batch=5, retry_after_seconds=0)
+    client = JournalClient()
+    first = index.process_once(client=client)
+    assert first["state"] == "ready", rows(pg, "SELECT error, artifact_key FROM index_publications")
+    monkeypatch.setattr(ap, "PROCESSOR_VERSION", "synthetic.attachment_parse.v2")
+    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 新解析", "error": ""})
+    derived_text.process(batch=5, retry_after_seconds=0)
+    jobs = {r["artifact_key"].split(":")[0]: r for r in rows(pg, "SELECT * FROM index_publications")}
+    assert set(jobs) == {"synthetic.attachment_parse.v1", "synthetic.attachment_parse.v2"}
+    for _ in range(4):
+        due(pg)
+        index.process_once(client=client)
+    jobs = {r["artifact_key"].split(":")[0]: r for r in rows(pg, "SELECT * FROM index_publications")}
+    assert jobs["synthetic.attachment_parse.v1"]["state"] == "disabled"
+    assert jobs["synthetic.attachment_parse.v1"]["desired_state"] == "superseded"
+    assert jobs["synthetic.attachment_parse.v2"]["state"] == "ready", jobs["synthetic.attachment_parse.v2"]["error"]
+    assert any(b.get("artifact_key", "").startswith("synthetic.attachment_parse.v2:") and b["content"] == "# 新解析"
+               for b in client.bodies)
+    # 发给桥接服务的只有它认识的字段（extra=forbid），说明字段留在 Fabric 清单里
+    allowed = set(index.BRIDGE_FIELDS) | {"title", "content"}
+    assert all(set(b) <= allowed for b in client.bodies)

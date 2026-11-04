@@ -9,6 +9,7 @@ DATAFABRIC_MINERU_CLOUD_TOKEN 读，不写进代码或日志。文件会离开�
 from __future__ import annotations
 
 import io
+import json
 import os
 import time
 import zipfile
@@ -58,7 +59,14 @@ def parse(path, *, token=None, client=None, model_version="pipeline", poll_secon
                     names = [n for n in z.namelist() if n.endswith("full.md")]
                     if not names:
                         return _fail("cloud_no_markdown")
-                    return {"success": True, "markdown": z.read(names[0]).decode("utf-8"), "error": ""}
+                    out = {"success": True, "markdown": z.read(names[0]).decode("utf-8"), "error": ""}
+                    lists = [n for n in z.namelist() if n.endswith("content_list.json")]
+                    if lists:  # 每个内容块的 page_idx，加工层用来定位
+                        try:
+                            out["content_list"] = json.loads(z.read(sorted(lists, key=len)[0]))
+                        except ValueError:
+                            out["content_list"] = None
+                    return out
             if state == "failed":
                 return _fail("cloud_failed")
             if time.monotonic() >= deadline:

@@ -156,21 +156,67 @@ def test_europe_pmc_and_who_windows():
     assert request["updated_since"] == start.isoformat() and request["updated_until"] == end.isoformat()
 
 
-def test_rate_gate_local_fallback_spaces_requests(monkeypatch):
+def _gate_worker(args):
+    import os
+    import time as _time
+
+    directory, n = args
+    os.environ["DATAFABRIC_RATE_DIR"] = directory
+    os.environ.pop("DATAFABRIC_HISTORY_REDIS_URL", None)
+    from collection import rate as gate
+
+    gate._redis.cache_clear()
+    stamps = []
+    for _ in range(n):
+        gate.wait("probe.example", 0.2)
+        stamps.append(_time.time())
+    return stamps
+
+
+def test_rate_gate_without_redis_is_shared_across_processes(tmp_path):
+    """Codex r58：Redis 不可用时 3 个进程各 2 次、间隔 0.2 秒，旧实现 0.2 秒就放行 6 次。"""
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(3) as pool:
+        stamps = sorted(t for result in pool.map(_gate_worker, [(str(tmp_path), 2)] * 3) for t in result)
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert len(stamps) == 6 and min(gaps) >= 0.19 and stamps[-1] - stamps[0] >= 0.95
+
+
+def test_rate_gate_redis_failure_falls_back_to_the_shared_file_gate(tmp_path, monkeypatch):
+    class Broken:
+        def set(self, *a, **k):
+            raise ConnectionError("down")
+
+    monkeypatch.setenv("DATAFABRIC_RATE_DIR", str(tmp_path))
+    monkeypatch.setattr(rate, "_redis", lambda: Broken())
+    calls = []
+    monkeypatch.setattr(rate, "_wait_file", lambda g, i, d: calls.append(g))
+    rate.wait("g", 0.5)
+    assert calls == ["g"]
+
+
+def test_rate_gate_respects_the_deadline(tmp_path, monkeypatch):
+    import time as _time
+
+    monkeypatch.setenv("DATAFABRIC_RATE_DIR", str(tmp_path))
     monkeypatch.delenv("DATAFABRIC_HISTORY_REDIS_URL", raising=False)
     rate._redis.cache_clear()
-    slept = []
-    clock = [100.0]
-    monkeypatch.setattr(rate.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(rate.time, "sleep", lambda s: slept.append(round(s, 3)))
-    rate._local_next.clear()
-    rate.wait("g", 0.5)
-    rate.wait("g", 0.5)
-    rate.wait("other", 0.5)
-    assert slept == [0.5]
+    rate.wait("slow", 30)
+    with pytest.raises(TimeoutError):
+        rate.wait("slow", 30, deadline=_time.monotonic() + 1)
 
 
-# ——登记差分——
+def test_every_known_host_maps_to_its_catalog_rate_group():
+    assert rate.group_for_url("https://clinicaltrials.gov/api/v2/studies").source_id == "clinicaltrials"
+    assert rate.group_for_url("https://www.ebi.ac.uk/europepmc/x").source_id == "europe_pmc"
+    assert rate.group_for_url("https://data.sec.gov/api/xbrl/x").min_interval_seconds == 1.0
+    assert rate.group_for_url("https://api.fda.gov/x").source_id == "fda_crl"  # 最长后缀优先
+    assert rate.group_for_url("https://eutils.ncbi.nlm.nih.gov/x").source_id == "pubmed"
+    assert rate.group_for_url("https://unknown.example/x") is None
+
+
+# ——登记差分 v2：只有可证明不影响判断的变化才不送模型——
 
 
 BASE = {
@@ -182,8 +228,12 @@ BASE = {
     "primary_completion_date": "2026-06",
     "primary_completion_date_type": "ESTIMATED",
     "start_date": "2024-01-15",
+    "design_info": {"allocation": "RANDOMIZED", "maskingInfo": {"masking": "DOUBLE"}},
+    "eligibility": {"minimumAge": "18 Years", "sex": "ALL"},
+    "arm_groups": [{"label": "High dose", "description": "XYZ-101 10 mg daily"}],
     "interventions": [{"type": "DRUG", "name": "XYZ-101"}, {"type": "DRUG", "name": "Placebo"}],
-    "locations": [{"facility": "A"}, {"facility": "B"}],
+    "locations": [{"facility": "A", "city": "X", "contacts": [{"name": "Dr A", "phone": "1"}]}],
+    "official_title": "A Phase 3 Study of XYZ-101",
     "has_results": False,
 }
 LOC = {"status": {"json_pointer": "/protocolSection/statusModule/overallStatus"}}
@@ -198,55 +248,86 @@ def test_identical_versions_have_no_changes():
     assert rd.diff(BASE, dict(BASE)) == []
 
 
-def test_status_change_is_material_and_keeps_pointer_and_both_values():
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"design_info": {"allocation": "NON_RANDOMIZED", "maskingInfo": {"masking": "DOUBLE"}}},  # 随机化取消
+        {"eligibility": {"minimumAge": "6 Years", "sex": "ALL"}},  # 入组年龄放宽到儿童
+        {"arm_groups": [{"label": "High dose", "description": "XYZ-101 100 mg daily"}]},  # 同名组剂量 10→100
+        {"start_date": "2024-02-01"},  # 任何日期移动都不能证明无关
+        {"primary_completion_date": "2026-07"},
+        {"locations": [{"facility": "A", "city": "X"}, {"facility": "B", "city": "Y"}]},  # 新增地点
+    ],
+)
+def test_codex_r58_counterexamples_and_any_unproven_change_go_to_the_model(case):
+    field = next(iter(case))
+    c = changed(**case)[field]
+    assert c["material"] is True and c["material_reason"] == "not_provably_immaterial"
+
+
+def test_same_named_arm_content_change_is_flagged_for_reading_the_original():
+    c = changed(arm_groups=[{"label": "High dose", "description": "XYZ-101 100 mg daily"}])["arm_groups"]
+    assert c["detail"]["same_names_content_changed"] is True
+    assert "需读原件" in rd.describe(c)
+
+
+def test_only_whitelisted_changes_skip_the_model():
+    contacts = changed(locations=[{"facility": "A", "city": "X", "contacts": [{"name": "Dr B", "phone": "2"}]}])
+    assert contacts["locations"]["material"] is False
+    assert contacts["locations"]["material_reason"] == "site_contacts_only"
+    title = changed(official_title="a phase 3  study of XYZ-101")
+    assert title["official_title"]["material"] is False
+    order = changed(interventions=[{"type": "DRUG", "name": "Placebo"}, {"type": "DRUG", "name": "XYZ-101"}])
+    assert order["interventions"]["material"] is False
+
+
+def test_field_appearing_or_disappearing_is_never_whitelisted():
+    after = {k: v for k, v in BASE.items() if k != "locations"}
+    c = {x["field"]: x for x in rd.diff(after, BASE)}["locations"]
+    assert c["material"] is True and c["old_value"] == {"present": False}
+
+
+def test_missing_old_value_stays_unknown_not_zero():
+    """Codex r58 B：旧版原件没有地点字段，不能描述成“地点数 0 → 4”。"""
+    after = {k: v for k, v in BASE.items() if k != "locations"}
+    c = {x["field"]: x for x in rd.diff(after, BASE)}["locations"]
+    assert c["detail"]["count_before"] is None
+    text = rd.describe(c)
+    assert "地点数 未知 → 1" in text and "0 →" not in text
+
+
+def test_summary_change_outside_projected_facts_goes_to_the_model():
+    """Codex r58 A：只改 briefSummary，facts 相同，也要送模型。"""
+    out = rd.diff(BASE, dict(BASE), old_summary="Original summary", new_summary="Updated summary: new development")
+    assert [(c["field"], c["material"]) for c in out] == [("brief_summary", True)]
+    assert out[0]["json_pointer"].endswith("briefSummary")
+
+
+def test_raw_change_outside_everything_projected_is_unmapped_and_material():
+    out = rd.diff(BASE, dict(BASE), old_summary="s", new_summary="s", old_raw_stable='{"a":1}', new_raw_stable='{"a":2}')
+    assert [(c["change_kind"], c["material"]) for c in out] == [("unmapped_change", True)]
+    assert "需读两版原件" in rd.describe(out[0])
+    # 原件相同（只差来源每次改写的数据日期，已在 stable_raw 里去掉）就没有变化
+    assert rd.diff(BASE, dict(BASE), old_raw_stable='{"a":1}', new_raw_stable='{"a":1}') == []
+
+
+def test_status_change_keeps_pointer_and_both_values_and_no_verdict():
     c = changed(status="TERMINATED", why_stopped="Sponsor decision")
     assert c["status"]["material"] and c["status"]["json_pointer"].endswith("overallStatus")
     assert c["status"]["old_value"] == {"present": True, "value": "RECRUITING"}
-    assert c["why_stopped"]["old_value"] == {"present": False}  # 缺字段不当 null/空串
-    assert "TERMINATED" in rd.describe(c["status"])
-    # 只复述登记，不给“失败/疗效”结论
-    assert "失败" not in rd.describe(c["status"])
+    assert c["why_stopped"]["old_value"] == {"present": False}
+    assert "TERMINATED" in rd.describe(c["status"]) and "失败" not in rd.describe(c["status"])
 
 
-def test_date_shift_threshold_and_direction():
-    c = changed(primary_completion_date="2027-03")
-    assert c["primary_completion_date"]["detail"] == {"days": 273, "precision": "month", "direction": "later"}
-    assert c["primary_completion_date"]["material"]
-    small = changed(primary_completion_date="2026-07")
-    assert not small["primary_completion_date"]["material"]
-    start = changed(start_date="2025-01-15")
-    assert not start["start_date"]["material"]  # 开始日期的修订不单独触发判断
-
-
-def test_estimated_to_actual_and_results_posted():
-    c = changed(primary_completion_date_type="ACTUAL", enrollment_type="ACTUAL", has_results=True)
-    assert c["primary_completion_date_type"]["material_reason"] == "date_now_actual"
-    assert c["enrollment_type"]["material"] and c["has_results"]["material"]
-
-
-def test_enrollment_ratio_threshold():
-    assert not changed(enrollment=410)["enrollment"]["material"]
-    big = changed(enrollment=250)["enrollment"]
-    assert big["material"] and big["detail"]["delta"] == -150
-
-
-def test_intervention_rename_vs_wording_and_locations_not_material():
-    c = changed(interventions=[{"type": "DRUG", "name": "XYZ-101", "description": "new text"},
-                               {"type": "DRUG", "name": "Placebo"}])
-    assert not c["interventions"]["material"]  # 名称集合没变，只改描述
-    arm = changed(interventions=[{"type": "DRUG", "name": "XYZ-101"}])
-    assert arm["interventions"]["material"] and arm["interventions"]["detail"]["removed"] == ["Placebo"]
-    loc = changed(locations=[{"facility": "A"}])
-    assert not loc["locations"]["material"] and loc["locations"]["detail"]["count_after"] == 1
-
-
-def test_long_values_stored_as_hash_and_size():
+def test_date_detail_and_long_values():
+    d = changed(primary_completion_date="2027-03")["primary_completion_date"]["detail"]
+    assert d == {"days": 273, "precision": "month", "direction": "later"}
     long_outcomes = [{"measure": "m" * 100, "timeFrame": str(i)} for i in range(40)]
-    c = changed(results_outcome_measures={"outcomeMeasures": long_outcomes})
-    stored = c["results_outcome_measures"]["new_value"]
+    stored = changed(results_outcome_measures={"outcomeMeasures": long_outcomes})["results_outcome_measures"]["new_value"]
     assert stored["present"] and "sha256" in stored and "value" not in stored
 
 
 def test_change_id_is_stable_and_versioned():
+    assert rd.PROCESSOR_VERSION.endswith(".v2")
     a = rd.change_id("a" * 64, "b" * 64, "status")
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")

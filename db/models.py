@@ -10,12 +10,10 @@ SQLAlchemy ORM 模型 —— 与 db/schema.sql 保持一致（v3）
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Text, Float, Integer, BigInteger, Boolean, DateTime, func
-from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.ext.mutable import MutableDict
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):

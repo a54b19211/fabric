@@ -798,7 +798,6 @@ def read_public(request: FetchRequest) -> dict:
     plugin = PLUGINS.get(declared.plugin)
     if plugin is None:
         raise HistoryError("source_plugin_missing", "来源插件未注册", 503)
-    rate.wait(declared.rate_group, declared.min_interval_seconds)
     return plugin(request)
 
 
@@ -882,6 +881,11 @@ def _read_public_api(request: FetchRequest) -> dict:
                     path = ["resultList", "result"]
                 else:
                     return _read_pubmed(request, client, began)
+                try:
+                    rate.wait_for_url(url, deadline=began + request.deadline_seconds)
+                except TimeoutError:
+                    stop = "deadline"
+                    break
                 requests_count += 1
                 remaining_time = request.deadline_seconds - (time.monotonic() - began)
                 with client.stream(
@@ -1035,15 +1039,6 @@ def _read_public_api(request: FetchRequest) -> dict:
                         raise HistoryError("repeated_page_cursor", "来源分页标记重复")
                     previous_cursors.add(next_cursor)
                     cursor = next_cursor
-                try:
-                    rate.wait(
-                        declared.rate_group,
-                        declared.min_interval_seconds,
-                        deadline=began + request.deadline_seconds,
-                    )
-                except TimeoutError:
-                    stop = "deadline"
-                    break
             else:
                 stop = "page_budget"
         except HistoryError as exc:
@@ -1077,6 +1072,10 @@ def _read_public_api(request: FetchRequest) -> dict:
 
 
 def _bounded_text(client, url, params, began, deadline, budget):
+    try:
+        rate.wait_for_url(url, deadline=began + deadline)  # 每个请求都过共享限速组
+    except TimeoutError:
+        raise ValueError("deadline") from None
     remaining = deadline - (time.monotonic() - began)
     if remaining <= 0:
         raise ValueError("deadline")
@@ -1143,7 +1142,6 @@ def _read_pubmed(request, client, began):
             }
         if time.monotonic() - began >= request.deadline_seconds:
             raise ValueError("deadline")
-        time.sleep(0.4)
         raw_xml = _bounded_text(
             client,
             base + "efetch.fcgi",

@@ -119,7 +119,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         decisions=("C",),
         incremental=Incremental("fixed_ids", None, "明确 CIK/概念清单；每次读完整单概念 JSON"),
         rate_group="sec.gov",
-        min_interval_seconds=0.2,
+        min_interval_seconds=1.0,  # 沿用原读取循环的每秒一请求
         coverage={"metadata": "XBRL 标准事实", "fulltext": "无（filing 原文另接）"},
     ),
     CollectionSpec(

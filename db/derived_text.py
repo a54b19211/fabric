@@ -1,10 +1,21 @@
-"""派生正文（V023）的处理与读取。附件解析耗时（MinerU 每份可达分钟级），所以不放在发布事务里：
-process() 找出还没有成功/不支持结果的附件版本，在事务外解析，再追加一行结果。"""
+"""派生正文（V023）的处理与读取。附件解析耗时（MinerU 每份可达分钟级），不放在发布事务里。
+
+process()：
+1. 找出当前处理器版本下还没有成功/不支持结果、失败未满 MAX_ATTEMPTS 次、也没有被别人持有的附件版本；
+2. 逐个认领（derived_text_claims，带租约；中断后租约过期可再认领），两个实例不会同时解析同一版本；
+3. 同 sha256 的文件已有成功结果就复用；否则在事务外解析；
+4. 写结果时核对认领仍属于自己，attempt 在同一事务里取下一个号（主键防重复），然后释放认领；
+5. 成功时同一事务把它放进 WeKnora 待办（按派生产物区分，见 db.index_publication）。
+整批受 time_budget_seconds 约束，到时不再认领新的。
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
+from uuid import uuid4
 
 from sqlalchemy import text
 
@@ -13,16 +24,18 @@ from processing import attachment_parse
 
 ATTACHMENT_SOURCES = ("nmpa", "cde", "chictr")
 MAX_ATTEMPTS = 3
+LEASE_SECONDS = 900
 
 
 def _pending(conn, sources, batch, retry_after_seconds):
     return conn.execute(
         text("""
-          SELECT v.version_id, v.source_id, v.is_demo, v.source_record_id, v.payload->'facts' AS facts,
-                 COALESCE(max(d.attempt), 0) AS attempts
+          SELECT v.version_id, v.source_id, v.is_demo, v.source_record_id, v.payload->'facts' AS facts
           FROM history_versions v
           LEFT JOIN derived_clean_text d ON d.version_id=v.version_id AND d.processor_version=:pv
-          WHERE v.source_id = ANY(:sources) AND v.payload->'facts'->>'role' = 'attachment'
+          LEFT JOIN derived_text_claims c ON c.version_id=v.version_id AND c.processor_version=:pv
+                                          AND c.lease_until > clock_timestamp()
+          WHERE v.source_id = ANY(:sources) AND v.payload->'facts'->>'role' = 'attachment' AND c.version_id IS NULL
           GROUP BY v.version_id, v.source_id, v.is_demo, v.source_record_id, v.payload->'facts', v.published_seq
           HAVING bool_and(d.status IS NULL OR d.status='failed')
              AND COALESCE(max(d.attempt), 0) < :max_attempts
@@ -41,73 +54,121 @@ def _pending(conn, sources, batch, retry_after_seconds):
     ).mappings().all()
 
 
-def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600):
-    """解析一批待处理附件；返回本批各状态计数。失败的版本隔 retry_after_seconds 再试，最多 MAX_ATTEMPTS 次。"""
+def claim(engine, version_id, lease_seconds=LEASE_SECONDS):
+    """认领一个版本；返回租约令牌，别人持有且未过期时返回 None。"""
+    token = uuid4().hex
+    with engine.begin() as conn:
+        got = conn.execute(
+            text("""
+              INSERT INTO derived_text_claims(version_id, processor_version, lease_token, lease_until)
+              VALUES (:v, :pv, :t, clock_timestamp() + make_interval(secs => :s))
+              ON CONFLICT (version_id, processor_version) DO UPDATE
+                SET lease_token=EXCLUDED.lease_token, lease_until=EXCLUDED.lease_until
+                WHERE derived_text_claims.lease_until <= clock_timestamp()
+              RETURNING lease_token
+            """),
+            {"v": version_id, "pv": attachment_parse.PROCESSOR_VERSION, "t": token, "s": lease_seconds},
+        ).scalar()
+    return token if got == token else None
+
+
+def _reuse(engine, sha):
+    with engine.begin() as conn:
+        return conn.execute(
+            text("""
+              SELECT d.text, d.parse_method, d.file_ext, d.locator_kind, d.segments FROM derived_clean_text d
+              JOIN history_versions v ON v.version_id=d.version_id
+              WHERE d.processor_version=:pv AND d.status='parsed' AND v.payload->'facts'->>'sha256'=:sha
+              ORDER BY d.created_at LIMIT 1
+            """),
+            {"pv": attachment_parse.PROCESSOR_VERSION, "sha": sha or ""},
+        ).mappings().first()
+
+
+def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, time_budget_seconds=1800):
+    """解析一批待处理附件；返回本批各状态计数（另含 lost_lease：认领在解析期间过期被别人接走）。"""
     from db.history import history_engine
 
     engine = history_engine()
+    began = time.monotonic()
     with engine.begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout='30000ms'"))
         todo = _pending(conn, sources, batch, retry_after_seconds)
     counts = {"parsed": 0, "failed": 0, "unsupported": 0}
     for row in todo:
+        if time.monotonic() - began >= time_budget_seconds:
+            break
+        token = claim(engine, row["version_id"])
+        if token is None:
+            continue
         facts = row["facts"] or {}
-        with engine.begin() as conn:
-            # 同一份文件（sha256 相同，例如同一附件挂在两个栏目页面下）已有成功结果：复用，不再调解析服务
-            reused = conn.execute(
-                text("""
-                  SELECT d.text, d.parse_method, d.file_ext, d.version_id FROM derived_clean_text d
-                  JOIN history_versions v ON v.version_id=d.version_id
-                  WHERE d.processor_version=:pv AND d.status='parsed' AND v.payload->'facts'->>'sha256'=:sha
-                  ORDER BY d.created_at LIMIT 1
-                """),
-                {"pv": attachment_parse.PROCESSOR_VERSION, "sha": facts.get("sha256") or ""},
-            ).mappings().first()
+        reused = _reuse(engine, facts.get("sha256"))
         if reused:
             result = {"status": "parsed", "text": reused["text"], "file_ext": reused["file_ext"],
-                      "parse_method": "reused_same_sha256:" + str(reused["parse_method"]), "error": None}
+                      "parse_method": "reused_same_sha256:" + str(reused["parse_method"]), "error": None,
+                      "attempts": ["reused_same_sha256"], "segments": reused["segments"],
+                      "locator_kind": reused["locator_kind"]}
         else:
             result = attachment_parse.parse_file(
                 store_path=facts.get("store_path"), sha256=facts.get("sha256"), file_ext=facts.get("file_ext")
             )
         body = result["text"]
         with engine.begin() as conn:
-            inserted = conn.execute(
+            held = conn.execute(
+                text("SELECT lease_token FROM derived_text_claims WHERE version_id=:v AND processor_version=:pv "
+                     "FOR UPDATE"),
+                {"v": row["version_id"], "pv": attachment_parse.PROCESSOR_VERSION},
+            ).scalar()
+            if held != token:
+                counts["lost_lease"] = counts.get("lost_lease", 0) + 1
+                continue
+            attempt = conn.execute(
+                text("SELECT COALESCE(max(attempt),0)+1 FROM derived_clean_text WHERE version_id=:v "
+                     "AND processor_version=:pv"),
+                {"v": row["version_id"], "pv": attachment_parse.PROCESSOR_VERSION},
+            ).scalar_one()
+            conn.execute(
                 text("""
                   INSERT INTO derived_clean_text
                     (version_id,processor_version,attempt,source_id,is_demo,source_record_id,status,parse_method,
-                     error,file_ext,text,chars,text_sha256)
-                  SELECT :v,:pv,:attempt,:source,:demo,:native,:status,:method,:error,:ext,:text,:chars,:sha
-                  WHERE NOT EXISTS (SELECT 1 FROM derived_clean_text
-                                    WHERE version_id=:v AND processor_version=:pv AND attempt=:attempt)
+                     parse_attempts,error,file_ext,text,chars,text_sha256,locator_kind,segments)
+                  VALUES (:v,:pv,:attempt,:source,:demo,:native,:status,:method,CAST(:attempts AS jsonb),:error,
+                          :ext,:text,:chars,:sha,:kind,CAST(:segments AS jsonb))
                 """),
                 {
                     "v": row["version_id"],
                     "pv": attachment_parse.PROCESSOR_VERSION,
-                    "attempt": row["attempts"] + 1,
+                    "attempt": attempt,
                     "source": row["source_id"],
                     "demo": row["is_demo"],
                     "native": row["source_record_id"],
                     "status": result["status"],
                     "method": result["parse_method"],
+                    "attempts": json.dumps(result.get("attempts") or []),
                     "error": result["error"],
                     "ext": result["file_ext"],
                     "text": body,
                     "chars": len(body),
                     "sha": hashlib.sha256(body.encode()).hexdigest(),
+                    "kind": result.get("locator_kind"),
+                    "segments": json.dumps(result.get("segments") or [], ensure_ascii=False),
                 },
-            ).rowcount
-            if inserted and result["status"] == "parsed":
+            )
+            conn.execute(
+                text("UPDATE derived_text_claims SET lease_until=clock_timestamp() WHERE version_id=:v "
+                     "AND processor_version=:pv AND lease_token=:t"),
+                {"v": row["version_id"], "pv": attachment_parse.PROCESSOR_VERSION, "t": token},
+            )
+            if result["status"] == "parsed":
                 from db.index_publication import enqueue_attachment
 
                 enqueue_attachment(conn, row["version_id"])
-        if inserted:
-            counts[result["status"]] += 1
+        counts[result["status"]] += 1
     return counts
 
 
 def for_versions(source_id, is_demo, version_ids, mode, cutoff):
-    """一页版本的派生正文（同一处理器版本下最新一次尝试）。版本须在本次模式和截止时间下可见。"""
+    """一页版本的派生正文（当前处理器版本下最新一次尝试），含定位和父版本关系。版本须在本次模式和截止时间下可见。"""
     from db import history
 
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
@@ -121,27 +182,45 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
         cutoff = history._cutoff(cutoff)
         if cutoff > history._now(conn):
             raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        params = {
+            "pv": attachment_parse.PROCESSOR_VERSION,
+            "source": source_id,
+            "demo": is_demo,
+            "ids": list(version_ids),
+            "cutoff": cutoff,
+        }
         rows = conn.execute(
             text(
-                "SELECT DISTINCT ON (d.version_id) d.version_id,d.attempt,d.status,d.parse_method,d.error,d.file_ext,"
-                "d.text,d.chars,d.text_sha256,d.processor_version FROM derived_clean_text d "
-                "JOIN history_versions v ON v.version_id=d.version_id "
+                "SELECT DISTINCT ON (d.version_id) d.version_id,d.attempt,d.status,d.parse_method,d.parse_attempts,"
+                "d.error,d.file_ext,d.text,d.chars,d.text_sha256,d.processor_version,d.locator_kind,d.segments "
+                "FROM derived_clean_text d JOIN history_versions v ON v.version_id=d.version_id "
                 "WHERE d.processor_version=:pv AND d.source_id=:source AND d.is_demo=:demo "
                 "AND d.version_id=ANY(:ids) AND " + eligible + " ORDER BY d.version_id, d.attempt DESC"
             ),
-            {
-                "pv": attachment_parse.PROCESSOR_VERSION,
-                "source": source_id,
-                "demo": is_demo,
-                "ids": list(version_ids),
-                "cutoff": cutoff,
-            },
+            params,
+        ).mappings().all()
+        links = conn.execute(
+            text(
+                "SELECT l.attachment_version_id, l.parent_record_id, l.parent_version_id, l.link_basis "
+                "FROM history_attachment_links l "
+                "LEFT JOIN history_versions p ON p.version_id=l.parent_version_id "
+                "WHERE l.attachment_version_id=ANY(:ids) AND (l.parent_version_id IS NULL OR ("
+                + eligible.replace("v.", "p.")
+                + ")) ORDER BY l.created_at"
+            ),
+            params,
         ).mappings().all()
     out = {v: {"state": "not_visible_or_not_processed"} for v in version_ids}
     for row in rows:
         out[row["version_id"]] = {"state": "processed", **{k: row[k] for k in row if k != "version_id"}}
+    for link in links:
+        entry = out.get(link["attachment_version_id"])
+        if entry and entry.get("state") == "processed":
+            entry.setdefault("attachment_of", []).append(
+                {k: link[k] for k in ("parent_record_id", "parent_version_id", "link_basis")}
+            )
     return {
-        "schema_version": "datafabric.derived_text.v1",
+        "schema_version": "datafabric.derived_text.v2",
         "processor_version": attachment_parse.PROCESSOR_VERSION,
         "source_id": source_id,
         "mode": mode,
@@ -149,6 +228,9 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
         "versions": out,
         "limitations": [
             "派生正文由解析器从原件生成；表格、扫描件的识别可能有误，引用时以原件为准",
+            "locator_kind=converted_page 的页码是转换后 PDF 的页码，不是原文件页码；block/sheet 没有页码；"
+            "unavailable 表示解析服务没给定位",
             "failed / unsupported 表示附件内容没有进入正文，不表示附件为空",
+            "parent_version_id 为空表示父页面的固定版本未知（例如按旧库链接补抓）",
         ],
     }

@@ -3,6 +3,7 @@
 DB_HOST 未配置时所有操作静默跳过，不影响本地运行。
 """
 import os
+
 os.environ["PGCLIENTENCODING"] = "UTF8"
 from contextlib import contextmanager
 from typing import Generator, Optional
