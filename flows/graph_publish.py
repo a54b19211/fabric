@@ -22,7 +22,6 @@ from biz_rules.history_models import (
 from biz_rules.reviewed_graph import (
     GraphBundle,
     PrimeKGQuery,
-    GraphDocumentRef,
     GraphEdge,
     GraphEvidence,
     GraphIdentity,
@@ -30,8 +29,6 @@ from biz_rules.reviewed_graph import (
     GraphNode,
     GraphRedirect,
     GraphReview,
-    LegacyDocument,
-    document_native_id,
     identity_key,
     primekg_bundle,
 )
@@ -60,175 +57,6 @@ def _loopback_url(value):
             "invalid_legacy_origin", "旧图只读入口必须为明确的本机HTTP根地址"
         )
     return value.rstrip("/")
-
-
-def capture_legacy(
-    base_url,
-    scope_ids,
-    namespace,
-    *,
-    offset=0,
-    batch_size=6,
-    include_auto=False,
-    include_pending=False,
-    expected_manifest_sha256=None,
-    client=None,
-):
-    """每批至多六篇；完整输入UUID清单和next offset让调用方继续，不把一批当全图。"""
-    if (
-        not scope_ids
-        or len(scope_ids) > 20000
-        or len(set(scope_ids)) != len(scope_ids)
-        or not 0 <= offset < len(scope_ids)
-        or not 1 <= batch_size <= 6
-    ):
-        raise HistoryError(
-            "legacy_scope_budget", "须给不重复明确UUID清单及有效批次范围"
-        )
-    GraphIdentity(namespace=namespace, id="namespace-check")
-    base_url = _loopback_url(base_url)
-    owned = client is None
-    if owned:
-        client = httpx.Client(
-            base_url=base_url, timeout=5, follow_redirects=False, trust_env=False
-        )
-    manifest_sha = sha256(canonical(scope_ids))
-    if (offset > 0 and expected_manifest_sha256 != manifest_sha) or (
-        expected_manifest_sha256 is not None
-        and expected_manifest_sha256 != manifest_sha
-    ):
-        raise HistoryError(
-            "scope_manifest_changed",
-            "续批必须绑定同一输入清单SHA；名单变化时不继续读取",
-        )
-    selected = scope_ids[offset : offset + batch_size]
-    documents, entities, relations, verified = [], [], [], set()
-    total_bytes = 0
-    deadline = time.monotonic() + 60
-
-    def read(path, params=None):
-        nonlocal total_bytes
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise HistoryError("legacy_read_deadline", "旧图本批读取超过60秒期限")
-        with client.stream(
-            "GET", path, params=params, timeout=min(5, remaining)
-        ) as response:
-            response.raise_for_status()
-            chunks, size = [], 0
-            for chunk in response.iter_bytes():
-                if time.monotonic() > deadline:
-                    raise HistoryError(
-                        "legacy_read_deadline", "旧图本批读取超过60秒期限"
-                    )
-                size += len(chunk)
-                total_bytes += len(chunk)
-                if size > 2 * 1024 * 1024 or total_bytes > 8 * 1024 * 1024:
-                    raise HistoryError(
-                        "legacy_read_budget", "旧图读取超过单响应2MiB/批次8MiB预算"
-                    )
-                chunks.append(chunk)
-        try:
-            return json.loads(b"".join(chunks))
-        except ValueError:
-            raise HistoryError(
-                "legacy_invalid_response", "旧图返回不是有效JSON"
-            ) from None
-
-    truncated = False
-    try:
-        for uuid in selected:
-            # UUID作为路径段，避免斜杠/查询字符改变精确白名单路径。
-            if any(
-                char
-                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:."
-                for char in uuid
-            ):
-                raise HistoryError("invalid_legacy_uuid", "旧文档UUID格式无效")
-            document = read("/api/documents/" + uuid)
-            if document.get("uuid") != uuid or not isinstance(
-                document.get("raw_content"), str
-            ):
-                raise HistoryError(
-                    "legacy_document_mismatch", "旧详情缺少精确UUID或正文"
-                )
-            with store.history_engine().begin() as conn:
-                store._source(conn, document.get("source_site"))
-            documents.append(document)
-            statuses = ["approved"]
-            if include_auto:
-                statuses.append("auto_approved")
-            if include_pending:
-                statuses.append("pending")
-            for status in statuses:
-                for kind, destination in (
-                    ("entities", entities),
-                    ("relations", relations),
-                ):
-                    result = read(
-                        "/api/review/" + kind,
-                        {
-                            "source_doc_uuid": uuid,
-                            "review_status": status,
-                            "page": 1,
-                            "page_size": 100,
-                        },
-                    )
-                    items = result.get("items")
-                    if not isinstance(items, list) or any(
-                        item.get("source_doc_uuid") != uuid
-                        or item.get("review_status") != status
-                        for item in items
-                    ):
-                        raise HistoryError(
-                            "legacy_review_scope_mismatch",
-                            "旧审核列表的文档/状态范围不一致",
-                        )
-                    destination.extend(items)
-                    truncated |= result.get("total", len(items)) > len(items)
-            graph = read(
-                "/api/review/graph",
-                {
-                    "source_doc_uuid": uuid,
-                    "review_status": "approved,auto_approved",
-                    "traversal": "degree",
-                    "limit": 100,
-                    "include_relations": False,
-                },
-            )
-            verified.update(
-                str(node["dict_id"])
-                for node in graph.get("nodes", [])
-                if node.get("dict_id") is not None
-                and node.get("is_verified") is True
-                and node.get("review_status") == "approved"
-            )
-    except httpx.HTTPError:
-        raise HistoryError(
-            "legacy_read_failed", "旧图HTTP读取失败；本批未发布，不当作空结果", 503
-        ) from None
-    finally:
-        if owned:
-            client.close()
-    return {
-        "schema_version": "datafabric.legacy.graph.observation.v1",
-        "namespace": namespace,
-        "is_demo": False,
-        "scope_record_ids": selected,
-        "scope_manifest_sha256": manifest_sha,
-        "scope_record_count": len(scope_ids),
-        "batch_offset": offset,
-        "selected_document_uuids": selected,
-        "next_document_offset": offset + len(selected)
-        if offset + len(selected) < len(scope_ids)
-        else None,
-        "selection_truncated": truncated,
-        "documents": documents,
-        "entities": entities,
-        "relations": relations,
-        "verified_dict_ids": sorted(verified),
-        "merge_logs": [],
-    }
 
 
 def _read_primekg(statement, parameters, columns, max_rows, *, client=None):
@@ -454,24 +282,6 @@ def capture_primekg(
         ) from None
 
 
-def _legacy_document(value):
-    return LegacyDocument(
-        source_doc_uuid=value["uuid"],
-        source_site=value["source_site"],
-        title=value.get("title") or value["uuid"],
-        source_url=value.get("source_url") or None,
-        original_raw_content=value["raw_content"],
-        original_raw_sha256=sha256(value["raw_content"]),
-        publish_date_raw=value.get("publish_date") or None,
-        original_created_at=str(value["created_at"])
-        if value.get("created_at")
-        else None,
-        original_updated_at=str(value["updated_at"])
-        if value.get("updated_at")
-        else None,
-    )
-
-
 def _evidence(original, ref, quote):
     if not quote or not isinstance(quote, str):
         return None
@@ -663,80 +473,6 @@ def build_legacy_bundle(observation, documents, document_refs):
     )
 
 
-def publish_legacy(observation, key, progress=None):
-    documents = [_legacy_document(value) for value in observation["documents"]]
-    if not documents or len(documents) > 6:
-        raise HistoryError("legacy_batch_budget", "每批须有1至6篇明确旧文档")
-    request = ArchiveImport(
-        source_id="legacy_documents",
-        is_demo=observation.get("is_demo") is True,
-        scope_description="明确旧UUID本批原文冻结，不赋历史资格",
-        declared_count=len(documents),
-        declared_complete=True,
-        records=[
-            ArchiveRecord(
-                source_record_id=document_native_id(doc),
-                record_kind="document",
-                raw_content=doc.model_dump_json(),
-            )
-            for doc in documents
-        ],
-    )
-    run = store.import_archive(request, key + ":documents")
-    if progress:
-        progress({"document_run_id": run.id, "document_version_ids": run.version_ids})
-    with store.history_engine().begin() as conn:
-        now = store._now(conn)
-    refs = []
-    for version_id, doc in zip(run.version_ids, documents, strict=True):
-        record = store.read_version(
-            version_id,
-            "legacy_documents",
-            document_native_id(doc),
-            request.is_demo,
-            "current",
-            now,
-        )
-        refs.append(
-            GraphDocumentRef(
-                source_id=record.source_id,
-                source_record_id=record.source_record_id,
-                version_id=record.version_id,
-                raw_sha256=record.raw_sha256,
-                origin_doc_uuid=doc.source_doc_uuid,
-            )
-        )
-    bundle = build_legacy_bundle(observation, documents, refs)
-    native = "legacy-graph:" + sha256(
-        canonical(
-            {
-                "namespace": bundle.namespace,
-                "scope": bundle.scope_manifest_sha256 or bundle.scope_record_ids,
-                "offset": bundle.batch_offset,
-                "selected": bundle.selected_document_uuids,
-            }
-        )
-    )
-    graph_run = store.import_archive(
-        ArchiveImport(
-            source_id="reviewed_graph",
-            is_demo=bundle.is_demo,
-            scope_description=bundle.scope_description,
-            declared_count=1,
-            declared_complete=False,
-            records=[
-                ArchiveRecord(
-                    source_record_id=native,
-                    record_kind="graph",
-                    raw_content=bundle.model_dump_json(),
-                )
-            ],
-        ),
-        key + ":graph",
-    )
-    return graph_run
-
-
 def publish_native_graph(records, key, *, max_nodes=100, max_edges=200):
     from biz_rules.native_graph import build_native_graph
 
@@ -792,17 +528,7 @@ def main():
     prime_capture.add_argument("--neighbor-term", default="")
     prime_capture.add_argument("--limit", type=int, default=20)
     prime_capture.add_argument("--output", required=True)
-    capture = commands.add_parser("capture-legacy")
-    capture.add_argument("--url", required=True)
-    capture.add_argument("--namespace", required=True)
-    capture.add_argument("--scope-file", required=True)
-    capture.add_argument("--offset", type=int, default=0)
-    capture.add_argument("--batch-size", type=int, default=6)
-    capture.add_argument("--include-auto-approved", action="store_true")
-    capture.add_argument("--include-pending", action="store_true")
-    capture.add_argument("--expected-scope-sha256")
-    capture.add_argument("--output", required=True)
-    for name in ("publish-legacy", "publish-primekg"):
+    for name in ("publish-primekg",):
         command = commands.add_parser(name)
         command.add_argument("--observation", required=True)
         command.add_argument("--idempotency-key", required=True)
@@ -838,40 +564,6 @@ def main():
             )
         )
         return
-    if args.command == "capture-legacy":
-        scope = json.loads(Path(args.scope_file).read_text())
-        # 先占用输出路径，读失败也留下明确回执，不覆盖旧观测。
-        _private_json(args.output, {"state": "reading", "offset": args.offset})
-        try:
-            result = capture_legacy(
-                args.url,
-                scope,
-                args.namespace,
-                offset=args.offset,
-                batch_size=args.batch_size,
-                include_auto=args.include_auto_approved,
-                include_pending=args.include_pending,
-                expected_manifest_sha256=args.expected_scope_sha256,
-            )
-        except HistoryError as exc:
-            Path(args.output).write_text(
-                canonical({"state": "failed", "code": exc.code, "message": exc.message})
-            )
-            raise SystemExit(exc.message) from None
-        Path(args.output).write_text(canonical(result))
-        print(
-            canonical(
-                {
-                    "state": "captured",
-                    "documents": len(result["documents"]),
-                    "scope_manifest_sha256": result["scope_manifest_sha256"],
-                    "scope_record_count": result["scope_record_count"],
-                    "next_document_offset": result["next_document_offset"],
-                    "selection_truncated": result["selection_truncated"],
-                }
-            )
-        )
-        return
     if len(args.idempotency_key) > 130:
         raise SystemExit("幂等键前缀须不超过130字符")
     observation = json.loads(Path(args.observation).read_text())
@@ -887,11 +579,7 @@ def main():
         Path(args.receipt).write_text(canonical(receipt))
 
     try:
-        run = (
-            publish_legacy(observation, args.idempotency_key, progress)
-            if args.command == "publish-legacy"
-            else publish_primekg(observation, args.idempotency_key)
-        )
+        run = publish_primekg(observation, args.idempotency_key)
     except HistoryError as exc:
         receipt.update(state="failed", code=exc.code, message=exc.message)
         Path(args.receipt).write_text(canonical(receipt))

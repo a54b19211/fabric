@@ -558,11 +558,10 @@ def _synthetic_graph_observation():
 
 
 def _published_graph(pg, monkeypatch, key="graph-fixture"):
-    from flows.graph_publish import publish_legacy
 
     _graph_sources(monkeypatch)
     observation = _synthetic_graph_observation()
-    run = publish_legacy(observation, key)
+    run = _publish_fixture_graph(observation, key)
     with pg.begin() as conn:
         payload = conn.execute(
             text("SELECT payload FROM history_versions WHERE version_id=:id"),
@@ -592,14 +591,13 @@ def _graph_archive(payload, **extra):
 
 def test_graph_roundtrip_unicode_quote_and_idempotency(pg, monkeypatch):
     from biz_rules.reviewed_graph import GraphBundle
-    from flows.graph_publish import publish_legacy
 
     observation, run, payload, now = _published_graph(pg, monkeypatch)
     graph = GraphBundle.model_validate_json(payload["raw_content"])
     assert graph.edges[0].binding_status == "bound"
     assert graph.edges[0].evidence[0].quote == "药物甲靶向蛋白乙。"
     assert graph.nodes[0].identity_status == "confirmed"
-    assert publish_legacy(observation, "graph-fixture").version_ids == run.version_ids
+    assert _publish_fixture_graph(observation, "graph-fixture").version_ids == run.version_ids
     result = store.read_graph_neighborhood(
         run.version_ids[0],
         "reviewed_graph",
@@ -861,13 +859,12 @@ def test_primekg_only_replays_background_after_local_first_seen(pg, monkeypatch)
 
 
 def test_legacy_document_cannot_smuggle_an_unlicensed_original_source(pg, monkeypatch):
-    from flows.graph_publish import publish_legacy
 
     _graph_sources(monkeypatch)
     observation = _synthetic_graph_observation()
     observation["documents"][0]["source_site"] = "not-in-catalog"
     with pytest.raises(Exception) as error:
-        publish_legacy(observation, "bad-original-source")
+        _publish_fixture_graph(observation, "bad-original-source")
     assert error.value.code in {"source_not_allowed", "source_not_available"}
     with pg.begin() as conn:
         assert (
@@ -1410,3 +1407,101 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
     got = derived_text.for_versions("nmpa", False, [legacy], "current", datetime.now(timezone.utc))
     assert got["versions"][legacy]["attachment_of"][0]["parent_version_id"] is None
     assert got["versions"][legacy]["attachment_of"][0]["link_basis"] == "parent_version_unknown"
+
+
+# ——测试用：把一批明确的 documents 原件和审核图写进 history（生产上由 db.publication 自动发表）——
+from biz_rules.history_models import ArchiveImport, ArchiveRecord, canonical, sha256  # noqa: E402,F811
+from biz_rules.reviewed_graph import GraphDocumentRef, LegacyDocument, document_native_id  # noqa: E402
+from flows.graph_publish import build_legacy_bundle  # noqa: E402
+
+
+def _fixture_document(value):
+    return LegacyDocument(
+        source_doc_uuid=value["uuid"],
+        source_site=value["source_site"],
+        title=value.get("title") or value["uuid"],
+        source_url=value.get("source_url") or None,
+        original_raw_content=value["raw_content"],
+        original_raw_sha256=sha256(value["raw_content"]),
+        publish_date_raw=value.get("publish_date") or None,
+        original_created_at=str(value["created_at"])
+        if value.get("created_at")
+        else None,
+        original_updated_at=str(value["updated_at"])
+        if value.get("updated_at")
+        else None,
+    )
+
+
+
+def _publish_fixture_graph(observation, key):
+    documents = [_fixture_document(value) for value in observation["documents"]]
+    if not documents or len(documents) > 6:
+        raise HistoryError("legacy_batch_budget", "每批须有1至6篇明确旧文档")
+    request = ArchiveImport(
+        source_id="legacy_documents",
+        is_demo=observation.get("is_demo") is True,
+        scope_description="明确旧UUID本批原文冻结，不赋历史资格",
+        declared_count=len(documents),
+        declared_complete=True,
+        records=[
+            ArchiveRecord(
+                source_record_id=document_native_id(doc),
+                record_kind="document",
+                raw_content=doc.model_dump_json(),
+            )
+            for doc in documents
+        ],
+    )
+    run = store.import_archive(request, key + ":documents")
+    with store.history_engine().begin() as conn:
+        now = store._now(conn)
+    refs = []
+    for version_id, doc in zip(run.version_ids, documents, strict=True):
+        record = store.read_version(
+            version_id,
+            "legacy_documents",
+            document_native_id(doc),
+            request.is_demo,
+            "current",
+            now,
+        )
+        refs.append(
+            GraphDocumentRef(
+                source_id=record.source_id,
+                source_record_id=record.source_record_id,
+                version_id=record.version_id,
+                raw_sha256=record.raw_sha256,
+                origin_doc_uuid=doc.source_doc_uuid,
+            )
+        )
+    bundle = build_legacy_bundle(observation, documents, refs)
+    native = "legacy-graph:" + sha256(
+        canonical(
+            {
+                "namespace": bundle.namespace,
+                "scope": bundle.scope_manifest_sha256 or bundle.scope_record_ids,
+                "offset": bundle.batch_offset,
+                "selected": bundle.selected_document_uuids,
+            }
+        )
+    )
+    graph_run = store.import_archive(
+        ArchiveImport(
+            source_id="reviewed_graph",
+            is_demo=bundle.is_demo,
+            scope_description=bundle.scope_description,
+            declared_count=1,
+            declared_complete=False,
+            records=[
+                ArchiveRecord(
+                    source_record_id=native,
+                    record_kind="graph",
+                    raw_content=bundle.model_dump_json(),
+                )
+            ],
+        ),
+        key + ":graph",
+    )
+    return graph_run
+

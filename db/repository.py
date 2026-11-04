@@ -17,7 +17,6 @@ from sqlalchemy import func, text
 
 from db.models import (
     Attachment,
-    CrawlLog,
     DocExtra,
     Document,
     EntityAlias,
@@ -4071,74 +4070,6 @@ def get_weknora_graph_stats() -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 # 10. 日志接口
 # ═══════════════════════════════════════════════════════════════════════
-
-def log_crawl_task(
-    site_key: str,
-    task_type: str,
-    config_snapshot: dict = {},
-) -> int:
-    """
-    爬取任务开始时插入 crawl_log 记录。
-    返回 log_id，供后续 update_crawl_log 使用。失败返回 0。
-    """
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return 0
-        log = CrawlLog(
-            site_key=site_key,
-            task_type=task_type,
-            status="running",
-            crawl_config_snapshot=dict(config_snapshot),
-        )
-        session.add(log)
-        session.flush()
-        log_id = log.id
-        _write_operation_log(
-            session, "insert", "crawl_log", log_id,
-            business_action="crawl",
-            description=f"爬取任务开始: site={site_key} type={task_type}",
-            details={"site_key": site_key, "task_type": task_type, "config_snapshot": dict(config_snapshot)},
-            trigger_source="log_crawl_task",
-        )
-        logger.info(f"[DB] 爬取任务日志创建: site={site_key} log_id={log_id}")
-        return log_id
-
-
-def update_crawl_log(
-    log_id: int,
-    status: str,
-    total: int = 0,
-    passed: int = 0,
-    failed: int = 0,
-    error: str = "",
-) -> None:
-    """爬取任务结束时更新 crawl_log 记录。status: success / failed / partial"""
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return
-        log = session.query(CrawlLog).filter(CrawlLog.id == log_id).first()
-        if log is None:
-            logger.warning(f"[DB] update_crawl_log: log_id {log_id} 不存在")
-            return
-        log.status = status
-        log.total_count = total
-        log.passed_count = passed
-        log.failed_count = failed
-        log.error_message = error
-        log.finished_at = datetime.now(timezone.utc)
-        _write_operation_log(
-            session, "update", "crawl_log", log_id,
-            business_action="crawl",
-            description=f"爬取任务结束: site={log.site_key} status={status} total={total} passed={passed} failed={failed}",
-            details={"site_key": log.site_key, "task_type": log.task_type,
-                      "status": status, "total": total, "passed": passed, "failed": failed, "error": error},
-            trigger_source="update_crawl_log",
-        )
-
 
 def log_review_action(
     object_type: str,

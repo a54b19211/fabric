@@ -20,7 +20,6 @@ from biz_rules.reviewed_graph import (
     primekg_bundle,
     resolve,
 )
-from flows.graph_publish import capture_legacy
 
 
 def node(identity, name="same name", **extra):
@@ -191,94 +190,6 @@ def test_legacy_document_preserves_raw_and_rejects_hash_mismatch():
         LegacyDocument.model_validate(
             {**document.model_dump(), "original_raw_content": raw + "changed"}
         )
-
-
-def test_continuation_is_bound_to_manifest_and_only_emits_current_batch(monkeypatch):
-    from contextlib import contextmanager
-
-    import flows.graph_publish as publish
-
-    @contextmanager
-    def connection():
-        yield object()
-
-    class Engine:
-        begin = staticmethod(connection)
-
-    monkeypatch.setattr(publish.store, "history_engine", lambda: Engine())
-    monkeypatch.setattr(publish.store, "_source", lambda *_args, **_kwargs: None)
-    requests = []
-
-    def respond(request):
-        requests.append(str(request.url))
-        path = request.url.path
-        if path.startswith("/api/documents/"):
-            uuid = path.rsplit("/", 1)[-1]
-            return httpx.Response(
-                200,
-                json={
-                    "uuid": uuid,
-                    "source_site": "clinicaltrials",
-                    "title": uuid,
-                    "raw_content": "exact text",
-                },
-            )
-        if path.endswith("/graph"):
-            return httpx.Response(200, json={"nodes": [], "edges": []})
-        return httpx.Response(200, json={"total": 0, "items": []})
-
-    scope = [f"doc-{i}" for i in range(13)]
-    client = httpx.Client(
-        base_url="http://127.0.0.1:8100", transport=httpx.MockTransport(respond)
-    )
-    first = capture_legacy(str(client.base_url), scope, "fixture", client=client)
-    assert first["scope_record_ids"] == scope[:6] and first["next_document_offset"] == 6
-    assert first["scope_record_count"] == 13 and len(first["documents"]) == 6
-    requests.clear()
-    with pytest.raises(HistoryError, match="续批"):
-        capture_legacy(str(client.base_url), scope, "fixture", offset=6, client=client)
-    assert not requests
-    changed = [*scope[:-1], "changed"]
-    with pytest.raises(HistoryError, match="名单变化"):
-        capture_legacy(
-            str(client.base_url),
-            changed,
-            "fixture",
-            offset=6,
-            expected_manifest_sha256=first["scope_manifest_sha256"],
-            client=client,
-        )
-    second = capture_legacy(
-        str(client.base_url),
-        scope,
-        "fixture",
-        offset=6,
-        expected_manifest_sha256=first["scope_manifest_sha256"],
-        client=client,
-    )
-    assert (
-        second["scope_record_ids"] == scope[6:12]
-        and second["next_document_offset"] == 12
-    )
-    assert second["scope_manifest_sha256"] == sha256(canonical(scope))
-    client.close()
-
-
-def test_legacy_http_error_is_failure_and_does_not_publish(monkeypatch):
-    import flows.graph_publish as publish
-
-    called = []
-    monkeypatch.setattr(
-        publish.store, "import_archive", lambda *args: called.append(args)
-    )
-    client = httpx.Client(
-        base_url="http://127.0.0.1:8100",
-        transport=httpx.MockTransport(lambda request: httpx.Response(503)),
-    )
-    with pytest.raises(HistoryError) as error:
-        capture_legacy(str(client.base_url), ["one"], "fixture", client=client)
-    assert error.value.code == "legacy_read_failed" and not called
-    client.close()
 
 
 def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
