@@ -66,13 +66,12 @@ def test_real_router_keeps_distinct_ids_and_typed_nested_originals(monkeypatch):
         {"id": False, "title": "next", "flag": False},
     ]
     original = copy.deepcopy(source)
-    monkeypatch.setattr(api_router, "iter_api_records", lambda _profile: iter(source))
     profile = {
         "uid_field": "id",
         "field_map": {"title": "title", "sniffed_meta.flag": "flag"},
         "extra_fields": {"count": {"path": "id", "type": "int"}, "flag": "flag"},
     }
-    rows = list(api_router.iter_api_results("synthetic", profile))
+    rows = [api_router.to_result("synthetic", profile, record)[0] for record in source]
     assert rows[0]["uuid"] != rows[1]["uuid"]
     assert rows[0]["title"] == "0"
     assert rows[0]["extra"] == {"count": 0, "flag": "False"}

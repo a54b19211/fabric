@@ -61,7 +61,7 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ## TODO
 
 - [ ] 接入成员3的 `extraction_flow`（LLM 抽取）
-- [ ] 接入 `sync_to_weknora.py` 的同步逻辑
+- [x] 正文进 WeKnora 只走 db/index_publication（经桥接服务）
 
 
 ## 雷达使用图数据

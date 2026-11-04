@@ -157,41 +157,6 @@ class ReviewActionResponse(BaseModel):
 
 # ── WeKnora ────────────────────────────────────────────────────────────
 
-class RecrawlResponse(BaseModel):
-    success: bool
-    uuid: str
-    message: str = ""
-
-
-class BatchRecrawlResponse(BaseModel):
-    success: bool
-    triggered: int
-    skipped: int = 0
-    message: str = ""
-
-
-class UploadResponse(BaseModel):
-    success: bool
-    uuid: str
-    title: str
-    message: str = ""
-
-
-class UploadItem(BaseModel):
-    filename: str
-    uuid: str = ""
-    title: str = ""
-    success: bool = False
-    error: str = ""
-
-
-class BatchUploadResponse(BaseModel):
-    total: int
-    succeeded: int
-    failed: int
-    items: list[UploadItem] = []
-
-
 # ── Worker ─────────────────────────────────────────────────────────────
 
 class WorkerItem(BaseModel):

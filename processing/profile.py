@@ -14,10 +14,10 @@
 
 from __future__ import annotations
 
-PROCESSOR_VERSION = "datafabric.profile.v1"
+PROCESSOR_VERSION = "datafabric.profile.v2"
 WEAK_CHARS = 200
 
-DEGRADING = ("field_truncated", "no_abstract", "no_title", "html_sup_sub_flattened", "summary_missing")
+DEGRADING = ("field_truncated", "no_abstract", "no_title", "html_sup_sub_unpaired", "summary_missing")
 BREAKING = ("no_body", "invalid_json", "not_a_record")
 
 CREDIBILITY = {
@@ -32,19 +32,17 @@ CREDIBILITY = {
     "filing_fact": "company_filing",
     "corporate_filing": "company_filing",
     "media": "media_report",
+    "industry_media": "media_report",
     "social": "unverified",
+    "guideline": "guideline_body",
+    "policy": "official_notice",
+    "regulatory_label": "regulatory_document",
+    "company_disclosure": "company_filing",
+    "drug_database": "curated_database",
 }
 
-DOC_TYPES = {
-    "clinicaltrials": "registry_record",
-    "chictr": "registry_record",
-    "who_don": "official_notice",
-    "nmpa": "regulatory_notice",
-    "cde": "regulatory_notice",
-    "fda_crl": "regulatory_letter",
-    "sec_companyfacts": "filing_fact",
-    "legacy_documents": "legacy_document",
-}
+# 采集目录里的来源，文档类型就是目录写的第一种证据类型；目录外的只有 documents 库存的冻结桥
+NON_CATALOG_DOC_TYPES = {"legacy_documents": "legacy_document"}
 
 
 def _doc_type(source_id, role, pub_types):
@@ -62,7 +60,11 @@ def _doc_type(source_id, role, pub_types):
         if types:
             return "literature_other"
         return "literature_unknown_type"
-    return DOC_TYPES.get(source_id, "unknown")
+    from collection.catalog import CATALOG
+
+    if source_id in CATALOG:
+        return CATALOG[source_id].evidence_types[0]
+    return NON_CATALOG_DOC_TYPES.get(source_id, "unknown")
 
 
 def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=None, parse_status=None) -> dict:

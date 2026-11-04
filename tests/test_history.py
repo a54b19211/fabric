@@ -215,50 +215,6 @@ def test_public_page_budget_is_partial_and_raw_original(monkeypatch):
     )
 
 
-def test_legacy_clinicaltrials_failure_and_truncation_not_eof(monkeypatch):
-    import requests
-
-    from biz_rules.extractors import clinicaltrials_fetcher as fetcher
-
-    monkeypatch.setattr(
-        fetcher.requests, "get", Mock(side_effect=requests.ConnectionError())
-    )
-    with pytest.raises(RuntimeError, match="不能视为源已读完"):
-        list(fetcher.fetch_clinicaltrials({}))
-    response = Mock()
-    response.json.return_value = {"studies": [trial_raw()], "nextPageToken": "later"}
-    response.raise_for_status.return_value = None
-    monkeypatch.setattr(fetcher.requests, "get", lambda *args, **kwargs: response)
-    iterator = fetcher.fetch_clinicaltrials({"max_pages": 1})
-    assert (
-        next(iterator)["protocolSection"]["identificationModule"]["nctId"]
-        == "NCT01234567"
-    )
-    with pytest.raises(RuntimeError, match="已截断"):
-        next(iterator)
-
-
-def test_legacy_pubmed_real_abstract_and_error(monkeypatch):
-    from biz_rules.extractors.pubmed import pubmed_fetcher as fetcher
-
-    xml = '<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>123</PMID><Article><Abstract><AbstractText Label="RESULTS">Real <b>abstract</b>.</AbstractText></Abstract><PublicationTypeList><PublicationType>Retracted Publication</PublicationType></PublicationTypeList></Article><CommentsCorrectionsList><CommentsCorrections RefType="RetractionIn"><PMID>124</PMID></CommentsCorrections></CommentsCorrectionsList></MedlineCitation></PubmedArticle></PubmedArticleSet>'
-    response = Mock(content=xml.encode(), text=xml)
-    response.raise_for_status.return_value = None
-    monkeypatch.setattr(fetcher.httpx, "get", lambda *args, **kwargs: response)
-    detail = fetcher._fetch_pubmed_details(["123"])["123"]
-    assert detail["abstract"] == "Real abstract."
-    assert detail["publication_types"] == ["Retracted Publication"]
-    assert detail["correction_links"][0]["pmid"] == "124"
-    assert (
-        fetcher._normalize("123", {"summary": "Wrong esummary field"})["abstract"] == ""
-    )
-    monkeypatch.setattr(
-        fetcher.httpx, "get", Mock(side_effect=httpx.ConnectError("offline"))
-    )
-    with pytest.raises(RuntimeError, match="不能视为零命中"):
-        list(fetcher.iter_pubmed({"query": "x", "max_records": 2}))
-
-
 def test_unknown_enrollment_not_zero():
     from biz_rules.schemas import ClinicalTrialsExtra
     from core_engine.api_router import _extract_extra_value
@@ -280,37 +236,6 @@ def test_legacy_no_database_is_not_saved(monkeypatch):
     monkeypatch.setattr(db.session, "get_session", absent)
     with pytest.raises(RuntimeError, match="未保存"):
         repository.upsert_document(SimpleNamespace())
-
-
-def test_legacy_api_recrawl_does_not_reset_or_fetch(monkeypatch):
-    import db.repository
-    from flows import crawl_flow as flow
-
-    doc = SimpleNamespace(
-        source_url="https://clinicaltrials.gov/api/v2/studies",
-        source_site="clinicaltrials",
-    )
-    monkeypatch.setattr(flow, "get_document_by_uuid", lambda value: doc)
-    monkeypatch.setattr(db.repository, "log_crawl_task", lambda **kwargs: 1)
-    statuses = []
-    monkeypatch.setattr(
-        db.repository,
-        "update_crawl_log",
-        lambda *args, **kwargs: statuses.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        db.repository,
-        "reset_document_for_recrawl",
-        Mock(side_effect=AssertionError("must not reset")),
-    )
-    monkeypatch.setattr(
-        flow.fetch_and_parse_url,
-        "fn",
-        Mock(side_effect=AssertionError("must not html fetch")),
-    )
-    result = flow.recrawl_document_fn("old")
-    assert result["success"] is False
-    assert statuses[-1][0][1] == "failed"
 
 
 def test_legacy_changed_text_rejected_before_old_result_write(monkeypatch):

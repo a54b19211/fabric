@@ -165,26 +165,28 @@ SOURCE_CATALOG = {
 }
 
 
-# 既有采集库存的来源许可目录；这里只声明桥接能力，不宣称新增站点抓取已接通。
-for _legacy_id, _name, _types in (
-    ("fda_api_drug_label", "既有FDA药品标签库存", ["regulatory"]),
-    ("fda_api_enforcement", "既有FDA执法/召回库存", ["regulatory"]),
-    ("chictr", "既有中国临床试验注册库存", ["trials_pipeline"]),
-    ("nmpa", "既有国家药监局资料", ["regulatory"]),
-    ("cde_xxgk", "既有CDE信息公开库存", ["regulatory"]),
-    ("cde", "既有CDE资料", ["regulatory"]),
-):
-    SOURCE_CATALOG[_legacy_id] = {
-        "name": _name,
-        "business_types": _types,
-        "acquisition_channel": "legacy_database",
-        "access": "explicit_source_allowlist",
-        "license_url": None,
-        "history_coverage": "仅从本次自动发表后形成不可变版本；不是原站历史档案",
-        "native_id": "原source_site + document UUID",
-        "read_scope": "已入库清洗正文的版本化桥接；不代表该源新抓取接口或全量覆盖",
-        "limitations": ["需管理员逐源许可；不保证原站覆盖、原日期语义或专业结论"],
-    }
+# 站点来源的许可目录：每个站点来源一项，由采集目录生成。站点编号同时是 site_crawler 采集的来源，
+# 也是 documents 库存（经 legacy_documents 冻结）按原站依赖的许可：撤权任何一个站点，两边一起停读。
+def _site_catalog():
+    from collection.catalog import SITE_SOURCES, spec
+
+    for source_id in sorted(SITE_SOURCES):
+        item = spec(source_id)
+        SOURCE_CATALOG.setdefault(source_id, {
+            "name": item.name,
+            "business_types": list(item.evidence_types),
+            "acquisition_channel": "site_plugin",
+            "access": "explicit_source_allowlist",
+            "license_url": None,
+            "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
+            "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
+            "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+            "limitations": ["需管理员逐源许可", "插件未对原站实测（verified=False）",
+                            "不保证原站覆盖、原日期语义或专业结论"],
+        })
+
+
+_site_catalog()
 
 
 def _unique(pairs):
@@ -372,8 +374,10 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
         raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
-    if source_id in {"nmpa", "cde", "chictr"}:
-        from collection.legacy_sites import project_capture
+    from collection.catalog import SITE_SOURCES
+
+    if source_id in SITE_SOURCES:
+        from collection.site_crawler import project_capture
 
         return project_capture(source_id, item)
     data = parse_json(item.raw_content)
@@ -1200,16 +1204,16 @@ def _read_pubmed(request, client, began):
         }
 
 
-def _read_legacy_site(request):
+def _read_site(request):
     # 旧 ETL 站点插件依赖浏览器抓取器等较重的库，用到时才加载
-    from collection import legacy_sites
+    from collection import site_crawler
 
-    return legacy_sites.read_site(request)
+    return site_crawler.read_site(request)
 
 
 # 来源插件注册表：插件名 → 读取函数。来源目录（collection.catalog）只引用插件名。
 PLUGINS = {
-    "legacy_site_crawler": _read_legacy_site,
+    "site_crawler": _read_site,
     "public_api_reader": _read_public_api,
     "who_don": _read_who,
     "sec_xbrl": _read_sec,

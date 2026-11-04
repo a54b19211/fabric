@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from core_engine import scrapling_client as client
-from flows import crawl_flow
+from collection import site_crawler
 
 URL = "https://example.invalid/notice.pdf"
 A = b"%PDF-1.4\nSYNTHETIC evidence A\n%%EOF\n"
@@ -79,24 +79,17 @@ def test_http_failure_never_returns_cached_a(http_source, status):
     assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
 
 
-def test_timeout_uses_existing_bounded_retry_and_never_calls_parser(http_source, monkeypatch):
-    from unittest.mock import Mock
-
+def test_timeout_uses_the_bounded_retry_and_keeps_the_old_original(http_source, monkeypatch):
     first = download()
     http_source["error"] = httpx.ReadTimeout("synthetic read timeout")
     monkeypatch.setattr(client.APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", .01)
     delays = []
-    monkeypatch.setattr(crawl_flow.time, "sleep", delays.append)
-    parser = Mock(side_effect=AssertionError("Must not parse an unconfirmed cached file"))
-    monkeypatch.setattr(crawl_flow.route_pdf, "fn", parser)
+    monkeypatch.setattr(site_crawler.time, "sleep", delays.append)
     with pytest.raises(httpx.ReadTimeout):
-        crawl_flow.fetch_and_parse_attachments.fn(
-            [{"url": URL}], "parent", "synthetic_files",
-        )
+        site_crawler._download(URL, source_site="synthetic_files")
     assert len(http_source["requests"]) == 4  # 初次成功＋本轮最多三次读取
     assert delays == [.01, .02]
-    parser.assert_not_called()
     assert Path(first["local_path"]).read_bytes() == A
 
 
@@ -117,10 +110,8 @@ def test_429_retries_once_then_reads_b(http_source, monkeypatch):
     monkeypatch.setattr(client.APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", .01)
     delays = []
-    monkeypatch.setattr(crawl_flow.time, "sleep", delays.append)
-    result = crawl_flow._read_with_retries(
-        client.download_pdf.fn, pdf_url=URL, source_site="synthetic_files",
-    )
+    monkeypatch.setattr(site_crawler.time, "sleep", delays.append)
+    result = site_crawler._download(URL, source_site="synthetic_files")
     assert len(requests) == 2 and delays == [.01]
     assert Path(result["local_path"]).read_bytes() == B
     assert Path(first["local_path"]).read_bytes() == A

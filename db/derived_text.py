@@ -22,7 +22,7 @@ from sqlalchemy import text
 from biz_rules.history_models import HistoryError
 from processing import attachment_parse
 
-ATTACHMENT_SOURCES = ("nmpa", "cde", "chictr")
+from collection.catalog import SITE_SOURCES as ATTACHMENT_SOURCES  # noqa: E402  站点来源才有附件版本
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 900
 

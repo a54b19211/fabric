@@ -1,7 +1,5 @@
 """
-API 数据路由器。
-将 API 原始记录转换为系统标准解析结果结构，
-与 route_webpage / route_pdf 的输出格式保持一致。
+接口站点的字段映射：把接口原始记录转换成与 route_webpage 相同的标准解析结果结构（site_crawler 用）。
 
 字段映射规则（field_map）：
   - 普通 key：用点号路径从原始记录取值，如 "openfda.brand_name.0"
@@ -10,28 +8,13 @@ API 数据路由器。
 
 import json
 import uuid as _uuid
-from datetime import datetime, timezone
-from typing import Iterator
 
-from loguru import logger
 
-from core_engine.api_client import iter_api_records
 from biz_rules.cleaners.field.date_format import normalize_date
-from core_engine.lineage_tracer import snapshot, record_step
 
 
 def _make_uuid(identifier: str) -> str:
     return str(_uuid.uuid5(_uuid.NAMESPACE_URL, identifier))
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _record_parse_lineage(parsed_result: dict, op: str = "") -> None:
-    """在 parse 步骤结束时记录关键字段的血缘（输入为空，输出为解析结果）。"""
-    empty_before = {k: "" for k in snapshot(parsed_result)}
-    record_step(parsed_result, step="parse", before=empty_before, op=op)
 
 
 def _get_nested(record: dict, dotted_key: str) -> str:
@@ -131,88 +114,74 @@ def _record_to_markdown(record: dict, title: str) -> str:
     return "\n".join(lines)
 
 
-def iter_api_results(site_key: str, profile: dict) -> Iterator[dict]:
-    """
-    根据站点配置拉取 API 数据，逐条 yield 标准解析结果 dict。
-    输出结构与 route_webpage / route_pdf 保持一致。
-    """
+def to_result(site_key: str, profile: dict, record: dict) -> tuple[dict, dict | None]:
+    """接口原始记录 → (标准解析结果, 保留的接口原始字段)。拉取函数已经给出标准解析结果的，原样用它，
+    此时没有另外的原始字段（返回 None）。"""
     field_map = profile.get("field_map", {})
     uid_field = profile.get("uid_field", "")  # 站点指定用哪个字段做 UUID 种子
 
-    for record in iter_api_records(profile):
-        # fetcher 已经返回标准格式（含 uuid/markdown/structured_data）时直接透传，跳过字段映射
-        if "uuid" in record and "markdown" in record and "structured_data" in record:
-            if record.get("source_site") or record.get("parse_method"):
-                # 防止 uuid 为空导致文件名异常
-                if not record.get("uuid"):
-                    src = record.get("source_url", json.dumps(record, sort_keys=True))
-                    record["uuid"] = _make_uuid(f"{site_key}:{src}")
-                _record_parse_lineage(record, op=record.get("parse_method", "api"))
-                yield record
-                continue
+    if "uuid" in record and "markdown" in record and "structured_data" in record \
+            and (record.get("source_site") or record.get("parse_method")):
+        if not record.get("uuid"):
+            src = record.get("source_url", json.dumps(record, sort_keys=True))
+            record = {**record, "uuid": _make_uuid(f"{site_key}:{src}")}
+        return record, None
 
-        # 生成幂等 UUID
-        uid_src = (
-            _get_nested(record, uid_field) if uid_field
-            else json.dumps(record, sort_keys=True)
-        )
-        doc_uuid = _make_uuid(f"{site_key}:{uid_src}")
+    uid_src = _get_nested(record, uid_field) if uid_field else json.dumps(record, sort_keys=True)
+    doc_uuid = _make_uuid(f"{site_key}:{uid_src}")
+    title = _get_nested(record, field_map.get("title", ""))
+    publish_date = normalize_date(_get_nested(record, field_map.get("publish_date", "")))
+    summary = _get_nested(record, field_map.get("summary", ""))
+    drug_name = _get_nested(record, field_map.get("drug_name", ""))
+    manufacturer = _get_nested(record, field_map.get("manufacturer", ""))
+    category = _get_nested(record, field_map.get("category", ""))
 
-        title = _get_nested(record, field_map.get("title", ""))
-        publish_date = normalize_date(_get_nested(record, field_map.get("publish_date", "")))
-        summary = _get_nested(record, field_map.get("summary", ""))
-        drug_name = _get_nested(record, field_map.get("drug_name", ""))
-        manufacturer = _get_nested(record, field_map.get("manufacturer", ""))
-        category = _get_nested(record, field_map.get("category", ""))
+    markdown = _record_to_markdown(record, title)
 
-        markdown = _record_to_markdown(record, title)
+    # source_url：优先用 field_map 指定的字段，其次 record 自带，最后用配置的 base_url
+    source_url_field = field_map.get("source_url", "")
+    source_url = (
+        _get_nested(record, source_url_field)
+        or profile.get("api", {}).get("base_url", "")
+    )
 
-        # source_url：优先用 field_map 指定的字段，其次 record 自带，最后用配置的 base_url
-        source_url_field = field_map.get("source_url", "")
-        source_url = (
-            _get_nested(record, source_url_field)
-            or profile.get("api", {}).get("base_url", "")
-        )
+    # sniffed_meta：由 field_map 中 "sniffed_meta.*" 前缀的键组装，供置信度评估使用
+    sniffed_meta = {
+        k.split(".", 1)[1]: _get_nested(record, v)
+        for k, v in field_map.items()
+        if k.startswith("sniffed_meta.")
+    }
 
-        # sniffed_meta：由 field_map 中 "sniffed_meta.*" 前缀的键组装，供置信度评估使用
-        sniffed_meta = {
-            k.split(".", 1)[1]: _get_nested(record, v)
-            for k, v in field_map.items()
-            if k.startswith("sniffed_meta.")
-        }
-
-        base_result = {
-            "uuid": doc_uuid,
+    base_result = {
+        "uuid": doc_uuid,
+        "title": title,
+        "publish_date": publish_date,
+        "markdown": markdown,
+        "structured_data": {
             "title": title,
             "publish_date": publish_date,
-            "markdown": markdown,
-            "structured_data": {
-                "title": title,
-                "publish_date": publish_date,
-                "category": category,
-                "summary": summary[:500] if summary else "",
-                "drug_name": drug_name,
-                "manufacturer": manufacturer,
-            },
-            "parse_method": "api",
-            "attachment_links": [],
-            "source_url": source_url,
-            "source_site": site_key,
-            "sniffed_meta": sniffed_meta,
-            "timestamp": _now_iso(),
-        }
+            "category": category,
+            "summary": summary[:500] if summary else "",
+            "drug_name": drug_name,
+            "manufacturer": manufacturer,
+        },
+        "parse_method": "api",
+        "attachment_links": [],
+        "source_url": source_url,
+        "source_site": site_key,
+        "sniffed_meta": sniffed_meta,
+    }
 
-        # 保留额外字段（用于 hkex 等站点）
-        for key in ["stock_code", "stock_name", "stock_id", "announcement_type"]:
-            if key in record:
-                base_result[key] = record[key]
+    # 保留额外字段（用于 hkex 等站点）
+    for key in ["stock_code", "stock_name", "stock_id", "announcement_type"]:
+        if key in record:
+            base_result[key] = record[key]
 
-        # extra_fields：按配置从原始记录抽取来源特有字段，写入 extra（供 doc_extra 落库）
-        extra_fields = profile.get("extra_fields", {})
-        if extra_fields:
-            extra = {k: _extract_extra_value(record, v) for k, v in extra_fields.items()}
-            if extra:
-                base_result["extra"] = extra
+    # extra_fields：按配置从原始记录抽取来源特有字段，写入 extra
+    extra_fields = profile.get("extra_fields", {})
+    if extra_fields:
+        extra = {k: _extract_extra_value(record, v) for k, v in extra_fields.items()}
+        if extra:
+            base_result["extra"] = extra
 
-        _record_parse_lineage(base_result, op=base_result["parse_method"])
-        yield base_result
+    return base_result, record

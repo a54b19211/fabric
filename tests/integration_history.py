@@ -1246,7 +1246,7 @@ def _fetch_attachment(tmp_path, monkeypatch, key, content=b"%PDF-1.4 synthetic n
         "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
         '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc","nmpa"]',
     )
-    from collection.legacy_sites import attachment_record_id
+    from collection.site_crawler import attachment_record_id
 
     path = tmp_path / (key + ".pdf")
     path.write_bytes(content)
@@ -1360,7 +1360,7 @@ def test_lost_lease_writes_nothing(pg, tmp_path, monkeypatch):
 def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_path, monkeypatch):
     import hashlib
 
-    from collection.legacy_sites import ATT_SCHEMA, WEB_SCHEMA, attachment_record_id
+    from collection.site_crawler import ATT_SCHEMA, WEB_SCHEMA, attachment_record_id
     from db import derived_text
 
     monkeypatch.setenv(

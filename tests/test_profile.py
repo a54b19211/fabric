@@ -54,7 +54,7 @@ def test_only_broken_input_is_quarantined_and_metadata_stays():
 
 
 def test_truncation_and_flattened_markup_are_degraded_not_broken():
-    p = run("clinicaltrials", warnings=["field_truncated:locations", "html_sup_sub_flattened"])
+    p = run("clinicaltrials", warnings=["field_truncated:locations", "html_sup_sub_unpaired"])
     assert p["quality"]["format"]["state"] == "degraded" and p["route"] == "normal"
 
 

@@ -1,4 +1,4 @@
-"""旧 ETL 的 NMPA / CDE / ChiCTR 采集并入唯一框架（collection.legacy_sites）。
+"""站点插件 collection.site_crawler（NMPA / CDE / ChiCTR 页面、接口站点、表格页）。
 
 不联网：页面抓取、解析和附件下载都换成替身；旧代码的站点配置和调用顺序原样复用。
 """
@@ -9,7 +9,7 @@ import pytest
 
 from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
 from biz_rules.history_sources import PLUGINS, project_record, read_public
-from collection import catalog, legacy_sites, rate
+from collection import catalog, site_crawler, rate
 
 PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/20261101120000123.html"
 ATT1 = "https://www.nmpa.gov.cn/directory/web/nmpa/images/a1.doc"
@@ -52,10 +52,10 @@ def fake_web(monkeypatch, tmp_path):
         return {"uuid": "f", "local_path": str(path), "source_url": pdf_url, "file_ext": "." + pdf_url.rsplit(".", 1)[1],
                 "skipped": False}
 
-    monkeypatch.setattr(legacy_sites, "_fetch_page", fetch_page)
-    monkeypatch.setattr(legacy_sites, "_route_webpage", route_webpage)
-    monkeypatch.setattr(legacy_sites, "_download", download)
-    monkeypatch.setattr(legacy_sites, "_store_root", lambda: tmp_path / "store")
+    monkeypatch.setattr(site_crawler, "_fetch_page", fetch_page)
+    monkeypatch.setattr(site_crawler, "_route_webpage", route_webpage)
+    monkeypatch.setattr(site_crawler, "_download", download)
+    monkeypatch.setattr(site_crawler, "_store_root", lambda: tmp_path / "store")
     return calls
 
 
@@ -70,7 +70,7 @@ def records_by_role(batch):
 def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
     for source in ("nmpa", "cde", "chictr"):
         spec = catalog.spec(source)
-        assert spec.status == "active" and spec.plugin == "legacy_site_crawler"
+        assert spec.status == "active" and spec.plugin == "site_crawler"
         assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
         assert spec.verified is False  # 迁入旧代码，本系统未对原站实测
 
@@ -78,8 +78,8 @@ def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
 
 def test_read_public_dispatches_to_the_migrated_plugin(monkeypatch):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    monkeypatch.setattr(legacy_sites, "read_site", lambda request: {"marker": request.source_id})
-    assert "legacy_site_crawler" in PLUGINS
+    monkeypatch.setattr(site_crawler, "read_site", lambda request: {"marker": request.source_id})
+    assert "site_crawler" in PLUGINS
     assert read_public(FetchRequest(source_id="chictr", query="by_url", source_record_ids=["https://www.chictr.org.cn/showproj.html?proj=1"])) == {"marker": "chictr"}
 
 
@@ -89,9 +89,9 @@ def test_detail_page_becomes_capture_plus_one_record_per_attachment(fake_web):
     roles = records_by_role(batch)
     [(page, data)] = roles["web_capture"]
     assert page.source_record_id == PAGE and page.record_kind == "document"
-    assert data["schema_version"] == legacy_sites.WEB_SCHEMA and "<h1>" in data["html"]
+    assert data["schema_version"] == site_crawler.WEB_SCHEMA and "<h1>" in data["html"]
     assert data["parsed"]["markdown"].startswith("# 关于某药品的公告")
-    A1, A2 = legacy_sites.attachment_record_id(PAGE, ATT1), legacy_sites.attachment_record_id(PAGE, ATT2)
+    A1, A2 = site_crawler.attachment_record_id(PAGE, ATT1), site_crawler.attachment_record_id(PAGE, ATT2)
     assert [a["record_id"] for a in data["attachments"]] == [A1, A2]
     atts = {r.source_record_id: d for r, d in roles["attachment"]}
     assert set(atts) == {A1, A2}
@@ -130,8 +130,8 @@ def test_list_mode_reuses_old_pagination_and_resumes(fake_web, monkeypatch):
         def iter_detail_urls(self):
             yield from urls
 
-    start = legacy_sites.SITE_PROFILES["nmpa"]["start_urls"][0]
-    monkeypatch.setattr(legacy_sites, "_make_driver", lambda site, profile, url: Driver())
+    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
+    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
     first = read_public(FetchRequest(source_id="nmpa", query=start, max_records=5))
     assert pages_of(first) == urls[:2] and len(first["records"]) == 5
     assert first["stop_reason"] == "record_budget" and not first["upstream_pagination_exhausted"]
@@ -191,7 +191,7 @@ def test_too_large_attachment_is_a_recorded_gap(fake_web, monkeypatch):
     def too_large(*a, **k):
         raise ValueError("attachment_too_large")
 
-    monkeypatch.setattr(legacy_sites, "_download", too_large)
+    monkeypatch.setattr(site_crawler, "_download", too_large)
     batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
     assert {a["status"] for a in batch["attachment_coverage"]} == {"too_large"} and len(batch["records"]) == 1
 
@@ -223,8 +223,8 @@ def test_list_pages_fetched_by_the_old_driver_go_through_the_gate(fake_web, monk
             driver.fetch_page.fn(url="list-1", delay=2.0)  # 旧驱动取列表页
             yield PAGE
 
-    monkeypatch.setattr(legacy_sites, "_make_driver", lambda site, profile, url: Driver())
-    start = legacy_sites.SITE_PROFILES["nmpa"]["start_urls"][0]
+    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
     batch = read_public(FetchRequest(source_id="nmpa", query=start))
     assert seen == [0] and batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
     assert driver.fetch_page is Real  # 读取结束后还原
@@ -235,16 +235,16 @@ def test_list_mode_only_accepts_the_sites_declared_start_urls(fake_web):
     assert batch["error"]["code"] == "unknown_start_url"
 
 
-def test_legacy_attachments_mode_refetches_originals_listed_by_the_old_store(fake_web, monkeypatch):
+def test_stored_attachments_mode_refetches_originals_listed_in_the_documents_store(fake_web, monkeypatch):
     monkeypatch.setattr(
-        legacy_sites, "_legacy_attachment_links", lambda site, parent: [{"url": ATT1, "text": "附件1"}]
+        site_crawler, "_stored_attachment_links", lambda site, parent: [{"url": ATT1, "text": "附件1"}]
     )
-    batch = read_public(FetchRequest(source_id="nmpa", query="legacy_attachments", source_record_ids=[PAGE]))
+    batch = read_public(FetchRequest(source_id="nmpa", query="stored_attachments", source_record_ids=[PAGE]))
     roles = records_by_role(batch)
     assert "web_capture" not in roles  # 原页面不重抓
     [(record, data)] = roles["attachment"]
-    assert record.source_record_id == legacy_sites.attachment_record_id(PAGE, ATT1) and data["parent_record_id"] == PAGE
-    assert data["discovered_from"] == "legacy_attachments_table"
+    assert record.source_record_id == site_crawler.attachment_record_id(PAGE, ATT1) and data["parent_record_id"] == PAGE
+    assert data["discovered_from"] == "stored_attachments_table"
     assert fake_web["fetch"] == []
 
 
@@ -255,7 +255,7 @@ def test_projection_of_capture_and_attachment(fake_web):
     assert p["title"] == "关于某药品的公告" and p["clean_text"].endswith("正文。")
     assert p["source_url"] == PAGE and p["facts"]["role"] == "web_capture"
     assert p["facts"]["attachment_record_ids"] == [
-        legacy_sites.attachment_record_id(PAGE, ATT1), legacy_sites.attachment_record_id(PAGE, ATT2)
+        site_crawler.attachment_record_id(PAGE, ATT1), site_crawler.attachment_record_id(PAGE, ATT2)
     ]
     assert p["source_published_at"]["value"] == "2026-11-01"
     a = project_record("nmpa", att)
@@ -272,15 +272,74 @@ def test_same_file_under_two_channel_pages_is_two_stable_records(fake_web, monke
     """NMPA 同一公告在两个栏目各有一个页面地址、附件链接相同（11-04 真实数据）。父页面+附件成对作为记录，
     各自稳定，不会因为从另一个父页面读到而来回换版本。"""
     other = "https://www.nmpa.gov.cn/yaopin/ypggtg/20261101120000123.html"
-    monkeypatch.setattr(legacy_sites, "_legacy_attachment_links", lambda site, parent: [{"url": ATT1, "text": "附件1"}])
-    batch = read_public(FetchRequest(source_id="nmpa", query="legacy_attachments", source_record_ids=[PAGE, other]))
+    monkeypatch.setattr(site_crawler, "_stored_attachment_links", lambda site, parent: [{"url": ATT1, "text": "附件1"}])
+    batch = read_public(FetchRequest(source_id="nmpa", query="stored_attachments", source_record_ids=[PAGE, other]))
     ids = [r.source_record_id for r in batch["records"]]
     assert len(set(ids)) == 2 and all(i.endswith("#attachment=" + ATT1) for i in ids)
-    again = read_public(FetchRequest(source_id="nmpa", query="legacy_attachments", source_record_ids=[PAGE]))
+    again = read_public(FetchRequest(source_id="nmpa", query="stored_attachments", source_record_ids=[PAGE]))
     assert again["records"][0].raw_content == batch["records"][0].raw_content
 
 
 def test_very_long_pair_falls_back_to_a_hashed_attachment_key():
     long_url = "https://www.nmpa.gov.cn/" + "x" * 390 + ".pdf"
-    rid = legacy_sites.attachment_record_id(PAGE, long_url)
+    rid = site_crawler.attachment_record_id(PAGE, long_url)
     assert len(rid) <= 400 and rid.startswith(PAGE + "#attachment-sha256=")
+
+
+def test_api_site_records_become_site_record_versions_with_their_attachments(fake_web, monkeypatch):
+    """接口站点（如 openFDA、港交所）走同一个插件：每条接口记录一个 site_record 版本，原始字段保留，
+    记录身份是 uuid5(站点:记录键)；结果里列出的附件各成版本。"""
+    profile = {"source_type": "api", "api": {}, "uid_field": "id",
+               "field_map": {"title": "t", "publish_date": "d", "source_url": "u"},
+               "api_fetcher": lambda cfg: iter([{"id": "R1", "t": "召回一", "d": "2026-01-02", "u": "https://x.invalid/1"},
+                                                {"id": "R2", "t": "召回二", "d": "", "u": "https://x.invalid/2"}])}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_enforcement", profile)
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=1))
+    [record] = batch["records"]
+    data = json.loads(record.raw_content)
+    assert data["role"] == "site_record" and data["raw"]["id"] == "R1" and data["parsed"]["title"] == "召回一"
+    from core_engine.api_router import _make_uuid
+    assert record.source_record_id == _make_uuid("fda_api_enforcement:R1")
+    assert batch["stop_reason"] == "record_budget" and batch["next_continuation"]
+    projected = site_crawler.project_capture("fda_api_enforcement", record)
+    assert projected["title"] == "召回一" and projected["parser_version"] == "datafabric.site.site_record.v1"
+    again = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=5,
+                                     continuation=batch["next_continuation"]))
+    assert [json.loads(r.raw_content)["raw"]["id"] for r in again["records"]] == ["R2"]
+    assert again["upstream_pagination_exhausted"]
+
+
+def test_api_site_only_answers_records_query(fake_web, monkeypatch):
+    profile = {"source_type": "api", "api": {}, "api_fetcher": lambda cfg: iter([])}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "hkex", profile)
+    batch = read_public(FetchRequest(source_id="hkex", query="https://www1.hkexnews.hk/x"))
+    assert batch["stop_reason"] == "source_failed" and batch["error"]["code"] == "unknown_query"
+
+
+def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
+    import httpx
+
+    from config.settings import APP
+
+    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
+    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.01)
+    monkeypatch.setattr(site_crawler.time, "sleep", lambda s: None)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("HTTP 429 too many")
+        return "ok"
+
+    assert site_crawler._with_retries(flaky) == "ok" and len(calls) == 3
+    calls.clear()
+
+    def broken():
+        calls.append(1)
+        raise ValueError("parse error")
+
+    with pytest.raises(ValueError):
+        site_crawler._with_retries(broken)
+    assert len(calls) == 1
+    assert site_crawler._is_transient(httpx.ReadTimeout("t"))

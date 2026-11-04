@@ -48,7 +48,7 @@ class CollectionSpec:
     coverage: dict = field(default_factory=dict)
     # 支持不带时间窗的全量回填（续页标记可靠、按页可续）
     backfill: bool = False
-    # False：插件是从旧 ETL 迁入的，本系统没有对原站做过实测（主持人 11-04 接受）
+    # False：站点插件没有对原站做过实测（主持人 11-04 接受；NMPA/CDE/ChiCTR 等）
     verified: bool = True
     blocked_reason: str | None = None
     notes: str = ""
@@ -162,15 +162,15 @@ SPECS: tuple[CollectionSpec, ...] = (
         blocked_reason="2026-11-04 实测：首页 200，检索列表返回 202 脚本挑战页；普通无头浏览器同样只得到 39 字节空页。"
         "旧 ETL 没有这个站的采集代码；等官方数据渠道或授权。",
     ),
-    # ——从旧 ETL 迁入（config/sites/* + core_engine），统一走 legacy_site_crawler 插件——
-    # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件按旧方式（含旧的浏览器抓取器）运行，
+    # ——站点插件 site_crawler（站点配置 config/sites/* + core_engine 抓取器）——
+    # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件用站点配置里的浏览器抓取器运行，
     # 本系统未对原站实测（verified=False）。没有可靠增量键，只按需读取/按列表入口续页，不进固定刷新。
     # 附件：详情页附件各成独立版本，正文由加工层 attachment_parse（自部署 MinerU）产出。
     CollectionSpec(
         source_id="chictr",
         name="中国临床试验注册中心",
         status="active",
-        plugin="legacy_site_crawler",
+        plugin="site_crawler",
         evidence_types=("registry_record",),
         decisions=("A", "E"),
         incremental=_NO_INCREMENT,
@@ -184,7 +184,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         source_id="nmpa",
         name="国家药品监督管理局",
         status="active",
-        plugin="legacy_site_crawler",
+        plugin="site_crawler",
         evidence_types=("regulatory_notice",),
         decisions=("A", "C"),
         incremental=_NO_INCREMENT,
@@ -197,7 +197,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         source_id="cde",
         name="国家药品审评中心",
         status="active",
-        plugin="legacy_site_crawler",
+        plugin="site_crawler",
         evidence_types=("regulatory_notice",),
         decisions=("A",),
         incremental=_NO_INCREMENT,
@@ -205,6 +205,56 @@ SPECS: tuple[CollectionSpec, ...] = (
         min_interval_seconds=2.0,
         coverage={"metadata": "新闻/政策页", "fulltext": "正文", "attachments": "附件（需页面会话 cookies）"},
         verified=False,
+    ),
+    *(
+        CollectionSpec(
+            source_id=source_id,
+            name=name,
+            status="active",
+            plugin="site_crawler",
+            evidence_types=evidence,
+            decisions=decisions,
+            incremental=_NO_INCREMENT,
+            rate_group=group,
+            min_interval_seconds=interval,
+            coverage=coverage,
+            verified=False,
+            notes=notes,
+        )
+        for source_id, name, evidence, decisions, group, interval, coverage, notes in (
+            ("cde_xxgk", "国家药品审评中心·信息公开（表格页）", ("regulatory_notice",), ("A",), "cde.org.cn", 2.0,
+             {"metadata": "表格页每张表", "fulltext": "表格转 Markdown"}, "query=列表入口；每张表一条 site_record"),
+            ("cde_zdyz", "国家药品审评中心·指导原则", ("guideline",), ("A", "B"), "cde.org.cn", 2.0,
+             {"metadata": "指导原则页", "fulltext": "正文", "attachments": "附件"}, ""),
+            ("phirda_industry", "中国药促会·产业资讯", ("industry_media",), ("C",), "phirda.com", 2.0,
+             {"metadata": "资讯页", "fulltext": "正文"}, ""),
+            ("phirda_policy", "中国药促会·政策法规", ("policy",), ("C",), "phirda.com", 2.0,
+             {"metadata": "政策页", "fulltext": "正文"}, ""),
+            ("phirda_rd", "中国药促会·研发追踪", ("industry_media",), ("A",), "phirda.com", 2.0,
+             {"metadata": "资讯页", "fulltext": "正文"}, ""),
+            ("phirda_healthcare_reform", "中国药促会·医改专题", ("policy",), ("C",), "phirda.com", 2.0,
+             {"metadata": "专题页", "fulltext": "正文"}, ""),
+            ("fda_press", "FDA Press Announcements", ("regulatory_notice",), ("A",), "fda.gov", 2.0,
+             {"metadata": "新闻稿页", "fulltext": "正文"}, ""),
+            ("fda_drug_safety", "FDA Drug Safety Communications", ("regulatory_notice",), ("A",), "fda.gov", 2.0,
+             {"metadata": "安全通讯页", "fulltext": "正文"}, ""),
+            ("fda_api_drug_label", "openFDA 药品说明书（drug/label）", ("regulatory_label",), ("A",),
+             "api.fda.gov", 0.5, {"metadata": "说明书接口记录", "fulltext": "接口字段"},
+             "query=records；与 fda_api_enforcement 同上游 api.fda.gov，不算两份独立证实"),
+            ("fda_api_enforcement", "openFDA 药品召回执行报告（drug/enforcement）", ("regulatory_notice",), ("A",),
+             "api.fda.gov", 0.5, {"metadata": "召回接口记录", "fulltext": "接口字段"},
+             "query=records；与 fda_api_drug_label 同上游"),
+            ("hkex", "港交所披露易", ("corporate_filing",), ("A", "C"), "hkexnews.hk", 2.0,
+             {"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, "query=records；医药公司清单见站点配置"),
+            ("fiercepharma", "Fierce Pharma（RSS）", ("industry_media",), ("A", "C"), "fiercepharma.com", 2.0,
+             {"metadata": "RSS 条目", "fulltext": "文章页"}, "query=records；行业媒体，不是独立证实来源"),
+            ("nccn", "NCCN 临床实践指南", ("guideline",), ("B",), "nccn.org", 2.0,
+             {"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, "query=records；许可未核实"),
+            ("roche", "Roche Media Releases", ("company_disclosure",), ("A",), "roche.com", 2.0,
+             {"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}, "query=records；企业披露，不是独立无偏来源"),
+            ("drugbank", "DrugBank", ("drug_database",), ("A",), "drugbank.com", 1.0,
+             {"metadata": "药物条目接口"}, "query=records；需要 DrugBank API 凭据与许可，未核实"),
+        )
     ),
     CollectionSpec(
         source_id="cninfo",
@@ -215,17 +265,6 @@ SPECS: tuple[CollectionSpec, ...] = (
         decisions=("A", "C"),
         incremental=_NO_INCREMENT,
         rate_group="cninfo.com.cn",
-        min_interval_seconds=2.0,
-    ),
-    CollectionSpec(
-        source_id="hkex",
-        name="港交所披露易",
-        status="declared",
-        plugin=None,
-        evidence_types=("corporate_filing",),
-        decisions=("A", "C"),
-        incremental=_NO_INCREMENT,
-        rate_group="hkexnews.hk",
         min_interval_seconds=2.0,
     ),
     CollectionSpec(
@@ -256,6 +295,8 @@ SPECS: tuple[CollectionSpec, ...] = (
 CATALOG: dict[str, CollectionSpec] = {s.source_id: s for s in SPECS}
 FETCHABLE = frozenset(s.source_id for s in SPECS if s.fetchable)
 WATCHABLE = frozenset(s.source_id for s in SPECS if s.watchable)
+# 由站点插件采集的来源（投影和读取都按这个集合分派）
+SITE_SOURCES = frozenset(s.source_id for s in SPECS if s.plugin == "site_crawler")
 
 
 def spec(source_id: str) -> CollectionSpec:

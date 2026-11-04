@@ -5,13 +5,11 @@ import hashlib
 import os
 import stat
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 
-import main_etl
 from core_engine import scrapling_client as client
-from flows import crawl_flow
+from collection import site_crawler
 from test_attachment_originals import A, URL, download, http_source
 
 
@@ -123,18 +121,10 @@ def test_new_directory_chain_is_synced_even_after_failed_creation_attempt(
     assert len(http_source["requests"]) == 2
 
 
-def test_directory_sync_failure_prevents_parsing_and_storage(http_source, monkeypatch):
-    parser, storage = Mock(), Mock()
-    monkeypatch.setattr(crawl_flow.route_pdf, "fn", parser)
-    monkeypatch.setattr(main_etl.process_and_store, "fn", storage)
-    monkeypatch.setattr(main_etl.fetch_and_parse_url, "fn", lambda *_args, **_kwargs:
-                        crawl_flow.fetch_and_parse_attachments.fn(
-                            [{"url": URL}], "parent", "synthetic_files"))
+def test_directory_sync_failure_is_not_retried_and_stores_nothing(http_source, monkeypatch):
+    """本地 I/O 错误（目录 fsync 失败）不是瞬时读取错误：不重试 HTTP，下载失败如实抛出。"""
     events = track_fsync(monkeypatch, fail_directory=lambda _path: True)
-    result = main_etl.crawl_detail_page.fn("synthetic_files", {}, URL)
-    assert result["stats"] == {"total": 1, "passed": 0, "quarantined": 0, "failed": 1}
-    assert "directory fsync" in result["error"]
-    parser.assert_not_called()
-    storage.assert_not_called()
-    assert len(http_source["requests"]) == 1  # 本地I/O错误不进入HTTP超时重试。
+    with pytest.raises(OSError, match="directory fsync"):
+        site_crawler._download(URL, source_site="synthetic_files")
+    assert len(http_source["requests"]) == 1
     assert any(kind == "directory" for kind, _path, _fd in events)

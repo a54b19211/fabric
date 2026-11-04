@@ -1,6 +1,4 @@
 from biz_rules.extractors.chictr.chictr import extract_chictr_detail
-from db.sites.chictr import db_writer as chictr_db_writer
-from biz_rules.cleaners.clinical_trial import clean_clinical_trial
 
 SITE_KEY = "chictr"
 
@@ -31,12 +29,10 @@ CONFIG = {
 
     # ── 详情页解析 ──
     "detail_extractor": extract_chictr_detail,
-    "db_writer": chictr_db_writer,
     "detail_wait_selector": "table td.left_title",
 
     # 详情页用 simple_fetch 即可（服务端渲染，无需 Playwright）
     "use_simple_fetch": False,
     "disable_resources": True,
     "solve_cloudflare": False,
-    "content_cleaner": clean_clinical_trial,
 }

@@ -51,86 +51,47 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ## 运行
 
-### 完整流水线（爬取 + 本地 PDF + 导出审核）
+数据链路只有一条：采集框架把原件写成只追加的 history 版本，加工层按版本产出派生结果，
+正文经 `db/index_publication` 和桥接服务进 WeKnora。
 
-```bash
-python main_etl.py
-```
+| 层 | 入口 | 说明 |
+|---|---|---|
+| 来源目录 | `collection/catalog.py` | 每个来源一份声明（插件、限速组、增量键、是否实测）；调度、许可目录、加工层都读它 |
+| 采集 | `POST /api/history/fetch`、`db/source_refresh.py` | 读取插件见 `biz_rules/history_sources.py` 的 `PLUGINS`；网站和站点接口统一走 `collection/site_crawler.py` |
+| 附件 | `flows/process_attachments.py` | 附件是独立版本，正文由 `processing/attachment_parse.py`（MinerU）产出 |
+| 清洗 | `flows/clean_stage.py` | `processing/clean_text.py`、`identifiers.py`、`profile.py`，分块租约并行 |
+| 索引 | `db/index_publication.py` | 唯一的进 WeKnora 路径 |
+| 发表 | `flows/history_publish.py` | 审核图发布与 documents 库存冻结 |
 
-### 仅爬取网页
-
-```bash
-python main_etl.py --mode crawl
-```
-
-### 仅处理本地 PDF
-
-```bash
-python main_etl.py --mode local
-```
-
-### 仅导出待审核 CSV
-
-```bash
-python main_etl.py --mode export_review
-```
-
-### 人工审核回灌
-
-1. 运行 `export_review` 导出待审核 CSV
-2. 用 Excel 打开 CSV，填写 `manual_score` 和 `reviewer_note` 列
-3. 保存后执行回灌：
-
-```bash
-python feedback_ingest.py --csv /data/review/pending_review_20240315.csv
-```
+本地导入文件（原 `--mode local`）用 `POST /api/history/archives`；重抓页面用 `query=by_url` 的读取请求。
 
 ---
 
 ## 项目结构
 
 ```
-├── main_etl.py              # ETL 主入口（Prefect 调度）
-├── feedback_ingest.py       # 人工审核回灌脚本
-├── requirements.txt         # 依赖清单
-├── .env.example             # 环境变量模板
+├── collection/              # 采集框架：来源目录、站点插件、共享限速、增量窗口
+├── processing/              # 加工：附件解析、清洗、编号、画像、登记差分
+├── db/                      # history 存储、派生表、索引发布、documents 库（抽取/审核用）
+├── flows/                   # 常驻任务入口
 ├── config/
 │   ├── settings.py          # 全局配置（API Key、路径、阈值）
-│   └── crawler_settings.py  # 爬虫站点配置
-├── core_engine/             # 核心引擎（采集、解析、质检、存储）
-├── biz_rules/               # 业务规则（清洗、提取、Schema）
-└── logs/                    # 运行日志（按日期滚动）
+│   ├── crawler_settings.py  # 加载站点配置
+│   └── sites/               # 每个站点一份配置（列表页、选择器、翻页、接口拉取函数）
+├── core_engine/             # 抓取器、翻页驱动、MinerU 客户端、抽取与智能体
+├── biz_rules/               # 站点提取器、history 模型与读取插件、图谱规则
+└── contracts/               # 数据契约与业务验收样例
 ```
 
 ---
 
-## 数据输出目录（DATA_ROOT 下）
+## 新增采集站点
 
-| 目录 | 内容 |
-|---|---|
-| `raw/` | 原始文件（HTML、PDF） |
-| `markdown/` | 解析后的 Markdown 全文 |
-| `json_envelopes/` | 结构化 JSON 元数据信封 |
-| `quarantine/` | 质量不达标的隔离数据 |
-| `review/` | 待人工审核的 CSV 导出 |
+1. 在 `config/sites/` 加一个站点配置（`SITE_KEY` + `CONFIG`）；
+2. 在 `collection/catalog.py` 加一条 `CollectionSpec(plugin="site_crawler", verified=False, ...)`；
+3. 加契约样例测试（`tests/test_site_crawler.py` 的写法），对原站实测后再把 `verified` 改为 True。
 
 ---
-
-## 新增爬取站点
-
-编辑 `config/crawler_settings.py`，在 `SITE_PROFILES` 字典中追加条目即可：
-
-```python
-"your_site_key": {
-    "name": "站点名称",
-    "url_pattern": "example.com",
-    "start_urls": ["https://www.example.com/news/"],
-    "use_css_extractor": False,
-    "request_delay_seconds": 2.0,
-    "headers": DEFAULT_HEADERS,
-    "max_pages": 30,
-},
-```
 
 ## 抽取服务的运行保护（2026-10-16）
 

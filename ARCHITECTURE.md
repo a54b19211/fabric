@@ -62,7 +62,7 @@ LLM 结构化抽取（实体 + 关系）→ 实体消歧 →
 | Web 框架 | FastAPI + uvicorn | `api/main.py`，端口 8000 |
 | ORM | SQLAlchemy 2.x + psycopg2 | PostgreSQL |
 | 向量检索 | pgvector | `text-embedding-v3`，1024 维，ivfflat 索引 |
-| 爬虫调度 | Prefect 3.6.22 | `flows/crawl_flow.py` |
+| 采集调度 | 来源目录 + 刷新任务 | `collection/catalog.py`、`db/source_refresh.py` |
 | 任务队列 | RQ + Redis（可插拔） | 默认 memory，可切 redis |
 | Agent 编排 | LangGraph + LangChain | StateGraph（ReAct） |
 | LLM | OpenAI 兼容协议 | Qwen/DashScope，抽取/审核/消歧共用 |
@@ -164,17 +164,20 @@ PostgreSQL，共 **15 张表**（`db/models.py` + 迁移），全局风格：**�
 
 ## 6. 核心链路详解
 
-### 6.1 爬虫链路（`flows/crawl_flow.py` + `core_engine/`）
+### 6.1 采集链路（`collection/` + `biz_rules/history_sources.py` 的读取插件）
 
 ```
-fetch_page → route_webpage/route_pdf(MinerU)/route_docx/route_excel
-  → clean_content(清洗+注入 frontmatter) → check_quality(质量门控)
-  → write_to_database(计算置信度 + upsert_document) 或 quarantine_data(隔离)
+来源目录 collection/catalog.py → 读取插件（public_api_reader / who_don / sec / site_crawler …）
+  → 只追加 history 版本（原件 + 确定性投影，三类时间）
+  → 附件各成版本 → processing.attachment_parse（MinerU）→ derived_clean_text
+  → 清洗段 processing.clean_text / identifiers / profile → 派生表
+  → db/index_publication → 桥接服务 → WeKnora
 ```
 
-- 站点配置在 `config/sites/` 下**递归加载**（`SITE_KEY` + `CONFIG`），新增站点无需改主配置。
-- 已配置站点约 19 个：`nmpa`、`cde`/`cde_zdyz`/`cde_xxgk`、`fda`(press/drug_safety/api_drug_label/api_enforcement)、`chictr`、`clinicaltrials`、`pubmed`、`drugbank`、`nccn`、`hkex`/`hkex_pharma_list_auto`、`fiercepharma`、`phirda`(rd/policy/industry/healthcare_reform)、`roche` 等。
-- 支持单篇重爬（`recrawl_document_fn`）与批量重爬，重爬前会软删旧抽取结果并重置流水线状态。
+- 站点配置在 `config/sites/` 下（`SITE_KEY` + `CONFIG`），由 `collection/site_crawler.py` 统一读取：详情页、表格页、接口站点三种。
+- 站点来源（catalog 里 plugin=site_crawler 的 18 个）都标 `verified=False`，未对原站实测。
+- 重抓用 `query=by_url`；不写 documents 表，documents 库存只经 `legacy_documents` 冻结进 history。
+- 抽取、审核、智能体、消歧目前仍读写 documents 库与实体表（只有这一套；迁到 history 版本是 v3 3.4/3.5）。
 
 ### 6.2 LLM 抽取链路（NER：命名实体识别 + 关系抽取，`flows/extraction_flow.py`）
 

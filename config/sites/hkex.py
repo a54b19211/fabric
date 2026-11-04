@@ -4,7 +4,6 @@
 
 from biz_rules.extractors.hkex_fetcher import fetch_hkex_announcements
 from config.sites.hkex_pharma_list_auto import PHARMA_COMPANIES
-from db.sites.hkex import db_writer as hkex_db_writer
 
 
 SITE_KEY = "hkex"
@@ -13,7 +12,6 @@ CONFIG = {
     "name": "港交所披露易",
     "source_type": "api",
     "api_fetcher": fetch_hkex_announcements,
-    "db_writer": hkex_db_writer,
 
     "api": {
         "base_url": "https://www1.hkexnews.hk/search/titlesearch.xhtml",
