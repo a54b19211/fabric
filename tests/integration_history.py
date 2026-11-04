@@ -102,7 +102,7 @@ def pg(pg_engine, monkeypatch):
     migration.migrate_history()
     with pg_engine.begin() as conn:
         conn.execute(text(
-            "TRUNCATE derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,"
+            "TRUNCATE derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,"
             "derived_registry_diff_runs,history_versions,history_runs,"
             "history_version_rank"
         ))

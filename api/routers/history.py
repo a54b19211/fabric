@@ -317,6 +317,20 @@ def derived_text(
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
 
+@router.get("/clean-text", dependencies=[Depends(require_read)])
+def clean_text_route(
+    source_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+):
+    """一页版本的清洗正文（带定位）、编号和画像（分类、四维质量、分流）。v3 3.3。"""
+    from db.clean_stage import for_versions
+
+    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+
+
 @router.get("/collection/catalog", dependencies=[Depends(require_read)])
 def collection_catalog():
     """来源目录：已接通、已登记未接通、被拒绝（含原因）的来源，缺口如实列出。"""

@@ -18,9 +18,17 @@ CREATE TABLE IF NOT EXISTS derived_clean_text (
   -- 定位：pdf_page / converted_page / block / sheet / unavailable；segments 是每块在正文里的偏移和定位
   locator_kind text,
   segments jsonb NOT NULL DEFAULT '[]'::jsonb,
+  language text,
+  warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (version_id, processor_version, attempt)
 );
+-- 早先只建了基础列的库（未上线的测试库）补齐后加的列；新库这几句什么也不做
+ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS parse_attempts jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS locator_kind text;
+ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS segments jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS language text;
+ALTER TABLE derived_clean_text ADD COLUMN IF NOT EXISTS warnings jsonb NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS derived_clean_text_source ON derived_clean_text (source_id, is_demo, status);
 CREATE OR REPLACE RULE derived_clean_text_no_update AS ON UPDATE TO derived_clean_text DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE derived_clean_text_no_delete AS ON DELETE TO derived_clean_text DO INSTEAD NOTHING;

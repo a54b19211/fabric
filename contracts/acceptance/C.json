@@ -1,0 +1,468 @@
+[
+  {
+    "id": "C-01",
+    "judgment": "C",
+    "case_kind": "business_acceptance",
+    "chain": null,
+    "work_mode": "judgment_update",
+    "design_ref": "v3 1.2 判断C 验收案例1",
+    "question": "一家公司发布口径更正后的财报，雷达能否只重算受影响报告期的指标和赛道判断？",
+    "required_evidence": [
+      "financial",
+      "company_disclosure"
+    ],
+    "required_entities_and_times": [
+      "公司",
+      "股票代码",
+      "报告期",
+      "单位",
+      "口径",
+      "范围",
+      "分母",
+      "更正日期"
+    ],
+    "sources_available": [
+      "sec_companyfacts"
+    ],
+    "sources_gap": [
+      "cninfo",
+      "hkex",
+      "sec_filings"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "赛道判断",
+      "关键指标序列",
+      "变点",
+      "口径局限"
+    ],
+    "must_not": [
+      "公告变多等于产业增长",
+      "合同额当作收入",
+      "把更正前后不同口径的值直接相连"
+    ],
+    "positive": {
+      "scenario": "某期财报被更正，收入口径改变（具体公司待选）",
+      "expected": [
+        "只重算受影响的报告期及依赖它的趋势和变点",
+        "旧判断保留，修订说明写清口径变化"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "其他报告期的数据没有更正",
+      "expected": [
+        "这些时期的值不变，不因一次更正整体重算"
+      ],
+      "must_not_conclude": [
+        "一次口径更正就说明整条序列不可信"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "recompute_only_affected",
+        "detail": "重算清单只含被更正的报告期及依赖它的指标"
+      },
+      {
+        "kind": "keeps_old_judgment",
+        "detail": "更正前的判断版本仍可读出"
+      },
+      {
+        "kind": "measurement_has_caliber",
+        "detail": "更正前后的值都带报告期、单位、范围、分母"
+      },
+      {
+        "kind": "change_point_reported",
+        "detail": "重算后的变点与更正前对照列出"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "巨潮、港交所、SEC filing 原文未接入，写成缺口"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "需找一份真实的口径更正财报，固定更正前后版本；未找到前不写公司。",
+    "synthetic_components": []
+  },
+  {
+    "id": "C-02",
+    "judgment": "C",
+    "case_kind": "business_acceptance",
+    "chain": null,
+    "work_mode": "investigation",
+    "design_ref": "v3 1.2 判断C 验收案例2",
+    "question": "某赛道“订单大增”公告集中出现，但实际收入没跟上，这算不算结构性变化？",
+    "required_evidence": [
+      "company_disclosure",
+      "financial",
+      "media"
+    ],
+    "required_entities_and_times": [
+      "公司",
+      "股票代码",
+      "报告期",
+      "合同额",
+      "收入",
+      "单位",
+      "分母"
+    ],
+    "sources_available": [
+      "sec_companyfacts"
+    ],
+    "sources_gap": [
+      "cninfo",
+      "hkex",
+      "industry_media"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "赛道判断",
+      "关键指标序列",
+      "变点",
+      "口径局限"
+    ],
+    "must_not": [
+      "公告变多等于产业增长",
+      "合同额当作收入"
+    ],
+    "positive": {
+      "scenario": "多家公司公告大额订单，后续报告期收入未同步增长（具体赛道待选）",
+      "expected": [
+        "合同额与收入分列序列，指出两者背离",
+        "写明证据不足以认定结构性增长，并给出要看的下一期数据"
+      ],
+      "must_not_conclude": [
+        "订单大增就是产业增长"
+      ]
+    },
+    "counterexample": {
+      "scenario": "订单与收入在后续报告期同步增长且口径一致",
+      "expected": [
+        "可以报告增长变点，并写明口径和分母"
+      ],
+      "must_not_conclude": [
+        "只要收入涨了就不必看口径"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "contract_not_revenue",
+        "detail": "合同额和收入是两条序列，不互相代入"
+      },
+      {
+        "kind": "no_volume_proxy",
+        "detail": "公告条数只出现在信息活动指标里"
+      },
+      {
+        "kind": "measurement_has_caliber",
+        "detail": "每个值带报告期、单位、范围、分母"
+      },
+      {
+        "kind": "change_point_reported",
+        "detail": "两条序列各自的变点分别给出"
+      },
+      {
+        "kind": "states_next_evidence",
+        "detail": "写明下一期哪项收入数据会改变判断"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "巨潮、港交所、行业媒体未接入，写成缺口"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "需找一个真实的“订单大增、收入未跟上”赛道样本，固定公告和财报版本后填入。",
+    "synthetic_components": []
+  },
+  {
+    "id": "C-03",
+    "judgment": "C",
+    "case_kind": "chain_positive",
+    "chain": "C",
+    "work_mode": "discovery",
+    "design_ref": "v3 第四部分 链路C 正例",
+    "question": "旧库存量与财报测量能否形成带口径的时期序列，并自动发现变点？",
+    "required_evidence": [
+      "regulatory_decision",
+      "financial",
+      "company_disclosure"
+    ],
+    "required_entities_and_times": [
+      "公司",
+      "股票代码",
+      "报告期",
+      "单位",
+      "范围",
+      "分母",
+      "批准文号",
+      "受理号"
+    ],
+    "sources_available": [
+      "nmpa",
+      "cde",
+      "openfda",
+      "sec_companyfacts"
+    ],
+    "sources_gap": [
+      "hkex",
+      "cninfo"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "赛道判断",
+      "关键指标序列",
+      "变点",
+      "口径局限"
+    ],
+    "must_not": [
+      "公告变多等于产业增长",
+      "合同额当作收入"
+    ],
+    "positive": {
+      "scenario": "NMPA/CDE/openFDA 旧库存量的批准或受理记录，加上港交所或巨潮财报的测量值",
+      "expected": [
+        "测量进入时期序列，口径对齐后给出趋势和变点",
+        "旧库记录的可见时间记为“旧系统报告的爬取时间”，不倒填 first_seen_at"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "某季度批准或公告条数大增，但产能、收入等测量没有变化",
+      "expected": [
+        "条数只作为信息活动指标"
+      ],
+      "must_not_conclude": [
+        "公告变多就说明产业增长"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "measurement_has_caliber",
+        "detail": "序列里每个点带报告期、单位、范围、分母"
+      },
+      {
+        "kind": "change_point_reported",
+        "detail": "变点检测在口径对齐后的序列上运行，结果列出"
+      },
+      {
+        "kind": "no_volume_proxy",
+        "detail": "批准或公告条数不进入产业指标序列"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "港交所、巨潮未接入，写成缺口"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "需从旧库存量中选一组真实记录，并找到对应公司的财报；未选定前不写公司。",
+    "synthetic_components": []
+  },
+  {
+    "id": "C-04",
+    "judgment": "C",
+    "case_kind": "chain_correction",
+    "chain": "C",
+    "work_mode": "judgment_update",
+    "design_ref": "v3 第四部分 链路C 更正",
+    "question": "公告附件出现新版本（替换了数据表），雷达能否只重算受该附件影响的测量？",
+    "required_evidence": [
+      "company_disclosure",
+      "financial",
+      "regulatory_decision"
+    ],
+    "required_entities_and_times": [
+      "附件版本",
+      "父版本",
+      "页码",
+      "报告期",
+      "单位",
+      "分母"
+    ],
+    "sources_available": [
+      "nmpa"
+    ],
+    "sources_gap": [
+      "cninfo",
+      "hkex"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "赛道判断",
+      "关键指标序列",
+      "变点",
+      "口径局限"
+    ],
+    "must_not": [
+      "公告变多等于产业增长",
+      "合同额当作收入"
+    ],
+    "positive": {
+      "scenario": "父公告不变，附件内容哈希变化（v3 3.3a：附件变了就是新版本）",
+      "expected": [
+        "只重算引用旧附件的测量和受影响时期",
+        "报告引用回指“附件版本+页码”，旧判断保留"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "附件下载失败或解析失败",
+      "expected": [
+        "记为覆盖缺口“附件未解析”，父文档照常可用"
+      ],
+      "must_not_conclude": [
+        "父文档就是全部内容",
+        "附件解析失败等于数据没变"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "recompute_only_affected",
+        "detail": "重算清单只含引用旧附件版本的测量"
+      },
+      {
+        "kind": "keeps_old_judgment",
+        "detail": "基于旧附件的判断版本仍可读出"
+      },
+      {
+        "kind": "measurement_has_caliber",
+        "detail": "附件中的测量带报告期、单位、分母"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "附件未解析和巨潮、港交所未接入都写成缺口"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "需找一个真实的附件被替换的公告，固定两个附件版本后填入。",
+    "synthetic_components": []
+  },
+  {
+    "id": "C-05",
+    "judgment": "C",
+    "case_kind": "chain_anomaly",
+    "chain": "C",
+    "work_mode": "discovery",
+    "design_ref": "v3 第四部分 链路C 异常",
+    "question": "财报测量遇到重启、半途失败或同一指标多处披露时，会不会重复计数？",
+    "required_evidence": [
+      "financial",
+      "company_disclosure"
+    ],
+    "required_entities_and_times": [
+      "公司",
+      "股票代码",
+      "报告期",
+      "指标",
+      "version_id",
+      "处理器版本"
+    ],
+    "sources_available": [
+      "sec_companyfacts"
+    ],
+    "sources_gap": [
+      "cninfo",
+      "hkex"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "赛道判断",
+      "关键指标序列",
+      "变点",
+      "口径局限"
+    ],
+    "must_not": [
+      "公告变多等于产业增长",
+      "合同额当作收入"
+    ],
+    "positive": {
+      "scenario": "合成的同一公司、同一报告期、同一指标出现在正文和摘要两处；任务中途重启",
+      "expected": [
+        "同一公司+报告期+指标只计一次，来源各自保留",
+        "重启后从检查点续做",
+        "计算结果不回流进抽取"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "同一指标在两个不同报告期出现",
+      "expected": [
+        "分别计入序列"
+      ],
+      "must_not_conclude": [
+        "同名指标就是重复"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "no_duplicate_on_restart",
+        "detail": "强制重启前后，落盘版本数和观测数不变"
+      },
+      {
+        "kind": "resumes_after_partial_failure",
+        "detail": "注入半途失败后从检查点续做，未完成部分在欠账里可见"
+      },
+      {
+        "kind": "no_derived_feedback_loop",
+        "detail": "图谱、报告、计算结果的血缘不出现在抽取输入里"
+      },
+      {
+        "kind": "identifier_not_double_counted",
+        "detail": "同一公司+报告期+指标在序列中只出现一个点"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      },
+      {
+        "kind": "no_real_coverage_claim",
+        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "巨潮、港交所未接入，写成缺口"
+      }
+    ],
+    "data_basis": "synthetic_flow_only",
+    "material_note": "用明确标为合成的财报测量和注入的故障跑流程；只证明流程，不证明真实覆盖。",
+    "synthetic_components": [
+      "注入的重启和失败",
+      "合成财报测量"
+    ]
+  }
+]

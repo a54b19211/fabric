@@ -19,6 +19,7 @@ def migrate_history():
             "V021__history_version_rank.sql",
             "V022__registry_changes.sql",
             "V023__derived_clean_text.sql",
+            "V025__clean_stage.sql",
         )
     )
     with history_engine().begin() as conn:

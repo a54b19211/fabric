@@ -1,0 +1,361 @@
+[
+  {
+    "id": "V-01",
+    "judgment": "view",
+    "case_kind": "usage_view",
+    "chain": null,
+    "work_mode": "investigation",
+    "design_ref": "v3 6.4 使用视角1 国家层",
+    "question": "某一关键药品或技术链（对象由任务方选定）对少数供应方的集中依赖程度多高，替代能力如何？",
+    "required_evidence": [
+      "regulatory_decision",
+      "company_disclosure",
+      "financial",
+      "policy",
+      "official_notice"
+    ],
+    "required_entities_and_times": [
+      "产品",
+      "企业",
+      "替代关系",
+      "地区",
+      "报告期",
+      "单位",
+      "分母"
+    ],
+    "sources_available": [
+      "nmpa",
+      "cde",
+      "sec_companyfacts"
+    ],
+    "sources_gap": [
+      "national_supply_stats",
+      "policy_execution_data",
+      "cninfo",
+      "hkex"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "待决问题与期限",
+      "主要判断及其影响",
+      "支持和反对的证据以及证据缺口",
+      "情景或可选行动及其代价、前提和风险",
+      "需补充的关键资料与重新复核条件"
+    ],
+    "must_not": [
+      "把合成资料当作已覆盖真实场景",
+      "没接入的来源写成已覆盖",
+      "只凭新闻数量、海关大类或政策前后曲线下因果结论"
+    ],
+    "positive": {
+      "scenario": "公开监管和企业披露材料，加上明确标为合成的全国供需台账",
+      "expected": [
+        "识别实际的产品、企业和替代关系",
+        "有分母时才报依赖度，没有就写缺口",
+        "列出几种情景或可选行动及其前提",
+        "合成台账只对有权限的用户可见"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "只有新闻数量、海关大类或政策前后的曲线",
+      "expected": [
+        "只报描述性关联和数据缺口"
+      ],
+      "must_not_conclude": [
+        "凭新闻数量判断依赖程度",
+        "政策前后差异就是政策效果"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "answers_pending_question",
+        "detail": "报告第一节回答了 question 里的待决问题和期限"
+      },
+      {
+        "kind": "key_evidence_not_missed",
+        "detail": "评测清单里的关键证据都被引用或被列为缺口"
+      },
+      {
+        "kind": "counter_evidence_changes_judgment",
+        "detail": "加入夹具反证后，主要判断或其置信说明随之改变"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "缺口来源逐个列出，选项的前提写明依赖哪些缺口"
+      },
+      {
+        "kind": "updatable_with_new_evidence",
+        "detail": "追加一条新证据后能生成新判断版本，旧版本保留"
+      },
+      {
+        "kind": "analysis_separate_from_recommendation",
+        "detail": "分析判断与对策建议分节；价值权重取自任务方输入"
+      },
+      {
+        "kind": "no_precise_figure_without_denominator",
+        "detail": "无分母时报告里不出现精确依赖度"
+      },
+      {
+        "kind": "no_causal_from_before_after",
+        "detail": "只有前后差异时措辞为“描述性关联”"
+      },
+      {
+        "kind": "permission_enforced",
+        "detail": "无权限用户读不到合成台账内容，报告、摘要、缓存里也没有"
+      },
+      {
+        "kind": "no_real_coverage_claim",
+        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "公开部分待选少量可核对材料；内部台账为合成，只测权限和缺口显示。",
+    "synthetic_components": [
+      "全国供需与产能内部台账（合成）"
+    ]
+  },
+  {
+    "id": "V-02",
+    "judgment": "view",
+    "case_kind": "usage_view",
+    "chain": null,
+    "work_mode": "investigation",
+    "design_ref": "v3 6.4 使用视角2 省级",
+    "question": "某省拟布局的一个赛道（由任务方选定），与本地企业、园区、产线基础是否匹配？",
+    "required_evidence": [
+      "financial",
+      "company_disclosure",
+      "policy",
+      "registry"
+    ],
+    "required_entities_and_times": [
+      "辖区企业",
+      "园区",
+      "产线",
+      "项目进展",
+      "投入与产出",
+      "报告期",
+      "单位"
+    ],
+    "sources_available": [
+      "sec_companyfacts",
+      "clinicaltrials"
+    ],
+    "sources_gap": [
+      "local_industry_ledger",
+      "cninfo",
+      "hkex"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "待决问题与期限",
+      "主要判断及其影响",
+      "支持和反对的证据以及证据缺口",
+      "情景或可选行动及其代价、前提和风险",
+      "需补充的关键资料与重新复核条件"
+    ],
+    "must_not": [
+      "把合成资料当作已覆盖真实场景",
+      "没接入的来源写成已覆盖"
+    ],
+    "positive": {
+      "scenario": "公开财报、公告、临床登记，加上明确标为合成的辖区底册",
+      "expected": [
+        "比较两个以上候选赛道时控制口径、规模和时间",
+        "财报和公告覆盖不到的部分显示为缺口"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "辖区底册没有接入",
+      "expected": [
+        "报告写明缺口，判断降为有限证据"
+      ],
+      "must_not_conclude": [
+        "公开财报就足以代表辖区产业基础"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "answers_pending_question",
+        "detail": "报告第一节回答了 question 里的待决问题和期限"
+      },
+      {
+        "kind": "key_evidence_not_missed",
+        "detail": "评测清单里的关键证据都被引用或被列为缺口"
+      },
+      {
+        "kind": "counter_evidence_changes_judgment",
+        "detail": "加入夹具反证后，主要判断或其置信说明随之改变"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "缺口来源逐个列出，选项的前提写明依赖哪些缺口"
+      },
+      {
+        "kind": "updatable_with_new_evidence",
+        "detail": "追加一条新证据后能生成新判断版本，旧版本保留"
+      },
+      {
+        "kind": "analysis_separate_from_recommendation",
+        "detail": "分析判断与对策建议分节；价值权重取自任务方输入"
+      },
+      {
+        "kind": "comparison_controls_caliber",
+        "detail": "赛道或区域比较表注明口径、规模和时间范围"
+      },
+      {
+        "kind": "permission_enforced",
+        "detail": "无权限用户读不到合成台账内容，报告、摘要、缓存里也没有"
+      },
+      {
+        "kind": "no_real_coverage_claim",
+        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "公开部分待选少量可核对材料；辖区底册为合成，只测权限和缺口显示。",
+    "synthetic_components": [
+      "辖区企业/园区/产线底册（合成）"
+    ]
+  },
+  {
+    "id": "V-03",
+    "judgment": "view",
+    "case_kind": "usage_view",
+    "chain": null,
+    "work_mode": "investigation",
+    "design_ref": "v3 6.4 使用视角3 高校/科研机构",
+    "question": "某高校的一个学科平台（由任务方选定）下一步往哪投，有哪些可转化机会和合作缺口？",
+    "required_evidence": [
+      "primary_research",
+      "preprint",
+      "patent",
+      "conference"
+    ],
+    "required_entities_and_times": [
+      "项目",
+      "经费",
+      "设备",
+      "队伍",
+      "成果",
+      "转化进展",
+      "PMID",
+      "DOI",
+      "专利号",
+      "基金号"
+    ],
+    "sources_available": [
+      "europe_pmc",
+      "pubmed"
+    ],
+    "sources_gap": [
+      "research_institution_ledger",
+      "patents",
+      "grants",
+      "biorxiv"
+    ],
+    "must_say": [
+      "主要判断",
+      "业务影响",
+      "支持和反对的证据",
+      "局限",
+      "下一条会改变判断的证据",
+      "待决问题与期限",
+      "主要判断及其影响",
+      "支持和反对的证据以及证据缺口",
+      "情景或可选行动及其代价、前提和风险",
+      "需补充的关键资料与重新复核条件"
+    ],
+    "must_not": [
+      "把合成资料当作已覆盖真实场景",
+      "没接入的来源写成已覆盖",
+      "用高被引或论文数量代替研究质量和转化价值"
+    ],
+    "positive": {
+      "scenario": "公开论文，加上明确标为合成的授权台账，并与基金、专利关联",
+      "expected": [
+        "转化机会以成果和转化进展为依据，列出合作缺口",
+        "机构间比较控制口径、规模和时间"
+      ],
+      "must_not_conclude": []
+    },
+    "counterexample": {
+      "scenario": "某方向高被引论文很多，但没有转化进展",
+      "expected": [
+        "不据此判定转化价值高"
+      ],
+      "must_not_conclude": [
+        "高被引或论文数量代表研究质量和转化价值"
+      ]
+    },
+    "checks": [
+      {
+        "kind": "answers_pending_question",
+        "detail": "报告第一节回答了 question 里的待决问题和期限"
+      },
+      {
+        "kind": "key_evidence_not_missed",
+        "detail": "评测清单里的关键证据都被引用或被列为缺口"
+      },
+      {
+        "kind": "counter_evidence_changes_judgment",
+        "detail": "加入夹具反证后，主要判断或其置信说明随之改变"
+      },
+      {
+        "kind": "gap_stated",
+        "detail": "缺口来源逐个列出，选项的前提写明依赖哪些缺口"
+      },
+      {
+        "kind": "updatable_with_new_evidence",
+        "detail": "追加一条新证据后能生成新判断版本，旧版本保留"
+      },
+      {
+        "kind": "analysis_separate_from_recommendation",
+        "detail": "分析判断与对策建议分节；价值权重取自任务方输入"
+      },
+      {
+        "kind": "no_volume_proxy",
+        "detail": "被引数和论文数不出现在质量或转化价值的理由里"
+      },
+      {
+        "kind": "comparison_controls_caliber",
+        "detail": "机构比较表注明口径、规模和时间范围"
+      },
+      {
+        "kind": "permission_enforced",
+        "detail": "无权限用户读不到合成台账内容，报告、摘要、缓存里也没有"
+      },
+      {
+        "kind": "no_real_coverage_claim",
+        "detail": "运行记录和报告标明使用合成材料，不出现“已覆盖真实场景”的表述"
+      },
+      {
+        "kind": "cites_fixed_version",
+        "detail": "报告每条依据都能回指源版本、加工版本、定位和片段哈希"
+      }
+    ],
+    "data_basis": "to_be_sourced",
+    "material_note": "公开部分待选少量可核对材料；授权台账为合成，只测权限和缺口显示。",
+    "synthetic_components": [
+      "项目/经费/成果授权台账（合成）"
+    ]
+  }
+]

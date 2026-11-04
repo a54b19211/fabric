@@ -24,7 +24,7 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v1"
+PROCESSOR_VERSION = "datafabric.clean_text.v2"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -246,7 +246,9 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
 # ---------------------------------------------------------------- 临床登记
 
 SUMMARY_POINTER = "/protocolSection/descriptionModule/briefSummary"
-MAX_FIELD_CHARS = 4000
+# v2：清洗正文是检索（WeKnora 分块）和抽取的输入，入组标准、终点、地点等长字段必须完整保留；
+# v1 的 4000 字截断在真实 CT 数据上截了 1796/4496 个版本的关键内容，只在极端情况下才截。
+MAX_FIELD_CHARS = 200000
 
 # 固定阅读顺序：先看状态与终止原因，再看设计、时间、人群与终点，最后是申办方与结果；其余字段按键名排序附后。
 REGISTRY_ORDER = [

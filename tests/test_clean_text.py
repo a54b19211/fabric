@@ -23,7 +23,7 @@ def must_survive(text):
 
 
 def assert_shape(out):
-    assert out["processor_version"] == ct.PROCESSOR_VERSION == "datafabric.clean_text.v1"
+    assert out["processor_version"] == ct.PROCESSOR_VERSION == ct.PROCESSOR_VERSION
     assert set(out) == {"processor_version", "text", "segments", "language", "removed_lines", "warnings"}
     for seg in out["segments"]:
         assert 0 <= seg["start"] < seg["end"] <= len(out["text"])
@@ -235,13 +235,20 @@ def test_registry_missing_fields_not_invented_and_summary_missing():
     assert out["segments"][0]["source"] == {"json_pointer": None}
 
 
-def test_registry_long_value_cut_with_explicit_note():
+def test_registry_long_fields_are_kept_whole_for_search():
+    """v2：入组标准等长字段完整保留（v1 的 4000 字截断在真实 CT 上截掉了 1796/4496 个版本的关键内容）。"""
     long = "未见异常；" * 1000
+    out = ct.clean_registry({"eligibility": long}, {"eligibility": {"json_pointer": "/e"}}, summary="s")
+    assert json.dumps(long, ensure_ascii=False) in out["text"] and out["warnings"] == []
+
+
+def test_registry_long_value_cut_with_explicit_note():
+    long = "未见异常；" * 50000
     out = ct.clean_registry({"eligibility": long}, {"eligibility": {"json_pointer": "/e"}}, summary="s")
     full = json.dumps(long, ensure_ascii=False)
     line = seg_text(out, out["segments"][1])
     assert line.endswith("…（共 %d 字符，见原件）" % len(full))
-    assert line == "入选标准 eligibility: " + full[:4000] + "…（共 %d 字符，见原件）" % len(full)
+    assert line == "入选标准 eligibility: " + full[:ct.MAX_FIELD_CHARS] + "…（共 %d 字符，见原件）" % len(full)
     assert "field_truncated:eligibility" in out["warnings"]
 
 
