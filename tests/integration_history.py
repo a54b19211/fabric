@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +17,7 @@ from biz_rules.history_models import (
     ArchiveImport,
     ArchiveRecord,
     FetchRequest,
+    HistoryError,
     archive_manifest_hash,
 )
 from db import history as store
@@ -100,7 +101,10 @@ def pg(pg_engine, monkeypatch):
     monkeypatch.setattr(migration, "history_engine", lambda: pg_engine)
     migration.migrate_history()
     with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE history_versions,history_runs,history_version_rank"))
+        conn.execute(text(
+            "TRUNCATE derived_registry_changes,derived_registry_diff_runs,history_versions,history_runs,"
+            "history_version_rank"
+        ))
         conn.execute(
             text("UPDATE history_sources SET published_seq=0,read_enabled=true")
         )
@@ -1141,3 +1145,91 @@ def test_ranking_keys_are_derived_with_each_version_and_a_partial_backfill_chang
     with pg.begin() as conn:  # derived keys are as immutable as the versions they come from
         conn.execute(text("UPDATE history_version_rank SET publication_role='context_reference'"))
     assert [r[1] for r in _ranks(pg)] == ["source_record", "source_record"]
+
+
+# ——登记差分（V022）：和版本同一事务写入；读取遵守模式和截止时间——
+
+
+def _fetch_study(native, key, **status):
+    module = {"overallStatus": status.get("status", "RECRUITING")}
+    if status.get("why"):
+        module["whyStopped"] = status["why"]
+    module["primaryCompletionDateStruct"] = {"date": status.get("pcd", "2026-06"), "type": status.get("pcd_type", "ESTIMATED")}
+    raw = json.dumps({
+        "protocolSection": {
+            "identificationModule": {"nctId": native, "briefTitle": "Example trial"},
+            "statusModule": module,
+            "designModule": {"enrollmentInfo": {"count": status.get("n", 400), "type": "ESTIMATED"}},
+        },
+    }, sort_keys=True)
+    request = FetchRequest(source_id="clinicaltrials", query="synthetic registry diff")
+    run, fresh = store.create_fetch(request, key)
+    if not fresh:
+        return run
+    store.job_input(run.id, run.attempt)
+    return store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id=native, record_kind="trial", raw_content=raw)],
+        "complete": False, "upstream_pagination_exhausted": True,
+        "stop_reason": "end", "requests": 1, "bytes": len(raw.encode()),
+        "source_total": 1, "error": None,
+    })
+
+
+def test_registry_diff_written_with_version_and_read_with_visibility(pg):
+    from db.registry_changes import for_versions
+
+    first = _fetch_study("NCT09990001", "rd-1")
+    same = _fetch_study("NCT09990001", "rd-2")  # 同内容不产生新版本，也不产生差分
+    assert same.version_ids == first.version_ids
+    second = _fetch_study("NCT09990001", "rd-3", status="TERMINATED", why="Futility", pcd="2027-06")
+    v1, v2 = first.version_ids[0], second.version_ids[0]
+    assert v1 != v2
+    with pg.begin() as conn:
+        runs = conn.execute(text(
+            "SELECT to_version_id,from_version_id,pairing,change_count,material_count "
+            "FROM derived_registry_diff_runs ORDER BY created_at"
+        )).all()
+        assert [(r[0], r[1], r[2]) for r in runs] == [(v1, None, "current_at_adoption"), (v2, v1, "current_at_adoption")]
+        # 只追加
+        assert conn.execute(text("DELETE FROM derived_registry_changes")).rowcount == 0
+    now = datetime.now(timezone.utc)
+    got = for_versions("clinicaltrials", False, [v1, v2], "current", now)["versions"]
+    assert got[v1]["state"] == "first_adoption" and got[v1]["changes"] == []
+    changes = {c["field"]: c for c in got[v2]["changes"]}
+    assert got[v2]["state"] == "processed" and got[v2]["from_version_id"] == v1
+    assert changes["status"]["new_value"] == {"present": True, "value": "TERMINATED"}
+    assert changes["status"]["json_pointer"] == "/protocolSection/statusModule/overallStatus"
+    assert changes["why_stopped"]["old_value"] == {"present": False}
+    assert changes["primary_completion_date"]["detail"]["direction"] == "later"
+    assert all(c["material"] for c in changes.values())
+    # 两版都在采用之前的截止时间：看不到
+    before = for_versions("clinicaltrials", False, [v2], "current", date("2020-01-01T00:00:00Z"))
+    assert before["versions"][v2] == {"state": "not_processed"}
+    # 公开历史重建模式：观察版本没有档案证明，不可见
+    hidden = for_versions("clinicaltrials", False, [v2], "public_history_reconstruction", now)
+    assert hidden["versions"][v2] == {"state": "not_processed"}
+    with pytest.raises(HistoryError):
+        for_versions("clinicaltrials", False, [v2], "current", now + timedelta(days=1))
+
+
+def test_registry_diff_backfill_pairs_existing_versions_once(pg):
+    from db.registry_changes import backfill, for_versions
+
+    a = _fetch_study("NCT09990002", "bf-1").version_ids[0]
+    b = _fetch_study("NCT09990002", "bf-2", n=200).version_ids[0]
+    with pg.begin() as conn:  # 模拟改造前已有的存量：没有差分行
+        conn.execute(text("ALTER TABLE derived_registry_changes DISABLE RULE derived_registry_changes_no_delete"))
+        conn.execute(text("ALTER TABLE derived_registry_diff_runs DISABLE RULE derived_registry_diff_runs_no_delete"))
+        conn.execute(text("DELETE FROM derived_registry_changes"))
+        conn.execute(text("DELETE FROM derived_registry_diff_runs"))
+        conn.execute(text("ALTER TABLE derived_registry_changes ENABLE RULE derived_registry_changes_no_delete"))
+        conn.execute(text("ALTER TABLE derived_registry_diff_runs ENABLE RULE derived_registry_diff_runs_no_delete"))
+    assert for_versions("clinicaltrials", False, [b], "current", datetime.now(timezone.utc))["versions"][b] == {
+        "state": "not_processed"
+    }
+    assert backfill("clinicaltrials", batch=1) == {"processed": 2, "skipped_archive_mix": 0}
+    assert backfill("clinicaltrials") == {"processed": 0, "skipped_archive_mix": 0}
+    got = for_versions("clinicaltrials", False, [a, b], "current", datetime.now(timezone.utc))["versions"]
+    assert got[a]["state"] == "first_adoption" and got[b]["pairing"] == "backfill_published_seq"
+    enrollment = {c["field"]: c for c in got[b]["changes"]}["enrollment"]
+    assert enrollment["detail"]["delta"] == -200 and enrollment["material"]

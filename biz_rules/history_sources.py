@@ -21,6 +21,7 @@ from biz_rules.history_models import (
     sha256,
     source_time,
 )
+from collection import rate
 
 SOURCE_CATALOG = {
     "sec_companyfacts": {
@@ -771,16 +772,38 @@ def _raw_array_items(text: str, path: list[str]):
         pos = end
 
 
+def _read_who(request):
+    from biz_rules.who_don import read_who
+
+    return read_who(request)
+
+
+def _read_sec(request):
+    from biz_rules.sec_xbrl import read_sec
+
+    return read_sec(request)
+
+
 def read_public(request: FetchRequest) -> dict:
-    """返回真实完成/截断/失败及已读原件。HTTP异常绝不伪装EOF。"""
-    if request.source_id == "who_don":
-        from biz_rules.who_don import read_who
+    """唯一读取入口：按来源目录找到插件并读取。新来源在 collection.catalog 声明，再在 PLUGINS 注册。"""
+    from collection.catalog import spec
 
-        return read_who(request)
-    if request.source_id == "sec_companyfacts":
-        from biz_rules.sec_xbrl import read_sec
+    declared = spec(request.source_id)
+    if not declared.fetchable:
+        raise HistoryError("source_not_connected", "该来源在目录中尚未接通", 503)
+    plugin = PLUGINS.get(declared.plugin)
+    if plugin is None:
+        raise HistoryError("source_plugin_missing", "来源插件未注册", 503)
+    rate.wait(declared.rate_group, declared.min_interval_seconds)
+    return plugin(request)
 
-        return read_sec(request)
+
+def _read_public_api(request: FetchRequest) -> dict:
+    """ClinicalTrials / Europe PMC / FDA CRL / PubMed 的公开 API 读取。返回真实完成/截断/失败及已读原件。
+    HTTP异常绝不伪装EOF。翻页之间按来源目录的限速组等待。"""
+    from collection.catalog import spec
+
+    declared = spec(request.source_id)
     records, seen, requests_count, source_total = [], {}, 0, None
     exhausted, error, stop = False, None, "record_budget"
     began = time.monotonic()
@@ -1008,7 +1031,15 @@ def read_public(request: FetchRequest) -> dict:
                         raise HistoryError("repeated_page_cursor", "来源分页标记重复")
                     previous_cursors.add(next_cursor)
                     cursor = next_cursor
-                time.sleep(0.4)
+                try:
+                    rate.wait(
+                        declared.rate_group,
+                        declared.min_interval_seconds,
+                        deadline=began + request.deadline_seconds,
+                    )
+                except TimeoutError:
+                    stop = "deadline"
+                    break
             else:
                 stop = "page_budget"
         except HistoryError as exc:
@@ -1165,3 +1196,11 @@ def _read_pubmed(request, client, began):
             "bytes": 0,
             "source_total": None,
         }
+
+
+# 来源插件注册表：插件名 → 读取函数。来源目录（collection.catalog）只引用插件名。
+PLUGINS = {
+    "public_api_reader": _read_public_api,
+    "who_don": _read_who,
+    "sec_xbrl": _read_sec,
+}

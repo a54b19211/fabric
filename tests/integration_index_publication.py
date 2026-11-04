@@ -53,7 +53,7 @@ def pg(pg_engine, monkeypatch):
     index_migration.migrate_index()
     with pg_engine.begin() as conn:
         assert conn.execute(text("SELECT current_schema()")).scalar_one().startswith("test_index_")
-        conn.execute(text("TRUNCATE index_publications,index_targets,history_versions,history_runs"))
+        conn.execute(text("TRUNCATE derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,history_versions,history_runs"))
         conn.execute(text("UPDATE history_sources SET published_seq=0,read_enabled=true"))
     set_targets(monkeypatch)
     return pg_engine

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import Field, ValidationError, model_validator
@@ -17,6 +18,8 @@ from biz_rules.history_models import (
     canonical,
     sha256,
 )
+from collection.catalog import WATCHABLE, spec
+from collection.windows import cycle_request
 from db import history, publication
 
 
@@ -25,9 +28,16 @@ class SourceWatch(Model):
     request: FetchRequest
     cadence_seconds: int = Field(default=3600, ge=3600, le=604800)
     lookback_days: int = Field(default=30, ge=1, le=3650)
+    # realtime：按来源更新窗口增量读，窗口有持久检查点；backfill：不加窗口，按续页读完整个范围，
+    # 读到底后按 cadence 重新对账。实时优先，回填在每轮实时之后各走一页（保底，不被饿死）。
+    mode: Literal["realtime", "backfill"] = "realtime"
 
     @model_validator(mode="after")
     def query_budget(self):
+        if self.mode == "backfill" and not (
+            self.request.source_id in WATCHABLE and spec(self.request.source_id).backfill
+        ):
+            raise ValueError("该来源未声明可靠的全量续页，不能回填")
         if self.request.source_id in {"europe_pmc", "clinicaltrials"} and len(self.request.query) > 400:
             raise ValueError("论文/临床固定刷新查询须为更新日期窗预留长度")
         if self.request.source_id == "sec_companyfacts":
@@ -38,32 +48,47 @@ class SourceWatch(Model):
         return self
 
 
+def _max_watches():
+    try:
+        value = int(os.environ.get("DATAFABRIC_HISTORY_MAX_WATCHES", "32"))
+    except ValueError:
+        value = -1
+    if not 1 <= value <= 64:
+        raise HistoryError("source_watch_configuration", "固定刷新数量上限须在1到64之间")
+    return value
+
+
 def watches():
+    limit = _max_watches()
     try:
         data = json.loads(os.environ.get("DATAFABRIC_HISTORY_WATCHES", "[]"))
-        if not isinstance(data, list) or len(data) > 8:
+        if not isinstance(data, list) or len(data) > limit:
             raise ValueError()
         values = [SourceWatch.model_validate(value) for value in data]
         if len({value.id for value in values}) != len(values):
             raise ValueError()
         if any(
-            value.request.source_id not in {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts"}
+            value.request.source_id not in WATCHABLE
             or value.request.continuation is not None
             or value.request.updated_since is not None
             or value.request.updated_until is not None
             for value in values
         ):
             raise ValueError()
-        return values
+        # 实时优先：同一轮里先走全部实时刷新，再给每个回填走一页
+        return sorted(values, key=lambda value: value.mode != "realtime")
     except (ValueError, ValidationError):
         raise HistoryError(
             "source_watch_configuration",
-            "固定刷新配置无效；仅允许WHO、Europe PMC、临床登记和SEC明确范围",
+            "固定刷新配置无效；只允许来源目录中已接通且有增量键的来源",
         ) from None
 
 
 def _key(watch):
-    return "source-watch:" + sha256(canonical(watch.model_dump(mode="json")))
+    data = watch.model_dump(mode="json")
+    if data.get("mode") == "realtime":
+        data.pop("mode")  # 改造前已在运行的刷新保持原键，状态和窗口不重置
+    return "source-watch:" + sha256(canonical(data))
 
 
 def _save(engine, key, state):
@@ -127,46 +152,11 @@ def refresh_once(engine=None):
                 lease_token=uuid4().hex,
             )
             if "request" not in state:
-                request = watch.request.model_dump(mode="json")
-                if watch.request.source_id == "who_don":
-                    request.update(
-                        updated_since=(
-                            now - timedelta(days=watch.lookback_days)
-                        ).isoformat(),
-                        updated_until=now.isoformat(),
-                    )
-                if watch.request.source_id == "europe_pmc":
-                    start = (
-                        (
-                            now.astimezone(timezone.utc)
-                            - timedelta(days=watch.lookback_days)
-                        )
-                        .date()
-                        .isoformat()
-                    )
-                    end = now.astimezone(timezone.utc).date().isoformat()
-                    request["query"] = (
-                        "("
-                        + request["query"]
-                        + ") AND UPDATE_DATE:["
-                        + start
-                        + " TO "
-                        + end
-                        + "]"
-                    )
-                if watch.request.source_id == "clinicaltrials" and not request["source_record_ids"]:
-                    start = (now - timedelta(days=watch.lookback_days)).date().isoformat()
-                    end = now.date().isoformat()
-                    date_filter = "AREA[LastUpdatePostDate]RANGE[" + start + "," + end + "]"
-                    request["query"] = (
-                        date_filter if request["query"] == "*"
-                        else "(" + request["query"] + ") AND " + date_filter
-                    )
+                request, start, end = cycle_request(watch, state, now)
+                state["mode"] = watch.mode
                 state["fixed_scope_query"] = request["query"]
-                state["window_started_at"] = (
-                    now - timedelta(days=watch.lookback_days)
-                ).isoformat()
-                state["window_ended_at"] = now.isoformat()
+                state["window_started_at"] = start.isoformat() if start else None
+                state["window_ended_at"] = end.isoformat() if end else None
                 state["request"] = request
                 state["cycle_started_at"] = now.isoformat()
                 state["cycle_pages"] = 0
@@ -224,6 +214,11 @@ def refresh_once(engine=None):
                 elif run.coverage.get("upstream_pagination_exhausted") is True:
                     state["state"] = "idle"
                     state["last_success_at"] = now.isoformat()
+                    if state.get("window_ended_at"):
+                        # 本周期窗口已确认读到底：下一周期从这里（减重叠）续读
+                        state["window_checkpoint"] = state["window_ended_at"]
+                    if watch.mode == "backfill":
+                        state["backfill_completed_at"] = now.isoformat()
                     state["next_check_at"] = (
                         now + timedelta(seconds=watch.cadence_seconds)
                     ).isoformat()
@@ -381,11 +376,14 @@ def source_health(source_id, engine=None):
                         key: payload.get(key)
                         for key in (
                             "watch_id",
+                            "mode",
                             "state",
                             "scope",
                             "fixed_scope_query",
                             "window_started_at",
                             "window_ended_at",
+                            "window_checkpoint",
+                            "backfill_completed_at",
                             "cadence_seconds",
                             "last_check_at",
                             "last_success_at",

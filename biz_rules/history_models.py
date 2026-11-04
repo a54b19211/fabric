@@ -261,7 +261,8 @@ class FetchContinuation(Model):
 
 
 class FetchRequest(Model):
-    source_id: Literal["clinicaltrials", "pubmed", "fda_crl", "europe_pmc", "who_don", "sec_companyfacts"]
+    # 只接受来源目录中已接通的来源（collection.catalog.FETCHABLE）
+    source_id: str = Field(min_length=1, max_length=60)
     query: str = Field(min_length=1, max_length=500)
     source_record_ids: list[str] = Field(default_factory=list, max_length=100)
     max_records: int = Field(default=10, ge=1, le=100)
@@ -290,6 +291,10 @@ class FetchRequest(Model):
 
     @model_validator(mode="after")
     def fixed_scope(self):
+        from collection.catalog import FETCHABLE
+
+        if self.source_id not in FETCHABLE:
+            raise ValueError("来源未在目录中接通")
         for value in (self.updated_since, self.updated_until):
             if value is not None:
                 utc(value)

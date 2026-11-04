@@ -289,6 +289,34 @@ def raw(
     )
 
 
+@router.get("/registry-changes", dependencies=[Depends(require_read)])
+def registry_changes(
+    source_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+):
+    """一页版本各自与上一版的登记字段差分（加工层派生，处理器版本固定）。"""
+    from db.registry_changes import for_versions
+
+    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+
+
+@router.get("/collection/catalog", dependencies=[Depends(require_read)])
+def collection_catalog():
+    """来源目录：已接通、已登记未接通、被拒绝（含原因）的来源，缺口如实列出。"""
+    from dataclasses import asdict
+
+    from collection.catalog import SPECS, gaps
+
+    return {
+        "schema_version": "datafabric.collection.catalog.v1",
+        "sources": [asdict(s) | {"fetchable": s.fetchable, "watchable": s.watchable} for s in SPECS],
+        "gaps": gaps(),
+    }
+
+
 @router.get("/changes", dependencies=[Depends(require_read)])
 def changes(
     source_id: str,

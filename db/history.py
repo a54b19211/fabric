@@ -33,6 +33,7 @@ from biz_rules.history_models import (
     utc,
 )
 from biz_rules.history_sources import stable_raw, project_record
+from db import registry_changes
 
 
 @lru_cache(maxsize=2)
@@ -828,6 +829,19 @@ def _publish(
                 ),
                 {"id": version_id},
             )
+            if run["kind"] == "fetch":
+                # 确定性加工和版本同一事务：版本可见时，它与上一版的登记差分也已就绪
+                registry_changes.record(
+                    conn,
+                    source_id=run["source_id"],
+                    is_demo=run["is_demo"],
+                    record_id=item.source_record_id,
+                    previous=current,
+                    to_version_id=version_id,
+                    facts=projected.get("facts"),
+                    locators=projected.get("field_locators"),
+                    pairing="current_at_adoption",
+                )
             new_count += 1
         version_ids.append(version_id)
     _persist_dependencies(conn, source, dependencies)
