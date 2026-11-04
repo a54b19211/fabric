@@ -163,6 +163,8 @@ def availability(source_id: str) -> Availability:
 # - 同一供给系统的两个端点（如 openFDA 说明书与召回）不能仅凭接口不同算两份独立证实；
 # - 但同一主机/限速组也不等于同一份：同一论文在 PubMed 与 Europe PMC 各有一条仍是一份，
 #   两项没有共同样本/试验来源的研究即使同在一个论文平台上也是两份。
+# - 目录的收录/镜像关系（CollectionSpec.may_include，如 Europe PMC 收录 PubMed）只说明两边可能有同一条
+#   记录，要先按 PMID/DOI 比（same_record）才能算独立，不把两个库当成一份。
 # 两份材料是否独立，只按下面四个依据逐条判断；任一依据成立就不独立，全部排除才独立，其余写 unknown。
 INDEPENDENCE_BASES: dict[str, str] = {
     "same_study_or_discloser": "研究材料看是否同一原始研究（共同样本/试验来源），披露材料看是否同一披露主体",
@@ -198,6 +200,36 @@ def independence(bases: dict[str, bool | None]) -> Independence:
     if all(bases.get(b) is False for b in INDEPENDENCE_BASES):
         return "independent"
     return "unknown"
+
+
+def may_carry_same_record(source_a: str, source_b: str) -> bool:
+    """两个来源可能有同一条记录：同一来源，或目录登记了收录/镜像关系（may_include，任一方向）。
+    只是“要先比记录级编号”的提示，不是“同一来源”。"""
+    return (source_a == source_b or source_b in CATALOG[source_a].may_include
+            or source_a in CATALOG[source_b].may_include)
+
+
+RECORD_IDS = ("pmid", "doi")
+
+
+def _record_id(kind: str, value: Any) -> str:
+    v = str(value or "").strip().lower()
+    return re.sub(r"^(https?://(dx\.)?doi\.org/|doi:)", "", v) if kind == "doi" else v
+
+
+def same_record(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
+    """两条记录是否同一固定材料（INDEPENDENCE_BASES 的 same_fixed_material），按记录级编号判断。
+    a、b 形如 {"source_id": ..., "pmid": ..., "doi": ...}：
+    - 共有 PMID 或 DOI → True，不论来自哪个库；
+    - 两边都有同一种编号、而且都不同 → False；
+    - 编号不够比：两个来源可能有同一条记录（may_carry_same_record）→ None，不能算独立；
+      否则 → False（目录没登记收录关系，不是同一条记录；转载、同一研究按其他依据另判）。"""
+    ids = [(_record_id(k, a.get(k)), _record_id(k, b.get(k))) for k in RECORD_IDS]
+    if any(x and x == y for x, y in ids):
+        return True
+    if any(x and y for x, y in ids):
+        return False
+    return None if may_carry_same_record(a["source_id"], b["source_id"]) else False
 
 
 # “不比谁先报警，比谁先判断对”的出处：归档报告 13.5 实验 D，不是 v3 章节（不能假托 v3）
@@ -677,11 +709,11 @@ def validate_case(case: AcceptanceCase | dict[str, Any]) -> AcceptanceCase:
 def validate_cases(cases: list[AcceptanceCase | dict[str, Any]]) -> list[AcceptanceCase]:
     """校验一组案例，并检查 id 与 design_ref 不重复——重复意味着有案例被复制凑数或被覆盖。"""
     out = [validate_case(c) for c in cases]
-    for field in ("id", "design_ref"):
-        counts = Counter(getattr(c, field) for c in out)
+    for attr in ("id", "design_ref"):
+        counts = Counter(getattr(c, attr) for c in out)
         dup = sorted(k for k, n in counts.items() if n > 1)
         if dup:
-            raise AcceptanceContractError(f"{field} 重复：{dup}")
+            raise AcceptanceContractError(f"{attr} 重复：{dup}")
     return out
 
 

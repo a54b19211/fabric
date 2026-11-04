@@ -142,6 +142,7 @@ def _final_attachment_texts(conn, version_ids):
 _CHUNK_SQL = """
     SELECT version_id, source_id, is_demo, source_record_id, record_kind, published_seq,
            payload->'facts' AS facts, payload->'field_locators' AS locators, payload->>'clean_text' AS clean_text,
+           payload->>'title' AS title,
            CASE WHEN source_id='europe_pmc' OR payload->'facts'->>'role' IN ('web_capture','site_record')
                 THEN payload->>'raw_content' END AS raw,
            CASE WHEN source_id='clinicaltrials'
@@ -266,8 +267,11 @@ def _process_rows(conn, key, rows, counts):
                             "kind": hit["kind"], "value": hit["value"], "s": hit["start"], "e": hit["end"]})
         pub = facts.get("publication_types")
         pub_types = pub.get("pubType") if isinstance(pub, dict) else pub
+        # 按内容分大类只看标题、摘要和来源给的类别字段（如 openFDA 召回记录的“药品召回”），不看正文
+        structured = facts.get("structured") or {}
+        lead = " ".join(str(x) for x in (r.get("title"), structured.get("summary"), structured.get("category")) if x)
         prof = profile.profile(source_id=r["source_id"], role=facts.get("role"), chars=len(body), warnings=warnings,
-                               identifiers=found, pub_types=pub_types, parse_status=parse_status)
+                               identifiers=found, pub_types=pub_types, parse_status=parse_status, lead_text=lead)
         profile_rows.append({"v": r["version_id"], "pv": prof["processor_version"], "tpv": text_pv,
                              "source": r["source_id"], "demo": r["is_demo"], "doc": prof["doc_type"],
                              "cat": prof.get("doc_category"),

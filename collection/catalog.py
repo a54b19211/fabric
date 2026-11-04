@@ -63,6 +63,10 @@ class CollectionSpec:
     # 共同样本/试验来源的两项研究也不因此合并。独立与否由 contracts.acceptance 按原始研究/披露主体、
     # 固定材料、引用/转载关系、同源组判断。空 = 自成一个供给系统；不回退到限速组或主机名。
     supply_system: str = ""
+    # 可能收录/镜像的其他来源编号（如 Europe PMC 官方收录 PubMed/MEDLINE 内容）。只说明“两边可能有同一条
+    # 记录”，不说明“是同一来源”：记录是否同一份仍按 PMID/DOI 等记录级编号判断
+    # （contracts.acceptance.same_record），不把整个库当成一份，也不进 supply_system 的供给重叠。
+    may_include: tuple[str, ...] = ()
     # 这个来源编号实际覆盖的数据集/端点
     datasets: tuple[str, ...] = ()
 
@@ -112,6 +116,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         rate_group="ebi.ac.uk",
         min_interval_seconds=0.4,
         coverage={"metadata": "core", "abstract": "有则取", "fulltext": "不自动抓，另核许可"},
+        may_include=("pubmed",),  # Europe PMC 官方收录 PubMed/MEDLINE
     ),
     CollectionSpec(
         source_id="who_don",
@@ -389,8 +394,10 @@ SITE_SOURCES = frozenset(s.source_id for s in SPECS if s.plugin == "site_crawler
 
 
 def _check_evidence_registry() -> None:
-    """目录里的证据细类和覆盖层级只用 contracts.evidence_types 的注册表，不另立词表。"""
+    """目录里的证据细类和覆盖层级只用 contracts.evidence_types 的注册表，不另立词表；
+    may_include 只能指向目录里的其他来源。"""
     errors = []
+    known = {s.source_id for s in SPECS}
     for s in SPECS:
         bad = [t for t in s.evidence_types if t not in FINE_TYPES]
         if bad:
@@ -398,6 +405,9 @@ def _check_evidence_registry() -> None:
         bad = [k for k in s.coverage if k not in COVERAGE]
         if bad:
             errors.append(f"{s.source_id} 的 coverage 有未注册的覆盖层级 {bad}")
+        bad = [x for x in s.may_include if x == s.source_id or x not in known]
+        if bad:
+            errors.append(f"{s.source_id} 的 may_include 不是目录里的其他来源 {bad}")
     if errors:
         raise ValueError("；".join(errors))
 

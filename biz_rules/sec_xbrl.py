@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
 import httpx
 
 from biz_rules.history_models import ArchiveRecord, HistoryError
+from collection import transport
 
 SEC_PARSER = "datafabric.sec.companyconcept.v0.1"
 ENDPOINT = "https://data.sec.gov/api/xbrl/companyconcept/"
@@ -129,7 +129,7 @@ def project_sec(item, data):
 
 
 def read_sec(request):
-    from biz_rules.history_sources import _bounded_text, parse_json
+    from biz_rules.history_sources import parse_json
 
     if request.query.strip() != "*" or not request.source_record_ids:
         raise HistoryError("sec_explicit_scope", "SEC读取须query='*'并给明确CIK:taxonomy:tag原生ID清单")
@@ -138,8 +138,7 @@ def read_sec(request):
     selected = list(dict.fromkeys(request.source_record_ids))
     for native in selected:
         split_native(native)
-    records, used, requests, error = [], 0, 0, None
-    started, stop = time.monotonic(), "record_budget"
+    records, error, stop = [], None, "record_budget"
     exhausted = False
     user_agent = os.environ.get("DATAFABRIC_SEC_USER_AGENT", "BioRadar-DataFabric/1.0 (bounded academic research)")
     if not user_agent.strip() or any(ord(c) < 32 for c in user_agent):
@@ -148,20 +147,19 @@ def read_sec(request):
         try:
             budget_count = min(len(selected), request.max_records, request.max_pages)
             for index, native in enumerate(selected[:budget_count]):
-                # 间隔由共享限速组 sec.gov 控制（每秒一请求，见来源目录），_bounded_text 内过闸
-                if time.monotonic() - started >= request.deadline_seconds:
-                    stop = "deadline"
-                    break
-                requests += 1
-                raw = _bounded_text(client, source_url(native), {}, started,
-                                    request.deadline_seconds, 8 * 1024 * 1024 - used)
-                used += len(raw.encode("utf-8"))
+                # 共享限速组 sec.gov（每秒一请求，见来源目录）与本次预算由 collection.transport 在发出处执行
+                status, body = transport.get(client, source_url(native), cap=8 * 1024 * 1024)
+                if status != 200:
+                    raise ValueError("HTTP " + str(status))
+                raw = body.decode("utf-8")
                 item = ArchiveRecord(source_record_id=native, record_kind="document", raw_content=raw)
                 project_sec(item, parse_json(raw))
                 records.append(item)
             else:
                 exhausted = len(records) == len(selected)
                 stop = "upstream_exhausted" if exhausted else "page_budget" if budget_count == request.max_pages else "record_budget"
+        except transport.Stop as stopped:
+            stop = stopped.reason
         except HistoryError as exc:
             error = {"code": exc.code, "message": exc.message}
             stop = "source_failed"
@@ -171,6 +169,6 @@ def read_sec(request):
     return {
         "records": records, "complete": False,
         "upstream_pagination_exhausted": exhausted and not error,
-        "stop_reason": stop, "error": error, "requests": requests, "bytes": used,
+        "stop_reason": stop, "error": error,
         "source_total": None, "next_continuation": None,
     }

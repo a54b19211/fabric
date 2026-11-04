@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import time
 from uuid import UUID
 
 import httpx
 from bs4 import BeautifulSoup
 
 from biz_rules.history_models import ArchiveRecord, HistoryError, canonical, source_time
+from collection import transport
 
 ENDPOINT = "https://www.who.int/api/emergencies/diseaseoutbreaknews"
 WHO_PARSER = "datafabric.who.don.projection.v0.2"
@@ -109,9 +109,8 @@ def project_who(item, data):
 def read_who(request):
     from biz_rules.history_sources import _raw_array_items, parse_json
 
-    records, requests, used, error = [], 0, 0, None
+    records, error = [], None
     exhausted, stop, continuation = False, "record_budget", None
-    started = time.monotonic()
     consumed = request.continuation.read_count if request.continuation else 0
     position = None
     if request.continuation:
@@ -157,32 +156,10 @@ def read_who(request):
                     )
                 if page_filters:
                     params["$filter"] = " and ".join(page_filters)
-                requests += 1
-                budget = request.deadline_seconds - (time.monotonic() - started)
-                if budget <= 0:
-                    raise HistoryError("source_deadline", "WHO公告读取超过时间预算")
-                from collection import rate
-
-                try:
-                    rate.wait_for_url(ENDPOINT, deadline=started + request.deadline_seconds)
-                except TimeoutError:
-                    raise HistoryError("source_deadline", "WHO公告读取超过时间预算") from None
-                with client.stream(
-                    "GET", ENDPOINT, params=params, timeout=min(20, budget)
-                ) as response:
-                    response.raise_for_status()
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        if time.monotonic() - started > request.deadline_seconds:
-                            raise HistoryError(
-                                "source_deadline", "WHO公告读取超过时间预算"
-                            )
-                        body.extend(chunk)
-                        if used + len(body) > 8 * 1024 * 1024:
-                            raise HistoryError(
-                                "source_byte_budget", "WHO公告读取超过8MiB预算"
-                            )
-                used += len(body)
+                # 限速、请求/字节/期限预算由 collection.transport 在发出处统一执行
+                status, body = transport.get(client, ENDPOINT, params, cap=8 * 1024 * 1024)
+                if status != 200:
+                    raise ValueError("HTTP " + str(status))
                 raw = body.decode("utf-8")
                 data = parse_json(raw)
                 if not isinstance(data.get("value"), list):
@@ -231,6 +208,8 @@ def read_who(request):
                     break
             else:
                 stop = "page_budget"
+        except transport.Stop as stopped:
+            stop = stopped.reason  # 停在最后读完的一页，续读位置不变
         except HistoryError as exc:
             error = {"code": exc.code, "message": exc.message}
         except (httpx.HTTPError, ValueError, KeyError, TypeError, UnicodeError):
@@ -244,8 +223,6 @@ def read_who(request):
         "upstream_pagination_exhausted": exhausted and not error,
         "stop_reason": "source_failed" if error else stop,
         "error": error,
-        "requests": requests,
-        "bytes": used,
         "source_total": None,
         "next_continuation": continuation if not error else None,
     }

@@ -27,7 +27,8 @@ def fake_web(monkeypatch, tmp_path):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
 
     def fetch_page(url, **kwargs):
-        transport.gate()  # 替身也是一次真实传输：过闸、计数
+        transport.gate(url)  # 替身也是一次真实传输：过闸、计数、计字节
+        transport.received(len(FakePage.html_content.encode()))
         calls["fetch"].append((url, kwargs))
         return {"page": FakePage(), "url": url, "uuid": "u-" + url[-8:], "timestamp": "t", "cookies": [{"name": "c"}]}
 
@@ -45,7 +46,7 @@ def fake_web(monkeypatch, tmp_path):
         }
 
     def download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None):
-        transport.gate()
+        transport.gate(pdf_url)
         calls["download"].append((pdf_url, cookies))
         if pdf_url == ATT2 and calls.get("fail_second"):
             raise RuntimeError("HTTP 404")
@@ -82,7 +83,9 @@ def test_read_public_dispatches_to_the_migrated_plugin(monkeypatch):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(site_crawler, "read_site", lambda request: {"marker": request.source_id})
     assert "site_crawler" in PLUGINS
-    assert read_public(FetchRequest(source_id="chictr", query="by_url", source_record_ids=["https://www.chictr.org.cn/showproj.html?proj=1"])) == {"marker": "chictr"}
+    batch = read_public(FetchRequest(source_id="chictr", query="by_url",
+                                     source_record_ids=["https://www.chictr.org.cn/showproj.html?proj=1"]))
+    assert batch["marker"] == "chictr" and batch["requests"] == 0  # 计量来自同一份预算
 
 
 def test_detail_page_becomes_capture_plus_one_record_per_attachment(fake_web):
@@ -182,7 +185,8 @@ def test_request_budget_counts_every_request(fake_web):
 
 
 def test_byte_budget_stops_and_keeps_what_was_read(fake_web, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_SITE_RUN_MAX_BYTES", "10")
+    # 第一页放得下，第二页读到一半超出：第二页不保留（读不完整），第一页和它的附件保留，续读指向第二页
+    monkeypatch.setenv("DATAFABRIC_READ_MAX_BYTES", str(len(FakePage.html_content.encode()) * 3 // 2))
     urls = [PAGE, PAGE.replace("123.html", "124.html")]
     batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_records=100))
     assert batch["stop_reason"] == "byte_budget" and pages_of(batch) == [PAGE]
@@ -351,16 +355,6 @@ def test_transfers_outside_a_read_are_not_gated(monkeypatch):
     assert calls == []
 
 
-class _Budget:
-    """最小的读取替身：只记过闸次数。"""
-
-    def __init__(self):
-        self.requests = 0
-
-    def before_request(self):
-        self.requests += 1
-
-
 def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, monkeypatch):
     """翻页驱动在独立线程里取列表页：线程带着读取上下文，列表页同样过闸计数；驱动自己的间隔归零。"""
     import concurrent.futures
@@ -372,7 +366,7 @@ def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, m
 
         def iter_detail_urls(self):
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(in_context(transport.gate)).result()  # 列表页的一次真实传输
+                executor.submit(in_context(lambda: transport.gate(PAGE))).result()  # 列表页的一次真实传输
             yield PAGE
 
     made = []
@@ -391,18 +385,18 @@ def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
 
     monkeypatch.setattr(APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.01)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(transport.time, "sleep", lambda s: None)
     calls = []
 
     def flaky():
         calls.append(1)
         if len(calls) < 3:
-            raise RuntimeError("HTTP 429 too many")
+            raise httpx.ReadTimeout("t")
         return "ok"
 
-    budget = _Budget()
-    with transport.metered(budget):
-        assert transport._metered(flaky)() == "ok"
+    budget = _budget()
+    assert transport._hop(budget, "https://synthetic.invalid/", flaky, drain=lambda r: None) == "ok"
     assert len(calls) == 3 and budget.requests == 3  # 每次重发都重新过闸
 
     calls.clear()
@@ -411,7 +405,149 @@ def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
         calls.append(1)
         raise ValueError("parse error")
 
-    with transport.metered(_Budget()), pytest.raises(ValueError):
-        transport._metered(broken)()
+    with pytest.raises(ValueError):
+        transport._hop(_budget(), "https://synthetic.invalid/", broken, drain=lambda r: None)
     assert len(calls) == 1
-    assert transport.is_transient(httpx.ReadTimeout("t"))
+    assert transport.is_transient(httpx.ReadTimeout("t")) and not transport.is_transient(RuntimeError("HTTP 429"))
+
+
+def _budget():
+    return transport.Budget(max_requests=10, max_bytes=10**9, max_records=10, deadline_seconds=60)
+
+
+def _api_site(monkeypatch, fetcher):
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label",
+                        {"source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"},
+                         "uid_field": "id"})
+
+
+def test_codex_401_every_redirect_hop_is_metered(monkeypatch):
+    """Codex 401 反例：httpx 自动跟随 12 跳重定向，预算 10。现在每一跳在实际发送处过闸、计数，第 11 跳前停下。"""
+    import httpx
+
+    hops, gates = [], []
+
+    def handler(request):
+        hops.append(str(request.url))
+        if len(hops) < 12:
+            return httpx.Response(302, headers={"Location": "https://synthetic.invalid/hop/" + str(len(hops))})
+        return httpx.Response(200, json={"done": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+
+    def fetcher(config):
+        client.get("https://synthetic.invalid/start")
+        yield {"id": "one", "title": "synthetic redirected record"}
+
+    _api_site(monkeypatch, fetcher)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: gates.append(True))
+    batch = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
+                                                max_records=1))
+    assert len(hops) == 10 and len(gates) == 10 and batch["requests"] == 10
+    assert batch["stop_reason"] == "request_budget" and batch["records"] == []
+
+
+def test_codex_402_retry_response_bytes_count_towards_the_budget(monkeypatch):
+    """Codex 402 第 3 点：两次 429 各回 2000 字节，预算 1000。第一次 429 的响应体就用完预算，不再重发。"""
+    import httpx
+
+    bodies = []
+
+    def handler(request):
+        status, body = (429, b"x" * 2000) if len(bodies) < 2 else (200, b"ok")
+        bodies.append(len(body))
+        return httpx.Response(status, content=body)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    def fetcher(config):
+        client.get("https://synthetic.invalid/rate-limited")
+        yield {"id": "one", "title": "synthetic record"}
+
+    _api_site(monkeypatch, fetcher)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
+    monkeypatch.setenv("DATAFABRIC_READ_MAX_BYTES", "1000")
+    monkeypatch.setattr(transport, "_retry_settings", lambda: (2, 0.0))
+    batch = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
+                                                max_records=1))
+    assert len(bodies) == 1 and batch["stop_reason"] == "byte_budget" and batch["bytes"] == 2000
+
+
+def test_streamed_download_stops_at_the_chunk_that_exhausts_the_budget(monkeypatch):
+    import httpx
+
+    def handler(request):
+        return httpx.Response(200, content=iter([b"a" * 400] * 5))  # 流式 2000 字节
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
+    budget = transport.Budget(max_requests=10, max_bytes=1000, max_records=10, deadline_seconds=60)
+    seen = []
+    with transport.metered(budget), pytest.raises(transport.Stop):
+        with client.stream("GET", "https://synthetic.invalid/file") as response:
+            for chunk in response.iter_bytes():
+                seen.append(len(chunk))
+    assert sum(seen) <= 1000 < budget.bytes <= 1200 and budget.stopped == "byte_budget"
+
+
+def test_requests_and_curl_redirects_are_gated_per_hop(monkeypatch):
+    """requests：每一跳调用一次 HTTPAdapter.send；curl_cffi：关掉库内部跳转，由闸门逐跳跟随。"""
+    import requests
+
+    gates = []
+    monkeypatch.setattr(rate, "wait", lambda group, *a, **k: gates.append(group))
+
+    class Raw:
+        def __init__(self, body):
+            self.body = body
+
+        def stream(self, *a, **k):
+            yield self.body
+
+        def read(self, *a, **k):
+            body, self.body = self.body, b""
+            return body
+
+        def release_conn(self):
+            pass
+
+        def close(self):
+            pass
+
+    sent = []
+
+    def adapter_send(self, request, *args, **kwargs):
+        sent.append(request.url)
+        response = requests.Response()
+        response.request, response.url, response.raw = request, request.url, Raw(b"x" * 10)
+        if len(sent) < 3:
+            response.status_code, response.headers["Location"] = 302, "https://b.invalid/" + str(len(sent))
+        else:
+            response.status_code = 200
+        return response
+
+    from requests.adapters import HTTPAdapter
+
+    monkeypatch.setattr(HTTPAdapter, "send", adapter_send)
+    with transport.metered(_budget()) as budget:
+        assert requests.get("https://a.invalid/start").status_code == 200
+    assert len(sent) == 3 and budget.requests == 3 and budget.bytes == 30
+    assert gates == ["a.invalid", "b.invalid", "b.invalid"]  # 按每一跳的实际主机限速
+
+    curl = pytest.importorskip("curl_cffi.requests")
+    calls = []
+
+    class Answer:
+        def __init__(self, status, location=None):
+            self.status_code, self.content = status, b"yy"
+            self.headers = {"location": location} if location else {}
+
+    def curl_request(self, method, url, *args, **kwargs):
+        calls.append((url, kwargs.get("allow_redirects")))
+        return Answer(302, "/next") if len(calls) == 1 else Answer(200)
+
+    monkeypatch.setattr(curl.Session, "request", curl_request)
+    with transport.metered(_budget()) as budget:
+        assert curl.Session().request("GET", "https://c.invalid/a").status_code == 200
+    assert calls == [("https://c.invalid/a", False), ("https://c.invalid/next", False)]
+    assert budget.requests == 2 and budget.bytes == 4

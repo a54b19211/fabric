@@ -15,22 +15,21 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 - "records"（接口站点）：按站点的接口拉取函数逐条读，可续读；
 - "stored_attachments"，source_record_ids=已存文档 URL：按 documents 库 attachments 表记录的链接
   重新下载附件原件（只读那张表，父页面不重抓）。
-每一次真实传输（接口拉取函数里的 httpx/requests 请求、网页抓取、附件下载、浏览器翻页）发出前都过
-collection.transport 的闸门：共享限速、请求/字节/期限预算、超时与 429 的有界重试，续读重放也计数。
+每一次真实传输（接口拉取函数里的 httpx/requests/curl 请求及其每一跳重定向、网页抓取、附件下载、浏览器里的
+document/xhr/fetch 请求）都在发出处过 collection.transport 的闸门：共享限速、请求/字节/期限预算、超时与 429 的
+有界重试，续读重放也计数。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
-import time
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
 from biz_rules.history_models import ArchiveRecord, HistoryError, source_time
-from collection import rate, transport
+from collection import transport
 from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
 
 WEB_SCHEMA = "datafabric.web_capture.v1"
@@ -134,13 +133,7 @@ def _record(record_id, data) -> ArchiveRecord:
     )
 
 
-class _Stop(BaseException):
-    """预算用完：reason 是 stop_reason。已读到的材料保留，调用方给出续读位置。
-    BaseException：拉取函数里的 except Exception 吞不掉预算停止。"""
-
-    def __init__(self, reason):
-        super().__init__(reason)
-        self.reason = reason
+_Stop = transport.Stop  # 预算用完（BaseException，拉取函数里的 except Exception 吞不掉）
 
 
 class _Resume(_Stop):
@@ -154,51 +147,32 @@ class _Resume(_Stop):
         self.page_recorded = page_recorded
 
 
-def run_byte_budget() -> int:
-    return int(os.environ.get("DATAFABRIC_SITE_RUN_MAX_BYTES", str(256 * 1024 * 1024)))
-
-
 class _Reader:
-    """一次读取的预算（Codex r59）：
-    - 版本数 ≤ max_records（父页面和附件都算）；
-    - 对外请求数 ≤ max_pages × 10（列表页、详情页、附件下载都算，旧翻页驱动内部的请求也算）；
-    - 总字节 ≤ DATAFABRIC_SITE_RUN_MAX_BYTES，单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES；
-    - 截止时间 deadline_seconds。
+    """一次读取：版本、附件覆盖和续读位置。预算与计量是本次读取共用的 transport.Budget——版本数 ≤ max_records
+    （父页面和附件都算），请求、字节、截止时间在每次真实传输的发出处执行；单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES。
     任何一项用完就停：已读到的保留，stop_reason 写明是哪一项，给续读位置，不声称读到底。"""
 
-    def __init__(self, request):
+    def __init__(self, request, budget):
         self.request = request
+        self.budget = budget
         self.site = request.source_id
         self.profile = SITE_PROFILES[self.site]
         self.spec = spec(self.site)
-        self.began = time.monotonic()
-        self.deadline = self.began + request.deadline_seconds
         self.records: list[ArchiveRecord | None] = []
-        self.requests = 0
-        self.request_budget = request.max_pages * 10
-        self.bytes = 0
-        self.byte_budget = run_byte_budget()
         # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_attempted ...）。放在读取结果里，
         # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本（Codex r61）。
         self.coverage: list[dict] = []
 
-    def before_request(self):
-        if self.requests >= self.request_budget:
-            raise _Stop("request_budget")
-        if self.bytes >= self.byte_budget:
-            raise _Stop("byte_budget")
-        try:
-            rate.wait(self.spec.rate_group, self.spec.min_interval_seconds, deadline=self.deadline)
-        except TimeoutError:
-            raise _Stop("deadline") from None
-        self.requests += 1
-
-    def add_bytes(self, n):
-        self.bytes += n
-
     def before_record(self):
-        if len(self.records) >= self.request.max_records:
-            raise _Stop("record_budget")
+        self.budget.need_record()
+
+    def add(self, record, at=None):
+        """一个版本占一个名额（at：填回先占的位置）。"""
+        if at is None:
+            self.budget.take_record()
+            self.records.append(record)
+        else:
+            self.records[at] = record
 
     def attachment(self, link, parent_id, cookies, discovered):
         """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。预算用完抛 _Stop。"""
@@ -218,9 +192,8 @@ class _Reader:
             entry.update(status="download_failed", error=type(exc).__name__)
             self.coverage.append({"parent_record_id": parent_id, **entry})
             return entry
-        self.bytes += size
         entry.update(sha256=sha, size=size)
-        self.records.append(
+        self.add(
             _record(
                 record_id,
                 {
@@ -252,7 +225,7 @@ class _Reader:
             self.before_record()
         links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
         if record_page:
-            self.records.append(_record(record_id, {
+            self.add(_record(record_id, {
                 "schema_version": RECORD_SCHEMA,
                 "role": "site_record",
                 "site": self.site,
@@ -299,7 +272,6 @@ class _Reader:
         html = getattr(page_data["page"], "html_content", "") or ""
         raw = html.encode("utf-8")
         html_sha = hashlib.sha256(raw).hexdigest()
-        self.bytes += len(raw)
         capture = {
             "schema_version": WEB_SCHEMA,
             "role": "web_capture",
@@ -319,7 +291,7 @@ class _Reader:
             capture["html_store_path"] = str(path)
         index = len(self.records)
         if record_page:
-            self.records.append(None)  # 占位：父页面排在它的附件前面
+            self.add(None)  # 占位：父页面排在它的附件前面
         cookies = page_data.get("cookies") or []
         links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
         # 原件里的附件清单只有来源给出的链接和文字；每个附件这次读没读到记在 coverage
@@ -328,7 +300,7 @@ class _Reader:
             for link in links
         ]
         if record_page:
-            self.records[index] = _record(url, capture)
+            self.add(_record(url, capture), at=index)
         for position, link in enumerate(links):
             if position < skip_attachments:
                 continue
@@ -373,9 +345,8 @@ def _cursor(request):
 
 def read_site(request) -> dict:
     """site_crawler 插件入口：这次读取的全部真实传输都过同一个闸门和预算。"""
-    reader = _Reader(request)
-    with transport.metered(reader):
-        return _read(request, reader)
+    with transport.reading(request) as budget:
+        return _read(request, _Reader(request, budget))
 
 
 def _read(request, reader) -> dict:
@@ -433,8 +404,11 @@ def _read(request, reader) -> dict:
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
-        error = {"code": "source_read_failed", "message": "站点读取失败：" + type(exc).__name__}
-        stop = "source_failed"
+        if reader.budget.stopped:  # 浏览器里的请求因预算被中止，驱动随后报的错不是来源失败
+            stop, resume = reader.budget.stopped, (position, 0, False)
+        else:
+            error = {"code": "source_read_failed", "message": "站点读取失败：" + type(exc).__name__}
+            stop = "source_failed"
     next_continuation = None
     if resume and error is None:
         next_continuation = {
@@ -448,8 +422,9 @@ def _read(request, reader) -> dict:
         "upstream_pagination_exhausted": exhausted and error is None,
         "stop_reason": stop,
         "error": error,
-        "requests": reader.requests,
-        "bytes": reader.bytes,
+        "requests": reader.budget.requests,
+        "bytes": reader.budget.bytes,
+        "subrequests": reader.budget.subrequests,
         "source_total": None,
         "count_drift": None,
         "next_continuation": next_continuation,

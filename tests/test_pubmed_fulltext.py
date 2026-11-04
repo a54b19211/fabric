@@ -4,7 +4,6 @@
 """
 
 import json
-import time
 from pathlib import Path
 
 import httpx
@@ -36,8 +35,9 @@ def article(pmid, doi, pmcid=None):
     )
 
 
-PUBMED = ('<?xml version="1.0" ?><PubmedArticleSet>' + article("111", "10.1000/a", "PMC111")
-          + article("222", "10.1000/b") + "</PubmedArticleSet>")
+ARTICLES = {"111": article("111", "10.1000/a", "PMC111"), "222": article("222", "10.1000/b")}
+PUBMED = '<?xml version="1.0" ?><PubmedArticleSet>' + "".join(ARTICLES.values()) + "</PubmedArticleSet>"
+REAL_CLIENT = httpx.Client
 
 
 def jats(license_xml, body=True, pmcid="PMC111"):
@@ -70,13 +70,16 @@ class Web:
         self.calls, self.gates = [], []
         self.pmc, self.pmc_status, self.unpaywall = pmc, pmc_status, unpaywall or {}
         monkeypatch.setattr(rate, "wait", lambda group, interval, deadline=None: self.gates.append(group))
-        self.client = httpx.Client(transport=httpx.MockTransport(self.handle))
+        monkeypatch.setattr(httpx, "Client",
+                            lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(self.handle), **kw))
 
     def handle(self, request):
         self.calls.append(request)
         url, params = request.url, dict(request.url.params)
         if url.path.endswith("efetch.fcgi") and params.get("db") == "pubmed":
-            return httpx.Response(200, text=PUBMED)
+            asked = params["id"].split(",")
+            return httpx.Response(200, text='<?xml version="1.0" ?><PubmedArticleSet>'
+                                  + "".join(ARTICLES[pmid] for pmid in asked) + "</PubmedArticleSet>")
         if url.path.endswith("efetch.fcgi") and params.get("db") == "pmc":
             return httpx.Response(self.pmc_status, content=self.pmc)
         if url.host == "api.unpaywall.org":
@@ -89,8 +92,8 @@ class Web:
         return httpx.Response(404)
 
     def read(self, **extra):
-        request = FetchRequest(source_id="pubmed", query="x", source_record_ids=["111", "222"], **extra)
-        return history_sources._read_pubmed(request, self.client, time.monotonic())
+        return history_sources.read_public(
+            FetchRequest(source_id="pubmed", query="x", source_record_ids=["111", "222"], **extra))
 
 
 @pytest.fixture(autouse=True)
@@ -180,9 +183,6 @@ def test_unpaywall_cc_pdf_is_downloaded_through_the_shared_store(monkeypatch, tm
         "10.1000/b": {"is_oa": True, "oa_status": "gold", "best_oa_location": {
             "url_for_pdf": OA_PDF, "license": "cc-by", "host_type": "repository", "version": "publishedVersion"}},
     })
-    real = httpx.Client
-    monkeypatch.setattr(client.httpx, "Client",
-                        lambda **kw: real(transport=httpx.MockTransport(web.handle), **kw))
     batch = web.read()
     [attachment] = [r for r in batch["records"] if r.raw_media_type == "application/json"]
     assert attachment.source_record_id == "222#attachment=" + OA_PDF
@@ -196,23 +196,42 @@ def test_unpaywall_cc_pdf_is_downloaded_through_the_shared_store(monkeypatch, tm
     assert web.gates.count("repo.example.org") == 1
 
 
-def test_budget_and_deadline_leave_the_rest_not_attempted(monkeypatch):
+def test_full_text_takes_a_version_slot_and_the_read_resumes_where_it_stopped(monkeypatch):
+    """Codex 400 第 4 点：max_records 按本次产出的版本计，文献和全文都算；额度不足给续读位置，不越界、不丢。"""
+    from biz_rules.history_models import FetchContinuation
+
     web = Web(monkeypatch, pmc=jats(CC_BY))
-    articles = [("111", "PMC111", None), ("222", "PMC222", None), ("333", "PMC333", None)]
-    records, coverage, used, _ = pf.attach_fulltext(web.client, articles, requests_left=1,
-                                                    deadline=time.monotonic() + 30)
-    assert used == 1 and len(records) == 1
-    assert [c["status"] for c in coverage] == ["stored", "not_attempted", "not_attempted"]
-    assert coverage[-1]["reason"] == "request_budget"
+    ids = ["111", "222"]
+    first = web.read(max_records=1)
+    assert [r.source_record_id for r in first["records"]] == ["111"] and first["stop_reason"] == "record_budget"
+    assert json.loads(first["next_continuation"]["cursor"]) == {"i": 0, "a": 1}  # 第 0 篇已存，只差全文
+    second = history_sources.read_public(FetchRequest(
+        source_id="pubmed", query="x", source_record_ids=ids, max_records=1,
+        continuation=FetchContinuation(**first["next_continuation"])))
+    assert [r.source_record_id for r in second["records"]] == ["111#attachment=" + pf.pmc_url("PMC111")]
+    assert json.loads(second["next_continuation"]["cursor"]) == {"i": 1, "a": 0}
+    third = history_sources.read_public(FetchRequest(
+        source_id="pubmed", query="x", source_record_ids=ids, max_records=1,
+        continuation=FetchContinuation(**second["next_continuation"])))
+    assert [r.source_record_id for r in third["records"]] == ["222"]
+    assert third["upstream_pagination_exhausted"] and third["next_continuation"] is None
+
+
+def test_deadline_at_the_gate_stops_before_any_request(monkeypatch):
+    web = Web(monkeypatch, pmc=jats(CC_BY))
 
     def closed(group, interval, deadline=None):
         raise TimeoutError(group)
 
     monkeypatch.setattr(rate, "wait", closed)
-    records, coverage, used, _ = pf.attach_fulltext(web.client, articles, requests_left=10,
-                                                    deadline=time.monotonic() + 30)
-    assert not records and used == 0
-    assert {c["reason"] for c in coverage} == {"deadline"} and len(coverage) == 3
+    batch = web.read()
+    assert batch["stop_reason"] == "deadline" and batch["records"] == [] and not web.calls
+    assert json.loads(batch["next_continuation"]["cursor"]) == {"i": 0, "a": 0}
+
+
+def test_license_terms_are_kept_per_article():
+    assert pf.conditions("CC BY-NC 4.0") == ["BY", "NC"] and pf.conditions("cc-by-nc-nd") == ["BY", "NC", "ND"]
+    assert pf.conditions("CC0 1.0") == [] and pf.conditions("cc-by-sa") == ["BY", "SA"]
 
 
 def test_fulltext_can_be_switched_off_and_is_then_recorded_per_article(monkeypatch):

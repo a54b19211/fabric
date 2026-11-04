@@ -2,6 +2,8 @@
 
 - 分类：文档类型（来源 + 原件自身字段，如 Europe PMC 的 pubTypeList）、证据细类和服务的判断（来源目录），
   以及细类映射到的 v3 1.4 大类（contracts.evidence_types 注册表；无合适大类写 unmapped，判不出写 unknown）。
+  监管机构公告/通知的大类按内容判（注册表 document_category）：标题、摘要、来源类别字段写明监管动作
+  （批准、拒绝、召回、撤市/暂停、警告信/执法等）才是监管决定，其余是官方通报。v4 起如此，v3 整体算决定。
   doc_type 只取注册表里的细类或文档角色（附件、库存冻结件），其余写 unknown。
 - 四个维度分开，各是“状态 + 理由”，允许未知，不合成一个分数：
   1. format：格式质量——ok / degraded（截断、缺摘要、上下标被拍平等，正文仍可用）/ broken（没有正文、解析失败）；
@@ -16,9 +18,9 @@
 
 from __future__ import annotations
 
-from contracts.evidence_types import FINE_TYPES, UNKNOWN, categories_of, category_of
+from contracts.evidence_types import FINE_TYPES, UNKNOWN, categories_of, document_category
 
-PROCESSOR_VERSION = "datafabric.profile.v3"
+PROCESSOR_VERSION = "datafabric.profile.v4"
 WEAK_CHARS = 200
 
 DEGRADING = ("field_truncated", "no_abstract", "no_title", "html_sup_sub_unpaired", "summary_missing")
@@ -53,18 +55,20 @@ def _doc_type(source_id, role, pub_types):
     return NON_CATALOG_DOC_TYPES.get(source_id, UNKNOWN)
 
 
-def _doc_category(doc_type, evidence):
-    """文档的大类。细类按注册表映射；附件随所属来源（来源只映射到一个大类时取它，否则 unknown）；
-    库存冻结件和不认识的类型写 unknown，不猜。"""
+def _doc_category(doc_type, evidence, lead_text):
+    """文档的大类。细类按注册表映射（按内容分的细类看 lead_text）；附件随所属来源（来源只映射到
+    一个大类时取它，否则 unknown）；库存冻结件和不认识的类型写 unknown，不猜。"""
     if doc_type in FINE_TYPES:
-        return category_of(doc_type)
+        return document_category(doc_type, lead_text)
     if doc_type == "attachment":
         cats = categories_of(evidence)
         return cats[0] if len(cats) == 1 else UNKNOWN
     return UNKNOWN
 
 
-def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=None, parse_status=None) -> dict:
+def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=None, parse_status=None,
+            lead_text="") -> dict:
+    """lead_text：标题、摘要和来源给的类别字段拼成的短文本，只用于按内容分大类（不传正文）。"""
     from collection.catalog import CATALOG
 
     spec = CATALOG.get(source_id)
@@ -110,7 +114,7 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
         "processor_version": PROCESSOR_VERSION,
         "doc_type": doc_type,
         # 文档本身的大类：细类映射到的 v3 1.4 大类；无合适大类 unmapped，判不出 unknown
-        "doc_category": _doc_category(doc_type, evidence),
+        "doc_category": _doc_category(doc_type, evidence, lead_text),
         "evidence_types": evidence,
         # 来源目录细类覆盖的大类（一个来源可以覆盖多类；unmapped/unknown 照样列出）
         "evidence_categories": categories_of(evidence),

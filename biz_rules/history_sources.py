@@ -6,7 +6,6 @@ from processing.identifiers import NCT_ID
 import json
 import math
 import re
-import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from decimal import Decimal
@@ -22,7 +21,7 @@ from biz_rules.history_models import (
     sha256,
     source_time,
 )
-from collection import rate
+from collection import transport
 
 SOURCE_CATALOG = {
     "sec_companyfacts": {
@@ -818,7 +817,9 @@ def _read_sec(request):
 
 
 def read_public(request: FetchRequest) -> dict:
-    """唯一读取入口：按来源目录找到插件并读取。新来源在 collection.catalog 声明，再在 PLUGINS 注册。"""
+    """唯一读取入口：按来源目录找到插件并读取。新来源在 collection.catalog 声明，再在 PLUGINS 注册。
+    整次读取共用一个预算（collection.transport.Budget）：插件里的每一次真实传输都在发出处过闸计量，
+    返回的请求数、字节数就是这一份计量。"""
     from collection.catalog import spec
 
     declared = spec(request.source_id)
@@ -827,264 +828,174 @@ def read_public(request: FetchRequest) -> dict:
     plugin = PLUGINS.get(declared.plugin)
     if plugin is None:
         raise HistoryError("source_plugin_missing", "来源插件未注册", 503)
-    return plugin(request)
+    with transport.reading(request) as budget:
+        result = plugin(request)
+    return {**result, "requests": budget.requests, "bytes": budget.bytes, "subrequests": budget.subrequests}
+
+
+PAGE_BYTES = 8 * 1024 * 1024  # 单个接口响应的大小上限（防内存）；整次读取的字节预算在 transport
+
+
+def _ok(status):
+    if status != 200:
+        raise ValueError("HTTP " + str(status))
+
+
+def _api_page(request, cursor, size, offset):
+    """ClinicalTrials / FDA CRL / Europe PMC 一页的请求 → (url, 参数, 记录数组路径)。"""
+    source = request.source_id
+    if source == "clinicaltrials":
+        params = {"format": "json", "pageSize": size, "countTotal": "true"}
+        # ClinicalTrials把星号当检索表达式，会过滤掉合法登记号。
+        if request.query.strip() != "*":
+            params["query.term"] = request.query
+        if request.source_record_ids:
+            if not all(re.fullmatch(NCT_ID, value) for value in request.source_record_ids):
+                raise ValueError("invalid_native_id")
+            params["filter.ids"] = ",".join(request.source_record_ids)
+        if cursor:
+            params["pageToken"] = cursor
+        return "https://clinicaltrials.gov/api/v2/studies", params, ["studies"]
+    if source == "fda_crl":
+        if request.source_record_ids:
+            raise HistoryError("by_id_unsupported", "FDA复合记录尚不支持精确by-ID重采")
+        params = {"limit": size, "skip": offset}
+        if request.query.strip() != "*":
+            params["search"] = request.query
+        return "https://api.fda.gov/transparency/crl.json", params, ["results"]
+    query = request.query
+    if request.source_record_ids:
+        native = []
+        for value in request.source_record_ids:
+            if not re.fullmatch(r"[A-Z]+:[A-Za-z0-9.-]+", value):
+                raise ValueError("invalid_native_id")
+            prefix, ident = value.split(":", 1)
+            native.append("(SRC:" + prefix + " EXT_ID:" + ident + ")")
+        query = "(" + query + ") AND (" + " OR ".join(native) + ")"
+    params = {"query": query, "format": "json", "resultType": "core", "pageSize": size, "cursorMark": cursor,
+              "sort": "ID asc"}
+    return "https://www.ebi.ac.uk/europepmc/webservices/rest/search", params, ["resultList", "result"]
+
+
+def _api_native(source, item):
+    if source == "clinicaltrials":
+        return _pointer(item, TRIAL_PATHS["trial_id"]), "trial"
+    if source == "europe_pmc":
+        return str(item.get("source", "")) + ":" + str(item.get("id", "")), "document"
+    return crl_id(item), "document"
+
+
+def _api_total(source, data):
+    if source == "clinicaltrials":
+        total = data.get("totalCount")
+        if "totalCount" in data and (not isinstance(total, int) or isinstance(total, bool) or total < 0):
+            raise HistoryError("invalid_source_pagination", "临床登记显式命中总数无效，不能确认EOF")
+        return total
+    if source == "fda_crl":
+        return ((data.get("meta") or {}).get("results") or {}).get("total")
+    return data.get("hitCount")
 
 
 def _read_public_api(request: FetchRequest) -> dict:
-    """ClinicalTrials / Europe PMC / FDA CRL / PubMed 的公开 API 读取。返回真实完成/截断/失败及已读原件。
-    HTTP异常绝不伪装EOF。翻页之间按来源目录的限速组等待。"""
+    """ClinicalTrials / Europe PMC / FDA CRL 的公开接口分页读取（PubMed 见 _read_pubmed）。返回真实完成/截断/失败
+    及已读原件；HTTP异常绝不伪装EOF。预算用完停在最后读完的一页，续读位置指向下一页。"""
     from collection.catalog import spec
 
     spec(request.source_id)  # 来源必须在采集目录里（不在则 KeyError）
-    records, seen, requests_count, source_total = [], {}, 0, None
+    if request.source_id == "pubmed":
+        return _read_pubmed(request)
+    source = request.source_id
+    records, seen, source_total = [], {}, None
     exhausted, error, stop = False, None, "record_budget"
-    began = time.monotonic()
-    max_bytes = 8 * 1024 * 1024
-    bytes_read = 0
-    cursor = "*" if request.source_id == "europe_pmc" else None
+    cursor = "*" if source == "europe_pmc" else None
     if request.continuation:
         cursor = request.continuation.cursor
     consumed = request.continuation.read_count if request.continuation else 0
-    next_continuation = None
-    count_drift = None
+    next_continuation = count_drift = None
     previous_cursors = {cursor} if cursor else set()
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
-            for page in range(request.max_pages):
-                if time.monotonic() - began >= request.deadline_seconds:
-                    stop = "deadline"
-                    break
+            for _ in range(request.max_pages):
                 remaining = request.max_records - len(records)
                 if remaining <= 0:
                     break
-                size = min(remaining, 100)
-                if request.source_id == "clinicaltrials":
-                    url = "https://clinicaltrials.gov/api/v2/studies"
-                    params = {
-                        "format": "json",
-                        "pageSize": size,
-                        "countTotal": "true",
-                    }
-                    # ClinicalTrials把星号当检索表达式，会过滤掉合法登记号。
-                    if request.query.strip() != "*":
-                        params["query.term"] = request.query
-                    if request.source_record_ids:
-                        if not all(
-                            re.fullmatch(NCT_ID, value)
-                            for value in request.source_record_ids
-                        ):
-                            raise ValueError("invalid_native_id")
-                        params["filter.ids"] = ",".join(request.source_record_ids)
-                    if cursor:
-                        params["pageToken"] = cursor
-                    path = ["studies"]
-                elif request.source_id == "fda_crl":
-                    url = "https://api.fda.gov/transparency/crl.json"
-                    params = {"limit": size, "skip": len(records)}
-                    if request.query.strip() != "*":
-                        params["search"] = request.query
-                    if request.source_record_ids:
-                        raise HistoryError(
-                            "by_id_unsupported", "FDA复合记录尚不支持精确by-ID重采"
-                        )
-                    path = ["results"]
-                elif request.source_id == "europe_pmc":
-                    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-                    query = request.query
-                    if request.source_record_ids:
-                        native = []
-                        for value in request.source_record_ids:
-                            if not re.fullmatch(r"[A-Z]+:[A-Za-z0-9.-]+", value):
-                                raise ValueError("invalid_native_id")
-                            source, ident = value.split(":", 1)
-                            native.append("(SRC:" + source + " EXT_ID:" + ident + ")")
-                        query = "(" + query + ") AND (" + " OR ".join(native) + ")"
-                    params = {
-                        "query": query,
-                        "format": "json",
-                        "resultType": "core",
-                        "pageSize": size,
-                        "cursorMark": cursor,
-                        "sort": "ID asc",
-                    }
-                    path = ["resultList", "result"]
-                else:
-                    return _read_pubmed(request, client, began)
-                try:
-                    rate.wait_for_url(url, deadline=began + request.deadline_seconds)
-                except TimeoutError:
-                    stop = "deadline"
-                    break
-                requests_count += 1
-                remaining_time = request.deadline_seconds - (time.monotonic() - began)
-                with client.stream(
-                    "GET", url, params=params, timeout=max(0.1, min(20, remaining_time))
-                ) as response:
-                    # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        if time.monotonic() - began >= request.deadline_seconds:
-                            raise HistoryError(
-                                "source_deadline", "公开读取超过时间预算"
-                            )
-                        body.extend(chunk)
-                        if len(body) + bytes_read > max_bytes:
-                            raise HistoryError(
-                                "source_byte_budget", "公开读取超过8MiB预算"
-                            )
-                    text = bytes(body).decode("utf-8")
-                    if response.status_code == 404 and request.source_id == "fda_crl":
-                        failure = parse_json(text).get("error") or {}
-                        if (
-                            failure.get("code") == "NOT_FOUND"
-                            and failure.get("message") == "No matches found!"
-                        ):
-                            exhausted, stop = True, "upstream_no_match"
-                            break
-                    response.raise_for_status()
-                bytes_read += len(body)
+                url, params, path = _api_page(request, cursor, min(remaining, 100), len(records))
+                status, body = transport.get(client, url, params, cap=PAGE_BYTES)
+                text = body.decode("utf-8")
+                # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
+                if status == 404 and source == "fda_crl":
+                    failure = parse_json(text).get("error") or {}
+                    if failure.get("code") == "NOT_FOUND" and failure.get("message") == "No matches found!":
+                        exhausted, stop = True, "upstream_no_match"
+                        break
+                _ok(status)
                 data = parse_json(text)
-                if request.source_id == "clinicaltrials":
-                    if "totalCount" in data and (
-                        not isinstance(data["totalCount"], int)
-                        or isinstance(data["totalCount"], bool)
-                        or data["totalCount"] < 0
-                    ):
-                        raise HistoryError(
-                            "invalid_source_pagination",
-                            "临床登记显式命中总数无效，不能确认EOF",
-                        )
-                    source_total = data.get("totalCount")
-                elif request.source_id == "fda_crl":
-                    source_total = ((data.get("meta") or {}).get("results") or {}).get(
-                        "total"
-                    )
-                elif request.source_id == "europe_pmc":
-                    source_total = data.get("hitCount")
+                source_total = _api_total(source, data)
                 page_items = list(_raw_array_items(text, path))
                 for data_item, raw in page_items:
-                    if request.source_id == "clinicaltrials":
-                        native = _pointer(data_item, TRIAL_PATHS["trial_id"])
-                        kind = "trial"
-                    elif request.source_id == "europe_pmc":
-                        native = (
-                            str(data_item.get("source", ""))
-                            + ":"
-                            + str(data_item.get("id", ""))
-                        )
-                        kind = "document"
-                    else:
-                        native, kind = crl_id(data_item), "document"
-                    item = ArchiveRecord(
-                        source_record_id=native, record_kind=kind, raw_content=raw
-                    )
-                    project_record(request.source_id, item)
+                    native, kind = _api_native(source, data_item)
+                    item = ArchiveRecord(source_record_id=native, record_kind=kind, raw_content=raw)
+                    project_record(source, item)
                     if native in seen:
                         if seen[native] != sha256(raw):
-                            records = [
-                                value
-                                for value in records
-                                if value.source_record_id != native
-                            ]
-                            raise HistoryError(
-                                "ambiguous_native_id",
-                                "同批同来源ID对应不同原件，拒绝猜测修订顺序",
-                            )
+                            records = [value for value in records if value.source_record_id != native]
+                            raise HistoryError("ambiguous_native_id", "同批同来源ID对应不同原件，拒绝猜测修订顺序")
                         continue
                     seen[native] = sha256(raw)
                     records.append(item)
                     if len(records) >= request.max_records:
                         break
-                if request.source_id == "clinicaltrials":
+                if source == "clinicaltrials":
                     next_cursor = data.get("nextPageToken")
                     consumed += len(page_items)
                     if not next_cursor and source_total is not None and consumed < source_total:
-                        raise HistoryError(
-                            "invalid_source_pagination",
-                            "临床登记仍有未读命中但缺少续页标记，不能视为EOF",
-                        )
-                    if next_cursor and (
-                        not isinstance(next_cursor, str) or not page_items
-                        or next_cursor in previous_cursors
-                    ):
+                        raise HistoryError("invalid_source_pagination", "临床登记仍有未读命中但缺少续页标记，不能视为EOF")
+                    if next_cursor and (not isinstance(next_cursor, str) or not page_items
+                                        or next_cursor in previous_cursors):
                         raise HistoryError("invalid_source_pagination", "临床登记分页中断，不能视为EOF")
                     exhausted = not bool(next_cursor)
-                elif request.source_id == "europe_pmc":
+                elif source == "europe_pmc":
                     next_cursor = data.get("nextCursorMark")
-                    if (
-                        not isinstance(source_total, int)
-                        or isinstance(source_total, bool)
-                        or source_total < 0
-                    ):
-                        raise HistoryError(
-                            "invalid_source_pagination",
-                            "Europe PMC缺可信命中总数，不能确认EOF",
-                        )
+                    if not isinstance(source_total, int) or isinstance(source_total, bool) or source_total < 0:
+                        raise HistoryError("invalid_source_pagination", "Europe PMC缺可信命中总数，不能确认EOF")
                     # Europe PMC重算hitCount；固定UPDATE_DATE窗内的记录被再次更新会移出窗口，
                     # 命中数可在翻页中途下降。已读过后返回空页且无新标记是其文档化的结束，
                     # 按读完处理，并把漂移的命中数与已读数如实记入覆盖说明。
-                    drifted = (
-                        not page_items and consumed > 0
-                        and (not next_cursor or next_cursor == cursor)
-                    )
+                    drifted = not page_items and consumed > 0 and (not next_cursor or next_cursor == cursor)
                     consumed += len(page_items)
                     exhausted = consumed >= source_total or drifted
                     if drifted and consumed < source_total:
                         count_drift = {"source_total": source_total, "read_count": consumed}
-                    if not exhausted and (
-                        not page_items or not next_cursor or next_cursor == cursor
-                    ):
-                        raise HistoryError(
-                            "invalid_source_pagination",
-                            "Europe PMC仍有未读命中但分页中断，不能视为EOF",
-                        )
+                    if not exhausted and (not page_items or not next_cursor or next_cursor == cursor):
+                        raise HistoryError("invalid_source_pagination", "Europe PMC仍有未读命中但分页中断，不能视为EOF")
                 else:
                     next_cursor = None
-                    exhausted = (
-                        isinstance(source_total, int) and len(records) >= source_total
-                    )
+                    exhausted = isinstance(source_total, int) and len(records) >= source_total
                 if not page_items and not exhausted:
-                    raise HistoryError(
-                        "unexpected_empty_page", "来源仍有后续标记但返回空页"
-                    )
-                if request.source_id in {"clinicaltrials", "europe_pmc"}:
-                    next_continuation = (
-                        None
-                        if exhausted
-                        else {
-                            "scope_hash": request.scope_hash(),
-                            "cursor": next_cursor,
-                            "read_count": consumed,
-                        }
-                    )
+                    raise HistoryError("unexpected_empty_page", "来源仍有后续标记但返回空页")
+                if source in {"clinicaltrials", "europe_pmc"}:
+                    next_continuation = None if exhausted else {
+                        "scope_hash": request.scope_hash(), "cursor": next_cursor, "read_count": consumed}
                 if exhausted:
                     stop = "upstream_exhausted"
                     break
                 if len(records) >= request.max_records:
                     stop = "record_budget"
                     break
-                if request.source_id != "fda_crl":
+                if source != "fda_crl":
                     if next_cursor in previous_cursors:
                         raise HistoryError("repeated_page_cursor", "来源分页标记重复")
                     previous_cursors.add(next_cursor)
                     cursor = next_cursor
             else:
                 stop = "page_budget"
+        except transport.Stop as stopped:
+            stop = stopped.reason  # 停在最后读完的一页，续读位置不变
         except HistoryError as exc:
             error = {"code": exc.code, "message": exc.message}
             stop = "source_failed"
-        except (
-            httpx.HTTPError,
-            UnicodeError,
-            ValueError,
-            TypeError,
-            KeyError,
-            IndexError,
-        ):
-            error = {
-                "code": "source_read_failed",
-                "message": "公开来源读取或格式校验失败；已读原件单独保留",
-            }
+        except (httpx.HTTPError, UnicodeError, ValueError, TypeError, KeyError, IndexError):
+            error = {"code": "source_read_failed", "message": "公开来源读取或格式校验失败；已读原件单独保留"}
             stop = "source_failed"
     return {
         "records": records,
@@ -1092,155 +1003,108 @@ def _read_public_api(request: FetchRequest) -> dict:
         "upstream_pagination_exhausted": exhausted,
         "stop_reason": stop,
         "error": error,
-        "requests": requests_count,
-        "bytes": bytes_read,
         "source_total": source_total,
         "count_drift": count_drift,
         "next_continuation": next_continuation if not error else None,
     }
 
 
-def _bounded_text(client, url, params, began, deadline, budget):
+def _pubmed_cursor(request):
+    if not request.continuation:
+        return 0, False
     try:
-        rate.wait_for_url(url, deadline=began + deadline)  # 每个请求都过共享限速组
-    except TimeoutError:
-        raise ValueError("deadline") from None
-    remaining = deadline - (time.monotonic() - began)
-    if remaining <= 0:
-        raise ValueError("deadline")
-    chunks, size = [], 0
-    with client.stream(
-        "GET", url, params=params, timeout=max(0.1, min(20, remaining))
-    ) as response:
-        response.raise_for_status()
-        for chunk in response.iter_bytes():
-            size += len(chunk)
-            if size > budget or time.monotonic() - began >= deadline:
-                raise ValueError("read_budget")
-            chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8")
+        value = json.loads(request.continuation.cursor)
+        return int(value["i"]), bool(value.get("a"))
+    except (ValueError, KeyError, TypeError):
+        raise HistoryError("invalid_cursor", "续读位置无效") from None
 
 
-def _read_pubmed(request, client, began):
-    # 新历史链用EFetch真实摘要，不复用ESummary不存在的summary字段。全文（PMC JATS / Unpaywall OA PDF）
-    # 按许可另成附件版本，见 collection.pubmed_fulltext；每个请求同样过共享限速、计入本次预算。
-    records = []
-    try:
-        base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
-        if request.source_record_ids:
-            if not all(
-                re.fullmatch(r"\d+", value) for value in request.source_record_ids
-            ):
-                raise ValueError("invalid_native_id")
-            ids = request.source_record_ids[: request.max_records]
-            count = len(request.source_record_ids)
-            calls = 0
-        else:
-            search_text = _bounded_text(
-                client,
-                base + "esearch.fcgi",
-                {
-                    "db": "pubmed",
-                    "retmode": "json",
-                    "term": request.query,
-                    "retmax": request.max_records,
-                },
-                began,
-                request.deadline_seconds,
-                1024 * 1024,
-            )
-            found = parse_json(search_text).get("esearchresult")
-            if (
-                not isinstance(found, dict)
-                or "count" not in found
-                or not isinstance(found.get("idlist"), list)
-            ):
-                raise ValueError("invalid_search")
-            count, ids, calls = int(found["count"]), found["idlist"], 1
-        if not ids:
-            if count:
-                raise ValueError("unexpected_empty_ids")
-            return {
-                "records": [],
-                "complete": False,
-                "upstream_pagination_exhausted": True,
-                "stop_reason": "upstream_no_match",
-                "error": None,
-                "requests": calls,
-                "bytes": 0,
-                "source_total": count,
-            }
-        if time.monotonic() - began >= request.deadline_seconds:
-            raise ValueError("deadline")
-        raw_xml = _bounded_text(
-            client,
-            base + "efetch.fcgi",
-            {"db": "pubmed", "retmode": "xml", "id": ",".join(ids)},
-            began,
-            request.deadline_seconds,
-            7 * 1024 * 1024,
-        )
-        root = ET.fromstring(raw_xml)
-        if root.tag != "PubmedArticleSet":
-            raise ValueError("invalid_efetch")
-        # 原件为实际返回的Article片段，保留XML原始字符，不用重序列化替代。
-        raw_articles = re.findall(
-            r"<PubmedArticle(?:\s[^>]*)?>.*?</PubmedArticle>", raw_xml, re.DOTALL
-        )
-        for raw in raw_articles:
-            parsed = ET.fromstring(raw)
-            pmid = parsed.findtext("./MedlineCitation/PMID")
-            if pmid not in ids:
-                raise ValueError("unrequested_id")
-            item = ArchiveRecord(
-                source_record_id=pmid,
-                record_kind="document",
-                raw_content=raw,
-                raw_media_type="application/xml",
-            )
-            project_record("pubmed", item)
-            records.append(item)
-        if {item.source_record_id for item in records} != set(ids):
-            raise ValueError("missing_ids")
-        from collection.pubmed_fulltext import attach_fulltext
+def _pubmed_articles(raw_xml, ids):
+    """EFetch 返回的 Article 原件片段（保留XML原始字符，不重序列化），按请求的 PMID 顺序。"""
+    root = ET.fromstring(raw_xml)
+    if root.tag != "PubmedArticleSet":
+        raise ValueError("invalid_efetch")
+    by_id = {}
+    for raw in re.findall(r"<PubmedArticle(?:\s[^>]*)?>.*?</PubmedArticle>", raw_xml, re.DOTALL):
+        pmid = ET.fromstring(raw).findtext("./MedlineCitation/PMID")
+        if pmid not in ids:
+            raise ValueError("unrequested_id")
+        item = ArchiveRecord(source_record_id=pmid, record_kind="document", raw_content=raw,
+                             raw_media_type="application/xml")
+        project_record("pubmed", item)
+        by_id[pmid] = item
+    if set(by_id) != set(ids):
+        raise ValueError("missing_ids")
+    return [by_id[pmid] for pmid in ids]
 
-        articles = []
-        for item in records:
-            facts = _project_pubmed(item)["facts"]
-            articles.append((item.source_record_id, facts.get("pmcid"), facts.get("doi")))
-        attachments, coverage, more_requests, more_bytes = attach_fulltext(
-            client,
-            articles,
-            requests_left=request.max_pages * 10 - (calls + 1),
-            deadline=began + request.deadline_seconds,
-        )
-        return {
-            "records": records + attachments,
-            "complete": False,
-            "upstream_pagination_exhausted": count <= len(records),
-            "stop_reason": "upstream_exhausted"
-            if count <= len(records)
-            else "record_budget",
-            "error": None,
-            "requests": calls + 1 + more_requests,
-            "bytes": len(raw_xml.encode()) + more_bytes,
-            "source_total": count,
-            "attachment_coverage": coverage,
-        }
-    except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
-        return {
-            "records": records,
-            "complete": False,
-            "upstream_pagination_exhausted": False,
-            "stop_reason": "source_failed",
-            "error": {
-                "code": "source_read_failed",
-                "message": "PubMed读取或EFetch原件校验失败",
-            },
-            "requests": 0,
-            "bytes": 0,
-            "source_total": None,
-        }
+
+def _read_pubmed(request):
+    """PubMed：ESearch 找 PMID（或给定的 PMID 清单），EFetch 取摘要原件；有合法全文的另成附件版本
+    （collection.pubmed_fulltext）。文献和全文都占 max_records；额度或其他预算用完就停，给续读位置：
+    cursor = {"i": 结果里第几篇, "a": 1 表示这一篇的文献版本已保存、只差全文}（与站点插件同一写法）。"""
+    from collection.pubmed_fulltext import fulltext
+
+    budget = transport.current()
+    start, fulltext_only = _pubmed_cursor(request)
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+    records, coverage, count = [], [], None
+    stop, error, resume = "upstream_exhausted", None, (start, int(fulltext_only))
+    with httpx.Client(timeout=20, follow_redirects=False) as client:
+        try:
+            if request.source_record_ids:
+                if not all(re.fullmatch(r"\d+", value) for value in request.source_record_ids):
+                    raise ValueError("invalid_native_id")
+                count = len(request.source_record_ids)
+                ids = request.source_record_ids[start: start + request.max_records]
+            else:
+                status, body = transport.get(client, base + "esearch.fcgi", {
+                    "db": "pubmed", "retmode": "json", "term": request.query, "retstart": start,
+                    "retmax": request.max_records}, cap=1024 * 1024)
+                _ok(status)
+                found = parse_json(body.decode("utf-8")).get("esearchresult")
+                if not isinstance(found, dict) or "count" not in found or not isinstance(found.get("idlist"), list):
+                    raise ValueError("invalid_search")
+                count, ids = int(found["count"]), found["idlist"]
+            if not ids:
+                if start < count:
+                    raise ValueError("unexpected_empty_ids")
+                stop, resume = ("upstream_no_match" if count == 0 else "upstream_exhausted"), None
+            else:
+                status, body = transport.get(client, base + "efetch.fcgi", {
+                    "db": "pubmed", "retmode": "xml", "id": ",".join(ids)}, cap=7 * 1024 * 1024)
+                _ok(status)
+                for k, item in enumerate(_pubmed_articles(body.decode("utf-8"), ids)):
+                    resume = (start + k, 0)
+                    if not (k == 0 and fulltext_only):  # 续读时这一篇已保存，只为取全文重取
+                        budget.take_record()
+                        records.append(item)
+                    resume = (start + k, 1)
+                    facts = _project_pubmed(item)["facts"]
+                    found_records, found_coverage = fulltext(
+                        client, item.source_record_id, facts.get("pmcid"), facts.get("doi"))
+                    records += found_records
+                    coverage += found_coverage
+                done = start + len(ids)
+                stop, resume = ("upstream_exhausted", None) if done >= count else ("record_budget", (done, 0))
+        except transport.Stop as stopped:
+            stop = stopped.reason
+        except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
+            error = {"code": "source_read_failed", "message": "PubMed读取或EFetch原件校验失败"}
+            stop = "source_failed"
+    return {
+        "records": records,
+        "complete": False,
+        "upstream_pagination_exhausted": error is None and resume is None,
+        "stop_reason": stop,
+        "error": error,
+        "source_total": count,
+        "attachment_coverage": coverage,
+        "next_continuation": None if error or resume is None else {
+            "scope_hash": request.scope_hash(),
+            "cursor": json.dumps({"i": resume[0], "a": resume[1]}),
+            "read_count": resume[0],
+        },
+    }
 
 
 def _read_site(request):

@@ -8,7 +8,7 @@ from db.history import history_engine
 def migrate_index():
     sql = "\n".join(
         (Path(__file__).parent / "versions" / name).read_text()
-        for name in ("V020__weknora_index.sql", "V024__index_artifact.sql")
+        for name in ("V020__weknora_index.sql", "V024__index_artifact.sql", "V027__index_publications_recent.sql")
     )
     with history_engine().begin() as conn:
         # 现役有读写时不无限等锁：等不到就整笔回滚，稍后再跑

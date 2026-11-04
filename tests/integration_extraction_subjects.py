@@ -133,3 +133,72 @@ def test_reviewed_results_on_a_history_subject_publish_a_graph_pointing_at_that_
     assert evidence["locator"]["text_sha256"] == queued["text_sha256"]
     # 没有冻结出 legacy_documents 版本
     assert not history.list_changes("legacy_documents", False)["items"]
+
+
+def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(databases, monkeypatch):
+    """Codex 402 第 1 点：登记入队后来源撤权，任务、详情、列表都不能再读出或送出该正文。"""
+    from datetime import datetime, timezone
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import api.routers.documents as documents_api
+    from biz_rules.history_models import HistoryError
+    from db import history
+    from db.extraction_subjects import enqueue_version
+    from flows.extraction_rq_job import extraction_job
+
+    source, target = databases
+    seen = _setup(monkeypatch)
+    version = _fetch_study(NCT, "codex-subject-revoke", status="RECRUITING").version_ids[0]
+    clean_stage.process()
+    queued = enqueue_version("clinicaltrials", NCT, version)
+    with target.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id=:s"), {"s": "clinicaltrials"})
+    try:
+        history.read_version(version, "clinicaltrials", NCT, False, "current", datetime.now(timezone.utc))
+    except HistoryError as exc:
+        assert exc.code == "source_not_available"
+    else:
+        raise AssertionError("history 应拒绝撤权来源")
+    assert extraction_job(queued["uuid"]) is False and not seen  # 没调用模型
+    with source.begin() as conn:
+        status, error = conn.execute(text("SELECT extraction_status, extraction_error FROM documents WHERE uuid=:u"),
+                                     {"u": queued["uuid"]}).one()
+    assert status == "failed" and "不可读取" in error
+    app = FastAPI()
+    app.include_router(documents_api.router)
+    client = TestClient(app)
+    detail = client.get("/api/documents/" + queued["uuid"])
+    assert detail.status_code == 403 and "RECRUITING" not in detail.text
+    listed = client.get("/api/documents", params={"page_size": 100}).json()
+    assert queued["uuid"] not in {item["uuid"] for item in listed["items"]}
+
+
+def test_codex_402_repeated_enqueue_reports_the_artifact_pinned_to_the_job(databases, monkeypatch):
+    """Codex 402 第 4 点：清洗器升级后再次登记同一版本，回执给出任务实际绑定的产物（v6），新产物另行标出。"""
+    from db.extraction_subjects import enqueue_version
+    from processing import clean_text
+
+    source, _ = databases
+    _setup(monkeypatch)
+    version = _fetch_study(NCT, "codex-subject-processor", status="RECRUITING").version_ids[0]
+    clean_stage.process()
+    first = enqueue_version("clinicaltrials", NCT, version)
+    real = clean_text.clean_registry
+
+    def updated(*args, **kwargs):
+        out = real(*args, **kwargs)
+        out["text"] = out["text"].replace("RECRUITING", "recruiting")
+        return out
+
+    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v7")
+    monkeypatch.setattr(clean_text, "clean_registry", updated)
+    clean_stage.process()
+    again = enqueue_version("clinicaltrials", NCT, version)
+    with source.begin() as conn:
+        stored = conn.execute(text("SELECT history_text_version, history_text_sha256 FROM documents WHERE uuid=:u"),
+                              {"u": again["uuid"]}).one()
+    assert (again["text_processor_version"], again["text_sha256"]) == tuple(stored)
+    assert again["text_processor_version"] == first["text_processor_version"] and again["created"] is False
+    assert again["newer_text"]["text_processor_version"] == "synthetic.clean_text.v7"

@@ -20,7 +20,6 @@ from __future__ import annotations
 import io
 import os
 import re
-import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -54,10 +53,6 @@ def max_upload_bytes() -> int:
 
 def max_inbox_file_bytes() -> int:
     return int(os.environ.get("DATAFABRIC_ATTACHMENT_MAX_BYTES", str(100 * 1024 * 1024)))
-
-
-def inbox_run_bytes() -> int:
-    return int(os.environ.get("DATAFABRIC_LOCAL_IMPORT_RUN_MAX_BYTES", str(256 * 1024 * 1024)))
 
 
 def clean_collection(value: str) -> str:
@@ -158,56 +153,59 @@ def _inbox() -> Path:
 
 
 def read_local(request) -> dict:
-    """导入插件 local_file_import：读收件目录里明确列出的文件。返回值形状与 read_public 其他插件相同。"""
-    records, coverage, size_read = [], [], 0
+    """导入插件 local_file_import：读收件目录里明确列出的文件。返回值形状与 read_public 其他插件相同。
+    版本数、字节、截止时间走本次读取共用的预算（collection.transport.Budget）。"""
+    from collection import transport
+
+    records, coverage = [], []
     stop, error = "upstream_exhausted", None
-    began = time.monotonic()
-    try:
-        if request.query != "inbox":
-            raise HistoryError("unknown_query", "local_files 只支持 query=inbox")
-        if not request.source_record_ids:
-            raise HistoryError("ids_required", "须列出收件目录内的相对路径")
-        root = _inbox()
-        names = [clean_relative(value) for value in request.source_record_ids]
-        for position, name in enumerate(names):
-            reason = None
-            if len(records) >= request.max_records:
-                reason = "record_budget"
-            elif time.monotonic() - began >= request.deadline_seconds:
-                reason = "deadline"
-            path = (root / name).resolve()
-            entry = {"record_id": local_record_id("inbox", name), "path": name}
-            if reason is None and (root not in path.parents or not path.is_file()):
-                coverage.append({**entry, "status": "missing"})
-                continue
-            if reason is None and path.stat().st_size > max_inbox_file_bytes():
-                coverage.append({**entry, "status": "too_large"})
-                continue
-            if reason is None and size_read + path.stat().st_size > inbox_run_bytes():
-                reason = "byte_budget"
-            if reason:
-                stop = reason
-                coverage.extend({"record_id": local_record_id("inbox", later), "path": later,
-                                 "status": "not_attempted"} for later in names[position:])
-                break
-            try:
-                record = prepare(path.read_bytes(), "inbox", name, discovered_from="local_inbox")
-            except HistoryError as exc:
-                coverage.append({**entry, "status": exc.code})
-                continue
-            size_read += path.stat().st_size
-            records.append(record)
-            coverage.append({**entry, "status": "stored"})
-    except HistoryError as exc:
-        error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
+    with transport.reading(request) as budget:
+        try:
+            if request.query != "inbox":
+                raise HistoryError("unknown_query", "local_files 只支持 query=inbox")
+            if not request.source_record_ids:
+                raise HistoryError("ids_required", "须列出收件目录内的相对路径")
+            root = _inbox()
+            names = [clean_relative(value) for value in request.source_record_ids]
+            for position, name in enumerate(names):
+                path = (root / name).resolve()
+                entry = {"record_id": local_record_id("inbox", name), "path": name}
+                if root not in path.parents or not path.is_file():
+                    coverage.append({**entry, "status": "missing"})
+                    continue
+                size = path.stat().st_size
+                if size > max_inbox_file_bytes():
+                    coverage.append({**entry, "status": "too_large"})
+                    continue
+                try:
+                    budget.need_record()
+                    budget.check()
+                    if budget.bytes + size > budget.max_bytes:
+                        budget.stop("byte_budget")
+                except transport.Stop as stopped:
+                    stop = stopped.reason
+                    coverage.extend({"record_id": local_record_id("inbox", later), "path": later,
+                                     "status": "not_attempted"} for later in names[position:])
+                    break
+                try:
+                    record = prepare(path.read_bytes(), "inbox", name, discovered_from="local_inbox")
+                except HistoryError as exc:
+                    coverage.append({**entry, "status": exc.code})
+                    continue
+                budget.take_bytes(size)
+                budget.take_record()
+                records.append(record)
+                coverage.append({**entry, "status": "stored"})
+        except HistoryError as exc:
+            error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     return {
         "records": records,
         "complete": False,
         "upstream_pagination_exhausted": stop == "upstream_exhausted",
         "stop_reason": stop,
         "error": error,
-        "requests": 0,
-        "bytes": size_read,
+        "requests": budget.requests,
+        "bytes": budget.bytes,
         "source_total": len(request.source_record_ids),
         "count_drift": None,
         "next_continuation": None,

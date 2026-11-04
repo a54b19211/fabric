@@ -7,7 +7,8 @@ from loguru import logger
 from api.schemas.response import (
     DocumentListResponse, DocumentDetailResponse,
     DocumentItem, AttachmentItem, )
-from db.extraction_subjects import subject_text
+from biz_rules.history_models import HistoryError
+from db.extraction_subjects import listed, subject_text
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
 from sqlalchemy import func as sqlfunc
@@ -59,7 +60,7 @@ def list_documents(
             )
             q = (
                 session.query(*cols)
-                .filter(Document.is_deleted == False)
+                .filter(Document.is_deleted == False, listed(Document))
             )
 
             # 动态筛选条件
@@ -154,12 +155,17 @@ def get_document(uuid: str):
                 for a in att_rows
             ]
 
+            try:
+                content = subject_text(doc)  # history 主体：先过权威访问检查
+            except HistoryError as exc:
+                raise HTTPException(status_code=exc.status, detail=exc.code) from None
+
             # 构建响应
             response = DocumentDetailResponse(
                 id=doc.id,
                 uuid=doc.uuid,
                 title=doc.title or "",
-                raw_content=subject_text(doc),
+                raw_content=content,
                 history_ref={"source_id": doc.history_source_id, "record_id": doc.history_record_id,
                              "version_id": doc.history_version_id, "text_processor_version": doc.history_text_version,
                              "text_sha256": doc.history_text_sha256} if doc.history_version_id else None,

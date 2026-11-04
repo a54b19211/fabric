@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """LLM 抽取触发接口"""
+from db.extraction_subjects import listed
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from loguru import logger
@@ -71,6 +72,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                     # documents 库存要有正文；history 固定版本的正文在 history 里
                     or_(and_(Document.raw_content != "", Document.raw_content.isnot(None)),
                         Document.history_version_id.isnot(None)),
+                    listed(Document),  # 撤权来源的 history 主体不再排队
                 ]
                 if body.source_site:
                     filters.append(Document.source_site == body.source_site)

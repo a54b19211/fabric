@@ -7,7 +7,6 @@
 """
 
 import hashlib
-import time
 from datetime import datetime, timezone
 
 import pytest
@@ -79,15 +78,15 @@ def test_uploaded_pdf_is_a_fixed_version_and_is_parsed_with_page_locators(chain,
 def test_pubmed_pmc_fulltext_links_to_its_same_run_article_and_parses_as_jats(chain, pg, monkeypatch):  # noqa: F811
     from db import derived_text
 
-    web = Web(monkeypatch, pmc=jats(CC_BY))
+    Web(monkeypatch, pmc=jats(CC_BY))  # 替身网络
     request = FetchRequest(source_id="pubmed", query="x", source_record_ids=["111", "222"])
     run, _ = store.create_fetch(request, "pubmed-fulltext-1")
     store.job_input(run.id, run.attempt)
-    batch = history_sources._read_pubmed(request, web.client, time.monotonic())
+    batch = history_sources.read_public(request)
     done = store.finish_fetch(run.id, run.attempt, batch)
     assert done.state == "completed" and len(done.version_ids) == 3
     assert {c["status"] for c in done.coverage["attachment_coverage"]} >= {"stored", "no_pmcid"}
-    article, attachment = done.version_ids[0], done.version_ids[2]
+    article, attachment = done.version_ids[0], done.version_ids[1]  # 全文紧跟它的文献
     with pg.begin() as conn:
         link = conn.execute(text(
             "SELECT parent_record_id,parent_version_id,link_basis FROM history_attachment_links "

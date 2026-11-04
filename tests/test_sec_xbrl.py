@@ -1,6 +1,5 @@
 """SEC原件/单位/期间的定向回归；全部金额为明确合成fixture，HTTP不联网。"""
 
-import copy
 import json
 from types import SimpleNamespace
 
@@ -135,10 +134,13 @@ def test_failure_is_not_zero_or_a_legal_empty_disclosure(monkeypatch, kind):
             return httpx.Response(int(kind))
         return httpx.Response(200, json={**value(), "cik": 1})
     mocked_http(monkeypatch, respond)
+    from collection import transport
+
+    monkeypatch.setattr(transport, "_retry_settings", lambda: (1, 0.0))
     batch = read_public(request())
     assert batch["error"] and not batch["upstream_pagination_exhausted"]
     assert batch["stop_reason"] == "source_failed" and batch["records"] == []
-    assert len(calls) == 1
+    assert len(calls) == (2 if kind == "timeout" else 1)  # 超时在传输层统一有界重试一次；其他错误不重试
 
 
 def test_page_budget_is_explicit_and_retains_success_before_later_error(monkeypatch):
@@ -148,7 +150,9 @@ def test_page_budget_is_explicit_and_retains_success_before_later_error(monkeypa
         calls.append(req)
         return httpx.Response(200, json=value()) if len(calls) == 1 else httpx.Response(503)
     mocked_http(monkeypatch, respond)
-    monkeypatch.setattr(sec.time, "sleep", lambda _: None)
+    from collection import transport
+
+    monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     limited = read_public(FetchRequest(source_id="sec_companyfacts", query="*", source_record_ids=ids,
                                      max_pages=1, max_records=2))
     assert limited["stop_reason"] == "page_budget" and not limited["upstream_pagination_exhausted"]

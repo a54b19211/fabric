@@ -227,6 +227,43 @@ def test_independence_is_judged_on_material_not_topology():
         acc.independence({"same_host": True})
 
 
+def test_may_include_means_check_record_ids_not_same_source():
+    # 目录记录 Europe PMC 收录 PubMed；这不是供给重叠，也不把两个库当成一份
+    assert CATALOG["europe_pmc"].may_include == ("pubmed",)
+    assert acc.may_carry_same_record("pubmed", "europe_pmc")
+    assert acc.may_carry_same_record("europe_pmc", "pubmed")
+    assert not acc.may_carry_same_record("europe_pmc", "clinicaltrials")
+    assert acc.shared_supply_systems(["pubmed", "europe_pmc"]) == {}
+    others = {"same_study_or_discloser": False, "citation_or_reprint": False, "same_origin_group": False}
+
+    def judge(a, b):
+        return acc.independence({**others, "same_fixed_material": acc.same_record(a, b)})
+
+    epmc = {"source_id": "europe_pmc", "pmid": "12345678", "doi": "10.1000/ABC"}
+    # 同一 PMID（或同一 DOI）：同一条记录，不独立
+    assert judge(epmc, {"source_id": "pubmed", "pmid": "12345678"}) == "not_independent"
+    assert judge(epmc, {"source_id": "pubmed", "doi": "https://doi.org/10.1000/abc"}) == "not_independent"
+    # PMID/DOI 都不同：两条记录，独立
+    assert judge(epmc, {"source_id": "pubmed", "pmid": "87654321", "doi": "10.1000/xyz"}) == "independent"
+    # 编号不够比：可能是同一条，判不了就是 unknown，不算两份
+    assert acc.same_record({"source_id": "europe_pmc"}, {"source_id": "pubmed", "pmid": "1"}) is None
+    doi_only = {"source_id": "europe_pmc", "doi": "10.1/a"}
+    assert judge(doi_only, {"source_id": "pubmed", "pmid": "1"}) == "unknown"
+    # 没有收录关系的两个来源编号不够比时不是同一条记录
+    assert acc.same_record({"source_id": "europe_pmc"}, {"source_id": "clinicaltrials"}) is False
+
+
+def test_catalog_rejects_unknown_may_include(monkeypatch):
+    import dataclasses
+
+    from collection import catalog
+
+    bad = dataclasses.replace(CATALOG["europe_pmc"], may_include=("no_such_source",))
+    monkeypatch.setattr(catalog, "SPECS", catalog.SPECS + (bad,))
+    with pytest.raises(ValueError, match="may_include"):
+        catalog._check_evidence_registry()
+
+
 SHARED_SUPPLY_CASES = {"A-03", "B-01", "B-02", "C-01", "C-03"}
 
 

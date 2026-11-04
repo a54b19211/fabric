@@ -15,6 +15,9 @@ B = b"%PDF-1.4\nSYNTHETIC evidence B\n%%EOF\n"
 
 @pytest.fixture
 def http_source(monkeypatch, tmp_path):
+    from collection import rate
+
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(client.APP, "DATA_ROOT", tmp_path)
     state = {"body": A, "status": 200, "error": None, "requests": []}
     real_client = httpx.Client
@@ -33,12 +36,8 @@ def http_source(monkeypatch, tmp_path):
     return state
 
 
-class _Budget:
-    def __init__(self):
-        self.requests = 0
-
-    def before_request(self):
-        self.requests += 1
+def _budget():
+    return transport.Budget(max_requests=10, max_bytes=10**9, max_records=10, deadline_seconds=60)
 
 
 def download(**kwargs):
@@ -94,7 +93,7 @@ def test_timeout_uses_the_bounded_retry_and_keeps_the_old_original(http_source, 
     monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", .01)
     delays = []
     monkeypatch.setattr(transport.time, "sleep", delays.append)
-    with transport.metered(_Budget()), pytest.raises(httpx.ReadTimeout):
+    with transport.metered(_budget()), pytest.raises(httpx.ReadTimeout):
         site_crawler._download(URL, source_site="synthetic_files")
     assert len(http_source["requests"]) == 4  # 初次成功＋本轮最多三次读取
     assert delays == [.01, .02]
@@ -119,7 +118,7 @@ def test_429_retries_once_then_reads_b(http_source, monkeypatch):
     monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", .01)
     delays = []
     monkeypatch.setattr(transport.time, "sleep", delays.append)
-    with transport.metered(_Budget()):
+    with transport.metered(_budget()):
         result = site_crawler._download(URL, source_site="synthetic_files")
     assert len(requests) == 2 and delays == [.01]
     assert Path(result["local_path"]).read_bytes() == B

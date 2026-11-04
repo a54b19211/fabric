@@ -309,7 +309,7 @@ class FetchRequest(Model):
         if self.continuation is not None:
             from collection.catalog import SITE_SOURCES
 
-            if self.source_id not in {"europe_pmc", "who_don", "clinicaltrials"} | SITE_SOURCES:
+            if self.source_id not in {"europe_pmc", "who_don", "clinicaltrials", "pubmed"} | SITE_SOURCES:
                 raise ValueError("此来源尚不支持连续分页")
             if self.continuation.scope_hash != self.scope_hash():
                 raise ValueError("续页必须绑定原查询范围及固定时间窗")
