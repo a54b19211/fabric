@@ -81,7 +81,35 @@ def _cleaner_input(row):
     return {"markdown": row["clean_text"] or "", "source_id": site}, "projection_clean_text"
 
 
+# 定位基准：段落 source 的偏移相对什么。网页/站点记录是原件 JSON 里 /parsed/markdown 字段解码后的值；
+# 投影正文是这个版本记录本身的 /clean_text 字段（不在原件里）。v5 起存进每段，API 和契约照原样带出去。
+_ANCHORS = {
+    "raw_json:/parsed/markdown": {"json_pointer": "/parsed/markdown", "within": "raw"},
+    "projection_clean_text": {"json_pointer": "/clean_text", "within": "record"},
+}
+
+
+def _anchored(segments, basis):
+    """这一版本自己的定位基准写进每段（返回新列表，不改传入的段——复用的结果可能被多个版本共用）。
+    同样的正文可以来自不同基准（站点原件的 /parsed/markdown 与库存冻结件的投影 /clean_text）：内容复用，
+    定位按当前版本重建。"""
+    anchor = _ANCHORS.get(basis)
+    if not anchor:
+        return segments or []
+    out = []
+    for seg in segments or []:
+        src = seg.get("source") or {}
+        if "start" in src and "end" in src:
+            seg = {**seg, "source": {**anchor, "start": src["start"], "end": src["end"]}}
+        out.append(seg)
+    return out
+
+
 def _run_cleaner(source, inp, basis):
+    return _clean_by_basis(source, inp, basis)
+
+
+def _clean_by_basis(source, inp, basis):
     if basis == "registry_fields":
         return clean_text.clean_registry(inp["facts"], inp["locators"], summary=inp["summary"])
     if basis == "raw_json":
@@ -126,9 +154,19 @@ _CHUNK_SQL = """
 
 
 def _claim(engine, key, chunk_seqs, lease_seconds):
-    """认领一块：先接过期/可重试的块，再在某个来源的末尾开新块。返回块或 None（没有活了）。"""
+    """认领一块：先接过期/可重试的块，再在某个来源的末尾开新块。返回块或 None（没有活了）。
+    最后一次租约也到期（处理进程消失、没交回结果）的块转成死信 failed/lease_exhausted，不会永远显示
+    “有人在处理”；死信由 retry_failed() 受控重置。"""
     token = uuid4().hex
     with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE derived_stage_chunks SET state='failed', lease_token=NULL, lease_until=NULL,
+                   error=jsonb_build_object('type','lease_exhausted',
+                                            'message','最后一次租约到期，处理进程没有交回结果',
+                                            'previous', error),
+                   updated_at=clock_timestamp()
+            WHERE stage_key=:k AND state='leased' AND lease_until < clock_timestamp() AND attempts >= :max
+        """), {"k": key, "max": MAX_CHUNK_ATTEMPTS})
         again = conn.execute(text("""
             UPDATE derived_stage_chunks SET state='leased', lease_token=:t, attempts=attempts+1,
                    lease_until=clock_timestamp()+make_interval(secs => :s), updated_at=clock_timestamp()
@@ -219,7 +257,7 @@ def _process_rows(conn, key, rows, counts):
                 "error": None if body else ",".join(warnings or ["no_body"]), "text": body, "chars": len(body),
                 "sha": hashlib.sha256(body.encode()).hexdigest(),
                 "kind": "json_pointer" if basis in ("registry_fields", "literature_fields") else "char_span",
-                "segments": json.dumps(result.get("segments") or [], ensure_ascii=False),
+                "segments": json.dumps(_anchored(result.get("segments"), basis), ensure_ascii=False),
                 "lang": result.get("language"), "warnings": json.dumps(warnings), "input": sha,
             })
         found = identifiers.extract(body) if body else []
@@ -232,6 +270,8 @@ def _process_rows(conn, key, rows, counts):
                                identifiers=found, pub_types=pub_types, parse_status=parse_status)
         profile_rows.append({"v": r["version_id"], "pv": prof["processor_version"], "tpv": text_pv,
                              "source": r["source_id"], "demo": r["is_demo"], "doc": prof["doc_type"],
+                             "cat": prof.get("doc_category"),
+                             "cats": json.dumps(prof.get("evidence_categories") or []),
                              "ev": json.dumps(prof["evidence_types"]), "dec": json.dumps(prof["decisions"]),
                              "q": json.dumps(prof["quality"], ensure_ascii=False), "route": prof["route"],
                              "reasons": json.dumps(prof["route_reasons"], ensure_ascii=False)})
@@ -256,9 +296,10 @@ def _process_rows(conn, key, rows, counts):
     if profile_rows:
         conn.execute(text("""
             INSERT INTO derived_profiles
-              (version_id,processor_version,text_processor_version,source_id,is_demo,doc_type,evidence_types,
+              (version_id,processor_version,text_processor_version,source_id,is_demo,doc_type,doc_category,
+               evidence_categories,evidence_types,
                decisions,quality,route,route_reasons)
-            SELECT :v,:pv,:tpv,:source,:demo,:doc,CAST(:ev AS jsonb),CAST(:dec AS jsonb),CAST(:q AS jsonb),
+            SELECT :v,:pv,:tpv,:source,:demo,:doc,:cat,CAST(:cats AS jsonb),CAST(:ev AS jsonb),CAST(:dec AS jsonb),CAST(:q AS jsonb),
                    :route,CAST(:reasons AS jsonb)
             WHERE NOT EXISTS (SELECT 1 FROM derived_profiles WHERE version_id=:v AND processor_version=:pv
                               AND text_processor_version=:tpv)
@@ -267,20 +308,39 @@ def _process_rows(conn, key, rows, counts):
 
 
 def _process_waiting(engine, key, counts, limit=500):
-    """等待表里的附件：解析完的补做画像并移出等待表。"""
+    """等待表里已经有最终解析结果的附件：补做画像并移出等待表，返回补做了几条。
+    先筛“已就绪”再分页（前面一直没解析完的不会挡住后面已解析的），行锁 SKIP LOCKED 认领，多进程不重复。"""
+    from db.derived_text import MAX_ATTEMPTS
+
     with engine.begin() as conn:
-        waiting = conn.execute(text(
-            "SELECT w.version_id FROM derived_stage_waiting w WHERE w.stage_key=:k LIMIT :n"
-        ), {"k": key, "n": limit}).scalars().all()
-        finals = _final_attachment_texts(conn, waiting)
+        ready = conn.execute(text("""
+            SELECT w.version_id FROM derived_stage_waiting w
+            WHERE w.stage_key=:k AND EXISTS (
+              SELECT 1 FROM derived_clean_text d WHERE d.version_id=w.version_id AND d.processor_version=:pv
+                AND (d.status IN ('parsed','unsupported') OR d.attempt >= :max))
+            ORDER BY w.created_at, w.version_id LIMIT :n FOR UPDATE OF w SKIP LOCKED
+        """), {"k": key, "n": limit, "pv": attachment_parse.PROCESSOR_VERSION, "max": MAX_ATTEMPTS}).scalars().all()
+        finals = _final_attachment_texts(conn, ready)
         if not finals:
-            return
+            return 0
         rows = conn.execute(text(_CHUNK_SQL.replace(
             "WHERE source_id=:source AND published_seq BETWEEN :start AND :end", "WHERE version_id=ANY(:ids)")),
             {"ids": list(finals)}).mappings().all()
         _process_rows(conn, key, [dict(r) for r in rows], counts)
         conn.execute(text("DELETE FROM derived_stage_waiting WHERE stage_key=:k AND version_id=ANY(:ids)"),
                      {"k": key, "ids": list(finals)})
+        return len(finals)
+
+
+def retry_failed(source_id=None):
+    """受控恢复：把死信块（failed，含 lease_exhausted）的尝试次数清零，下一次运行重新认领。返回重置了几块。"""
+    from db.history import history_engine
+
+    with history_engine().begin() as conn:
+        return conn.execute(text(
+            "UPDATE derived_stage_chunks SET attempts=0, updated_at=clock_timestamp() "
+            "WHERE stage_key=:k AND state='failed' AND (CAST(:s AS text) IS NULL OR source_id=:s)"),
+            {"k": stage_key(), "s": source_id}).rowcount
 
 
 def process(*, batch=None, time_budget_seconds=600, chunk_seqs=CHUNK_SEQS, lease_seconds=LEASE_SECONDS,
@@ -294,7 +354,8 @@ def process(*, batch=None, time_budget_seconds=600, chunk_seqs=CHUNK_SEQS, lease
     began = time.monotonic()
     counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0, "chunks": 0,
               "failed_chunks": 0, "quarantine": 0, "weak_signal": 0, "normal": 0}
-    _process_waiting(engine, key, counts)
+    while _process_waiting(engine, key, counts) and time.monotonic() - began < time_budget_seconds:
+        pass
     while time.monotonic() - began < time_budget_seconds and (max_chunks is None or counts["chunks"] < max_chunks):
         chunk = _claim(engine, key, chunk_seqs, lease_seconds)
         if chunk is None:
@@ -346,12 +407,16 @@ def stage_status():
                  AND c.state='leased') AS leased,
               (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
                  AND c.state='failed') AS failed,
+              (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
+                 AND c.state='failed' AND c.attempts >= :max) AS dead_letter,
+              (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
+                 AND c.state='leased' AND c.lease_until < clock_timestamp()) AS lease_expired,
               (SELECT COALESCE(sum((stats->>'versions')::int),0) FROM derived_stage_chunks c WHERE c.stage_key=:k
                  AND c.source_id=s.source_id AND c.state='done') AS done_versions,
               (SELECT COALESCE(sum((stats->>'seconds')::float),0) FROM derived_stage_chunks c WHERE c.stage_key=:k
                  AND c.source_id=s.source_id AND c.state='done') AS done_seconds
             FROM history_sources s WHERE s.published_seq > 0 AND NOT (s.source_id = ANY(:skip)) ORDER BY 1
-        """), {"k": key, "skip": list(SKIP_SOURCES)}).mappings().all()
+        """), {"k": key, "skip": list(SKIP_SOURCES), "max": MAX_CHUNK_ATTEMPTS}).mappings().all()
         done = conn.execute(text(
             "SELECT source_id, chunk_start, chunk_end FROM derived_stage_chunks WHERE stage_key=:k AND state='done' "
             "ORDER BY source_id, chunk_start"), {"k": key}).mappings().all()
@@ -366,7 +431,8 @@ def stage_status():
     for r in rows:
         mark = marks.get(r["source_id"], 0)
         rate = r["done_versions"] / r["done_seconds"] if r["done_seconds"] else None
-        out.append({**{k: r[k] for k in ("source_id", "published_seq", "leased", "failed")}, "watermark": mark,
+        out.append({**{k: r[k] for k in ("source_id", "published_seq", "leased", "lease_expired", "failed",
+                                         "dead_letter")}, "watermark": mark,
                     "lag": r["published_seq"] - mark, "versions_per_second": round(rate, 1) if rate else None})
     return {"stage_key": key, "sources": out, "waiting_attachments": waiting}
 
@@ -394,7 +460,8 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
             params).mappings()}
         visible = set(meta)
         cleans = conn.execute(text(
-            "SELECT DISTINCT ON (version_id) version_id,processor_version,text,text_sha256,segments,language,warnings,"
+            "SELECT DISTINCT ON (version_id) version_id,processor_version,parse_method AS basis,text,text_sha256,"
+            "segments,language,warnings,"
             "locator_kind,status FROM derived_clean_text WHERE version_id=ANY(:ids) AND processor_version=ANY(:pvs) "
             "ORDER BY version_id, attempt DESC"), params).mappings().all()  # 只有当前清洗/附件解析版本
         ids = conn.execute(text(
@@ -402,7 +469,8 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
             "WHERE version_id=ANY(:ids) AND processor_version=:idpv ORDER BY version_id,start_offset"),
             params).mappings().all()
         profiles = conn.execute(text(
-            "SELECT version_id,doc_type,evidence_types,decisions,quality,route,route_reasons,text_processor_version "
+            "SELECT version_id,doc_type,doc_category,evidence_categories,evidence_types,decisions,quality,route,"
+            "route_reasons,text_processor_version "
             "FROM derived_profiles WHERE version_id=ANY(:ids) AND processor_version=:prof"), params).mappings().all()
     out = {v: {"state": "not_visible_or_not_processed"} for v in version_ids}
     for v in visible:

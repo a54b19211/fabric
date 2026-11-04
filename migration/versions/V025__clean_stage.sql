@@ -1,5 +1,5 @@
 -- v3 3.3 清洗段的派生结果：编号（规范化后，带在派生正文里的偏移）和画像（分类、四维质量、分流）。
--- 清洗正文本身存 derived_clean_text（processor_version=datafabric.clean_text.v1；附件沿用 attachment_parse）。
+-- 清洗正文本身存 derived_clean_text（processor_version 见 processing.clean_text.PROCESSOR_VERSION；附件沿用 attachment_parse）。
 -- 只追加；任何一个处理器（清洗、附件解析、编号、画像）升级都写新行，旧行保留。
 CREATE TABLE IF NOT EXISTS derived_identifiers (
   version_id char(64) NOT NULL REFERENCES history_versions(version_id),
@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS derived_profiles (
   PRIMARY KEY (version_id, processor_version, text_processor_version)
 );
 CREATE INDEX IF NOT EXISTS derived_profiles_route ON derived_profiles (source_id, is_demo, route);
+-- 业务证据大类（contracts.evidence_types）：文档所属大类、可提供的大类；无法映射写 unmapped/unknown
+ALTER TABLE derived_profiles ADD COLUMN IF NOT EXISTS doc_category text;
+ALTER TABLE derived_profiles ADD COLUMN IF NOT EXISTS evidence_categories jsonb;
 CREATE OR REPLACE RULE derived_identifiers_no_update AS ON UPDATE TO derived_identifiers DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE derived_identifiers_no_delete AS ON DELETE TO derived_identifiers DO INSTEAD NOTHING;
 CREATE OR REPLACE RULE derived_profiles_no_update AS ON UPDATE TO derived_profiles DO INSTEAD NOTHING;

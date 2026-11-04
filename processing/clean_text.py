@@ -24,7 +24,7 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v4"
+PROCESSOR_VERSION = "datafabric.clean_text.v6"
 
 # ---------------------------------------------------------------- 空白与语言
 

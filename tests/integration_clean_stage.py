@@ -261,3 +261,63 @@ def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch)
     assert "summary_missing" not in (got[ct]["clean"]["warnings"] or [])
     assert "A phase 3 study of drug X." in got[ct]["clean"]["text"]
     assert "summary_missing" in got[bare]["clean"]["warnings"]  # 没有摘要就如实报缺，不拿标题顶替
+
+
+# ——Codex r66 的两个反例（原样逻辑，断言写成验收）——
+def test_last_expired_lease_becomes_a_dead_letter_and_can_be_retried(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    _fetch_study("NCT09998883", "codex-last-lease")
+    key = clean_stage.stage_key()
+    for _ in range(clean_stage.MAX_CHUNK_ATTEMPTS):
+        assert clean_stage._claim(pg, key, 10, 60)
+        with pg.begin() as conn:
+            conn.execute(text("UPDATE derived_stage_chunks SET lease_until=clock_timestamp()-interval '1 second' "
+                              "WHERE stage_key=:k"), {"k": key})
+    clean_stage.process(max_chunks=1)
+    [chunk] = rows(pg, "SELECT state, attempts, error FROM derived_stage_chunks")
+    assert chunk["state"] == "failed" and chunk["error"]["type"] == "lease_exhausted"
+    [src] = [s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials"]
+    assert src["dead_letter"] == 1 and src["leased"] == 0 and src["lag"] == src["published_seq"]
+    assert clean_stage.retry_failed() == 1
+    assert clean_stage.process()["chunks"] == 1  # 受控重置后重新认领并完成
+    assert rows(pg, "SELECT state FROM derived_stage_chunks")[0]["state"] == "done"
+
+
+def test_unready_waiting_attachment_does_not_starve_a_ready_one(pg, monkeypatch, tmp_path):
+    from collections import defaultdict
+    from pathlib import Path
+
+    from db import clean_stage, derived_text
+    from processing import attachment_parse
+
+    allow(monkeypatch)
+    first, path1 = _fetch_attachment(tmp_path, monkeypatch, "codex-waiting-first", content=b"%PDF-1.4 synthetic blocked")
+    second, path2 = _fetch_attachment(tmp_path, monkeypatch, "codex-waiting-second", content=b"%PDF-1.4 synthetic ready")
+    assert clean_stage.process()["waiting_for_attachment_text"] == 2
+    head = rows(pg, "SELECT version_id FROM derived_stage_waiting WHERE stage_key=:k "
+                    "ORDER BY created_at, version_id LIMIT 1", k=clean_stage.stage_key())[0]["version_id"]
+    ready, ready_path = (second, path2) if head == first else (first, path1)
+    monkeypatch.setattr(attachment_parse, "_mineru", lambda p: {
+        "success": True, "markdown": "The decision for NCT09998883 remains unchanged.", "error": ""}
+        if Path(p).read_bytes() == ready_path.read_bytes()
+        else {"success": False, "markdown": "", "error": "synthetic parser pending"})
+    parsed = derived_text.process(batch=10, retry_after_seconds=0)
+    assert parsed["parsed"] == 1 and parsed["failed"] == 1
+    counts = defaultdict(int)
+    clean_stage._process_waiting(pg, clean_stage.stage_key(), counts, limit=1)
+    assert rows(pg, "SELECT version_id FROM derived_profiles WHERE version_id=:v", v=ready)
+    left = [r["version_id"] for r in rows(pg, "SELECT version_id FROM derived_stage_waiting")]
+    assert left == [head]  # 没解析完的还在等，已解析的已补做
+
+
+def test_profile_business_categories_are_stored_and_returned(pg, monkeypatch):
+    from db import clean_stage
+
+    allow(monkeypatch)
+    ct = _fetch_study("NCT09990016", "cs-categories").version_ids[0]
+    clean_stage.process()
+    prof = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW())["versions"][ct]["profile"]
+    assert prof["doc_type"] == "registry_record" and prof["doc_category"] == "registry"
+    assert "registry" in prof["evidence_categories"]

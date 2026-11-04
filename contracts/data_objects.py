@@ -56,6 +56,9 @@ class Locator(Strict):
     sheet: str | None = None
     # 定位落在派生正文上时（例如附件解析正文里的偏移），写明是哪一份派生正文
     derived_text_sha256: str | None = Field(default=None, pattern=VERSION_ID)
+    # json_pointer 指向哪里：raw = 版本原件（JSON 解析后）；record = 版本记录本身（如投影字段 /clean_text）。
+    # json_pointer 带 start/end 时，偏移是该字段解码后字符串里的位置
+    within: Literal["raw", "record"] = "raw"
 
     @model_validator(mode="after")
     def required_by_kind(self):
@@ -328,7 +331,8 @@ def _first_locator(version_id: str, row: dict) -> Locator:
     kind = row.get("locator_kind")
     on_derived = {"version_id": version_id, "derived_text_sha256": row.get("text_sha256")}
     if src.get("json_pointer"):
-        return Locator(kind="json_pointer", version_id=version_id, json_pointer=src["json_pointer"])
+        return Locator(kind="json_pointer", version_id=version_id, json_pointer=src["json_pointer"],
+                       start=src.get("start"), end=src.get("end"), within=src.get("within", "raw"))
     if "start" in src and "end" in src:
         return Locator(kind="char_span", version_id=version_id, start=src["start"], end=src["end"])
     if kind in ("pdf_page", "converted_page") and first.get("page"):
@@ -365,3 +369,20 @@ def from_clean_text(row: dict, *, source_id: str, record_id: str, seen, proof=No
         segments=len(row.get("segments") or []),
         language=language,
     )
+
+
+def resolve(locator: Locator, *, raw_content: str, record: dict | None = None) -> str:
+    """按定位从原件（或版本记录）取回片段，验证回指用。只支持文本定位（json_pointer / char_span）。"""
+    import json
+
+    if locator.kind == "char_span":
+        return raw_content[locator.start:locator.end]
+    if locator.kind != "json_pointer":
+        raise ValueError(f"{locator.kind} 定位要按派生正文或页面解析")
+    node = json.loads(raw_content) if locator.within == "raw" else (record or {})
+    for token in locator.json_pointer.split("/")[1:]:
+        token = token.replace("~1", "/").replace("~0", "~")
+        node = node[int(token)] if isinstance(node, list) else node[token]
+    if locator.start is None:
+        return node if isinstance(node, str) else json.dumps(node, ensure_ascii=False)
+    return node[locator.start:locator.end]
