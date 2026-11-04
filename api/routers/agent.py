@@ -874,17 +874,15 @@ def get_pipeline_overview():
             by_status=by, by_dict=by_dict,
         ))
 
-        # ⑥ 同步（文档同步 + 实体推送 + 关系推送）
-        wk_rows = session.execute(text(
-            "SELECT weknora_sync_status, COUNT(*) FROM documents WHERE is_deleted=false GROUP BY weknora_sync_status"
-        )).fetchall()
+        # ⑥ 同步（正文索引发布 + 实体推送 + 关系推送）
+        from db import index_publication
         ent_rows = session.execute(text(
             "SELECT weknora_graph_status, COUNT(*) FROM extracted_entities WHERE is_deleted=false GROUP BY weknora_graph_status"
         )).fetchall()
         rel_rows = session.execute(text(
             "SELECT weknora_graph_status, COUNT(*) FROM entity_relations WHERE is_deleted=false GROUP BY weknora_graph_status"
         )).fetchall()
-        by = {f"weknora_{r[0] or 'unknown'}": r[1] for r in wk_rows}
+        by = {f"index_{state}": n for state, n in index_publication.state_counts().items()}
         for r in ent_rows:
             by[f"graph_entity_{r[0] or 'unknown'}"] = r[1]
         for r in rel_rows:

@@ -157,33 +157,6 @@ class ReviewActionResponse(BaseModel):
 
 # ── WeKnora ────────────────────────────────────────────────────────────
 
-class WeknoraPendingItem(BaseModel):
-    uuid: str
-    title: str
-    source_site: str
-    publish_date: str
-
-
-class WeknoraPendingResponse(BaseModel):
-    total: int
-    items: list[WeknoraPendingItem]
-
-
-class WeknoraSyncResponse(BaseModel):
-    success: bool
-    message: str
-
-
-class WeknoraBatchResponse(BaseModel):
-    triggered: int
-
-
-class WeknoraStatsResponse(BaseModel):
-    pending: int
-    synced: int
-    failed: int
-
-
 class RecrawlResponse(BaseModel):
     success: bool
     uuid: str

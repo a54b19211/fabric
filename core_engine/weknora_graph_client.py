@@ -155,60 +155,7 @@ class WeKnoraGraphClient:
 
     # ── 5. 知识库校验 ─────────────────────────────────────────────────
 
-    def validate_knowledge_base(self, kb_id: str) -> dict:
-        """验证知识库 ID 是否有效。返回 WeKnora API 响应中的 data 字段。"""
-        url = f"{self._base_url}/api/v1/knowledge-bases/{kb_id}"
-        try:
-            resp = httpx.get(url, headers=self._headers, timeout=15.0)
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("success"):
-                raise RuntimeError(f"知识库不存在或无权访问: {kb_id}")
-            return data.get("data", {})
-        except httpx.HTTPStatusError as e:
-            logger.error(f"[WeKnoraGraph] 校验知识库失败 HTTP {e.response.status_code}: {e.response.text[:300]}")
-            raise RuntimeError(f"知识库 ID 无效 ({kb_id})：WeKnora 返回 {e.response.status_code}")
-        except Exception as e:
-            logger.error(f"[WeKnoraGraph] 校验知识库请求失败: {e}")
-            raise
-
     # ── 6. 文档同步（全文上传） ──────────────────────────────────────────
-
-    def upload_document(self, title: str, content: str, metadata: dict, kb_id: str = "") -> str:
-        """
-        上传文档到 WeKnora 知识库。返回 weknora knowledge_id。
-        调用 POST /api/v1/knowledge-bases/{kb_id}/knowledge/manual
-        """
-        kb = kb_id or self._kb_id
-        url = f"{self._base_url}/api/v1/knowledge-bases/{kb}/knowledge/manual"
-        payload = {
-            "title": title,
-            "content": content,
-            "status": "publish",
-            "channel": "crawler",
-            "source_metadata": metadata,
-        }
-        try:
-            resp = httpx.post(url, json=payload, headers=self._headers, timeout=60.0)
-            logger.info(f"[WeKnoraGraph] upload_document 响应 {resp.status_code}: {resp.text[:200]}")
-            if resp.status_code == 409:
-                logger.info(f"[WeKnoraGraph] 文档已存在（409），视为已同步")
-                return ""
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("success"):
-                raise RuntimeError(f"WeKnora 返回失败: {data}")
-            return data.get("data", {}).get("id", "")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 409:
-                logger.info(f"[WeKnoraGraph] 文档已存在（409），视为已同步")
-                return ""
-            logger.error(f"[WeKnoraGraph] upload_document HTTP {e.response.status_code}: {e.response.text[:300]}")
-            raise
-        except Exception as e:
-            logger.error(f"[WeKnoraGraph] upload_document 请求失败: {e}")
-            raise
-
 
 # 全局单例
 _client: WeKnoraGraphClient | None = None

@@ -57,10 +57,6 @@ class BatchRejectRelationsRequest(BaseModel):
     source_site: str = ""
 
 
-class WeknoraBatchRequest(BaseModel):
-    limit: int = Field(default=100, ge=1, description="单次同步文档数量上限")
-
-
 class RecrawlRequest(BaseModel):
     """重爬请求体（目前无额外参数，预留扩展）"""
     pass

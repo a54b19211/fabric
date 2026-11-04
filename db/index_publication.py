@@ -457,6 +457,13 @@ def status(*, limit=100):
         return result
 
 
+def state_counts():
+    """各索引发布状态的条数（流水线总览用）。"""
+    with history.history_engine().begin() as conn:
+        return {r[0]: r[1] for r in conn.execute(text(
+            "SELECT state, count(*) FROM index_publications GROUP BY state"))}
+
+
 def retry(key):
     with history.history_engine().begin() as conn:
         result = conn.execute(text("""

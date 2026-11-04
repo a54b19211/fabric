@@ -129,7 +129,9 @@ def test_stored_clean_text_fits_the_data_contract(pg, monkeypatch):
     ct = _fetch_study("NCT09990012", "cs-contract").version_ids[0]
     clean_stage.process(batch=50)
     got = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW())["versions"][ct]
-    obj = clean_stage.to_contract(got, source_id="clinicaltrials")
+    obj = do.from_clean_text({**got["clean"], "version_id": ct}, source_id="clinicaltrials",
+                             record_id=got["source_record_id"], seen=got["first_seen_at"],
+                             proof=got.get("proof_available_at"))
     assert isinstance(obj, do.CleanText) and obj.inputs[0].version_id == ct
     assert obj.locators[0].kind == "json_pointer"
 

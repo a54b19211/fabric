@@ -15,7 +15,7 @@
 - 实体只到“候选”，消歧是唐的职责；
 - 专题假设与判断版本是雷达的应用状态，这里只定义它引用证据的方式。
 
-现有两种派生结果（登记差分、附件正文）用 from_registry_change / from_attachment_text 映射进来，
+现有两种派生结果（登记差分、清洗正文——含附件解析正文）用 from_registry_change / from_clean_text 映射进来，
 说明它们满足同一契约；以后的清洗、抽取、测量都按这里的模型落表。
 """
 
@@ -319,39 +319,49 @@ def from_registry_change(change: dict, *, source_id: str, record_id: str, from_s
     )
 
 
-def from_attachment_text(row: dict, *, source_id: str, record_id: str, seen, links: list[dict],
-                         proof=None) -> CleanText:
-    """附件派生正文（derived_clean_text 最新一次）→ 清洗正文。解析只读附件本身，输入只有附件版本；
-    所在公告页是关联（Relation），固定版本未知时如实写空和依据，不参与可见时间。"""
+def _first_locator(version_id: str, row: dict) -> Locator:
+    """清洗正文第一段的定位。段落自带原件位置（JSON 路径 / 原件字符偏移）时用它；否则用解析服务给的
+    页、块、表；都没有就是 unavailable，不编。页/块/表落在派生正文上，所以写明是哪一份派生正文。"""
+    segments = row.get("segments") or []
+    first = segments[0] if segments else {}
+    src = first.get("source") or {}
+    kind = row.get("locator_kind")
+    on_derived = {"version_id": version_id, "derived_text_sha256": row.get("text_sha256")}
+    if src.get("json_pointer"):
+        return Locator(kind="json_pointer", version_id=version_id, json_pointer=src["json_pointer"])
+    if "start" in src and "end" in src:
+        return Locator(kind="char_span", version_id=version_id, start=src["start"], end=src["end"])
+    if kind in ("pdf_page", "converted_page") and first.get("page"):
+        return Locator(kind=kind, page=first["page"], **on_derived)
+    if kind == "block" or (kind is None and "block" in first):
+        return Locator(kind="block", block=first.get("block", 0), **on_derived)
+    if "sheet" in first:
+        return Locator(kind="sheet", sheet=first["sheet"], **on_derived)
+    return Locator(kind="unavailable", version_id=version_id)
+
+
+def from_clean_text(row: dict, *, source_id: str, record_id: str, seen, proof=None,
+                    links: list[dict] = ()) -> CleanText:
+    """derived_clean_text 的一行（清洗正文或附件解析正文）→ 清洗正文契约对象。
+    输入只有这个版本自己；附件所在公告页是关联（Relation），固定版本未知时如实写空和依据，不参与可见时间。"""
     refs = [VersionRef(source_id=source_id, record_id=record_id, version_id=row["version_id"])]
     relations = [
         Relation(kind="attachment_of", source_id=source_id, record_id=link["parent_record_id"],
                  version_id=link.get("parent_version_id"), basis=link.get("link_basis") or "unknown")
         for link in links
     ]
-    kind = row.get("locator_kind") or "unavailable"
-    segments = row.get("segments") or []
-    if kind in ("pdf_page", "converted_page") and segments and segments[0].get("page"):
-        locators = [Locator(kind=kind, version_id=row["version_id"], page=segments[0]["page"],
-                            derived_text_sha256=row["text_sha256"])]
-    elif kind == "block" and segments:
-        locators = [Locator(kind="block", version_id=row["version_id"], block=segments[0].get("block", 0),
-                            derived_text_sha256=row["text_sha256"])]
-    elif kind == "sheet" and segments:
-        locators = [Locator(kind="sheet", version_id=row["version_id"], sheet=segments[0]["sheet"],
-                            derived_text_sha256=row["text_sha256"])]
-    else:
-        locators = [Locator(kind="unavailable", version_id=row["version_id"])]
-    state = {"parsed": "ok", "failed": "failed", "unsupported": "unknown"}[row["status"]]
+    state = {"parsed": "ok", "failed": "failed", "unsupported": "unknown"}.get(row.get("status"), "failed")
+    language = row.get("language") if row.get("language") in ("zh", "en", "mixed") else "unknown"
     return CleanText(
         inputs=refs,
         relations=relations,
         processing=Processing(processor_version=row["processor_version"]),
-        locators=locators,
+        locators=[_first_locator(row["version_id"], row)],
         permission_sources=[source_id],
         visibility=merge_visibility(refs, {row["version_id"]: (seen, proof)}),
-        status=Status(state=state, reason=row.get("error") or "解析未成功") if state != "ok" else Status(state="ok"),
+        status=Status(state="ok") if state == "ok" else Status(state=state, reason=row.get("error") or "没有可用正文"),
         text_sha256=row["text_sha256"],
-        chars=row.get("chars") or 0,
-        segments=len(segments),
+        chars=row.get("chars") if row.get("chars") is not None else len(row.get("text") or ""),
+        segments=len(row.get("segments") or []),
+        language=language,
     )

@@ -309,28 +309,6 @@ def reset_stale_extractions(max_age_minutes: int = 0) -> int:
         return result
 
 
-def update_weknora_sync_status(uuid: str, status: str) -> None:
-    """更新文档的 WeKnora 同步状态。status: pending / synced / failed"""
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return
-        doc = session.query(Document).filter(Document.uuid == uuid).first()
-        if doc is None:
-            logger.warning(f"[DB] update_weknora_sync_status: 文档不存在 {uuid}")
-            return
-        before_status = doc.weknora_sync_status
-        doc.weknora_sync_status = status
-        _write_operation_log(
-            session, "update", "documents", doc.id,
-            business_action="weknora_sync",
-            description=f"weknora_sync_status: {before_status} → {status} uuid={uuid}",
-            details={"uuid": uuid, "weknora_sync_status": {"before": before_status, "after": status}},
-            trigger_source="update_weknora_sync_status",
-        )
-
-
 def get_pending_extraction(limit: int = 100) -> list[dict]:
     """
     查询 extraction_status=pending 且 is_deleted=False 的文档。
@@ -366,68 +344,6 @@ def get_pending_extraction(limit: int = 100) -> list[dict]:
             }
             for r in rows
         ]
-
-
-def get_pending_weknora_sync(limit: int = 100, offset: int = 0, source_site: str = "") -> tuple[list[dict], int]:
-    """
-    查询 weknora_sync_status=pending 且 is_deleted=False 的文档。
-    返回字段：uuid, title, source_site, raw_content, publish_date,
-             source_url, parent_uuid, doc_type, language, confidence_score,
-             parse_method, crawl_timestamp
-    返回 (rows, total)。
-    """
-    from db.session import get_session
-
-    with get_session() as session:
-        if session is None:
-            return [], 0
-        filters = [
-            Document.weknora_sync_status == "pending",
-            Document.is_deleted == False,
-        ]
-        if source_site:
-            filters.append(Document.source_site == source_site)
-        base_q = session.query(Document).filter(*filters)
-        total = base_q.count()
-        rows = (
-            session.query(
-                Document.uuid,
-                Document.title,
-                Document.source_site,
-                Document.raw_content,
-                Document.publish_date,
-                Document.source_url,
-                Document.parent_uuid,
-                Document.doc_type,
-                Document.language,
-                Document.confidence_score,
-                Document.parse_method,
-                Document.crawl_timestamp,
-            )
-            .filter(*filters)
-            .order_by(Document.id.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
-        rows_out = [
-            {
-                "uuid": r.uuid,
-                "title": r.title,
-                "source_site": r.source_site,
-                "raw_content": r.raw_content or "",
-                "publish_date": r.publish_date or "",
-                "source_url": r.source_url or "",
-                "parent_uuid": r.parent_uuid or "",
-                "doc_type": r.doc_type or "",
-                "language": r.language or "",
-                "confidence_score": r.confidence_score or 0.0,
-                "parse_method": r.parse_method or "",
-                "crawl_timestamp": str(r.crawl_timestamp) if r.crawl_timestamp else "",
-            }
-            for r in rows
-        ]
-        return rows_out, total
 
 
 # ═══════════════════════════════════════════════════════════════════════

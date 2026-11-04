@@ -77,7 +77,7 @@ def test_unmapped_registry_change_is_flagged_not_ok():
 
 
 def test_real_attachment_text_fits_and_says_the_parent_version_is_unknown():
-    text = do.from_attachment_text(
+    text = do.from_clean_text(
         REAL_ATTACHMENT, source_id="nmpa", record_id=ATT_RECORD, seen=datetime(2026, 11, 4, 7, 41, tzinfo=UTC),
         links=[{"parent_record_id": ATT_RECORD.split("#")[0], "parent_version_id": None,
                 "link_basis": "parent_version_unknown"}],
@@ -93,7 +93,7 @@ def test_real_attachment_text_fits_and_says_the_parent_version_is_unknown():
 
 def test_attachment_parent_is_a_relation_not_an_input():
     seen, proof = datetime(2026, 11, 4, tzinfo=UTC), datetime(2026, 11, 4, 1, tzinfo=UTC)
-    text = do.from_attachment_text(
+    text = do.from_clean_text(
         REAL_ATTACHMENT, source_id="nmpa", record_id=ATT_RECORD, seen=seen, proof=proof,
         links=[{"parent_record_id": ATT_RECORD.split("#")[0], "parent_version_id": B,
                 "link_basis": "same_run_parent_version"}],
