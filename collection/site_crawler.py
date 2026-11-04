@@ -15,7 +15,8 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 - "records"（接口站点）：按站点的接口拉取函数逐条读，可续读；
 - "stored_attachments"，source_record_ids=已存文档 URL：按 documents 库 attachments 表记录的链接
   重新下载附件原件（只读那张表，父页面不重抓）。
-接口拉取函数自己发请求、自己翻页：共享限速和请求预算按“每条记录一次”计，不是按 HTTP 请求计。
+每一次真实传输（接口拉取函数里的 httpx/requests 请求、网页抓取、附件下载、浏览器翻页）发出前都过
+collection.transport 的闸门：共享限速、请求/字节/期限预算、超时与 429 的有界重试，续读重放也计数。
 """
 
 from __future__ import annotations
@@ -23,15 +24,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import time
-from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
 from biz_rules.history_models import ArchiveRecord, HistoryError, source_time
-from collection import rate
+from collection import rate, transport
 from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
 
 WEB_SCHEMA = "datafabric.web_capture.v1"
@@ -43,45 +42,10 @@ from config.crawler_settings import SITE_PROFILES  # noqa: E402  站点配置
 
 
 # ——抓取入口（测试替换这几个名字）——
-def _is_transient(error: Exception) -> bool:
-    """只重试超时和限流（429）；解析错误和其他 HTTP 错误不重试。"""
-    seen = set()
-    while isinstance(error, BaseException) and id(error) not in seen:
-        seen.add(id(error))
-        if isinstance(error, TimeoutError) or any(
-            cls.__name__ in {"TimeoutException", "TimeoutError", "ReadTimeout", "ConnectTimeout",
-                             "WriteTimeout", "PoolTimeout"}
-            for cls in type(error).__mro__
-        ):
-            return True
-        if getattr(getattr(error, "response", None), "status_code", None) == 429:
-            return True
-        if isinstance(error, RuntimeError) and re.search(r"\bHTTP\s+429\b", str(error)):
-            return True  # fetch_page 对非 2xx 抛 RuntimeError
-        error = error.__cause__ or error.__context__
-    return False
-
-
-def _with_retries(read, *args, **kwargs):
-    """有界重试一次读取（TASK_RETRIES 次，指数退避，单次最多 60 秒）；只用于读，不包任何写入。"""
-    from config.settings import APP
-
-    retries = max(0, int(APP.TASK_RETRIES))
-    delay = min(max(float(APP.TASK_RETRY_DELAY), 0.0), 60.0)
-    for attempt in range(retries + 1):
-        try:
-            return read(*args, **kwargs)
-        except Exception as error:
-            if attempt == retries or not _is_transient(error):
-                raise
-            time.sleep(delay)
-            delay = min(delay * 2, 60.0)
-
-
 def _fetch_page(url, **kwargs):
     from core_engine.scrapling_client import fetch_page
 
-    return _with_retries(fetch_page.fn, url, **kwargs)
+    return fetch_page.fn(url, **kwargs)
 
 
 def _route_webpage(page_data, site_key=None):
@@ -93,14 +57,15 @@ def _route_webpage(page_data, site_key=None):
 def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None):
     from core_engine.scrapling_client import download_pdf
 
-    return _with_retries(download_pdf.fn, pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force,
-                         cookies=cookies)
+    return download_pdf.fn(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies)
 
 
 def _make_driver(site, profile, start_url):
     from core_engine.pagination_driver import make_driver
 
-    return make_driver(site, profile, start_url)
+    driver = make_driver(site, profile, start_url)
+    driver.delay = 0  # 间隔由共享限速组在每次传输前控制
+    return driver
 
 
 def _store_root() -> Path:
@@ -169,8 +134,9 @@ def _record(record_id, data) -> ArchiveRecord:
     )
 
 
-class _Stop(Exception):
-    """预算用完：reason 是 stop_reason。已读到的材料保留，调用方给出续读位置。"""
+class _Stop(BaseException):
+    """预算用完：reason 是 stop_reason。已读到的材料保留，调用方给出续读位置。
+    BaseException：拉取函数里的 except Exception 吞不掉预算停止。"""
 
     def __init__(self, reason):
         super().__init__(reason)
@@ -227,6 +193,9 @@ class _Reader:
             raise _Stop("deadline") from None
         self.requests += 1
 
+    def add_bytes(self, n):
+        self.bytes += n
+
     def before_record(self):
         if len(self.records) >= self.request.max_records:
             raise _Stop("record_budget")
@@ -237,7 +206,6 @@ class _Reader:
         record_id = attachment_record_id(parent_id, url)
         entry = {"record_id": record_id, "url": url, "text": (link or {}).get("text", ""), "status": "stored"}
         self.before_record()
-        self.before_request()
         try:
             info = _download(url, parent_uuid=parent_id, source_site=self.site, cookies=cookies)
             sha, size = _sha256_file(info["local_path"])
@@ -282,7 +250,6 @@ class _Reader:
             raise HistoryError("native_id_missing", "站点记录缺少稳定编号")
         if record_page:
             self.before_record()
-        self.before_request()  # 接口拉取函数自己发请求：这里按每条记录过一次闸门、计一次请求
         links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
         if record_page:
             self.records.append(_record(record_id, {
@@ -320,7 +287,6 @@ class _Reader:
         cfg = self.profile
         if record_page:
             self.before_record()
-        self.before_request()
         page_data = _fetch_page(
             url,
             delay=0,  # 间隔由共享限速组统一控制
@@ -395,28 +361,6 @@ def _site_results(reader, query):
             yield parsed, None
 
 
-@contextmanager
-def _gated_driver(reader):
-    """旧翻页驱动内部用 fetch_page 取列表页：读取期间让它也过同一个闸门、计入请求预算。
-    js_click 型驱动（CDE）在一个浏览器会话里点击翻页，不经过 fetch_page，只按站点配置的间隔放慢。"""
-    import core_engine.pagination_driver as driver
-
-    real = driver.fetch_page
-
-    class Gated:
-        @staticmethod
-        def fn(*args, **kwargs):
-            reader.before_request()
-            kwargs["delay"] = 0
-            return real.fn(*args, **kwargs)
-
-    driver.fetch_page = Gated
-    try:
-        yield
-    finally:
-        driver.fetch_page = real
-
-
 def _cursor(request):
     if not request.continuation:
         return 0, 0, False
@@ -428,9 +372,15 @@ def _cursor(request):
 
 
 def read_site(request) -> dict:
+    """site_crawler 插件入口：这次读取的全部真实传输都过同一个闸门和预算。"""
+    reader = _Reader(request)
+    with transport.metered(reader):
+        return _read(request, reader)
+
+
+def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
     续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件}。"""
-    reader = _Reader(request)
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
     position = 0
     try:
@@ -466,16 +416,15 @@ def read_site(request) -> dict:
         else:
             if request.query not in reader.profile.get("start_urls", []):
                 raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
-            with _gated_driver(reader):
-                seen = -1
-                for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
-                    seen += 1
-                    if seen < start_i:
-                        continue
-                    position = seen
-                    first = seen == start_i
-                    reader.page(url, skip_attachments=start_a if first else 0,
-                                record_page=not (first and start_recorded))
+            seen = -1
+            for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
+                seen += 1
+                if seen < start_i:
+                    continue
+                position = seen
+                first = seen == start_i
+                reader.page(url, skip_attachments=start_a if first else 0,
+                            record_page=not (first and start_recorded))
             exhausted = True
     except _Resume as stopped:
         stop, resume = stopped.reason, (position, stopped.attachment, stopped.page_recorded)

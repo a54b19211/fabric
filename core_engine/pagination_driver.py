@@ -12,6 +12,8 @@
 import json
 import time
 import concurrent.futures
+
+from collection.transport import in_context
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse, urljoin
 
@@ -68,8 +70,6 @@ class BasePaginationDriver(ABC):
             return []
 
         base_url = self.start_url
-        parsed_base = urlparse(base_url)
-        origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
 
         urls = []
         seen = set()
@@ -90,7 +90,7 @@ class BasePaginationDriver(ABC):
         """在独立线程里调用 fetch_page，避免 asyncio 冲突。"""
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(
-                fetch_page.fn,
+                in_context(fetch_page.fn),
                 url=url,
                 delay=self.delay,
                 wait_selector=self.wait_sel,
@@ -191,14 +191,14 @@ class JsClickDriver(BasePaginationDriver):
     def iter_detail_urls(self, on_page_urls=None):
         # generator 路径：调用方迭代时执行
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            batches = executor.submit(self._playwright_crawl).result()
+            batches = executor.submit(in_context(self._playwright_crawl)).result()
         for page_urls in batches:
             yield from page_urls
 
     def run_with_callback(self, on_page_urls):
         """直接执行 Playwright 爬取，每页完成后在主线程触发回调。"""
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            batches = executor.submit(self._playwright_crawl).result()
+            batches = executor.submit(in_context(self._playwright_crawl)).result()
         for page_urls in batches:
             on_page_urls(page_urls)
 
@@ -285,7 +285,7 @@ class JsClickDriver(BasePaginationDriver):
     def iter_table_data(self):
         """在独立线程中运行 Playwright 表格提取，返回按页分组的 parsed dict 批次。"""
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            batches = executor.submit(self._playwright_crawl_tables).result()
+            batches = executor.submit(in_context(self._playwright_crawl_tables)).result()
         for page_parsed_list in batches:
             yield page_parsed_list
 
@@ -295,7 +295,6 @@ class JsClickDriver(BasePaginationDriver):
 
         pagination = self.site_cfg.get("pagination", {})
         next_btn_selector = pagination.get("next_btn_selector", "")
-        table_container_selector = self.site_cfg.get("table_container_selector", "")
         ua = DEFAULT_HEADERS["User-Agent"]
         batches: list[list[dict]] = []
 

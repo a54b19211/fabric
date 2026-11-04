@@ -9,7 +9,7 @@ import pytest
 
 from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
 from biz_rules.history_sources import PLUGINS, project_record, read_public
-from collection import catalog, site_crawler, rate
+from collection import catalog, rate, site_crawler, transport
 
 PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/20261101120000123.html"
 ATT1 = "https://www.nmpa.gov.cn/directory/web/nmpa/images/a1.doc"
@@ -27,6 +27,7 @@ def fake_web(monkeypatch, tmp_path):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
 
     def fetch_page(url, **kwargs):
+        transport.gate()  # 替身也是一次真实传输：过闸、计数
         calls["fetch"].append((url, kwargs))
         return {"page": FakePage(), "url": url, "uuid": "u-" + url[-8:], "timestamp": "t", "cookies": [{"name": "c"}]}
 
@@ -44,6 +45,7 @@ def fake_web(monkeypatch, tmp_path):
         }
 
     def download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None):
+        transport.gate()
         calls["download"].append((pdf_url, cookies))
         if pdf_url == ATT2 and calls.get("fail_second"):
             raise RuntimeError("HTTP 404")
@@ -205,31 +207,6 @@ def test_codex_r61_same_page_read_twice_is_the_same_raw(fake_web):
     assert "fetched_at" not in json.loads(a["records"][0].raw_content)
 
 
-def test_list_pages_fetched_by_the_old_driver_go_through_the_gate(fake_web, monkeypatch):
-    import core_engine.pagination_driver as driver
-
-    seen = []
-
-    class Real:
-        @staticmethod
-        def fn(*args, **kwargs):
-            seen.append(kwargs.get("delay"))
-            return {"page": FakePage(), "url": "x", "uuid": "u", "timestamp": "t", "cookies": []}
-
-    monkeypatch.setattr(driver, "fetch_page", Real)
-
-    class Driver:
-        def iter_detail_urls(self):
-            driver.fetch_page.fn(url="list-1", delay=2.0)  # 旧驱动取列表页
-            yield PAGE
-
-    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
-    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
-    batch = read_public(FetchRequest(source_id="nmpa", query=start))
-    assert seen == [0] and batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
-    assert driver.fetch_page is Real  # 读取结束后还原
-
-
 def test_list_mode_only_accepts_the_sites_declared_start_urls(fake_web):
     batch = read_public(FetchRequest(source_id="nmpa", query="https://www.nmpa.gov.cn/other/index.html"))
     assert batch["error"]["code"] == "unknown_start_url"
@@ -316,6 +293,97 @@ def test_api_site_only_answers_records_query(fake_web, monkeypatch):
     assert batch["stop_reason"] == "source_failed" and batch["error"]["code"] == "unknown_query"
 
 
+def test_every_real_http_transfer_is_gated_and_budgeted_before_it_is_sent(monkeypatch):
+    """Codex r69 反例：拉取函数在产出第一条记录前发 12 个请求。现在每个请求发出前都过共享限速并计数，
+    请求预算 10 次用完就停在第 11 个请求之前，不再读到底。"""
+    import httpx
+
+    seen = []
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: (seen.append("http"), httpx.Response(200, json={}))[1]))
+
+    def fetcher(config):
+        for i in range(12):
+            client.get(f"https://synthetic.invalid/record/{i}")
+        yield {"id": "one", "title": "Synthetic result"}
+
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label",
+                        {"source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"},
+                         "uid_field": "id"})
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: seen.append("gate"))
+    result = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
+                                                 max_records=1))
+    assert seen[:4] == ["gate", "http", "gate", "http"]  # 先过闸再发
+    assert seen.count("http") == 10 and result["requests"] == 10
+    assert result["stop_reason"] == "request_budget" and not result["upstream_pagination_exhausted"]
+    assert result["records"] == []
+
+
+def test_transient_errors_are_retried_at_the_transport_and_each_retry_is_counted(monkeypatch):
+    import httpx
+
+    from config.settings import APP
+
+    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
+    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.0)
+    answers = iter([httpx.Response(429), httpx.Response(200, json={"ok": 1})])
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: next(answers)))
+
+    def fetcher(config):
+        assert client.get("https://synthetic.invalid/x").status_code == 200
+        yield {"id": "one", "title": "ok"}
+
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label",
+                        {"source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"},
+                         "uid_field": "id"})
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
+    result = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_records=5))
+    assert result["requests"] == 2 and len(result["records"]) == 1
+
+
+def test_transfers_outside_a_read_are_not_gated(monkeypatch):
+    import httpx
+
+    calls = []
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: calls.append("gate"))
+    transport.install()
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    client.get("https://synthetic.invalid/")
+    assert calls == []
+
+
+class _Budget:
+    """最小的读取替身：只记过闸次数。"""
+
+    def __init__(self):
+        self.requests = 0
+
+    def before_request(self):
+        self.requests += 1
+
+
+def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, monkeypatch):
+    """翻页驱动在独立线程里取列表页：线程带着读取上下文，列表页同样过闸计数；驱动自己的间隔归零。"""
+    import concurrent.futures
+
+    from collection.transport import in_context
+
+    class Driver:
+        delay = 2.0
+
+        def iter_detail_urls(self):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(in_context(transport.gate)).result()  # 列表页的一次真实传输
+            yield PAGE
+
+    made = []
+    import core_engine.pagination_driver as pd
+
+    monkeypatch.setattr(pd, "make_driver", lambda site, profile, url: made.append(Driver()) or made[-1])
+    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
+    batch = read_public(FetchRequest(source_id="nmpa", query=start))
+    assert made[0].delay == 0 and batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
+
+
 def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
     import httpx
 
@@ -323,7 +391,7 @@ def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
 
     monkeypatch.setattr(APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.01)
-    monkeypatch.setattr(site_crawler.time, "sleep", lambda s: None)
+    monkeypatch.setattr(transport.time, "sleep", lambda s: None)
     calls = []
 
     def flaky():
@@ -332,14 +400,18 @@ def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
             raise RuntimeError("HTTP 429 too many")
         return "ok"
 
-    assert site_crawler._with_retries(flaky) == "ok" and len(calls) == 3
+    budget = _Budget()
+    with transport.metered(budget):
+        assert transport._metered(flaky)() == "ok"
+    assert len(calls) == 3 and budget.requests == 3  # 每次重发都重新过闸
+
     calls.clear()
 
     def broken():
         calls.append(1)
         raise ValueError("parse error")
 
-    with pytest.raises(ValueError):
-        site_crawler._with_retries(broken)
+    with transport.metered(_Budget()), pytest.raises(ValueError):
+        transport._metered(broken)()
     assert len(calls) == 1
-    assert site_crawler._is_transient(httpx.ReadTimeout("t"))
+    assert transport.is_transient(httpx.ReadTimeout("t"))
