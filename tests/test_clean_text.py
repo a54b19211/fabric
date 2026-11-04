@@ -343,3 +343,21 @@ def test_literature_no_body_and_bad_json():
     assert bad["text"] == "" and bad["segments"] == [] and bad["warnings"] == ["invalid_json", "no_body"]
     arr = ct.clean_literature("[1, 2]")
     assert arr["warnings"] == ["not_a_record", "no_body"]
+
+
+def test_rewritten_registry_pages_keep_only_the_original_part():
+    md = "# 某试验\n\n本研究是一项随机对照研究，采用平行设计。\n\n## 纳入标准\n\n改写过的标准\n\n---\n\n## 原始注册信息\n\n注册号：ChiCTR2400000001\n\n纳入标准：原文"
+    out = ct.clean_markdown(md, source_id="chictr")
+    assert out["text"].startswith("注册号：ChiCTR2400000001") and "改写过的标准" not in out["text"]
+    for seg in out["segments"]:  # 删的是整块，偏移仍逐字回指
+        assert ct.normalize_whitespace(md[seg["source"]["start"]:seg["source"]["end"]]) == seg_text(out, seg)
+
+
+def test_fiercepharma_template_drops_navigation_and_footer_only_for_that_site():
+    body = "Pfizer said on Tuesday that its phase 3 trial met the primary endpoint in adults."
+    md = "\n\n".join(["# Pfizer trial", "Fierce Pharma", "Subscribe", "Oncology", body, body, body,
+                       "© 2026 Questex LLC. All rights reserved."])
+    out = ct.clean_markdown(md, source_id="fiercepharma")
+    assert out["text"] == "\n\n".join(["# Pfizer trial", body, body, body])
+    other = ct.clean_markdown(md, source_id="nmpa")
+    assert "Subscribe" in other["text"] and "©" in other["text"]

@@ -1,12 +1,9 @@
 """
-文本清洗工具函数 + 站点清洗器导出。
-
-原 biz_rules/cleaners.py 的内容迁移至此，保持向后兼容。
+站点提取器用的字段工具（空白、全角、标题、日期）。正文清洗只在 processing.clean_text。
 """
 
 import re
 
-# ── 通用文本清洗函数（原 cleaners.py）──────────────────────────────────────
 
 
 def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
@@ -31,19 +28,10 @@ def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
 
 
 def full_to_half(text: str) -> str:
-    """全角字符转半角（仅 ASCII 全角区间 + 全角空格）。"""
-    if not text:
-        return ""
-    result = []
-    for ch in text:
-        code = ord(ch)
-        if code == 0x3000:  # 全角空格 → 半角空格
-            result.append(" ")
-        elif 0xFF01 <= code <= 0xFF5E:  # 全角 ASCII → 半角
-            result.append(chr(code - 0xFEE0))
-        else:
-            result.append(ch)
-    return "".join(result)
+    """全角字符转半角（仅 ASCII 全角区间 + 全角空格）；与编号抽取用的是同一个实现。"""
+    from processing.identifiers import fold_fullwidth
+
+    return fold_fullwidth(text) if text else ""
 
 
 def remove_extra_whitespace(text: str) -> str:
@@ -55,29 +43,8 @@ def remove_html_tags(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
 
 
-# normalize_date 统一收敛到 field/date_format.py，避免重复定义。
-# 此处保留导出以兼容旧的 from biz_rules.cleaners import normalize_date 用法。
+# 日期规范只在 field/date_format.py
 from biz_rules.cleaners.field.date_format import normalize_date  # noqa: E402
-from biz_rules.cleaners.normalizer_l3 import (  # noqa: E402
-    normalize_l3,
-    normalize_synonym,
-    normalize_unit_expression,
-)
-
-
-def normalize_publish_date(parsed_result: dict) -> dict:
-    """标准化 publish_date（顶层 + structured_data 同步），返回原 parsed_result。
-
-    无法解析时保留原值，不做覆盖（避免数据丢失）。
-    """
-    raw = parsed_result.get("publish_date", "")
-    normalized = normalize_date(raw)
-    if normalized:
-        parsed_result["publish_date"] = normalized
-        structured = parsed_result.get("structured_data")
-        if isinstance(structured, dict):
-            structured["publish_date"] = normalized
-    return parsed_result
 
 
 def clean_title(title: str) -> str:
@@ -86,29 +53,11 @@ def clean_title(title: str) -> str:
     return title
 
 
-def truncate_text(text: str, max_length: int = 5000) -> str:
-    if len(text) <= max_length:
-        return text
-    return text[:max_length] + "\n\n...[文本已截断]..."
-
-
-# ── 站点清洗器 ──────────────────────────────────────────────────────────────
-
-from biz_rules.cleaners.fiercepharma import clean_fiercepharma  # noqa: E402
-from biz_rules.cleaners.clinical_trial import clean_clinical_trial  # noqa: E402
-
 __all__ = [
     "normalize_whitespace",
     "full_to_half",
     "remove_extra_whitespace",
     "remove_html_tags",
     "normalize_date",
-    "normalize_publish_date",
     "clean_title",
-    "truncate_text",
-    "clean_fiercepharma",
-    "clean_clinical_trial",
-    "normalize_l3",
-    "normalize_synonym",
-    "normalize_unit_expression",
 ]

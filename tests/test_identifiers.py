@@ -26,7 +26,7 @@ def assert_offsets(text):
 
 
 def test_processor_version():
-    assert ids.PROCESSOR_VERSION == "datafabric.identifiers.v1"
+    assert ids.PROCESSOR_VERSION == "datafabric.identifiers.v2"
 
 
 # ---------- NCT ----------
@@ -351,3 +351,24 @@ def test_normalize_invalid(kind, raw):
 def test_extract_rejects_non_string():
     with pytest.raises(TypeError):
         ids.extract(None)
+
+
+def test_labeled_registration_numbers_need_the_label():
+    hits = ids.extract("进口药品注册证号：H20150001，另有编号 20150001")
+    assert [(h["kind"], h["value"]) for h in hits] == [("nmpa_registration", "H20150001")]
+    assert ids.extract("批准文号：国药准字Ｈ２０２３０００１")[0]["value"] == "国药准字H20230001"
+
+
+def test_site_extractor_uses_the_one_rule():
+    from biz_rules.extractors import extract_approval_number
+
+    assert extract_approval_number("批准文号：国药准字 T20230001") == "国药准字T20230001"  # 旧正则漏了 T 类
+    assert extract_approval_number("国药准字H123456789") == ""  # 9 位不是批准文号（旧正则会截成前 8 位）
+    assert extract_approval_number("注册证号：S20150002") == "S20150002"
+
+
+def test_native_nct_format_is_ascii_only():
+    import re
+
+    assert re.fullmatch(ids.NCT_ID, "NCT01234567")
+    assert not re.fullmatch(ids.NCT_ID, "NCT０１２３４５６７")  # 旧 \d 会收全角数字

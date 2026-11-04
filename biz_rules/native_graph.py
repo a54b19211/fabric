@@ -1,5 +1,6 @@
 """明确来源字段的图投影；不从名称推断真实身份或机制关系。"""
 
+from processing.identifiers import NCT_ID
 import re
 
 from biz_rules.history_models import HistoryError, HistoryRecord, canonical, sha256
@@ -39,7 +40,7 @@ def _native(record):
         raise ValueError("原件SHA不一致")
     data = parse_json(record["raw_content"])
     identity = _pointer(data, NATIVE_PATH)
-    if not isinstance(identity, str) or not re.fullmatch(r"NCT[0-9]{8}", identity):
+    if not isinstance(identity, str) or not re.fullmatch(NCT_ID, identity):
         raise ValueError("缺少原生NCT登记号")
     if record["source_record_id"] != identity:
         raise ValueError("原生登记号与采用记录身份矛盾")

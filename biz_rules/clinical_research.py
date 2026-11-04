@@ -1,5 +1,6 @@
 """Project the stored ClinicalTrials protocol without rewriting historical data."""
 
+from processing.identifiers import NCT_ID
 import json
 import re
 from typing import Literal, Optional
@@ -41,7 +42,7 @@ class ClinicalTrialIntervention(SourceValue):
 
 
 class ClinicalTrialFacts(SourceValue):
-    nct_id: str = Field(pattern=r"^NCT[0-9]{8}$")
+    nct_id: str = Field(pattern="^" + NCT_ID + "$")
     brief_title: Optional[str] = None
     brief_summary: Optional[str] = None
     conditions: Optional[list[str]] = None

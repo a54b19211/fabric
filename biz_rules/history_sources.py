@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from processing.identifiers import NCT_ID
 import json
 import math
 import re
@@ -433,7 +434,7 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
         native = facts.get("trial_id")
         if (
             not isinstance(native, str)
-            or not re.fullmatch(r"NCT\d{8}", native)
+            or not re.fullmatch(NCT_ID, native)
             or native != item.source_record_id
         ):
             raise HistoryError("native_id_mismatch", "临床登记ID与原件不一致")
@@ -845,7 +846,7 @@ def _read_public_api(request: FetchRequest) -> dict:
                         params["query.term"] = request.query
                     if request.source_record_ids:
                         if not all(
-                            re.fullmatch(r"NCT\d{8}", value)
+                            re.fullmatch(NCT_ID, value)
                             for value in request.source_record_ids
                         ):
                             raise ValueError("invalid_native_id")

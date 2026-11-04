@@ -9,12 +9,7 @@
 import re
 
 from biz_rules.cleaners import full_to_half
-
-# 批准文号：国药准字 + 一个类别字母（H/Z/S/B/J/F）+ 8 位数字
-_APPROVAL_NUMBER_RE = re.compile(r"国药准字[ZHBSJF]\d{8}")
-
-# 带标签的批准文号 / 注册证号
-_APPROVAL_LABELED_RE = re.compile(r"(?:批准文号|注册证号)[:：]?\s*([ZHBSJF]?\d{8})")
+from processing import identifiers
 
 # 标签字段取值：标签名后接冒号/空白，再取到下一个空白或中文标点为止
 _LABEL_VALUE_RE = re.compile(r"[:：]?\s*([^\s，。；、,，:：]{1,40})")
@@ -24,13 +19,11 @@ def extract_approval_number(text: str) -> str:
     """从正文中精确提取批准文号，取不到返回空字符串。"""
     if not text:
         return ""
-    text = full_to_half(text)
-    m = _APPROVAL_NUMBER_RE.search(text)
-    if m:
-        return m.group(0)
-    m = _APPROVAL_LABELED_RE.search(text)
-    if m:
-        return m.group(1)
+    hits = identifiers.extract(text)
+    for kind in ("nmpa_approval", "nmpa_registration"):  # 编号规则只在 processing.identifiers
+        for hit in hits:
+            if hit["kind"] == kind:
+                return hit["value"]
     return ""
 
 

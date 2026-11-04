@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from processing.identifiers import NCT_ID
 from collections import deque
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -134,7 +135,7 @@ class GraphFieldEvidence(GraphDocumentRef):
 class GraphIdentityRule(Model):
     method_version: Literal["clinicaltrials.native-id.v1"] = "clinicaltrials.native-id.v1"
     namespace: Literal["clinicaltrials.NCT"] = "clinicaltrials.NCT"
-    value: str = Field(pattern=r"^NCT[0-9]{8}$")
+    value: str = Field(pattern="^" + NCT_ID + "$")
     basis: GraphFieldEvidence
 
 

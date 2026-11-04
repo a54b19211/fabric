@@ -24,7 +24,7 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v3"
+PROCESSOR_VERSION = "datafabric.clean_text.v4"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -125,6 +125,68 @@ BOILERPLATE_PATTERNS = [
 ]
 
 
+# 站点模板：整块删除（删整块，每段在原文里仍是连续区间，偏移照样回指）。
+# lead：标题之后、第一段实质正文之前的导航块（每行都匹配其中一条，或整块不超过 20 字）；
+# footer：在正文前四分之一之后，第一个以这些标记开头的块及其后全部（版权、订阅、站点导航尾巴）。
+SITE_TEMPLATES = {
+    "fiercepharma": {
+        "lead": [re.compile(p) for p in (
+            r"Fierce\s+(?:Pharma|Biotech|Healthcare|Life Sciences).*",
+            r"(?:Advertise|About Us|Subscribe|Resources|Events|Podcasts|Webinars|Whitepapers|Survey)",
+            r"(?:Pharma|Vaccines|Asia|Manufacturing|Facilities|Recalls|Warning Letters|Marketing)",
+            r"(?:Cell & Gene Therapy|Drug Delivery|Executives|Special Reports|Fierce 50)",
+            r"(?:Oncology|Supply Chain|AI and Machine Learning|Awards|Outsourcing Awards)",
+            r"(?:Innovation Awards|Pharma Marketing Awards|Industry Events)",
+        )],
+        "footer": ("Let Google know we are your trusted source.", "©", "All rights reserved", "Terms of use",
+                   "Privacy Policy"),
+        "footer_lines": ("Connect", "Let's Talk"),  # 整行就是这个词（页尾导航栏）
+    },
+}
+# 旧采集器把登记页改写成叙述段落，再把原文附在这个标题下（documents 库存里的 ChiCTR 全部如此）
+_REWRITE_APPENDIX = re.compile(r"#{1,6}\s*原始注册信息\s*")
+
+
+def _block_text(block):
+    return "\n".join(n for n in (_norm_line(x) for x, _ in block[1]) if n)
+
+
+def _apply_templates(blocks, site):
+    """返回（保留的块, 删掉的行数）。"""
+    dropped = 0
+    for i, block in enumerate(blocks):
+        if block[0] == "heading" and _REWRITE_APPENDIX.fullmatch(_block_text(block)):
+            dropped += sum(len(b[1]) for b in blocks[:i + 1])
+            blocks = blocks[i + 1:]
+            break
+    template = SITE_TEMPLATES.get(site or "")
+    if not template or not blocks:
+        return blocks, dropped
+    keep, start = [], 0
+    if blocks[0][0] == "heading":
+        keep, start = [blocks[0]], 1
+    while start < len(blocks):
+        text = _block_text(blocks[start])
+        lines = [x for x in text.split("\n") if x]
+        if len(text) <= 20 or all(any(p.fullmatch(x) for p in template["lead"]) for x in lines):
+            dropped += len(blocks[start][1])
+            start += 1
+            continue
+        break
+    rest = blocks[start:]
+    total = sum(len(_block_text(b)) for b in rest)
+    seen = 0
+    for j, block in enumerate(rest):
+        text = _block_text(block)
+        if seen > total // 4 and (text.startswith(template["footer"])
+                                  or text.split("\n")[0] in template.get("footer_lines", ())):
+            dropped += sum(len(b[1]) for b in rest[j:])
+            rest = rest[:j]
+            break
+        seen += len(text)
+    return keep + rest, dropped
+
+
 def is_boilerplate(line: str) -> bool:
     norm = _norm_line(line)
     return bool(norm) and any(p.fullmatch(norm) for p in BOILERPLATE_PATTERNS)
@@ -161,9 +223,9 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
     按空行分块；标题行单独成段；列表、表格（| 管道表格与 <table>…</table> HTML 表格）整块保留。
     表格块内部不做模板行判断：单元格里出现“首页”“打印本页”是数据，不是导航。
     普通块中间夹了一行模板：删掉这行，并在此处断段——这样每段在原文里仍是连续区间，偏移可逐字回指。
-    source_id 暂未使用，留给以后按站点追加模板模式；现在所有来源用同一套保守模式。
+    source_id 是站点（documents 库存按原站）：SITE_TEMPLATES 里有它的，再按站点模板整块删导航和页尾。
+    documents 库存里被旧采集器“改写成叙述段落 + 原文附录”的登记页，只保留“原始注册信息”之后的原文部分。
     """
-    del source_id
     blocks = []  # 每块：[kind, [(line, offset), ...]]
     current = None
     removed = 0
@@ -219,6 +281,8 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
             current = ["list", []]
         current[1].append((line, offset))
     flush()  # 没有闭合的 <table> 也照样整块保留到结尾，不丢内容
+    blocks, dropped = _apply_templates(blocks, source_id)
+    removed += dropped
 
     parts, segments, cursor = [], [], 0
     for kind, lines in blocks:

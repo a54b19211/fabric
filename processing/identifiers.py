@@ -1,7 +1,8 @@
 """清洗层：从正文里抽取并规范化编号（设计 v3 §3.3“解析与清洗”）。
 
 覆盖：NCT、CTR（CDE 药物临床试验登记号）、ChiCTR、PMID、PMCID、DOI、批准文号（国药准字）、
-受理号（CDE）、股票代码（A 股 / 北交所 / 港股）。规范化后的同一编号用来把不同来源的同一试验、论文、
+带标签的批准文号/注册证号、受理号（CDE）、股票代码（A 股 / 北交所 / 港股）。
+全仓库只有这一份编号规则：站点提取器、来源投影、图谱模型的编号格式都从这里取（NCT_ID 等）。规范化后的同一编号用来把不同来源的同一试验、论文、
 药品、公司连起来——但只当同源链接和同一性候选。错连（假阳性）会把两件不相干的事并到一起，
 比漏连代价大，所以每条规则都偏保守：拿不准就不出。
 
@@ -21,13 +22,22 @@ from __future__ import annotations
 
 import re
 
-PROCESSOR_VERSION = "datafabric.identifiers.v1"
+PROCESSOR_VERSION = "datafabric.identifiers.v2"
 
 # 编号两侧不能紧挨 ASCII 字母数字：XNCT012345678、NCT012345678（9 位）都不是 NCT
 _L = r"(?<![A-Za-z0-9])"
 _R = r"(?![A-Za-z0-9])"
 # re.A 让 IGNORECASE 只做 ASCII 大小写折叠；否则 [a-z] 会匹配到开尔文符号 K、长 s 等，造出假编号
 _FLAGS = re.A | re.I
+
+
+# 原生编号的精确格式（校验结构化字段用；正文抽取用下面带边界和大小写折叠的规则）
+NCT_ID = r"NCT[0-9]{8}"
+
+
+def fold_fullwidth(text: str) -> str:
+    """全角 ASCII 和全角空格逐字符转半角（与 NFKC 对这些字符的结果相同），长度不变。"""
+    return _fold(text)
 
 
 def _fold(text: str) -> str:
@@ -79,6 +89,8 @@ _DOI_FULLWIDTH_OK = set("./-_")
 # 批准文号：国药准字 + 类别字母（H 化药 Z 中药 S 生物制品 J 进口分包装 B 保健 F 辅料 T 体外诊断）+ 8 位；
 # 允许中间一个空格（排版常见），多了不认
 _NMPA = re.compile(r"国药准字 ?([HZSJBFT])([0-9]{8})" + _R, _FLAGS)
+# 带标签的批准文号/注册证号（进口药品注册证号等不带“国药准字”的写法）：必须紧跟标签，否则 8 位数字太常见
+_NMPA_LABELED = re.compile(r"(?:批准文号|注册证号)[:：]? ?([HZSJBFT]?[0-9]{8})" + _R, _FLAGS)
 
 # 受理号：CDE 受理号前四位是 申报类别（C 国产 / J 进口）+ 新药或仿制（X / Y）+ 药品类别（H 化药 S 生物
 # Z 中药）+ 申请类型（L 临床 S 上市 B 补充），后接 7 位。字母组合本身不算罕见，所以要么前面 15 个字符内
@@ -202,6 +214,8 @@ def _scan(text: str):
     found.extend(_doi_hits(text, folded))
     for m in _NMPA.finditer(folded):
         found.append(("nmpa_approval", "国药准字" + m.group(1).upper() + m.group(2), m.start(), m.end()))
+    for m in _NMPA_LABELED.finditer(folded):
+        found.append(("nmpa_registration", m.group(1).upper(), m.start(), m.end()))
     for m in _CDE.finditer(folded):
         window = folded[max(0, m.start() - _CDE_WINDOW):m.start()]
         if _CDE_LABEL in window or _cde_standalone(folded, m.start(), m.end()):

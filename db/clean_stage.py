@@ -58,7 +58,13 @@ def _cleaner_input(row):
     """(清洗器的输入, 定位基准)。输入决定结果：同样的输入不重算（v3 3.3“原文没变就复用”）。"""
     source, facts = row["source_id"], row["facts"] or {}
     if source == "clinicaltrials":
-        return {"facts": facts, "locators": row["locators"] or {}, "summary": row["clean_text"]}, "registry_fields"
+        # 摘要直接取原件 briefSummary：投影在没有摘要时用标题顶替，拿它当摘要会把标题定位到摘要路径上
+        try:
+            summary = (((json.loads(row["raw"] or "{}").get("protocolSection") or {})
+                        .get("descriptionModule") or {}).get("briefSummary"))
+        except (ValueError, AttributeError):
+            summary = None
+        return {"facts": facts, "locators": row["locators"] or {}, "summary": summary}, "registry_fields"
     if source == "europe_pmc":
         # 只取清洗器用到的字段：只改引用数等元数据的新版本（EPMC 平均每篇 8 个版本）输入相同，直接复用。
         # 定位用 JSON 路径（/title、/abstractText），不随其他字段变化移动，在每个版本上都能回指。
@@ -68,13 +74,15 @@ def _cleaner_input(row):
             return {"invalid_raw_sha256": hashlib.sha256((row["raw"] or "").encode()).hexdigest(),
                     "raw": row["raw"] or ""}, "raw_json"
         return {"title": data.get("title"), "abstractText": data.get("abstractText")}, "literature_fields"
-    if source in SITE_SOURCES and facts.get("role") == "web_capture":
+    if source in SITE_SOURCES and facts.get("role") in ("web_capture", "site_record"):
         try:
             markdown = (json.loads(row["raw"] or "{}").get("parsed") or {}).get("markdown") or ""
         except ValueError:
             markdown = ""
         return {"markdown": markdown, "source_id": source}, "raw_json:/parsed/markdown"
-    return {"markdown": row["clean_text"] or "", "source_id": source}, "projection_clean_text"
+    # documents 库存按原站套站点模板
+    site = facts.get("source_site") if source == "legacy_documents" else source
+    return {"markdown": row["clean_text"] or "", "source_id": site}, "projection_clean_text"
 
 
 def _run_cleaner(source, inp, basis):
@@ -89,7 +97,7 @@ def _run_cleaner(source, inp, basis):
             seg["source"] = {"json_pointer": (seg.get("source") or {}).get("json_pointer")
                              or ("/title" if seg.get("kind") == "title" else "/abstractText")}
         return out
-    return clean_text.clean_markdown(inp["markdown"], source_id=source)
+    return clean_text.clean_markdown(inp["markdown"], source_id=inp.get("source_id") or source)
 
 
 def _final_attachment_texts(conn, version_ids):
