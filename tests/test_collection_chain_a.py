@@ -183,17 +183,22 @@ def test_rate_gate_without_redis_is_shared_across_processes(tmp_path):
     assert len(stamps) == 6 and min(gaps) >= 0.19 and stamps[-1] - stamps[0] >= 0.95
 
 
-def test_rate_gate_redis_failure_falls_back_to_the_shared_file_gate(tmp_path, monkeypatch):
+def test_rate_gate_redis_failure_waits_and_never_splits_into_a_second_clock(monkeypatch):
+    """Codex r61：配了 Redis 而它故障时不能切到文件闸门（会和仍连得上 Redis 的进程各算各的）。"""
+
     class Broken:
         def set(self, *a, **k):
             raise ConnectionError("down")
 
-    monkeypatch.setenv("DATAFABRIC_RATE_DIR", str(tmp_path))
     monkeypatch.setattr(rate, "_redis", lambda: Broken())
-    calls = []
-    monkeypatch.setattr(rate, "_wait_file", lambda g, i, d: calls.append(g))
-    rate.wait("g", 0.5)
-    assert calls == ["g"]
+    monkeypatch.setattr(rate, "_wait_file", lambda *a: pytest.fail("must not use the file gate"))
+    monkeypatch.setattr(rate.time, "sleep", lambda s: None)
+    import time as _time
+
+    with pytest.raises(TimeoutError):
+        rate.wait("g", 0.5, deadline=_time.monotonic() + 0.0001)
+    with pytest.raises(TimeoutError, match="rate_gate_unavailable"):
+        rate.wait("g", 0.5)
 
 
 def test_rate_gate_respects_the_deadline(tmp_path, monkeypatch):
@@ -276,9 +281,45 @@ def test_only_whitelisted_changes_skip_the_model():
     assert contacts["locations"]["material"] is False
     assert contacts["locations"]["material_reason"] == "site_contacts_only"
     title = changed(official_title="a phase 3  study of XYZ-101")
-    assert title["official_title"]["material"] is False
+    assert title["official_title"]["material_reason"] == "title_case_or_spacing_only"
     order = changed(interventions=[{"type": "DRUG", "name": "Placebo"}, {"type": "DRUG", "name": "XYZ-101"}])
-    assert order["interventions"]["material"] is False
+    assert order["interventions"]["material_reason"] == "order_only"
+
+
+def test_codex_r61_case_is_only_equivalent_where_it_really_is():
+    """单位 mL→ML、描述大小写都不能证明等价；只有正式题目可以忽略大小写。"""
+    units = changed(results_outcome_measures={"unitOfMeasure": "ML"})
+    base = {**BASE, "results_outcome_measures": {"unitOfMeasure": "mL"}}
+    c = {x["field"]: x for x in rd.diff(base, {**base, "results_outcome_measures": {"unitOfMeasure": "ML"}})}
+    assert c["results_outcome_measures"]["material"] is True
+    arm = changed(arm_groups=[{"label": "High dose", "description": "xyz-101 10 MG daily"}])
+    assert arm["arm_groups"]["material"] is True
+    assert units  # 从缺到有也是变化
+
+
+def test_codex_r61_unmapped_change_is_not_hidden_by_a_minor_change():
+    """题目只改大小写（白名单）+ 详细描述（投影外）改了：后者照样送模型。"""
+    import json as _json
+
+    old_raw = _json.dumps({"protocolSection": {"descriptionModule": {"detailedDescription": "old"},
+                                               "statusModule": {"lastUpdateSubmitDate": "2026-01-01"}}})
+    new_raw = _json.dumps({"protocolSection": {"descriptionModule": {"detailedDescription": "new safety signal"},
+                                               "statusModule": {"lastUpdateSubmitDate": "2026-02-01"}}})
+    out = {c["field"]: c for c in rd.diff(BASE, {**BASE, "official_title": "A PHASE 3 STUDY OF XYZ-101"},
+                                          old_raw_stable=old_raw, new_raw_stable=new_raw)}
+    assert out["official_title"]["material"] is False
+    assert out["_unmapped"]["material"] is True
+    assert out["_unmapped"]["detail"]["changed_paths"] == ["/protocolSection/descriptionModule/detailedDescription"]
+
+
+def test_bookkeeping_dates_alone_are_not_a_content_change():
+    import json as _json
+
+    old_raw = _json.dumps({"protocolSection": {"statusModule": {"lastUpdatePostDateStruct": {"date": "2026-01-01"},
+                                                                "statusVerifiedDate": "2026-01"}}})
+    new_raw = _json.dumps({"protocolSection": {"statusModule": {"lastUpdatePostDateStruct": {"date": "2026-02-01"},
+                                                                "statusVerifiedDate": "2026-02"}}})
+    assert rd.diff(BASE, dict(BASE), old_raw_stable=old_raw, new_raw_stable=new_raw) == []
 
 
 def test_field_appearing_or_disappearing_is_never_whitelisted():
@@ -328,6 +369,6 @@ def test_date_detail_and_long_values():
 
 
 def test_change_id_is_stable_and_versioned():
-    assert rd.PROCESSOR_VERSION.endswith(".v2")
+    assert rd.PROCESSOR_VERSION.endswith(".v3")
     a = rd.change_id("a" * 64, "b" * 64, "status")
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")

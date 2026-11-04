@@ -32,7 +32,7 @@ from biz_rules.history_models import (
     source_time,
     utc,
 )
-from biz_rules.history_sources import project_record, stable_raw
+from biz_rules.history_sources import stable_raw, project_record
 from db import registry_changes
 
 
@@ -988,6 +988,9 @@ def finish_fetch(run_id, attempt, batch):
         }
         if batch.get("next_continuation") is not None:
             coverage["next_continuation"] = batch["next_continuation"]
+        if batch.get("attachment_coverage"):
+            # 本次读取每个附件读没读到（站点插件），留在读取记录里，不进原件
+            coverage["attachment_coverage"] = batch["attachment_coverage"][:500]
         coverage.update(
             mode="bounded_public_query",
             limitations=[

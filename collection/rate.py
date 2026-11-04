@@ -1,9 +1,11 @@
 """共享限速组：同一站点（或同一出口）的所有采集请求共用一份请求间隔。每个对外 HTTP 请求发出前都过闸。
 
 - 首选 Redis（SET NX PX）：跨进程、跨主机。
-- Redis 未配置或暂时不可用：退回本机文件锁闸门（fcntl.flock + 共享的“下一次可发时间”）。它仍然跨进程，
+- 没配置 Redis（明确的单机模式）：用本机文件锁闸门（fcntl.flock + 共享的“下一次可发时间”）。它跨进程，
   同一主机上所有采集进程共用一份间隔（Codex r58：旧的“每进程各自计时”在 3 个进程下实际速率放大 3 倍）。
-  跨主机部署必须配 Redis；文件闸门只保证单机。
+- 配置了 Redis 但它暂时故障：不切到文件闸门——那样会和仍连得上 Redis 的进程分成两套时钟（Codex r61 实测
+  两次放行只隔 0.0006 秒）。而是退避重试，等到 deadline 仍不行就抛 TimeoutError，调用方按截止停下，不发请求。
+  跨主机部署必须配 Redis。
 - 等待受 deadline 约束（time.monotonic() 的绝对值），等不到就抛 TimeoutError，调用方记为截止。
 """
 
@@ -16,6 +18,9 @@ import time
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
+
+
+REDIS_FAILURE_RETRIES = 8
 
 
 @lru_cache(maxsize=1)
@@ -69,14 +74,17 @@ def wait(group: str, interval: float, *, deadline: float | None = None) -> None:
         return
     key = "datafabric:rate:" + group
     ms = max(1, int(interval * 1000))
+    failures = 0
     while True:
         try:
             if client.set(key, b"1", nx=True, px=ms):
                 return
             left = client.pttl(key)
-        except Exception:  # noqa: BLE001 -- Redis 故障：退回仍跨进程的文件闸门
-            _wait_file(group, interval, deadline)
-            return
+        except Exception:  # noqa: BLE001 -- Redis 故障：不发请求，退避重试
+            failures += 1
+            if deadline is None and failures >= REDIS_FAILURE_RETRIES:
+                raise TimeoutError("rate_gate_unavailable:" + group) from None
+            left = int(min(5.0, 0.25 * 2 ** failures) * 1000)
         pause = (left if isinstance(left, int) and left > 0 else ms) / 1000
         if deadline is not None and time.monotonic() + pause > deadline:
             raise TimeoutError(group)

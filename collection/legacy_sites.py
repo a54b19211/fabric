@@ -143,11 +143,14 @@ class _Stop(Exception):
 
 
 class _Resume(_Stop):
-    """预算在某一父项的附件中途用完：attachment 是下一个要读的附件序号。"""
+    """预算在某一父项的附件中途用完：attachment 是下一个要读的附件序号；page_recorded 表示这一页的
+    页面版本已经保存，续读时只为拿附件链接和会话重取页面，不再占版本名额（Codex r61：否则 max_records=1
+    时每轮都被父页面占满，永远读不到附件）。"""
 
-    def __init__(self, reason, attachment):
+    def __init__(self, reason, attachment, page_recorded=False):
         super().__init__(reason)
         self.attachment = attachment
+        self.page_recorded = page_recorded
 
 
 def run_byte_budget() -> int:
@@ -174,6 +177,9 @@ class _Reader:
         self.request_budget = request.max_pages * 10
         self.bytes = 0
         self.byte_budget = run_byte_budget()
+        # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_attempted ...）。放在读取结果里，
+        # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本（Codex r61）。
+        self.coverage: list[dict] = []
 
     def before_request(self):
         if self.requests >= self.request_budget:
@@ -203,9 +209,11 @@ class _Reader:
         except ValueError as exc:
             status = "too_large" if str(exc) == "attachment_too_large" else "download_failed"
             entry.update(status=status, error=str(exc)[:80])
+            self.coverage.append({"parent_record_id": parent_id, **entry})
             return entry
         except Exception as exc:  # noqa: BLE001 -- 附件失败是覆盖缺口，不让父页面失败
             entry.update(status="download_failed", error=type(exc).__name__)
+            self.coverage.append({"parent_record_id": parent_id, **entry})
             return entry
         self.bytes += size
         entry.update(sha256=sha, size=size)
@@ -228,13 +236,16 @@ class _Reader:
                 },
             )
         )
+        self.coverage.append({"parent_record_id": parent_id, **entry})
         return entry
 
-    def page(self, url, skip_attachments=0):
-        """读一个详情页和它的附件。skip_attachments：续读时这一页前面已读过的附件数。
-        预算在附件中途用完时，父页面照常保存（未读附件标 not_attempted），抛 _Resume。"""
+    def page(self, url, skip_attachments=0, record_page=True):
+        """读一个详情页和它的附件。skip_attachments：续读时这一页前面已读过的附件数；record_page=False：
+        这一页的页面版本上一轮已保存，这次只为拿附件链接和会话重取，不再占版本名额。
+        预算在附件中途用完时，父页面照常保存，抛 _Resume（续读位置指向下一个附件）。"""
         cfg = self.profile
-        self.before_record()
+        if record_page:
+            self.before_record()
         self.before_request()
         page_data = _fetch_page(
             url,
@@ -254,7 +265,6 @@ class _Reader:
             "role": "web_capture",
             "site": self.site,
             "url": url,
-            "fetched_at": page_data.get("timestamp"),
             "html_sha256": html_sha,
             "parsed": {k: parsed.get(k) for k in ("title", "publish_date", "markdown", "parse_method", "extra")},
             "attachments": [],
@@ -268,32 +278,27 @@ class _Reader:
                 path.write_bytes(raw)
             capture["html_store_path"] = str(path)
         index = len(self.records)
-        self.records.append(None)  # 占位：父页面排在它的附件前面
+        if record_page:
+            self.records.append(None)  # 占位：父页面排在它的附件前面
         cookies = page_data.get("cookies") or []
         links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
-        stopped = None
+        # 原件里的附件清单只有来源给出的链接和文字；每个附件这次读没读到记在 coverage
+        capture["attachments"] = [
+            {"record_id": attachment_record_id(url, link["url"]), "url": link["url"], "text": link.get("text", "")}
+            for link in links
+        ]
+        if record_page:
+            self.records[index] = _record(url, capture)
         for position, link in enumerate(links):
-            if position < skip_attachments or stopped:
-                capture["attachments"].append(
-                    {
-                        "record_id": attachment_record_id(url, link["url"]),
-                        "url": link["url"],
-                        "text": link.get("text", ""),
-                        "status": "read_in_earlier_run" if position < skip_attachments else "not_attempted",
-                    }
-                )
+            if position < skip_attachments:
                 continue
             try:
-                capture["attachments"].append(self.attachment(link, url, cookies, "detail_page"))
+                self.attachment(link, url, cookies, "detail_page")
             except _Stop as stop:
-                stopped = (stop.reason, position)
-                capture["attachments"].append(
-                    {"record_id": attachment_record_id(url, link["url"]), "url": link["url"],
-                     "text": link.get("text", ""), "status": "not_attempted"}
-                )
-        self.records[index] = _record(url, capture)
-        if stopped:
-            raise _Resume(*stopped)
+                for later in links[position:]:
+                    self.coverage.append({"parent_record_id": url, "url": later["url"], "status": "not_attempted",
+                                          "record_id": attachment_record_id(url, later["url"])})
+                raise _Resume(stop.reason, position, page_recorded=True) from None
 
 
 @contextmanager
@@ -320,10 +325,10 @@ def _gated_driver(reader):
 
 def _cursor(request):
     if not request.continuation:
-        return 0, 0
+        return 0, 0, False
     try:
         value = json.loads(request.continuation.cursor)
-        return int(value["i"]), int(value["a"])
+        return int(value["i"]), int(value["a"]), bool(value.get("p"))
     except (ValueError, KeyError, TypeError):
         raise HistoryError("invalid_cursor", "续读位置无效") from None
 
@@ -335,7 +340,7 @@ def read_site(request) -> dict:
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
     position = 0
     try:
-        start_i, start_a = _cursor(request)
+        start_i, start_a, start_recorded = _cursor(request)
         position = start_i
         if request.query in {"by_url", "legacy_attachments"}:
             for url in request.source_record_ids:
@@ -345,7 +350,8 @@ def read_site(request) -> dict:
                 url = request.source_record_ids[position]
                 skip = start_a if position == start_i else 0
                 if request.query == "by_url":
-                    reader.page(url, skip_attachments=skip)
+                    reader.page(url, skip_attachments=skip,
+                                record_page=not (position == start_i and start_recorded))
                     continue
                 for k, link in enumerate(_legacy_attachment_links(reader.site, url)):
                     if k < skip:
@@ -353,7 +359,7 @@ def read_site(request) -> dict:
                     try:
                         reader.attachment(link, url, None, "legacy_attachments_table")
                     except _Stop as stop_here:
-                        raise _Resume(stop_here.reason, k) from None
+                        raise _Resume(stop_here.reason, k, page_recorded=False) from None
             exhausted = True
         else:
             if request.query not in reader.profile.get("start_urls", []):
@@ -365,12 +371,14 @@ def read_site(request) -> dict:
                     if seen < start_i:
                         continue
                     position = seen
-                    reader.page(url, skip_attachments=start_a if seen == start_i else 0)
+                    first = seen == start_i
+                    reader.page(url, skip_attachments=start_a if first else 0,
+                                record_page=not (first and start_recorded))
             exhausted = True
     except _Resume as stopped:
-        stop, resume = stopped.reason, (position, stopped.attachment)
+        stop, resume = stopped.reason, (position, stopped.attachment, stopped.page_recorded)
     except _Stop as stopped:
-        stop, resume = stopped.reason, (position, 0)
+        stop, resume = stopped.reason, (position, 0, False)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
@@ -380,7 +388,7 @@ def read_site(request) -> dict:
     if resume and error is None:
         next_continuation = {
             "scope_hash": request.scope_hash(),
-            "cursor": json.dumps({"i": resume[0], "a": resume[1]}),
+            "cursor": json.dumps({"i": resume[0], "a": resume[1], "p": int(resume[2])}),
             "read_count": resume[0],
         }
     return {
@@ -394,6 +402,7 @@ def read_site(request) -> dict:
         "source_total": None,
         "count_drift": None,
         "next_continuation": next_continuation,
+        "attachment_coverage": reader.coverage,
     }
 
 
@@ -411,7 +420,6 @@ def project_capture(source_id: str, item: ArchiveRecord) -> dict:
             "parse_method": parsed.get("parse_method"),
             "html_sha256": data.get("html_sha256"),
             "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
-            "attachment_status": {a.get("record_id"): a.get("status") for a in data.get("attachments", [])},
             "extra": parsed.get("extra") or {},
         }
         title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
