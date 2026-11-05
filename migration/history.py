@@ -22,6 +22,7 @@ def migrate_history():
             "V025__clean_stage.sql",
             "V029__legacy_aliases.sql",
             "V030__profile_annotations.sql",
+            "V032__extraction_checks.sql",
         )
     )
     with history_engine().begin() as conn:

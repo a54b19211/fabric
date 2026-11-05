@@ -318,6 +318,11 @@ def _process_rows(conn, key, rows, counts):
 
         counts["index_enqueued"] = counts.get("index_enqueued", 0) + enqueue_versions(
             conn, [row["v"] for row in profile_rows])
+        # v3 6.2: the extraction-consistency checks of these products, registered in the same transaction
+        from db.extraction_checks import enqueue as enqueue_checks
+
+        counts["checks_enqueued"] = counts.get("checks_enqueued", 0) + enqueue_checks(
+            conn, [(row["v"], row["tpv"]) for row in profile_rows])
 
 
 def _process_waiting(engine, key, counts, limit=500):

@@ -351,6 +351,21 @@ def clean_text_route(
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, processor_version)
 
 
+@router.get("/extraction-checks", dependencies=[Depends(require_read)])
+def extraction_checks_route(
+    source_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+):
+    """v3 6.2: the extraction-consistency checks of visible versions (BioCheck), per producer. A version without a
+    completed check is "unchecked"; consumers use only completed, explicit results and never raise a state."""
+    from db.extraction_checks import for_versions
+
+    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+
+
 class SearchRequest(BaseModel):
     """检索请求（v3 3.6）。cutoff 不给就是现在；mode 决定按哪种时间判可见（见 db.retrieval）。"""
     model_config = ConfigDict(extra="forbid")
