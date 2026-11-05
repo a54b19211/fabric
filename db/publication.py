@@ -180,6 +180,7 @@ def _seed_document(conn, row):
 
 def backfill_once(engine=None, *, limit=5):
     """固定库存上界，逐站轮转；同一总预算，库存EOF不是原站覆盖证明。"""
+    _legacy_write()  # v3 6.3: the documents-store inventory no longer seeds legacy_documents (first gate)
     engine = engine or publication_engine()
     sites = source_sites()
     disk = disk_status()
@@ -464,11 +465,19 @@ def _graph_input(conn, uuid, fallback=None):
     }
 
 
+def _legacy_write():
+    """Every path that would write a new legacy_documents version passes here (v3 6.3): retired, the event stays
+    blocked with its reason (410), kept, not retried; nothing is deleted."""
+    if history.legacy_retired():
+        raise HistoryError(*history.LEGACY_RETIRED, 410)
+
+
 def _prepare(engine, row):
     if row["prepared"] is not None:
         prepared = row["prepared"]
         if prepared.get("history_subject") is not None:
             return prepared
+        _legacy_write()
         if prepared["document_request"]["is_demo"] is not is_demo():
             raise HistoryError(
                 "publication_demo_scope_changed",
@@ -509,6 +518,7 @@ def _prepare(engine, row):
                             + row["event_key"])}
             _save_prepared(engine, row, prepared)
             return prepared
+    _legacy_write()
     if frozen.get("source_site") not in source_sites():
         raise HistoryError(
             "publication_source_blocked",

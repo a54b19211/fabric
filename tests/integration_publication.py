@@ -52,6 +52,7 @@ def databases(monkeypatch):
         '["clinicaltrials","legacy_documents","reviewed_graph","external_archive"]',
     )
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_SOURCES", '["clinicaltrials"]')
+    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # these tests drive the old legacy writer (cutover mode)
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_IS_DEMO", "true")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_NAMESPACE", "synthetic.publication")

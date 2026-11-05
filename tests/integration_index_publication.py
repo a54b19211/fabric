@@ -46,6 +46,7 @@ def pg_engine():
 @pytest.fixture
 def pg(pg_engine, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["external_archive","legacy_documents","clinicaltrials"]')
+    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # withdrawal fixtures are legacy versions (cutover mode)
     monkeypatch.setattr(history, "history_engine", lambda: pg_engine)
     monkeypatch.setattr(history_migration, "history_engine", lambda: pg_engine)
     monkeypatch.setattr(index_migration, "history_engine", lambda: pg_engine)

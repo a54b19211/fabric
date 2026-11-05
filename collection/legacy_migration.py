@@ -34,6 +34,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
@@ -64,6 +65,25 @@ def front_matter(markdown: str) -> tuple[dict, str]:
                 value = value[1:-1]
             meta[key.strip()] = value
     return meta, markdown[end + 5 :]
+
+
+def of_site(url: str, pattern: str) -> bool:
+    """The URL is one of the site's own pages by its parsed parts (Codex r92): http(s), no user info, the default
+    port, a hostname that is the site's host or a subdomain of it, and a path under the site's detail path when
+    the site names one ("chictr.org.cn/showproj"). A site URL carried in the query, fragment or user info of
+    another page proves nothing."""
+    if not url or not pattern:
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    host, _, path = pattern.partition("/")
+    hostname = (parts.hostname or "").lower()
+    return (parts.scheme in ("http", "https") and not parts.username and not parts.password
+            and port in (None, 80, 443) and (hostname == host or hostname.endswith("." + host))
+            and (not path or parts.path.startswith("/" + path)))
 
 
 def _uuid5(value: str) -> str:
@@ -153,7 +173,7 @@ def plan(payload: dict) -> dict:
             return dict(out, reason="uuid_not_reproducible")
         record_id, basis, kind = legacy_uuid, "uuid5_record_key", "record"
     else:
-        if not url or profile.get("url_pattern", "\0") not in url:
+        if not of_site(url, profile.get("url_pattern") or ""):
             return dict(out, reason="url_not_of_site")
         if _uuid5(url) != legacy_uuid:
             return dict(out, reason="detail_url_not_proven")

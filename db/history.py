@@ -554,6 +554,8 @@ def _same_identity(payload, identity, *, ignore_raw=False):
 
 def import_archive(request: ArchiveImport, key: str):
     # 全包先验证再发布；任何一条非法均不部分提交或改变已有成果。
+    if request.source_id == "legacy_documents" and legacy_retired():
+        raise HistoryError(*LEGACY_RETIRED, 410)  # v3 6.3：旧桥不再新写（DATAFABRIC_LEGACY_WRITES=on 为切换期）
     prepared = [
         (item, project_record(request.source_id, item)) for item in request.records
     ]
@@ -1333,6 +1335,18 @@ def backfill_rank(source_id, *, batch=500):
         ).rowcount
 
 
+def legacy_retired() -> bool:
+    """v3 6.3: the legacy_documents bridge is retired - nothing new is written to it (documents come in through
+    their real sources, collected or migrated) and no new query chooses it; versions already there stay readable
+    by their old ids (reports, graphs, audit, aliases). DATAFABRIC_LEGACY_WRITES=on keeps the old writer and
+    queries for the time of a cutover."""
+    return os.environ.get("DATAFABRIC_LEGACY_WRITES", "off") != "on"
+
+
+LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥已退役（v3 6.3）：不再写入、不再作新查询的来源；文档经各真实来源进入，"
+                  "旧版本按旧编号仍可读")
+
+
 def list_records(
     source_id,
     is_demo,
@@ -1346,6 +1360,8 @@ def list_records(
     limit=25,
     cursor=None,
 ):
+    if source_id == "legacy_documents" and legacy_retired() and not source_record_ids:
+        raise HistoryError(*LEGACY_RETIRED, 410)  # 按旧编号（source_record_ids）的读取不受影响
     _derived_mode(source_id, mode)
     if not 1 <= limit <= 100:
         raise HistoryError("query_budget", "每页条数须为1至100")

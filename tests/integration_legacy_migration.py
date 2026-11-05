@@ -23,6 +23,7 @@ SOURCES = ["legacy_documents", "clinicaltrials", "nmpa", "fda_api_drug_label", "
 @pytest.fixture
 def lpg(pg, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(SOURCES))
+    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # fixtures write legacy versions (cutover mode)
     with pg.begin() as conn:
         conn.execute(text("TRUNCATE legacy_aliases"))
     return pg
@@ -184,6 +185,19 @@ def test_plan_is_pure_and_names_every_reason():
     assert plan(payload("fda_api_drug_label", str(uuid.uuid4()), "", LABEL))["reason"] == "uuid_not_reproducible"
     assert plan(payload("fda_api_drug_label", u5("x"), "", "no key"))["reason"] == "record_key_not_found"
     assert plan(payload("unknown_site", "u", "", "x"))["reason"] == "source_unknown"
+    # Codex r92: ownership is proven by the parsed URL, not by a site URL carried inside another page's URL
+    for foreign in ("https://example.org/fabric-review-only?next=" + NMPA_URL,
+                    "https://example.org/#" + NMPA_URL,
+                    "https://www.nmpa.gov.cn@example.org/x.html",
+                    "https://user:pw@www.nmpa.gov.cn/xxgk/1.html",
+                    "https://www.nmpa.gov.cn:8443/xxgk/1.html",
+                    "ftp://www.nmpa.gov.cn/xxgk/1.html",
+                    "https://nmpa.gov.cn.example.org/xxgk/1.html"):
+        assert plan(payload("nmpa", u5(foreign), foreign, PAGE))["reason"] == "url_not_of_site", foreign
+    chictr = "https://www.chictr.org.cn/showproj.html?proj=325180"
+    assert plan(payload("chictr", u5(chictr), chictr, PAGE))["basis"] == "uuid5_detail_url"
+    listing = "https://www.chictr.org.cn/searchproj.html?page=2"  # the site's own, but not a detail page
+    assert plan(payload("chictr", u5(listing), listing, PAGE))["reason"] == "url_not_of_site"
     assert plan(payload("nmpa", u5(NMPA_URL), NMPA_URL, "", "withdrawn"))["reason"] == "legacy_withdrawn"
     bad = dict(PROTOCOL, identificationModule={"nctId": "NOT-AN-NCT"})
     assert plan(payload("clinicaltrials", "u", "", ct_markdown(bad)))["reason"] == "nct_not_found"
@@ -192,3 +206,30 @@ def test_plan_is_pure_and_names_every_reason():
     assert good["block"]["scalar_rendering"] == {"hasResults": "python_str"}
     assert plan(payload("clinicaltrials", "u", "", ct_markdown(PROTOCOL, "\n**hasResults**: maybe")))[
         "reason"] == "embedded_json_incomplete"
+
+
+def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_still_read(lpg, monkeypatch):
+    """Codex r92: retirement is real - with the switch off (the default) nothing new is written to
+    legacy_documents (archive import, the publisher's inventory seeding), no new query chooses it, and an old id
+    still reads its version (with its alias). Nothing is deleted."""
+    from db import publication
+
+    page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page")  # written in cutover mode (fixture)
+    migrate(is_demo=False, apply=True)
+    monkeypatch.delenv("DATAFABRIC_LEGACY_WRITES")
+    with lpg.begin() as conn:
+        now = store._now(conn)
+    with pytest.raises(HistoryError) as error:
+        legacy("nmpa", u5(NMPA_URL + "?2"), NMPA_URL + "?2", PAGE, "new-after-retirement")
+    assert (error.value.code, error.value.status) == ("legacy_retired", 410)
+    with pytest.raises(HistoryError) as error:
+        publication.backfill_once(limit=5)
+    assert error.value.code == "legacy_retired"
+    with pytest.raises(HistoryError) as error:  # a new query does not choose legacy
+        store.list_records("legacy_documents", False, "current", now, terms=["公告"])
+    assert error.value.code == "legacy_retired"
+    by_id = store.list_records("legacy_documents", False, "current", now, source_record_ids=[page])
+    assert [item.version_id for item in by_id.items] == [page_v]  # an old reference still resolves
+    read = store.read_version(page_v, "legacy_documents", page, False, "current", now)
+    assert read.migration["status"] == "imported"
+    assert len(rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")) == 1  # kept
