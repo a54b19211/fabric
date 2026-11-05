@@ -356,7 +356,12 @@ _SENT = "(p.first_send_at IS NOT NULL OR p.knowledge_id IS NOT NULL OR p.receipt
 # An upload stops counting as in flight only when it is settled: ready / disabled, or (not being sent again)
 # its parse ended upstream or it was proven rejected before anything was created. blocked, waiting or an
 # expired lease never release it - the remote outcome may still be open (Codex DECISION T-30 r2).
-_RELEASED = ("(p.state IN ('ready','disabled') OR (p.state<>'sending' AND ("
+# Evidence about the current attempt only: a receipt naming a later physical attempt than the one known when
+# this upload was reserved (attempt_floor). An earlier attempt's rejection, or a stale receipt saved after a lost
+# response, never releases a new attempt's slot; without such evidence only ready / disabled release it.
+_AFTER_ATTEMPT = ("(p.attempt_floor IS NULL OR "
+                  "COALESCE((p.receipt->'last_attempt'->>'attempt')::int,0)>p.attempt_floor)")
+_RELEASED = ("(p.state IN ('ready','disabled') OR (p.state<>'sending' AND " + _AFTER_ATTEMPT + " AND ("
              "COALESCE(p.receipt->>'parse_status','') IN ('completed','failed','cancelled') OR "
              "(COALESCE(p.receipt->>'upload_status','')='rejected' AND p.knowledge_id IS NULL))))")
 # COALESCE: a receipt without these fields must not turn the test into NULL (NOT NULL would drop an open upload
@@ -396,50 +401,77 @@ def limits():
             "burst": _env_number("DATAFABRIC_INDEX_UPLOAD_BURST", 10, float)}
 
 
+# An upload whose size is unknown (sent before sizes were recorded and not recoverable) counts as the largest
+# single upload allowed, never as zero.
+_SIZE = ("COALESCE(sum(COALESCE(p.sent_chars,:uc)),0),COALESCE(sum(COALESCE(p.sent_bytes,:ub)),0),"
+         "count(*) FILTER (WHERE p.sent_chars IS NULL OR p.sent_bytes IS NULL)")
+
+
+def _unknown_size():
+    return {"uc": index_pieces.MAX_CHARS, "ub": index_pieces.MAX_BYTES}
+
+
 def _inflight(conn, kb, exclude=None):
+    """(entries, chars, bytes, entries of unknown size) in flight for a knowledge base."""
     return conn.execute(text(
-        "SELECT count(*),COALESCE(sum(p.sent_chars),0),COALESCE(sum(p.sent_bytes),0) FROM index_publications p "
+        "SELECT count(*)," + _SIZE + " FROM index_publications p "
         "WHERE p.manifest->>'knowledge_base_id'=:kb AND p.state NOT IN ('ready','disabled') AND " + _SENT
         + " AND NOT " + _RELEASED + (" AND p.id<>:id" if exclude else "")
-    ), {"kb": kb, "id": exclude}).one()
+    ), {"kb": kb, "id": exclude, **_unknown_size()}).one()
 
 
 def _gated(conn, lim):
-    """Knowledge bases where no new upload may start now (in-flight budget full, or no send token)."""
-    full = conn.execute(text(
-        "SELECT kb FROM (SELECT p.manifest->>'knowledge_base_id' AS kb,count(*) AS n,"
-        "COALESCE(sum(p.sent_chars),0) AS c,COALESCE(sum(p.sent_bytes),0) AS b FROM index_publications p "
-        "WHERE p.state NOT IN ('ready','disabled') AND " + _SENT + " AND NOT " + _RELEASED + " GROUP BY 1) x "
-        "WHERE n>=:n OR c>=:c OR b>=:b "
-        "UNION SELECT knowledge_base_id FROM index_send_bucket "
+    """{knowledge base: reason} where no new upload may start now: in-flight entries or size full, or no token."""
+    out = {}
+    for kb, n, c, b, _ in conn.execute(text(
+        "SELECT p.manifest->>'knowledge_base_id'," "count(*)," + _SIZE + " FROM index_publications p "
+        "WHERE p.state NOT IN ('ready','disabled') AND " + _SENT + " AND NOT " + _RELEASED + " GROUP BY 1"
+    ), _unknown_size()):
+        if n >= lim["max_inflight"]:
+            out[kb] = "inflight_entries"
+        elif c >= lim["max_inflight_chars"] or b >= lim["max_inflight_bytes"]:
+            out[kb] = "inflight_size"
+    for (kb,) in conn.execute(text(
+        "SELECT knowledge_base_id FROM index_send_bucket "
         "WHERE LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0)<1"
-    ), {"n": lim["max_inflight"], "c": lim["max_inflight_chars"], "b": lim["max_inflight_bytes"],
-        "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalars().all()
-    return list(full)
+    ), {"burst": lim["burst"], "rate": lim["uploads_per_minute"]}):
+        out.setdefault(kb, "send_rate")
+    return out
 
 
-def _gate_denied(conn, kb, reason):
-    """Count a denial and the time the gate has been closed (gaps between denials capped at 60 s)."""
+def _gate_closed(conn, kb, reason):
+    """A gate seen closed while uploads wait: count the denial (per observation) and open a wall-clock interval
+    (closed_since) for the reason and for "any" - the interval, not the number of threads that saw it, is the
+    blocked time, so concurrent workers do not add it up twice."""
+    for r in (reason, "any"):
+        conn.execute(text("""
+            INSERT INTO index_gate_stats(knowledge_base_id,reason,denials,blocked_seconds,last_at,closed_since)
+            VALUES (:kb,:r,1,0,clock_timestamp(),clock_timestamp())
+            ON CONFLICT (knowledge_base_id,reason) DO UPDATE SET denials=index_gate_stats.denials+1,
+              last_at=clock_timestamp(),closed_since=COALESCE(index_gate_stats.closed_since,clock_timestamp())
+        """), {"kb": kb, "r": r})
+
+
+def _gate_open(conn, kb):
+    """The gate seen open: close every open interval of this knowledge base into blocked_seconds."""
     conn.execute(text("""
-        INSERT INTO index_gate_stats(knowledge_base_id,reason,denials,blocked_seconds,last_at)
-        VALUES (:kb,:reason,1,0,clock_timestamp())
-        ON CONFLICT (knowledge_base_id,reason) DO UPDATE SET denials=index_gate_stats.denials+1,
-          blocked_seconds=index_gate_stats.blocked_seconds
-            +LEAST(60,EXTRACT(EPOCH FROM clock_timestamp()-index_gate_stats.last_at)),
-          last_at=clock_timestamp()
-    """), {"kb": kb, "reason": reason})
+        UPDATE index_gate_stats SET blocked_seconds=blocked_seconds+EXTRACT(EPOCH FROM clock_timestamp()-closed_since),
+          closed_since=NULL WHERE knowledge_base_id=:kb AND closed_since IS NOT NULL
+    """), {"kb": kb})
 
 
-def _reserve(row, content):
+def _reserve(row, content, receipt=None):
     """Before one physical upload (a first upload or the retry of one proven rejected): under the knowledge
     base's advisory lock - shared by every worker and process - check the in-flight entries, characters and
-    bytes, take a send token, and mark the job sending with its size, all in one transaction. Returns None
-    when granted, or the reason it was not (nothing is sent then)."""
+    bytes, take a send token, and mark the job sending with its size and the bridge's latest known attempt
+    (attempt_floor: only evidence about a later attempt can settle this one), all in one transaction. Returns
+    None when granted, or the reason it was not (nothing is sent then)."""
+    floor = int(((receipt or {}).get("last_attempt") or {}).get("attempt") or 0)
     kb, lim = row["manifest"]["knowledge_base_id"], limits()
     chars, size = len(content), len(content.encode())
     with history.history_engine().begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "index_kb:" + kb})
-        n, c, b = _inflight(conn, kb, exclude=row["id"])
+        n, c, b, _ = _inflight(conn, kb, exclude=row["id"])
         reason = None
         if n + 1 > lim["max_inflight"]:
             reason = "inflight_entries"
@@ -458,13 +490,14 @@ def _reserve(row, content):
                 ON CONFLICT (knowledge_base_id) DO UPDATE SET tokens=:t,refilled_at=clock_timestamp()
             """), {"kb": kb, "t": tokens if reason else tokens - 1})
         if reason:
-            _gate_denied(conn, kb, reason)
+            _gate_closed(conn, kb, reason)
             return reason
+        _gate_open(conn, kb)
         changed = conn.execute(text("""
             UPDATE index_publications SET first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',
-              sent_chars=:chars,sent_bytes=:size,updated_at=clock_timestamp()
+              sent_chars=:chars,sent_bytes=:size,attempt_floor=:floor,updated_at=clock_timestamp()
             WHERE id=:id AND lease_token=:token AND lease_until>clock_timestamp()
-        """), {"id": row["id"], "token": row["lease_token"], "chars": chars, "size": size})
+        """), {"id": row["id"], "token": row["lease_token"], "chars": chars, "size": size, "floor": floor})
         if changed.rowcount != 1:
             raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
     return None
@@ -473,8 +506,20 @@ def _reserve(row, content):
 def _claim_class(klass):
     """The next due job of one class: the source served least recently in this class first, then by due time.
     An upload class skips knowledge bases whose gate is closed, so their jobs do not burn turns."""
-    gated = _gated_now() if klass in UPLOAD_CLASSES else []
     with history.history_engine().begin() as conn:
+        gated = {}
+        if klass in UPLOAD_CLASSES:
+            # the gate before the claim: knowledge bases with due uploads are seen closed or open, and recorded
+            gated = _gated(conn, limits())
+            waiting = [kb for (kb,) in conn.execute(text(
+                "SELECT DISTINCT p.manifest->>'knowledge_base_id' FROM index_publications p "
+                "WHERE p.next_check_at<=clock_timestamp() AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp()) "
+                "AND " + CLASS_SQL[klass]))]
+            for kb in waiting:
+                if kb in gated:
+                    _gate_closed(conn, kb, gated[kb])
+                else:
+                    _gate_open(conn, kb)
         row = conn.execute(text("""
             SELECT p.*,t.config,t.enabled FROM index_publications p
             JOIN index_targets t ON t.id=p.target_id
@@ -485,7 +530,7 @@ def _claim_class(klass):
               AND NOT (p.manifest->>'knowledge_base_id' = ANY(:gated))
             ORDER BY c.last_claimed_at NULLS FIRST,p.next_check_at,p.id
             FOR UPDATE OF p SKIP LOCKED LIMIT 1
-        """), {"k": klass, "gated": gated}).mappings().first()
+        """), {"k": klass, "gated": list(gated)}).mappings().first()
         if row is None:
             return None
         token = uuid4().hex
@@ -502,9 +547,16 @@ def _claim_class(klass):
         return dict(row, lease_token=token, job_class=klass)
 
 
-def _gated_now():
-    with history.history_engine().begin() as conn:
-        return _gated(conn, limits())
+def rotation_gaps():
+    """Per class, the longest run of claims between two of its turns in ROTATION, from any starting phase (F at
+    turns 0 and 3: 5). With a fixed set of S_k sources holding due jobs of class k, its gate open and every
+    claim bounded (lease LEASE_SECONDS), a due job with a jobs ahead of it in its source is claimed within
+    (a + 1) * S_k * gap_k claims of one worker thread; new jobs arriving in other classes do not change it."""
+    out = {}
+    for k in dict.fromkeys(ROTATION):
+        at = [i for i, c in enumerate(ROTATION) if c == k]
+        out[k] = max((at[(j + 1) % len(at)] - at[j]) % len(ROTATION) or len(ROTATION) for j in range(len(at)))
+    return out
 
 
 def scheduler_status():
@@ -528,17 +580,20 @@ def scheduler_status():
             "SELECT DISTINCT manifest->>'knowledge_base_id' FROM index_publications"))} - {None})
         budget = []
         for kb in kbs:
-            n, c, b = _inflight(conn, kb)
+            n, c, b, unknown = _inflight(conn, kb)
             tokens = conn.execute(text(
                 "SELECT LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0) "
                 "FROM index_send_bucket WHERE knowledge_base_id=:kb"
             ), {"kb": kb, "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalar()
-            gates = {r["reason"]: {"denials": r["denials"], "blocked_seconds": round(float(r["blocked_seconds"]), 1),
+            gates = {r["reason"]: {"denials": r["denials"], "blocked_seconds": round(float(r["blocked"]), 1),
+                                   "closed_since": r["closed_since"].isoformat() if r["closed_since"] else None,
                                    "last_at": r["last_at"].isoformat() if r["last_at"] else None}
                      for r in conn.execute(text(
-                         "SELECT reason,denials,blocked_seconds,last_at FROM index_gate_stats WHERE knowledge_base_id=:kb"
+                         "SELECT reason,denials,last_at,closed_since,blocked_seconds+COALESCE(EXTRACT(EPOCH FROM "
+                         "clock_timestamp()-closed_since),0) AS blocked FROM index_gate_stats WHERE knowledge_base_id=:kb"
                      ), {"kb": kb}).mappings()}
-            budget.append({"knowledge_base_id": kb, "inflight": {"entries": n, "chars": int(c), "bytes": int(b)},
+            budget.append({"knowledge_base_id": kb, "inflight": {"entries": n, "chars": int(c), "bytes": int(b),
+                                                                 "unknown_size_entries": unknown},
                            "send_tokens": None if tokens is None else round(float(tokens), 2), "gate": gates})
         hour = conn.execute(text(
             "SELECT count(*) FILTER (WHERE first_send_at>clock_timestamp()-interval '1 hour') AS first_sends,"
@@ -548,7 +603,8 @@ def scheduler_status():
     for r in classes:
         r["oldest_due_seconds"] = None if r["oldest_due_seconds"] is None else round(float(r["oldest_due_seconds"]), 1)
         r["last_claimed_at"] = r["last_claimed_at"].isoformat() if r["last_claimed_at"] else None
-    return {"rotation": list(ROTATION), "limits": lim, "classes": classes, "knowledge_bases": budget,
+    return {"rotation": list(ROTATION), "rotation_gaps": rotation_gaps(), "limits": lim, "classes": classes,
+            "knowledge_bases": budget,
             "last_hour": dict(hour)}
 
 
@@ -746,7 +802,7 @@ def process_once(*, client=None, classes=None, lane=None, sent=None):
             # 都先过同一个原子在途预算和共享发送令牌（T-30）。补绑定、对账找回只是 GET/补投影，不占名额。
             physical = receipt is None or (receipt.get("upload_status") == "rejected" and not receipt.get("knowledge_id"))
             if physical:
-                denied = _reserve(row, content)
+                denied = _reserve(row, content, receipt)
                 if denied:
                     return _hold(row, 15)
             else:

@@ -76,8 +76,8 @@ def handled(pg, row):
                           "next_check_at=clock_timestamp()+interval '1 day' WHERE id=:id"), {"id": row["id"]})
 
 
-def turn(n):
-    k = n % len(index.ROTATION)
+def turn(n, phase=0):
+    k = (n + phase) % len(index.ROTATION)
     for klass in dict.fromkeys(index.ROTATION[k:] + index.ROTATION[:k]):
         row = index._claim_class(klass)
         if row is not None:
@@ -147,7 +147,8 @@ def test_every_class_is_served_within_its_bound_under_backlog_and_inflow(pg, mon
         claimed.setdefault(row["id"], (n + 1, row["job_class"], time.monotonic() - started))
         handled(pg, row)
         clone(pg, base, state="'queued'", desired_state="'active'", lane="'new'", **UNSENT)  # continuous inflow
-    bound = {"F": 4, "P": 3, "R": 8, "B": 8, "C": 8}  # ceil(8/q) with q = 2, 3, 1, 1, 1 of 8
+    bound = index.rotation_gaps()  # worst phase: F 5, P 3, R / B / C 8
+    assert bound == {"F": 5, "P": 3, "R": 8, "B": 8, "C": 8}
     for group, klass in ((firsts, "F"), (retires, "R"), (rechecks, "C"), (backfills, "B"), (polls[:60], "P")):
         for a, job_id in enumerate(group):
             assert job_id in claimed, (klass, a)
@@ -155,6 +156,30 @@ def test_every_class_is_served_within_its_bound_under_backlog_and_inflow(pg, mon
             assert got == klass and n <= (a + 1) * bound[klass], (klass, a, n)
     served = {k: sum(1 for _, c, _ in claimed.values() if c == k) for k in bound}
     assert served["P"] >= 200 * 3 // 8 - 1 and served["R"] == 5 and served["C"] == 5 and served["B"] == 4
+
+
+def test_the_bound_holds_from_every_starting_phase(pg, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_INDEX_MAX_INFLIGHT", "100000")
+    base = base_job(pg)
+    bound = index.rotation_gaps()
+    for phase in range(len(index.ROTATION)):
+        with pg.begin() as conn:
+            conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+interval '1 day'"))
+            conn.execute(text("DELETE FROM index_claim_cursor"))
+        groups = {"P": clone(pg, base, 12, state="'indexing'", desired_state="'active'", **SENT),
+                  "F": clone(pg, base, 4, state="'queued'", desired_state="'active'", lane="'new'", **UNSENT),
+                  "R": clone(pg, base, 2, state="'disabling'", desired_state="'superseded'"),
+                  "C": clone(pg, base, 2, state="'ready'", desired_state="'active'"),
+                  "B": clone(pg, base, 2, state="'queued'", desired_state="'active'", lane="'backfill'", **UNSENT)}
+        claimed = {}
+        for n in range(40):
+            row = turn(n, phase)
+            claimed.setdefault(row["id"], n + 1)
+            handled(pg, row)
+            clone(pg, base, state="'indexing'", desired_state="'active'", **SENT)  # other classes keep busy
+        for klass, ids in groups.items():
+            for a, job_id in enumerate(ids):
+                assert claimed.get(job_id, 10 ** 6) <= (a + 1) * bound[klass], (phase, klass, a, claimed.get(job_id))
 
 
 def test_sources_take_turns_inside_a_class(pg):
@@ -203,10 +228,16 @@ def test_inflight_budget_is_atomic_across_workers_and_only_settled_uploads_relea
         assert count() == 5, [dict(r) for r in conn.execute(text(
             "SELECT state,first_send_at IS NOT NULL AS sent,receipt,knowledge_id,manifest->>'knowledge_base_id' AS kb "
             "FROM index_publications WHERE id=ANY(:ids)"), {"ids": g}).mappings()]
-        # proven rejected before creation, or its parse ended upstream, releases it
+        # a rejection or an ended parse releases it only when the receipt speaks of this attempt (a later one
+        # than the attempt known when it was reserved, attempt_floor 0 here)
         conn.execute(text("UPDATE index_publications SET state='waiting',knowledge_id=NULL,"
                           "receipt='{\"upload_status\":\"rejected\"}' WHERE id=:id"), {"id": g[2]})
         conn.execute(text("UPDATE index_publications SET state='blocked',receipt='{\"parse_status\":\"completed\"}' WHERE id=:id"), {"id": g[3]})
+        assert count() == 5
+        conn.execute(text("UPDATE index_publications SET receipt=receipt||jsonb_build_object('last_attempt',"
+                          "jsonb_build_object('attempt',1,'outcome','rejected')) WHERE id=:id"), {"id": g[2]})
+        conn.execute(text("UPDATE index_publications SET receipt=receipt||jsonb_build_object('last_attempt',"
+                          "jsonb_build_object('attempt',1,'outcome','uploaded')) WHERE id=:id"), {"id": g[3]})
         assert count() == 3
         sizes = conn.execute(text("SELECT sent_chars,sent_bytes FROM index_publications WHERE id=:id"), {"id": g[4]}).one()
     assert tuple(sizes) == (len("fixed text " * 10), len(("fixed text " * 10).encode()))
@@ -295,3 +326,21 @@ def test_a_sending_job_after_a_restart_is_polled_not_uploaded_again(pg, monkeypa
     assert class_of(pg, row["id"]) == "P"
     assert index.process_once(client=client, classes=["P"])["state"] == "ready"
     assert client.upload_count == 0 and rows(pg, "SELECT count(*) AS n FROM index_gate_stats") == [{"n": 0}]
+
+
+def test_migration_recovers_the_size_of_earlier_uploads(pg):
+    from migration import index_publication as index_migration
+
+    base = base_job(pg)
+    (piece,) = clone(pg, base, state="'indexing'", desired_state="'active'", **SENT,
+                     piece="jsonb_build_object('index',1,'count',2,'chars',123,'bytes',456)",
+                     sent_chars="NULL", sent_bytes="NULL")
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET sent_chars=NULL,sent_bytes=NULL WHERE id=:id"), {"id": base["id"]})
+        text_row = conn.execute(text("SELECT length(text),octet_length(text) FROM derived_clean_text WHERE version_id=:v "
+                                     "AND processor_version||':'||text_sha256=:k"),
+                                {"v": base["version_id"], "k": base["artifact_key"]}).first()
+    index_migration.migrate_index()
+    got = {r["id"]: (r["sent_chars"], r["sent_bytes"]) for r in rows(pg, "SELECT id,sent_chars,sent_bytes FROM index_publications")}
+    assert got[piece] == (123, 456)
+    assert got[base["id"]] == tuple(text_row)
