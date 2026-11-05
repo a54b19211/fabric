@@ -1066,10 +1066,52 @@ def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypa
     with pg.begin() as conn:
         assert retrieval._serving_old(conn, old[0]["target_id"], old[0]["source_record_id"], artifact,
                                       old[0]["artifact_key"], old[0]["piece_key"])
+    cover = retrieval._coverage({"external_archive"})["external_archive"]
+    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0  # 旧计划整套 ready，覆盖全篇
+    old_ids = [r["id"] for r in old]
+    with pg.begin() as conn:  # 假设旧片不在：只有新计划的后几片 ready，覆盖不到全篇，不算整份可检索
+        conn.execute(text("UPDATE index_publications SET state='waiting' WHERE id=ANY(:ids)"), {"ids": old_ids})
+    cover = retrieval._coverage({"external_archive"})["external_archive"]
+    assert cover["ready_artifacts"] == 0 and cover["partial_artifacts"] == 1
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET state='ready' WHERE id=ANY(:ids)"), {"ids": old_ids})
     run_only([r["id"] for r in new], "ready")
     states = run_only([r["id"] for r in old], "disabled")
     assert all(states[r["id"]] == "ready" for r in new) and all(states[r["id"]] == "disabled" for r in old)
     assert client.disable_count == len(old)
+    cover = retrieval._coverage({"external_archive"})["external_archive"]
+    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0  # 新计划整套 ready
     with pg.begin() as conn:
         assert not retrieval._serving_old(conn, old[0]["target_id"], old[0]["source_record_id"], artifact,
                                           old[0]["artifact_key"], old[0]["piece_key"])
+
+
+def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, monkeypatch):
+    """Codex r83：piece_key 之前的分片库（按分片序号的两个唯一键、没有 piece_key 列）跑索引迁移：从已有 piece
+    回填完整身份键，去掉旧唯一键、建新唯一键；id、remote_id、清单、回执都不变；再跑一次什么也不变。"""
+    from processing import index_pieces
+
+    small_pieces(monkeypatch)
+    long_document()
+    scan()
+    client = SearchClient(pg)
+    while index.process_once(client=client)["state"] != "idle":
+        pass
+    query = "SELECT id,remote_id,manifest,receipt,state,piece,piece_key FROM index_publications ORDER BY id"
+    before = rows(pg, query)
+    assert len(before) >= 3 and all(r["piece_key"] == index_pieces.key(r["piece"]) for r in before)
+    with pg.begin() as conn:  # 回到 2b4011f 时的表
+        conn.execute(text("DROP INDEX index_publications_artifact_piece_key"))
+        conn.execute(text("DROP INDEX index_publications_record_artifact_piece_key"))
+        conn.execute(text("ALTER TABLE index_publications DROP COLUMN piece_key"))
+        conn.execute(text("CREATE UNIQUE INDEX index_publications_artifact_piece ON index_publications "
+                          "(target_id, version_id, artifact_key, piece_index)"))
+        conn.execute(text("CREATE UNIQUE INDEX index_publications_record_artifact_piece ON index_publications "
+                          "(target_id, source_record_id, artifact_key, piece_index) WHERE artifact_key <> ''"))
+    for _ in range(2):
+        index_migration.migrate_index()
+        assert rows(pg, query) == before
+        names = {r["indexname"] for r in rows(pg, "SELECT indexname FROM pg_indexes WHERE "
+                                                  "schemaname=current_schema() AND tablename='index_publications'")}
+        assert {"index_publications_artifact_piece_key", "index_publications_record_artifact_piece_key"} <= names
+        assert not names & {"index_publications_artifact_piece", "index_publications_record_artifact_piece"}

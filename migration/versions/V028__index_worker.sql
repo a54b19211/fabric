@@ -18,11 +18,19 @@ ALTER TABLE index_publications ADD COLUMN IF NOT EXISTS piece jsonb;
 -- piece_key：分片身份键 “规则:序号:起-止:片摘要”，不分片为空串（processing.index_pieces.key）。
 -- 规则换了、范围或内容变了都是另一片，不会与旧片相撞（Codex 456）。
 ALTER TABLE index_publications ADD COLUMN IF NOT EXISTS piece_key text NOT NULL DEFAULT '';
+-- 已有分片（piece_key 之前按序号建的库）从 piece 回填同一个键；id、remote_id、清单、回执都不动（Codex r83）。
+UPDATE index_publications
+   SET piece_key = (piece->>'rule')||':'||(piece->>'index')||':'||(piece->>'start')||'-'||(piece->>'end')
+                   ||':'||(piece->>'sha256')
+ WHERE piece IS NOT NULL AND piece_key = '';
 -- 两个唯一键都带分片身份键：
 -- 具体片幂等：(目标, 版本, 产物, 片)；逻辑产物复用：同一目标、同一记录、同一份清洗正文的同一片只有一个物理
 -- 条目，并发入队由它保证（Codex S36-01）。改造前的待办 artifact_key 为空，只受前一个约束。
+-- 先去掉旧的唯一键：分片之前的两个，和 piece_key 之前按分片序号建的两个。
 DROP INDEX IF EXISTS index_publications_artifact;
 DROP INDEX IF EXISTS index_publications_record_artifact;
+DROP INDEX IF EXISTS index_publications_artifact_piece;
+DROP INDEX IF EXISTS index_publications_record_artifact_piece;
 CREATE UNIQUE INDEX IF NOT EXISTS index_publications_artifact_piece_key
   ON index_publications (target_id, version_id, artifact_key, piece_key);
 CREATE UNIQUE INDEX IF NOT EXISTS index_publications_record_artifact_piece_key

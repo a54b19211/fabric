@@ -222,8 +222,11 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
 
 
 def _coverage(source_ids):
-    """各来源的索引覆盖，分两层计：物理条目（片）按状态；产物（一条记录的一份正文，可能有几片）整份 ready、
-    部分 ready（有片 ready 但没全齐，不算可检索）的个数，以及整份 ready 覆盖的记录数。"""
+    """各来源的索引覆盖，分两层计：物理条目（片）按状态；产物（一条记录的一份正文，可能有几片）整份可检索、
+    部分可检索的个数，以及整份可检索覆盖的记录数。
+    整份可检索 = 整篇条目 ready，或 ready 的片首尾相接覆盖全篇 [0, 全篇长)（全篇长取该产物各片的最大终点）。
+    按覆盖算、不按“现存的行都 ready”（Codex 460）：新计划只建出、只 ready 了几片不算；交接期旧计划的整套片
+    仍 ready 时算（检索照样认它们）。worker 何时停用旧片另由当前计划的整套片判定（index.artifact_ready）。"""
     with history.history_engine().begin() as conn:
         rows = conn.execute(text("""
             SELECT t.config->>'source_id' AS source_id,p.state,count(*) AS entries
@@ -231,16 +234,30 @@ def _coverage(source_ids):
             WHERE t.enabled AND t.config->>'source_id'=ANY(:sources) GROUP BY 1,2
         """), {"sources": list(source_ids)}).mappings().all()
         artifacts = conn.execute(text("""
-            WITH a AS (
-              SELECT t.config->>'source_id' AS source_id,p.source_record_id,p.artifact_key,
-                     bool_and(p.state='ready') AS ready,bool_or(p.state='ready') AS some_ready
+            WITH p AS (
+              SELECT t.config->>'source_id' AS source_id,p.source_record_id AS record,p.artifact_key AS artifact,
+                     p.state,p.piece IS NULL AS whole,(p.piece->>'start')::int AS s,(p.piece->>'end')::int AS e
               FROM index_publications p JOIN index_targets t ON t.id=p.target_id
-              WHERE t.enabled AND t.config->>'source_id'=ANY(:sources) AND p.state<>'disabled'
-              GROUP BY 1,2,3)
+              WHERE t.enabled AND t.config->>'source_id'=ANY(:sources)),
+            a AS (
+              SELECT source_id,record,artifact,max(e) AS length,bool_or(state='ready') AS some_ready
+              FROM p GROUP BY 1,2,3 HAVING bool_or(state<>'disabled')),
+            r AS (  -- ready 的片按起点排；reach：排在它前面的片到达的最远处
+              SELECT source_id,record,artifact,whole,s,e,max(e) OVER (PARTITION BY source_id,record,artifact
+                     ORDER BY s,e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS reach
+              FROM p WHERE state='ready'),
+            c AS (
+              SELECT source_id,record,artifact,bool_or(whole) AS whole_ready,
+                     bool_and(whole OR s<=COALESCE(reach,0)) AS gapless,max(e) AS reach_end
+              FROM r GROUP BY 1,2,3),
+            f AS (
+              SELECT a.source_id,a.record,a.some_ready,
+                     COALESCE(c.whole_ready OR (c.gapless AND c.reach_end=a.length),false) AS ready
+              FROM a LEFT JOIN c USING (source_id,record,artifact))
             SELECT source_id,count(*) AS artifacts,count(*) FILTER (WHERE ready) AS ready_artifacts,
                    count(*) FILTER (WHERE some_ready AND NOT ready) AS partial_artifacts,
-                   count(DISTINCT source_record_id) FILTER (WHERE ready) AS ready_records
-            FROM a GROUP BY 1
+                   count(DISTINCT record) FILTER (WHERE ready) AS ready_records
+            FROM f GROUP BY 1
         """), {"sources": list(source_ids)}).mappings().all()
     out = {}
     for row in rows:
