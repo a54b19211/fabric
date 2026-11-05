@@ -234,17 +234,18 @@ def test_an_over_length_product_is_unbuildable_never_cut_to_fit(pg, env):
     literal = "10.1234/" + "a" * 292
     version = add_document("NCT01234567", summary="Identifier " + literal)
     profile()
-    with pg.begin() as conn:  # the table is append-only (V025 rule): lift the rule for this one simulated producer fault
-        conn.execute(text("ALTER TABLE derived_identifiers DISABLE RULE derived_identifiers_no_update"))
-        conn.execute(text("UPDATE derived_identifiers SET value=value||'z' WHERE version_id=:v AND kind='doi'"),
-                     {"v": version})
-        conn.execute(text("ALTER TABLE derived_identifiers ENABLE RULE derived_identifiers_no_update"))
-    assert [r["value"] for r in rows(pg, "SELECT value FROM derived_identifiers WHERE version_id=:v AND kind='doi'",
-                                     {"v": version})] == [literal + "z"]
+    with pg.begin() as conn:  # a faulty producer row, appended (the table is append-only, V025)
+        conn.execute(text(
+            "INSERT INTO derived_identifiers (version_id,processor_version,text_processor_version,kind,value,"
+            "start_offset,end_offset) SELECT version_id,processor_version,text_processor_version,kind,value||'z',"
+            "start_offset,end_offset FROM derived_identifiers WHERE version_id=:v AND kind='doi'"), {"v": version})
+    assert sorted(r["value"] for r in rows(pg, "SELECT value FROM derived_identifiers WHERE version_id=:v AND kind='doi'",
+                                           {"v": version})) == [literal, literal + "z"]
     fake = FakeBioCheck()
     drain(fake)
-    sent = [i["fields"]["identifier"]["value"] for r in fake.requests for i in r["items"] if i["kind"] == "identifier"]
-    assert not [v for v in sent if v.startswith("10.1234/")]
+    sent = [i["fields"]["identifier"]["value"] for r in fake.requests for i in r["items"]
+            if i["kind"] == "identifier" and i["fields"]["scheme"] == "doi"]
+    assert sent == [literal], "only the valid 300-character row is sent; the 301-character one neither cut nor sent"
     marked = rows(pg, "SELECT items FROM derived_extraction_checks WHERE version_id=:v AND producer='identifiers' "
                       "AND error_code='item_not_buildable'", {"v": version})
     reasons = [i["reason"] for r in marked for i in r["items"]]
