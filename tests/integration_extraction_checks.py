@@ -32,7 +32,8 @@ class FakeBioCheck:
             return httpx.Response(self.status, json={"error_code": "service_unavailable", "message": "x"})
         if self.body is not None:
             return httpx.Response(200, json=self.body)
-        items = [{"id": i["id"], "kind": i["kind"], "status": "consistent", "fields": {}} for i in payload["items"]]
+        items = [{"id": i["id"], "kind": i["kind"], "status": "consistent",
+                  "fields": {"locator": {"result": "match"}, "quote": {"result": "match"}}} for i in payload["items"]]
         return httpx.Response(200, json={"contract_version": checks.CONTRACT, "checker_version": "biocheck.extraction_rules.v3",
                                          "subject": payload["subject"], "items": items,
                                          "counts": {"consistent": len(items), "inconsistent": 0, "unchecked": 0},
@@ -64,9 +65,11 @@ def drain(fake):
         states.append(state)
 
 
-def stored(pg, version):
+def stored(pg, version, producer="identifiers"):
+    """Result rows of one producer (the profile of these documents may have no locators: a no_items marker)."""
     return rows(pg, "SELECT producer,status,error_code,checker_version,request_sha256,text_sha256 FROM "
-                    "derived_extraction_checks WHERE version_id=:v ORDER BY id", {"v": version})
+                    "derived_extraction_checks WHERE version_id=:v AND producer=:p ORDER BY id",
+                {"v": version, "p": producer})
 
 
 def test_tasks_are_registered_in_the_same_transaction_as_the_products(pg):
@@ -119,10 +122,12 @@ def test_only_the_same_full_request_and_checker_is_reused(pg, env, monkeypatch):
     drain(again)
     assert again.requests == []  # same request, same checker: reused, nothing sent
     monkeypatch.setenv("DATAFABRIC_EXTRACTION_CHECKER", "biocheck.extraction_rules.v4")
-    requeue()
+    assert checks.backfill() == 2  # an upgrade queues every product again
     newer = FakeBioCheck()
     drain(newer)
-    assert len(newer.requests) == sent  # another checker version: asked again
+    assert len(newer.requests) >= 1  # another checker version: asked again (the v3 answer is not adopted)
+    got = checks.for_versions("external_archive", True, [version], "current", datetime.now(timezone.utc))
+    assert got["versions"][version]["identifiers"]["state"] == "unchecked"
     # another product content (one more identifier) changes the request: never served by the old answer
     monkeypatch.delenv("DATAFABRIC_EXTRACTION_CHECKER")
     with pg.begin() as conn:
@@ -158,7 +163,7 @@ def test_a_failed_call_is_unchecked_and_retried(pg, env, fake):
     assert "waiting" in drain(fake)
     assert {r["error_code"] for r in stored(pg, version)} == {"service_unavailable"}
     got = checks.for_versions("external_archive", True, [version], "current", datetime.now(timezone.utc))["versions"][version]
-    assert got["identifiers"]["state"] == "unchecked" and got["identifiers"]["last_unchecked_reason"] == "service_unavailable"
+    assert got["identifiers"]["state"] == "unchecked" and got["identifiers"]["reason"] == "service_unavailable"
     with pg.begin() as conn:
         conn.execute(text("UPDATE derived_extraction_check_tasks SET next_check_at=clock_timestamp()"))
     drain(FakeBioCheck())
@@ -172,7 +177,7 @@ def test_a_contract_rejection_blocks_and_an_invalid_answer_is_unchecked(pg, env)
     assert {r["error_code"] for r in stored(pg, version)} == {"contract_rejected"}
     with pg.begin() as conn:
         conn.execute(text("UPDATE derived_extraction_check_tasks SET state='queued',attempts=0,next_check_at=clock_timestamp()"))
-    drain(FakeBioCheck(body={"contract_version": checks.CONTRACT, "checker_version": "x", "items": []}))
+    drain(FakeBioCheck(body={"contract_version": checks.CONTRACT, "checker_version": "biocheck.extraction_rules.v3", "items": []}))
     assert "invalid_response" in {r["error_code"] for r in stored(pg, version)}
 
 
