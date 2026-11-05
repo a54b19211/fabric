@@ -36,6 +36,18 @@ LEASE_SECONDS = 120
 WINDOW, MAX_ITEMS, MAX_PASSAGES, MAX_CHARS = 200, 50, 8, 20000
 PRODUCERS = ("identifiers", "profile")
 RESULTS = {"match", "mismatch", "not_found", "unsupported"}
+# The field results BioCheck v3 gives each kind (biocheck.extraction_rules.v3 check_item): the locator always, then
+# the kind's own fields. A response that leaves one out did not check it - "all present fields match" is not enough.
+KIND_RESULTS = {
+    "identifier": ("locator", "identifier"),
+    "annotation": ("locator", "label"),
+    "claim": ("locator", "statement", "polarity"),
+    "measurement": ("locator", "object", "metric", "value", "unit", "period", "scope", "denominator", "measure_kind"),
+}
+# Contract lengths (extraction_consistency.v1). A product longer than these is not sent cut to fit: a prefix of the
+# producer's value is a different value, so the item is unbuildable and reads back unchecked.
+LIMITS = {"quote": 300, "value": 300, "scheme": 40, "label": 80, "producer_version": 80,
+          "source_id": 80, "record_id": 2000, "version_id": 128}
 TASK_KEY = ("version_id", "producer", "producer_version", "text_processor_version", "checker_version")
 
 
@@ -175,7 +187,7 @@ def _items(conn, task, full):
             quote = full[r["start_offset"]:r["end_offset"]]
             out.append({"id": f"i{n}", "kind": "identifier", "start": r["start_offset"], "end": r["end_offset"],
                         "quote": quote, "producer": {"name": "datafabric.identifiers", "version": task["producer_version"]},
-                        "fields": {"scheme": r["kind"][:40], "identifier": {"state": "stated", "value": r["value"][:300]}}})
+                        "fields": {"scheme": r["kind"], "identifier": {"state": "stated", "value": r["value"]}}})
     else:
         types = conn.execute(text("""
             SELECT experiment_types FROM derived_profiles WHERE version_id=:v AND processor_version=:pv
@@ -187,17 +199,55 @@ def _items(conn, task, full):
             for loc in t.get("locators") or []:
                 n += 1
                 out.append({"id": f"a{n}", "kind": "annotation", "start": loc["start"], "end": loc["end"],
-                            "quote": loc.get("text") or "", "fields": {"label": str(t.get("type"))[:80]},
+                            "quote": loc.get("text") or "", "fields": {"label": t.get("type")},
                             "producer": {"name": "datafabric.profile", "version": task["producer_version"]}})
     return out
 
 
+def _fits(value, limit):
+    return isinstance(value, str) and 0 < len(value) <= limit
+
+
+def _subject_unusable(subject):
+    """Why the subject cannot be sent as it is (None when it can): its ids are never cut to fit."""
+    for name in ("source_id", "record_id", "version_id"):
+        if not _fits(subject[name], LIMITS[name]):
+            return f"subject_{name}_exceeds_contract"
+    return None
+
+
+def _unusable(item, full):
+    """Why an item cannot be sent as the producer stated it (None when it can)."""
+    if not (isinstance(item["start"], int) and isinstance(item["end"], int) and 0 <= item["start"] < item["end"] <= len(full)):
+        return "offsets_outside_artifact"
+    if not _fits(item["quote"], LIMITS["quote"]):
+        return "quote_exceeds_contract"
+    if not _fits(item["producer"]["version"], LIMITS["producer_version"]):
+        return "producer_version_exceeds_contract"
+    f = item["fields"]
+    if item["kind"] == "identifier":
+        if not _fits(f["scheme"], LIMITS["scheme"]):
+            return "scheme_exceeds_contract"
+        if not _fits(f["identifier"]["value"], LIMITS["value"]):
+            return "value_exceeds_contract"
+    elif item["kind"] == "annotation" and not _fits(f["label"], LIMITS["label"]):
+        return "label_exceeds_contract"
+    return None
+
+
 def _requests(subject, full, items):
     """Bounded requests: each item's contiguous window [start-200, end+200) of the artifact, windows merged,
-    at most 8 passages / 20,000 characters / 50 items per request. Items whose offsets fall outside the artifact
-    or whose quote is empty or too long are returned apart (unbuildable), never sent as if checkable."""
-    unbuildable = [i for i in items if not (0 <= i["start"] < i["end"] <= len(full)) or not 0 < len(i["quote"]) <= 300]
-    usable = sorted((i for i in items if i not in unbuildable), key=lambda i: (i["start"], i["end"]))
+    at most 8 passages / 20,000 characters / 50 items per request. Items that cannot be sent exactly as produced
+    (offsets outside the artifact, a quote / value / scheme / label / version over the contract length, or a
+    subject over it) are returned apart with the reason (unbuildable), never cut to fit or sent as if checkable."""
+    whole = _subject_unusable(subject)
+    unbuildable = []
+    for i in items:
+        why = whole or _unusable(i, full)
+        if why:
+            unbuildable.append({**i, "reason": why})
+    left = {i["id"] for i in unbuildable}
+    usable = sorted((i for i in items if i["id"] not in left), key=lambda i: (i["start"], i["end"]))
     batches, current = [], []
 
     def windows(group):
@@ -269,9 +319,12 @@ def _verdict(body, request):
         if not isinstance(got, dict) or got.get("id") != sent["id"] or got.get("kind") != sent["kind"]:
             return "invalid_response"
         fields = got.get("fields")
-        if not isinstance(fields, dict) or not fields or any(
+        expected = set(KIND_RESULTS.get(sent["kind"], ()))
+        if sent["kind"] == "claim" and sent["fields"].get("qualifiers"):
+            expected.add("qualifiers")
+        if not isinstance(fields, dict) or not expected or set(fields) != expected or any(
                 not isinstance(f, dict) or f.get("result") not in RESULTS for f in fields.values()):
-            return "invalid_response"
+            return "invalid_response"  # every field this checker gives the kind, and nothing else
         if got.get("status") != _derived_status(fields):
             return "invalid_response"  # the reported status must follow from the item's own field results
     return None
@@ -301,7 +354,7 @@ def process_once(*, client=None):
                     error_code="artifact_changed")
             return {"state": _finish(task, "blocked")}
         items = _items(conn, task, full)
-    subject = {"source_id": version["source_id"], "record_id": version["source_record_id"][:2000],
+    subject = {"source_id": version["source_id"], "record_id": version["source_record_id"],
                "version_id": version["version_id"].strip(), "raw_sha256": version["raw_sha256"] or "0" * 64,
                "is_demo": bool(version["is_demo"]),
                "artifact": {"processor_version": task["text_processor_version"], "text_sha256": art["text_sha256"]}}
@@ -322,7 +375,7 @@ def process_once(*, client=None):
                 [{k: i[k] for k in ("id", "kind", "start", "end")} for i in unbuildable]).encode()).hexdigest(),
                 "unchecked", error_code="item_not_buildable",
                 items=[{"id": i["id"], "kind": i["kind"], "status": "unchecked",
-                        "reason": "offsets_outside_artifact_or_quote_unusable"} for i in unbuildable])
+                        "reason": i["reason"]} for i in unbuildable])
     owned = client is None
     client = client or httpx.Client(timeout=20, follow_redirects=False, trust_env=False)
     failed = None

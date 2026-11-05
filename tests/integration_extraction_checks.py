@@ -15,11 +15,16 @@ from integration_index_publication import add_document, pg, pg_engine, profile, 
 
 
 
-class FakeBioCheck:
-    """POST /v1/extraction-consistency as the contract defines it: every item answered consistent."""
+# What BioCheck v3 answers per kind (biocheck app/extraction.py check_item), written out here, not imported.
+V3_FIELDS = {"identifier": ("locator", "identifier"), "annotation": ("locator", "label")}
 
-    def __init__(self, status=200, fail=False, body=None):
-        self.status, self.fail, self.body, self.requests = status, fail, body, []
+
+class FakeBioCheck:
+    """POST /v1/extraction-consistency as the contract defines it: every item answered consistent, with every
+    field result the checker gives its kind; mutate(items) may alter the answer before it is sent."""
+
+    def __init__(self, status=200, fail=False, body=None, mutate=None):
+        self.status, self.fail, self.body, self.mutate, self.requests = status, fail, body, mutate, []
 
     def handler(self, request):
         assert request.url.path == "/v1/extraction-consistency"
@@ -33,7 +38,9 @@ class FakeBioCheck:
         if self.body is not None:
             return httpx.Response(200, json=self.body)
         items = [{"id": i["id"], "kind": i["kind"], "status": "consistent",
-                  "fields": {"locator": {"result": "match"}, "quote": {"result": "match"}}} for i in payload["items"]]
+                  "fields": {name: {"result": "match"} for name in V3_FIELDS[i["kind"]]}} for i in payload["items"]]
+        if self.mutate:
+            self.mutate(items)
         return httpx.Response(200, json={"contract_version": checks.CONTRACT, "checker_version": "biocheck.extraction_rules.v3",
                                          "subject": payload["subject"], "items": items,
                                          "counts": {"consistent": len(items), "inconsistent": 0, "unchecked": 0},
@@ -196,3 +203,49 @@ def test_a_changed_artifact_is_unchecked_and_results_are_append_only(pg, env):
         conn.execute(text("UPDATE derived_extraction_checks SET status='completed'"))
         conn.execute(text("DELETE FROM derived_extraction_checks"))
     assert {r["status"] for r in stored(pg, version)} == {"unchecked"}
+
+
+def test_an_answer_without_a_field_of_the_kind_is_not_adopted(pg, env):
+    """A locator match is not a checked identifier: an answer leaving the identifier field out (or adding one the
+    checker does not give the kind) is invalid, even with every remaining field "match" and status consistent."""
+    version = document()
+
+    def drop(items):
+        for i in items:
+            i["fields"].pop("identifier", None)
+
+    drain(FakeBioCheck(mutate=drop))
+    assert not [r for r in stored(pg, version) if r["status"] == "completed"]
+    assert "invalid_response" in {r["error_code"] for r in stored(pg, version)}
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE derived_extraction_check_tasks SET state='queued',attempts=0,next_check_at=clock_timestamp()"))
+
+    def extra(items):
+        for i in items:
+            i["fields"]["quote"] = {"result": "match"}
+
+    drain(FakeBioCheck(mutate=extra))
+    assert not [r for r in stored(pg, version) if r["status"] == "completed"]
+
+
+def test_an_over_length_product_is_unbuildable_never_cut_to_fit(pg, env):
+    """A producer value over the contract's 300 characters is not replaced by its prefix: nothing of it is sent,
+    the item reads back unchecked with the reason."""
+    literal = "10.1234/" + "a" * 292
+    version = add_document("NCT01234567", summary="Identifier " + literal)
+    profile()
+    with pg.begin() as conn:  # the table is append-only (V025 rule): lift the rule for this one simulated producer fault
+        conn.execute(text("ALTER TABLE derived_identifiers DISABLE RULE derived_identifiers_no_update"))
+        conn.execute(text("UPDATE derived_identifiers SET value=value||'z' WHERE version_id=:v AND kind='doi'"),
+                     {"v": version})
+        conn.execute(text("ALTER TABLE derived_identifiers ENABLE RULE derived_identifiers_no_update"))
+    assert [r["value"] for r in rows(pg, "SELECT value FROM derived_identifiers WHERE version_id=:v AND kind='doi'",
+                                     {"v": version})] == [literal + "z"]
+    fake = FakeBioCheck()
+    drain(fake)
+    sent = [i["fields"]["identifier"]["value"] for r in fake.requests for i in r["items"] if i["kind"] == "identifier"]
+    assert not [v for v in sent if v.startswith("10.1234/")]
+    marked = rows(pg, "SELECT items FROM derived_extraction_checks WHERE version_id=:v AND producer='identifiers' "
+                      "AND error_code='item_not_buildable'", {"v": version})
+    reasons = [i["reason"] for r in marked for i in r["items"]]
+    assert reasons == ["value_exceeds_contract"], reasons
