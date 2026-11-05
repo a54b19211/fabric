@@ -5,9 +5,10 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import text
 
-from biz_rules.history_models import ArchiveRecord, FetchRequest
+from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
 from contracts import data_objects as do
 from processing import clean_text
 from db import history as store
@@ -67,6 +68,15 @@ def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, monkeyp
     assert any(s["source"].get("json_pointer") for s in got["clean"]["segments"])
     assert {"kind": "nct", "value": "NCT09990011"} in [{k: i[k] for k in ("kind", "value")} for i in got["identifiers"]]
     assert got["profile"]["doc_type"] == "registry_record" and got["profile"]["route"] in ("normal", "weak_signal")
+    # v3 6.1：按引用里绑定的处理器版本回读；那一版没有产物就是没有，不拿当前版冒充
+    named = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW(),
+                                     processor_version=clean_text.PROCESSOR_VERSION)["versions"][ct]
+    assert named["clean"]["text"] == got["clean"]["text"]
+    older = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW(),
+                                     processor_version="datafabric.clean_text.v1")["versions"][ct]
+    assert older["state"] == "not_processed" and "clean" not in older
+    with pytest.raises(HistoryError):
+        clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW(), processor_version="x;drop")
     lit = clean_stage.for_versions("europe_pmc", False, [paper], "current", NOW())["versions"][paper]
     assert "No significant" in lit["clean"]["text"] and "≥3×ULN" in lit["clean"]["text"]
     assert lit["profile"]["doc_type"] == "primary_research"

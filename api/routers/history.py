@@ -342,11 +342,13 @@ def clean_text_route(
     mode: Mode,
     cutoff: datetime,
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+    processor_version: str | None = None,
 ):
-    """一页版本的清洗正文（带定位）、编号和画像（分类、四维质量、分流）。v3 3.3。"""
+    """一页版本的清洗正文（带定位）、编号和画像（分类、四维质量、分流）。v3 3.3。
+    processor_version：只取这个处理器版本的产物（v3 6.1 按引用回读）；不给就是当前处理器。"""
     from db.clean_stage import for_versions
 
-    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, processor_version)
 
 
 class SearchRequest(BaseModel):

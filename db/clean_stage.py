@@ -447,12 +447,16 @@ def stage_status():
     return {"stage_key": key, "sources": out, "waiting_attachments": waiting}
 
 
-def for_versions(source_id, is_demo, version_ids, mode, cutoff):
-    """一页版本的清洗正文、编号和画像。版本须在本次模式和截止时间下可见。"""
+def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_version=None):
+    """一页版本的清洗正文、编号和画像。版本须在本次模式和截止时间下可见。
+    processor_version 不给：当前清洗/附件解析处理器的产物；给了：只取这个处理器版本留下的产物（v3 6.1：
+    清洗器升级后，按引用里绑定的处理器版本回读模型当时读到的原文；那一版的产物不在就是没有，不拿新版冒充）。"""
     from db import history
 
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
         raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
+    if processor_version is not None and not re.fullmatch(r"datafabric\.[a-z_]+\.v[0-9]+", processor_version):
+        raise HistoryError("invalid_processor_version", "处理器版本格式不对", 422)
     eligible = history._eligibility(mode).replace("first_seen_at", "v.first_seen_at").replace(
         "proof_available_at", "v.proof_available_at")
     with history.history_engine().begin() as conn:
@@ -462,7 +466,8 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
         if cutoff > history._now(conn):
             raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
         params = {"source": source_id, "demo": is_demo, "ids": list(version_ids), "cutoff": cutoff,
-                  "pvs": [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION],
+                  "pvs": [processor_version] if processor_version else [clean_text.PROCESSOR_VERSION,
+                                                                        attachment_parse.PROCESSOR_VERSION],
                   "prof": profile.PROCESSOR_VERSION, "idpv": identifiers.PROCESSOR_VERSION}
         meta = {r["version_id"]: dict(r) for r in conn.execute(text(
             "SELECT v.version_id,v.source_record_id,v.first_seen_at,v.proof_available_at FROM history_versions v "
@@ -473,7 +478,7 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
             "SELECT DISTINCT ON (version_id) version_id,processor_version,parse_method AS basis,text,text_sha256,"
             "segments,language,warnings,"
             "locator_kind,status FROM derived_clean_text WHERE version_id=ANY(:ids) AND processor_version=ANY(:pvs) "
-            "ORDER BY version_id, attempt DESC"), params).mappings().all()  # 只有当前清洗/附件解析版本
+            "ORDER BY version_id, attempt DESC"), params).mappings().all()  # 当前处理器（或指定的那一版）
         ids = conn.execute(text(
             "SELECT version_id,text_processor_version,kind,value,start_offset,end_offset FROM derived_identifiers "
             "WHERE version_id=ANY(:ids) AND processor_version=:idpv ORDER BY version_id,start_offset"),
