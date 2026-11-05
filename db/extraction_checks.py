@@ -29,30 +29,13 @@ import httpx
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
+from extraction_contract import CONTRACT, canonical, verdict
+from extraction_contract import derived_status as _derived_status
 from db import history
 
-CONTRACT = "extraction_consistency.v1"
 LEASE_SECONDS = 120
 WINDOW, MAX_ITEMS, MAX_PASSAGES, MAX_CHARS = 200, 50, 8, 20000
 PRODUCERS = ("identifiers", "profile")
-RESULTS = {"match", "mismatch", "not_found", "unsupported"}
-# The field results BioCheck v3 gives each kind (biocheck.extraction_rules.v3 check_item): the locator always, then
-# the kind's own fields. A response that leaves one out did not check it - "all present fields match" is not enough.
-KIND_RESULTS = {
-    "identifier": ("locator", "identifier"),
-    "annotation": ("locator", "label"),
-    "claim": ("locator", "statement", "polarity"),
-    "measurement": ("locator", "object", "metric", "value", "unit", "period", "scope", "denominator", "measure_kind"),
-}
-# When the locator does not hold, v3 stops early: locator "mismatch" and only the kind's own fields (KIND_FIELDS,
-# plus measure_kind for a measurement), each "unsupported" (no_valid_location). Such an item is a real extraction
-# error read as inconsistent - not a protocol fault - and can never be consistent.
-NO_LOCATION_RESULTS = {
-    "identifier": ("locator", "identifier"),
-    "annotation": ("locator",),
-    "claim": ("locator", "statement"),
-    "measurement": KIND_RESULTS["measurement"],
-}
 # Contract lengths (extraction_consistency.v1). A product longer than these is not sent cut to fit: a prefix of the
 # producer's value is a different value, so the item is unbuildable and reads back unchecked.
 LIMITS = {"quote": 300, "value": 300, "scheme": 40, "label": 80, "producer_version": 80,
@@ -300,51 +283,10 @@ def _requests(subject, full, items):
     return out, unbuildable
 
 
-def canonical(body):
-    return json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-
-
-def _derived_status(fields):
-    results = {f["result"] for f in fields.values()}
-    if results <= {"match"}:
-        return "consistent"
-    if results & {"mismatch", "not_found"}:
-        return "inconsistent"
-    return "unchecked"
-
-
 def _verdict(body, request):
-    """None when the response may be adopted, else the reason it may not."""
-    if not isinstance(body, dict) or body.get("contract_version") != CONTRACT:
-        return "invalid_response"
-    if body.get("checker_version") != expected_checker():
-        return "checker_mismatch"
-    if body.get("subject") != request["subject"]:
-        return "invalid_response"
-    items = body.get("items")
-    if not isinstance(items, list) or len(items) != len(request["items"]):
-        return "invalid_response"
-    for got, sent in zip(items, request["items"]):
-        if not isinstance(got, dict) or got.get("id") != sent["id"] or got.get("kind") != sent["kind"]:
-            return "invalid_response"
-        fields = got.get("fields")
-        if not isinstance(fields, dict) or sent["kind"] not in KIND_RESULTS or any(
-                not isinstance(f, dict) or f.get("result") not in RESULTS for f in fields.values()):
-            return "invalid_response"
-        located = (fields.get("locator") or {}).get("result") == "match"
-        if located:  # every field this checker gives the kind, and nothing else
-            expected = set(KIND_RESULTS[sent["kind"]])
-            if sent["kind"] == "claim" and sent["fields"].get("qualifiers"):
-                expected.add("qualifiers")
-            if set(fields) != expected:
-                return "invalid_response"
-        elif (fields.get("locator") or {}).get("result") != "mismatch" or set(fields) != set(
-                NO_LOCATION_RESULTS[sent["kind"]]) or any(
-                f["result"] != "unsupported" for name, f in fields.items() if name != "locator"):
-            return "invalid_response"  # only v3's exact no-location shape stands for "the locator failed"
-        if got.get("status") != _derived_status(fields):
-            return "invalid_response"  # the reported status must follow from the item's own field results
-    return None
+    """None when the response may be adopted, else the reason it may not (the shared contract's strict rules
+    for the checker this deployment expects)."""
+    return verdict(body, request, expected_checker())
 
 
 def process_once(*, client=None):

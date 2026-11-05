@@ -47,6 +47,14 @@ python -m venv .venv
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
+抽取一致性的共享契约 `extraction-contract`（BioCheck 协议的字段集合、严格回执校验、规范序列化，与 BioRadar 共用同一版本）
+按 wheel 的 sha256 固定，单独安装：先在 extraction-contract 检出目录里执行 `bash scripts/build_and_verify.sh`
+（离线构建可复现的 wheel，并校验同一哈希），再执行：
+
+```bash
+pip install --no-index --find-links "${EXTRACTION_CONTRACT_WHEELS:-../extraction-contract/dist}" --require-hashes -r requirements-contract.txt
+```
+
 
 
 ## 运行

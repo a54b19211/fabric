@@ -1,0 +1,5 @@
+# The shared extraction-consistency contract, pinned by the sha256 of its reproducible wheel (pip requires
+# hashes for every line of a file once one has one, so it has a file of its own). Build the wheel from the
+# extraction-contract checkout (scripts/build_and_verify.sh, which checks the same hash), then:
+#   pip install --no-index --find-links "${EXTRACTION_CONTRACT_WHEELS:-../extraction-contract/dist}" --require-hashes -r requirements-contract.txt
+extraction-contract==1.0.0 --hash=sha256:769b1d757531d3f4d46da162b0fae16a213412706f85a54b2c8dd387c0a25fea
