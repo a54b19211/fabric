@@ -101,3 +101,14 @@ def test_a_figure_keeps_its_table_and_its_caption_where_they_are():
                                             "</figure>"))
     assert out["text"].split("\n\n")[1:] == ["| Age | n |\n| --- | --- |\n| 0-4 | 380 |", "Table 2. By age."]
     assert [s["kind"] for s in out["segments"]][1:] == ["table", "paragraph"]
+
+
+def test_a_nested_table_is_marked_degraded_not_given_as_a_structured_table():
+    html = ("<table><caption>Table 3</caption><tr><th>Province</th><th>Detail</th></tr>"
+            "<tr><td>North</td><td><table><tr><th>Week</th><th>n</th></tr><tr><td>W1</td><td>4</td></tr></table>"
+            "</td></tr></table>")
+    out = clean_text.clean_who(who(Overview=html))
+    kinds = [s["kind"] for s in out["segments"]][1:]
+    assert kinds == ["table_degraded"] and "nested_table_degraded" in out["warnings"]
+    assert "|" not in out["text"]  # no pipe table that would claim rows and columns
+    assert out["text"].split("\n\n")[1] == "Table 3 Province Detail North Week n W1 4"  # readable, nothing dropped

@@ -786,6 +786,11 @@ def _who_blocks(html: str):
                 text = _who_text(child)
                 if text:
                     out.append(("list", "- " + text))
+            elif name == "table" and child.find("table") is not None:
+                # 嵌套表格：行列关系没有可靠的展开方式，不冒充结构化表格；可读文字整块保留（含表题）
+                text = _who_text(child)
+                if text:
+                    out.append(("table_degraded", text))
             elif name == "table":
                 caption, table, placeholders = _who_table(child)
                 if caption:
@@ -842,4 +847,6 @@ def clean_who(raw_json: str) -> dict:
     body = "\n\n".join(parts)
     if len(parts) <= (1 if title else 0):
         warnings.append("no_body")
+    if any(s["kind"] == "table_degraded" for s in segments):
+        warnings.append("nested_table_degraded")
     return _result(body, segments, detect_language(body), 0, warnings)
