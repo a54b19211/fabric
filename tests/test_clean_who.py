@@ -69,3 +69,35 @@ def test_every_word_of_the_flattened_projection_is_still_there():
     flat = BeautifulSoup(html, "html.parser").get_text(" ", strip=True).split()
     words = [w for w in clean_text.clean_who(who(Overview=html))["text"].split() if w not in markup]
     assert words == [w for w in title + flat if w not in markup]
+
+
+def table_rows(html):
+    out = clean_text.clean_who(who(Overview=html))
+    seg = next(s for s in out["segments"] if s["kind"] == "table")
+    return out["text"][seg["start"] : seg["end"]].split("\n"), seg.get("placeholder_cells", 0)
+
+
+def test_rowspan_keeps_every_value_in_its_own_column():
+    """A spanned cell is an empty placeholder; the values after it stay under their headers (Codex r153)."""
+    rows, held = table_rows("<table><tr><th>Region</th><th>Suspected</th><th>Confirmed</th></tr>"
+                            "<tr><td rowspan='2'>A</td><td>10</td><td>2</td></tr><tr><td>20</td><td>4</td></tr>"
+                            "<tr><td>B</td><td>5</td><td rowspan='2'>1</td></tr><tr><td>C</td><td>7</td></tr></table>")
+    assert rows == ["| Region | Suspected | Confirmed |", "| --- | --- | --- |", "| A | 10 | 2 |", "|  | 20 | 4 |",
+                    "| B | 5 | 1 |", "| C | 7 |  |"]
+    assert held == 2
+
+
+def test_a_cell_spanning_rows_and_columns_holds_its_whole_block():
+    rows, held = table_rows("<table><tr><th>Area</th><th>Week</th><th>Cases</th><th>Deaths</th></tr>"
+                            "<tr><td rowspan='2' colspan='2'>North (W1-W2)</td><td>12</td><td>1</td></tr>"
+                            "<tr><td>9</td><td>0</td></tr></table>")
+    assert rows[2:] == ["| North (W1-W2) |  | 12 | 1 |", "|  |  | 9 | 0 |"]
+    assert held == 3
+
+
+def test_a_figure_keeps_its_table_and_its_caption_where_they_are():
+    out = clean_text.clean_who(who(Overview="<figure><table><tr><th>Age</th><th>n</th></tr><tr><td>0-4</td>"
+                                            "<td>380</td></tr></table><figcaption>Table 2. By age.</figcaption>"
+                                            "</figure>"))
+    assert out["text"].split("\n\n")[1:] == ["| Age | n |\n| --- | --- |\n| 0-4 | 380 |", "Table 2. By age."]
+    assert [s["kind"] for s in out["segments"]][1:] == ["table", "paragraph"]

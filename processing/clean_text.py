@@ -680,31 +680,60 @@ def _cell(text: str) -> str:
     return text.replace("|", "\\|")
 
 
-def _who_table(table) -> tuple[str | None, str]:
-    """(表题或 None, markdown 管道表格)。合并单元格（colspan）后面补空格子，保持列数；行少于列数的补齐。"""
+def _span(cell, name):
+    try:
+        return max(1, min(int(cell.get(name) or 1), 50))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _who_table(table) -> tuple[str | None, str, int]:
+    """(表题或 None, markdown 管道表格, 占位格数)。单元格按真实网格排：rowspan 从上一行延续下来的格子、
+    colspan 向右展开的格子都写成空占位格，所以每个值留在它自己的列（Codex r153：只保住词序不够，
+    数字不能错到别的指标列）。占位格不重复文字，也不编；数量随段一起记下，下游知道表里有合并格。"""
     caption = table.find("caption")
     caption_text = _who_text(caption) if caption else None
-    rows = []
+    rows, carry, placeholders = [], {}, 0  # carry: column -> rows still spanned from above
     for tr in table.find_all("tr"):
         if tr.find_parent("table") is not table:
             continue  # 嵌套表格的行属于里面那张表（它在单元格文字里，不丢）
-        cells = []
-        for c in tr.find_all(["th", "td"], recursive=False):
-            cells.append(_cell(_who_text(c)))
-            try:
-                span = max(1, min(int(c.get("colspan") or 1), 50))
-            except (TypeError, ValueError):
-                span = 1
-            cells.extend([""] * (span - 1))
-        if cells:
-            rows.append(cells)
+        row, col = [], 0
+        cells = iter(tr.find_all(["th", "td"], recursive=False))
+
+        def held(c):
+            nonlocal placeholders
+            if c in carry:
+                carry[c] -= 1
+                if not carry[c]:
+                    del carry[c]
+                placeholders += 1
+                return True
+            return False
+
+        for cell in cells:
+            while held(col):
+                row.append("")
+                col += 1
+            colspan, rowspan = _span(cell, "colspan"), _span(cell, "rowspan")
+            for k in range(colspan):
+                row.append(_cell(_who_text(cell)) if k == 0 else "")
+                placeholders += k > 0
+                if rowspan > 1:
+                    carry[col] = rowspan - 1
+                col += 1
+        while any(c >= col for c in carry):  # spans from above to the right of this row's own cells
+            held(col)  # a spanned column counts its placeholder; any other column here is padding
+            row.append("")
+            col += 1
+        if row:
+            rows.append(row)
     if not rows:
-        return caption_text, ""
+        return caption_text, "", 0
     width = max(len(r) for r in rows)
     rows = [r + [""] * (width - len(r)) for r in rows]
     lines = ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
     lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
-    return caption_text, "\n".join(lines)
+    return caption_text, "\n".join(lines), placeholders
 
 
 def _who_blocks(html: str):
@@ -758,16 +787,16 @@ def _who_blocks(html: str):
                 if text:
                     out.append(("list", "- " + text))
             elif name == "table":
-                caption, table = _who_table(child)
+                caption, table, placeholders = _who_table(child)
                 if caption:
                     out.append(("paragraph", caption))
                 if table:
-                    out.append(("table", table))
-            elif name == "figure":
+                    out.append(("table", table, placeholders))
+            elif name == "figcaption":
                 text = _who_text(child)
                 if text:
                     out.append(("paragraph", text))
-            else:  # div / section / blockquote / 未知容器：进去按块读
+            else:  # div / section / blockquote / figure / 未知容器：进去按块读（figure 里的表格仍是表格）
                 walk(child)
         return out
 
@@ -784,12 +813,14 @@ def clean_who(raw_json: str) -> dict:
     data = json.loads(raw_json)
     parts, segments, cursor, warnings = [], [], 0, []
 
-    def add(text, kind, pointer, block):
+    def add(text, kind, pointer, block, placeholders=0):
         nonlocal cursor
         if parts:
             cursor += 2
         segments.append({"start": cursor, "end": cursor + len(text), "kind": kind,
                          "source": {"json_pointer": pointer, "within": "raw", "block": block}})
+        if placeholders:
+            segments[-1]["placeholder_cells"] = placeholders  # empty cells standing for merged (spanned) ones
         parts.append(text)
         cursor += len(text)
 
@@ -806,8 +837,8 @@ def clean_who(raw_json: str) -> dict:
         if not isinstance(value, str):
             warnings.append("section_not_text:" + key)
             continue
-        for i, (kind, text) in enumerate(_who_blocks(value)):
-            add(text, kind, "/" + key, i)
+        for i, (kind, text, *extra) in enumerate(_who_blocks(value)):
+            add(text, kind, "/" + key, i, *extra)
     body = "\n\n".join(parts)
     if len(parts) <= (1 if title else 0):
         warnings.append("no_body")
