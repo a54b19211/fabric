@@ -35,9 +35,11 @@ from biz_rules.history_models import (
 from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
 from biz_rules.observations import OBSERVATION_PARSER
 from db import history
+from processing import index_pieces
 
 FRESH_DAYS = 3
 MAX_IDENTIFIERS = 50
+TOMBSTONES = ("withdrawn", "deleted", "retracted")
 
 
 class IndexTarget(Model):
@@ -73,9 +75,9 @@ def _text_processors():
 # 一批版本的当前产物：当前画像处理器的画像 + 它所基于的那份正文（同一处理器版本下最新一次成功结果）
 _CURRENT = """
 SELECT DISTINCT ON (p.version_id) p.version_id,p.doc_type,p.doc_category,p.evidence_types,
-       c.processor_version,c.text,c.text_sha256,c.locator_kind
+       c.processor_version,c.text,c.text_sha256,c.locator_kind,c.segments
 FROM derived_profiles p
-JOIN LATERAL (SELECT processor_version,text,text_sha256,locator_kind FROM derived_clean_text
+JOIN LATERAL (SELECT processor_version,text,text_sha256,locator_kind,segments FROM derived_clean_text
               WHERE version_id=p.version_id AND processor_version=p.text_processor_version AND status='parsed'
               ORDER BY attempt DESC LIMIT 1) c ON true
 WHERE p.version_id=ANY(:ids) AND p.processor_version=:profile AND p.text_processor_version=ANY(:texts)
@@ -148,7 +150,7 @@ def metadata(record, proof_available_at, artifact, identifiers):
     return {k: v for k, v in values.items() if v not in (None, [], "")}
 
 
-def _manifest(target, record, artifact, meta):
+def _manifest(target, record, artifact, meta, piece=None):
     identity = {
         "source_instance": target["source_instance"], "source_id": record.source_id,
         "source_record_id": record.source_record_id, "version_id": record.version_id,
@@ -159,7 +161,9 @@ def _manifest(target, record, artifact, meta):
         "source_scope": target["source_scope"],
         "raw_locator": {k: identity[k] for k in identity if k != "raw_sha256"},
         "title": (record.title or record.source_record_id)[:255],
-        "content_sha256": artifact["text_sha256"],
+        # 实际上传的正文：不分片时就是整份产物；分片时是这一片（上下文前缀 + 全篇里的一段）
+        "content_sha256": piece["sha256"] if piece else artifact["text_sha256"],
+        **({"piece": piece} if piece else {}),
         # 正文是哪一份产物：命中能回指“版本 + 这份正文”，附件还回指父页面
         "artifact_key": artifact_key(artifact), "processor_version": artifact["processor_version"],
         "artifact_sha256": artifact["text_sha256"], "locator_kind": artifact.get("locator_kind"),
@@ -171,7 +175,7 @@ def _manifest(target, record, artifact, meta):
 # 桥接服务（extensions/kdd Publication，extra=forbid）认识的字段；Fabric 清单里其余的说明字段只留在本地
 # is_demo：演示目标的发布必须带上（桥接按它隔离演示与真实知识库；不带等于真实）
 BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256", "artifact_key",
-                 "is_demo", "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata")
+                 "piece", "is_demo", "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata")
 
 
 def _bridge_body(row, content):
@@ -181,23 +185,30 @@ def _bridge_body(row, content):
     return {**body, "is_demo": bool(row["config"]["is_demo"]), "title": manifest["title"][:255], "content": content}
 
 
-def _enqueue(conn, target, record, artifact, meta):
+def _enqueue(conn, target, record, artifact, meta, pieces):
     """一条（目标, 记录, 产物）的索引待办：同一记录里清洗正文相同的版本只建一条，代表版本是最先产出这份正文的
     版本。检索时由 Fabric 按模式和截止时间找出此刻可见的版本，它的当前产物就是这份正文才返回（db.retrieval）。
+    复用键 (目标, 记录, 产物) 由数据库唯一索引保证（V028 index_publications_record_artifact）：两个事务同时入队
+    同一份正文时，后一个等前一个提交后什么也不做，代表版本一经建立就不变（Codex S36-01）。
+    太长的产物分片（processing.index_pieces）：一片一个物理条目，唯一键带上分片序号；一次放得下的不分片，
+    身份与原来一致。
     新建后，同一记录的其他待办尽快复查（处理器升级后旧产物会被判为 superseded 并停用，记录保留）。"""
     key = artifact_key(artifact)
-    manifest = _manifest(target.model_dump(), record, artifact, meta)
     lane = "new" if (datetime.now(record.first_seen_at.tzinfo) - record.first_seen_at).days < FRESH_DAYS else "backfill"
-    inserted = conn.execute(text("""
-        INSERT INTO index_publications
-          (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key,lane)
-        SELECT :id,:target,:version,:native,:remote,CAST(:manifest AS jsonb),:key,:lane
-        WHERE NOT EXISTS (SELECT 1 FROM index_publications
-                          WHERE target_id=:target AND source_record_id=:native AND artifact_key=:key)
-        ON CONFLICT(target_id,version_id,artifact_key) DO NOTHING
-    """), {"id": sha256(canonical([target.key(), record.version_id, key])), "target": target.key(),
-            "version": record.version_id, "native": record.source_record_id,
-            "remote": publication_id(manifest), "manifest": canonical(manifest), "key": key, "lane": lane}).rowcount
+    inserted = 0
+    for piece in pieces or [None]:
+        manifest = _manifest(target.model_dump(), record, artifact, meta, piece)
+        ident = [target.key(), record.version_id, key] + ([piece["index"]] if piece else [])
+        inserted += conn.execute(text("""
+            INSERT INTO index_publications
+              (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key,lane,piece_index,piece)
+            VALUES (:id,:target,:version,:native,:remote,CAST(:manifest AS jsonb),:key,:lane,:piece_index,
+                    CAST(:piece AS jsonb))
+            ON CONFLICT DO NOTHING
+        """), {"id": sha256(canonical(ident)), "target": target.key(), "version": record.version_id,
+                "native": record.source_record_id, "remote": publication_id(manifest), "manifest": canonical(manifest),
+                "key": key, "lane": lane, "piece_index": piece["index"] if piece else 0,
+                "piece": canonical(piece) if piece else None}).rowcount
     if inserted:
         conn.execute(text("""
             UPDATE index_publications SET next_check_at=clock_timestamp()
@@ -228,11 +239,14 @@ def enqueue_versions(conn, version_ids, *, configured=None):
         "AND record_kind<>'graph' AND payload->>'parser_version' IS DISTINCT FROM :observation ORDER BY published_seq"
     ), {"ids": list(artifacts), "observation": OBSERVATION_PARSER}).mappings():
         record = HistoryRecord.model_validate(row["payload"])
+        if (record.facts or {}).get("publication_state") in TOMBSTONES:
+            continue  # 撤回/删除的墓碑版本没有可检索的内容；检索时按模式和截止时间判 withdrawn
         artifact = artifacts[record.version_id]
         meta = metadata(record, row["proof_available_at"], artifact, found.get(record.version_id, []))
+        pieces = index_pieces.plan(artifact["text"], artifact.get("segments") or [])
         for target in wanted:
             if (target.source_id, target.is_demo) == (record.source_id, record.is_demo):
-                count += _enqueue(conn, target, record, artifact, meta)
+                count += _enqueue(conn, target, record, artifact, meta, pieces)
     return count
 
 
@@ -343,11 +357,11 @@ def _current_state(row):
         if row["artifact_key"] in keys:
             return "active"
         # 这份正文（处理器升级前的产物，或改造前按投影正文建的待办）已不是任何版本的当前产物。
-        # 没发出过的直接停用；发出过的，等该记录的当前产物都能检索（ready）后再停用，不撤掉最后的入口；
-        # 在那之前原样保留、不再上传（retiring）。检索时照样逐条校验，被更正、撤回的版本不会返回。
+        # 没发出过的直接停用；发出过的，等该记录的当前产物都能检索（整份产物的每一片都 ready）后再停用，
+        # 不撤掉最后的入口；在那之前原样保留、不再上传（retiring）。检索时照样逐条校验。
         ready = {key for (key,) in conn.execute(text(
             "SELECT artifact_key FROM index_publications WHERE target_id=:t AND source_record_id=:n "
-            "AND state='ready' AND artifact_key=ANY(:keys)"
+            "AND artifact_key=ANY(:keys) GROUP BY artifact_key HAVING bool_and(state='ready')"
         ), {"t": row["target_id"], "n": row["source_record_id"], "keys": list(keys)})}
         return "superseded" if never_sent(row) or keys <= ready else "retiring"
 
@@ -374,12 +388,14 @@ def _validate_receipt(row, receipt):
                for k in ["source_instance", "source_id", "source_record_id", "version_id", "raw_sha256"])
         or receipt.get("raw_locator") != expected["raw_locator"]
         or (receipt.get("identity") or {}).get("artifact_key") != expected.get("artifact_key")
+        or (receipt.get("identity") or {}).get("piece") != expected.get("piece")
     ):
         raise HistoryError("index_binding_mismatch", "索引回执与固定原件不符", 409)
 
 
-def _finish(row, state, desired, *, receipt=None, error=None, delay=30):
-    attempts = row["attempts"] + 1 if error else 0
+def _finish(row, state, desired, *, receipt=None, error=None, delay=30, final=False):
+    """final：重试也不会好（超出上传或分块核验预算）——直接受阻，记明原因和覆盖缺口，不进入无休止的 indexing。"""
+    attempts = max(row["attempts"] + 1, 6 if final else 0) if error else 0
     if error:
         delay = min(3600, 10 * 2 ** min(attempts, 8))
         if attempts >= 6:
@@ -402,11 +418,11 @@ def _finish(row, state, desired, *, receipt=None, error=None, delay=30):
         if result.rowcount != 1:
             raise HistoryError("index_lease_lost", "迟到索引回执未覆盖当前处理资格", 409)
         if state == "ready" and row["state"] != "ready":
-            # 刚能检索：同一记录里等着交接的旧条目马上复查
+            # 刚能检索：同一记录里等着交接的其他产物的条目马上复查（同一产物的其他片不用叫醒）
             conn.execute(text(
                 "UPDATE index_publications SET next_check_at=clock_timestamp() WHERE target_id=:t "
-                "AND source_record_id=:n AND id<>:id AND state<>'disabled'"
-            ), {"t": row["target_id"], "n": row["source_record_id"], "id": row["id"]})
+                "AND source_record_id=:n AND artifact_key<>:k AND state<>'disabled'"
+            ), {"t": row["target_id"], "n": row["source_record_id"], "k": row["artifact_key"]})
     return {"id": row["id"], "state": state, "desired_state": desired}
 
 
@@ -464,9 +480,16 @@ def process_once(*, client=None, lane=None, sent=None):
             )
             return _finish(row, "disabled" if confirmed else "disabling", desired, receipt=receipt, delay=300 if confirmed else 15)
         with history.history_engine().begin() as conn:
-            content = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
-        if not content.strip() or len(content.encode()) > 2000000:
-            raise HistoryError("index_content_budget", "正文为空或超过索引单条预算，原件仍保留", 422)
+            full = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
+        content = index_pieces.content(full, row["piece"]) if row.get("piece") else full
+        if not content.strip():
+            raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
+        if (len(content) + index_pieces.UPLOAD_OVERHEAD > index_pieces.MAX_CHARS
+                or len(content.encode()) + index_pieces.UPLOAD_OVERHEAD > index_pieces.MAX_BYTES):
+            # 改造前冻结的整篇清单、或分片规则之外的超长内容：不上传，记缺口（原件与清洗产物都保留）
+            return _finish(row, "blocked", desired, final=True, error={
+                "code": "index_content_budget", "message": "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，"
+                "记为覆盖缺口" % (len(content), len(content.encode()))})
         if sha256(content) != row["manifest"]["content_sha256"]:
             raise HistoryError("index_content_changed", "清洗产物与冻结摘要不符", 409)
         if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
@@ -479,6 +502,11 @@ def process_once(*, client=None, lane=None, sent=None):
         latest = _current_state(row)
         if latest in ("revoked", "superseded"):
             return _finish(row, "disabling", latest, receipt=receipt, delay=0)
+        if receipt.get("index_status") == "budget_exceeded":
+            # 上游实际分出的块数超过桥接核验预算：按新分片规则重新计划之前不会好，不无休止等待
+            return _finish(row, "blocked", desired, receipt=receipt, final=True, error={
+                "code": "index_chunk_budget", "message": "实际块数超过核验预算（%s 块），记为覆盖缺口"
+                % receipt.get("chunk_count")})
         if receipt.get("source_status") != "active":
             if (receipt.get("source_change_type") == "disabled_upstream"
                     and receipt.get("parse_status") in {"pending", "processing", "finalizing"}):
@@ -614,6 +642,7 @@ def status(*, limit=100, state=None, source_id=None, cursor=None):
                 "id","target_id","version_id","source_record_id","remote_id","state","desired_state",
                 "knowledge_id","receipt","error","attempts","first_send_at","next_check_at","updated_at",
             ]} | {"artifact_key": row.get("artifact_key") or "", "lane": row.get("lane"),
+                  "piece_index": row.get("piece_index"), "piece": row.get("piece"),
                   "created_at": row.get("created_at"), "ready_at": row.get("ready_at"),
                   "title": (row["manifest"] or {}).get("title"),
                   "source": row["config"], "read_permitted": permitted})

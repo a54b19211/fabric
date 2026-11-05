@@ -24,7 +24,7 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v8"
+PROCESSOR_VERSION = "datafabric.clean_text.v11"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -310,19 +310,21 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
 # ---------------------------------------------------------------- 临床登记
 
 SUMMARY_POINTER = "/protocolSection/descriptionModule/briefSummary"
-# v2：清洗正文是检索（WeKnora 分块）和抽取的输入，入组标准、终点、地点等长字段必须完整保留；
-# v1 的 4000 字截断在真实 CT 数据上截了 1796/4496 个版本的关键内容，只在极端情况下才截。
-MAX_FIELD_CHARS = 200000
-# v7/v8：结构化字段写成可读的逐行文本，不再整块 JSON（v6 在 4,496 个真实 CT 版本的正文里全都有 JSON 块，单个不良事件字段
-# 就有 16 万字：关键词落在 "groupId" 这类字段名上，正文膨胀超过索引分块上限）。方案、入组标准、干预、终点等
-# 方案字段照旧完整保留；只有数值表一样的结果模块和地点名单按下表封顶，写明总量，完整内容回原件按 json_pointer 读。
-FIELD_LIMITS = {
-    "results_adverse_events": 4000,
-    "results_baseline": 4000,
-    "results_participant_flow": 3000,
-    "results_outcome_measures": 20000,
-    "locations": 8000,
-}
+# 清洗正文是语义完整的规范产物：字段一律完整保留，不按字数截断。v1 的 4,000 字截断丢过入组标准、终点；
+# v7/v8 对结果表和地点的封顶又会丢不良事件、分组、单位、分母、离散度（Codex 448）。长度预算只用在索引分片、
+# 展示摘要和模型阅读窗口上（db.index_publication 的分片），不用在这里。
+# v7 起结构化字段写成可读的逐行文本，不写 JSON（v6 在 4,496 个真实 CT 版本的正文里全都有 JSON 块）。
+# 唯一不进默认正文的是研究地点联系人里纯联络用途的信息（Codex 451）：电话、分机、邮件，以及角色为 CONTACT
+# （联络人）的条目（姓名与角色标签）。研究者等其他角色、角色不明的保留姓名与角色。原件保留，按 json_pointer 可读；用到排除规则的
+# 产物在 warnings 里记 excluded_by_rule:<规则版本>。
+CONTACT_RULE = "datafabric.site_contact_rule.v2"
+CONTACT_CHANNELS = ("phone", "phoneExt", "email")
+
+
+def excluded_contact_field(contact, key):
+    """按规则不进正文的联络字段：电话、分机、邮件；角色为 CONTACT 的条目里的姓名和角色标签（整条只剩联络用途）。
+    v2：把 CONTACT 条目的角色标签也明确列入排除（v1 实际也不写，但规则里没写明）。"""
+    return key in CONTACT_CHANNELS or (key in ("name", "role") and contact.get("role") == "CONTACT")
 
 # 固定阅读顺序：先看状态与终止原因，再看设计、时间、人群与终点，最后是申办方与结果；其余字段按键名排序附后。
 REGISTRY_ORDER = [
@@ -398,12 +400,12 @@ def _readable(value, path=""):
     空值不写。"""
     if isinstance(value, dict):
         items = sorted((k, v) for k, v in value.items() if not _empty(v))
-        if all(not isinstance(v, (dict, list)) for _, v in items):
-            if items:
-                yield (path + " " if path else "") + "; ".join(k + ": " + _leaf(v) for k, v in items)
-            return
+        flat = [(k, v) for k, v in items if not isinstance(v, (dict, list))]
+        if flat:  # 标量字段同一行，嵌套的字段随后逐个展开
+            yield (path + " " if path else "") + "; ".join(k + ": " + _leaf(v) for k, v in flat)
         for k, v in items:
-            yield from _readable(v, path + "." + k if path else k)
+            if isinstance(v, (dict, list)):
+                yield from _readable(v, path + "." + k if path else k)
     elif isinstance(value, list):
         values = [v for v in value if not _empty(v)]
         if all(not isinstance(v, (dict, list)) for v in values):
@@ -416,41 +418,49 @@ def _readable(value, path=""):
         yield (path + ": " if path else "") + _leaf(value)
 
 
-_SITE_FIELDS = ("facility", "city", "state", "country")
+def _site(site):
+    """一个研究地点（全部字段），联系人按 CONTACT_RULE 去掉纯联络信息 → (地点, 去掉的字段数)。"""
+    if not isinstance(site.get("contacts"), list):
+        return site, 0
+    contacts, removed = [], 0
+    for contact in site["contacts"]:
+        if not isinstance(contact, dict):
+            contacts.append(contact)
+            continue
+        kept = {k: v for k, v in contact.items() if not excluded_contact_field(contact, k)}
+        removed += len(contact) - len(kept)
+        if kept:
+            contacts.append(kept)
+    return {**site, "contacts": contacts}, removed
 
 
 def _locations(value):
-    """研究地点：先写全部国家及各自地点数（截断也不丢“在哪些国家做”），每个地点只写机构、城市、州/省、国家；
-    招募状态、坐标、联系人（个人信息）不进正文，完整内容回原件按 json_pointer 读。"""
+    """研究地点：先写一行全部国家及各自地点数（由地点名单算出的汇总，便于按国家检索），再逐个地点写全部字段
+    （联系人按 CONTACT_RULE）→ (渲染用的值, 按规则去掉的字段数)。"""
     if not isinstance(value, list):
-        return value
-    sites = [{k: site[k] for k in _SITE_FIELDS if site.get(k)} for site in value if isinstance(site, dict)]
+        return value, 0
+    sites, removed = [], 0
+    for site in value:
+        if isinstance(site, dict):
+            site, n = _site(site)
+            sites.append(site)
+            removed += n
     countries = {}
     for site in sites:
         if site.get("country"):
             countries[site["country"]] = countries.get(site["country"], 0) + 1
     ranked = sorted(countries.items(), key=lambda item: (-item[1], item[0]))
-    return {"countries": ["%s (%d)" % item for item in ranked], "sites": [s for s in sites if s]}
+    return {"countries": ["%s (%d)" % item for item in ranked], "sites": sites}, removed
 
 
 def _render_field(key, value):
-    """一个字段的正文：标量或一行就写在“字段名 field_key: ”后面；多行另起，逐行写。超过上限的写到上限为止
-    （按行截断），末尾写明本字段总字数，返回 (正文, 是否截断)。"""
-    lines = list(_readable(_locations(value) if key == "locations" else value))
+    """一个字段的正文（完整，不截断）：标量或只有一行就写在“字段名 field_key: ”后面；多行另起，逐行写。
+    → (正文, 按规则去掉的字段数)。"""
+    value, removed = _locations(value) if key == "locations" else (value, 0)
+    lines = list(_readable(value))
     if not lines:
-        return "", False
-    limit = FIELD_LIMITS.get(key, MAX_FIELD_CHARS)
-    total = sum(len(line) for line in lines) + len(lines) - 1
-    if total <= limit:
-        return (lines[0] if len(lines) == 1 else "\n" + "\n".join(lines)), False
-    kept, used = [], 0
-    for line in lines:
-        if used + len(line) > limit:
-            break
-        kept.append(line)
-        used += len(line) + 1
-    kept = kept or [lines[0][:limit]]
-    return "\n" + "\n".join(kept) + "\n…（本字段共 %d 字，完整内容见原件）" % total, True
+        return "", removed
+    return (lines[0] if len(lines) == 1 else "\n" + "\n".join(lines)), removed
 
 
 def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -> dict:
@@ -458,7 +468,8 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
 
     每个存在的字段一段，以“字段名 field_key:”开头：标量写在同一行；结构化的值写成可读的逐行文本
     （见 _readable，v7 起不再写 JSON）。值为 None 视同字段缺失，直接不写（不写 0 / null）。
-    超过上限（FIELD_LIMITS，其余 MAX_FIELD_CHARS）的按行截断，末尾写明本字段总字数，记 field_truncated:<key>。
+    字段一律完整保留，不截断；只有研究地点联系人里纯联络用途的信息不进正文（CONTACT_RULE），
+    用到时 warnings 记 excluded_by_rule:<规则版本>。
     """
     facts = facts or {}
     locators = locators or {}
@@ -487,11 +498,11 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
     ordered += sorted(k for k in present if k not in REGISTRY_ORDER)
     for key in ordered:
         value = facts[key]
-        rendered, truncated = _render_field(key, value)
+        rendered, removed = _render_field(key, value)
+        if removed and "excluded_by_rule:" + CONTACT_RULE not in warnings:
+            warnings.append("excluded_by_rule:" + CONTACT_RULE)
         if not rendered.strip():
             continue
-        if truncated:
-            warnings.append("field_truncated:" + key)
         locator = locators.get(key)
         pointer = locator.get("json_pointer") if isinstance(locator, dict) else None
         add(REGISTRY_LABELS.get(key, _DEFAULT_LABEL) + " " + key + ":" + ("" if rendered.startswith("\n") else " ")

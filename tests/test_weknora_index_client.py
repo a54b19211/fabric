@@ -72,12 +72,13 @@ def test_fixed_paths_headers_bodies_and_bounded_socket_reads(clients):
     assert json.loads(calls[2].content) == {
         "reason": "Fabric current state: revoked", "state": "revoked",
     }
-    for request in calls:
+    # 停用要等桥接逐块停用（长文档几十秒），单独给足时间；其余请求每次读最多 5 秒
+    for request, wait in zip(calls, (5.0, 5.0, 170.0)):
         assert request.headers["Authorization"] == "Bearer " + TOKEN
         assert request.headers["Accept-Encoding"] == "identity"
         assert TOKEN not in str(request.url)
         assert request.extensions["timeout"] == {
-            "connect": 5.0, "read": 5.0, "write": 5.0, "pool": 5.0,
+            "connect": wait, "read": wait, "write": wait, "pool": wait,
         }
     client.close()
     assert not transport.is_closed  # An injected client's lifetime belongs to the caller.

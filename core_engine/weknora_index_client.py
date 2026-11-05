@@ -18,6 +18,9 @@ def publication_id(manifest):
     if manifest.get("artifact_key"):
         # 同一固定版本的派生正文产物（附件）：桥接服务 feat/kdd-artifact-key 起把它算进身份；不带时与 v1 相同
         parts.append(manifest["artifact_key"])
+    if manifest.get("piece"):
+        # 太长的产物分片进索引（processing.index_pieces）：每片一条发布，分片规则版本和序号进身份；不分片时不变
+        parts.append([manifest["piece"]["rule"], manifest["piece"]["index"]])
     return sha256(canonical(parts))
 
 

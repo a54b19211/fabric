@@ -243,38 +243,51 @@ def test_registry_long_fields_are_kept_whole_for_search():
     assert long in out["text"] and out["warnings"] == []
 
 
-def test_registry_long_value_cut_with_explicit_note():
+def test_registry_very_long_value_is_still_kept_whole():
+    """清洗层不截断（Codex 448）：长度预算只用在索引分片、展示摘要和模型阅读窗口上。"""
     long = "未见异常；" * 50000
     out = ct.clean_registry({"eligibility": long}, {"eligibility": {"json_pointer": "/e"}}, summary="s")
-    line = seg_text(out, out["segments"][1])
-    assert line == ("入选标准 eligibility:\n" + long[:ct.MAX_FIELD_CHARS]
-                    + "\n…（本字段共 %d 字，完整内容见原件）" % len(long))
-    assert "field_truncated:eligibility" in out["warnings"]
+    assert seg_text(out, out["segments"][1]) == "入选标准 eligibility: " + long
+    assert out["warnings"] == []
 
 
-def test_registry_v7_renders_structure_readably_and_caps_result_tables():
-    """v7：结构化字段写成可读行；数值表一样的结果模块按上限截断并写明总量（v6 有 16 万字的不良事件 JSON）。"""
+def test_registry_v9_renders_structure_readably_and_keeps_every_value():
+    """v9：结构化字段写成可读行，不写 JSON，不截断；结果表的分组、数值、单位、离散度全部保留。"""
     events = {"eventGroups": [{"id": "EG%03d" % i, "title": "Arm %d" % i, "seriousNumAffected": i} for i in range(500)]}
+    measures = [{"title": "Overall survival", "unitOfMeasure": "months", "dispersionType": "95% Confidence Interval",
+                 "classes": [{"categories": [{"measurements": [
+                     {"groupId": "OG000", "value": "14.2", "lowerLimit": "11.8", "upperLimit": "16.9"}]}]}],
+                 "denoms": [{"counts": [{"groupId": "OG000", "value": "355"}], "units": "Participants"}]}]
     outcomes = [{"measure": "Overall survival", "timeFrame": "up to 5 years", "description": "OS per RECIST"}]
+    people = [{"name": "Ms Contact", "role": "CONTACT", "phone": "+86-10-0000", "email": "c@example.org"},
+              {"name": "Dr Lead", "role": "PRINCIPAL_INVESTIGATOR", "email": "lead@example.org"},
+              {"name": "Dr Unknown", "phone": "+86-10-1111"}]
     sites = [{"facility": "Site %d" % i, "city": "Beijing", "country": "China", "status": "RECRUITING",
-              "geoPoint": {"lat": 39.9, "lon": 116.4}, "contacts": [{"name": "Dr X", "email": "x@example.org"}]}
+              "geoPoint": {"lat": 39.9, "lon": 116.4}, "contacts": people}
              for i in range(3)] + [{"facility": "Site US", "city": "Boston", "country": "United States"}]
-    out = ct.clean_registry({"results_adverse_events": events, "primary_outcomes": outcomes, "locations": sites},
+    out = ct.clean_registry({"results_adverse_events": events, "results_outcome_measures": measures,
+                             "primary_outcomes": outcomes, "locations": sites},
                             {"results_adverse_events": {"json_pointer": "/resultsSection/adverseEventsModule"}},
                             summary="s")
     text = out["text"]
     assert ("主要终点 primary_outcomes: [1] description: OS per RECIST; measure: Overall survival; "
             "timeFrame: up to 5 years") in text
-    # v8：地点先写全部国家及地点数，每个地点只写机构、城市、州/省、国家；状态、坐标、联系人不进正文
+    # 地点：先写全部国家及地点数，再逐个地点写全部字段；联系人只去掉纯联络信息（Codex 451）：电话、邮件、
+    # 联络人（CONTACT）的姓名。研究者、角色不明的姓名和角色保留
     assert ("研究地点 locations:\ncountries: China (3); United States (1)\n"
-            "sites[1] city: Beijing; country: China; facility: Site 0") in text
-    assert "x@example.org" not in text and "Dr X" not in text and "geoPoint" not in text and "RECRUITING" not in text
+            "sites[1] city: Beijing; country: China; facility: Site 0; status: RECRUITING\n"
+            "sites[1].contacts[1] name: Dr Lead; role: PRINCIPAL_INVESTIGATOR\n"
+            "sites[1].contacts[2] name: Dr Unknown\n"
+            "sites[1].geoPoint lat: 39.9; lon: 116.4") in text
+    for gone in ("Ms Contact", "c@example.org", "lead@example.org", "+86-10"):
+        assert gone not in text, gone
     block = seg_text(out, next(s for s in out["segments"]
                                if s["source"]["json_pointer"] == "/resultsSection/adverseEventsModule"))
     assert block.startswith("结果-不良事件 results_adverse_events:\neventGroups[1] id: EG000; seriousNumAffected: 0")
-    assert len(block) < ct.FIELD_LIMITS["results_adverse_events"] + 200 and "完整内容见原件" in block
-    assert out["warnings"] == ["field_truncated:results_adverse_events"]
-    assert '{"' not in text
+    assert "eventGroups[500] id: EG499; seriousNumAffected: 499; title: Arm 499" in block  # 一条不少
+    for value in ("14.2", "11.8", "16.9", "months", "95% Confidence Interval", "355", "Participants", "OG000"):
+        assert value in text, value
+    assert out["warnings"] == ["excluded_by_rule:" + ct.CONTACT_RULE] and '{"' not in text
 
 
 def test_registry_empty():

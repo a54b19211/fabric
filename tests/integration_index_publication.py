@@ -121,7 +121,7 @@ def receipt_for(body):
     return {"publication_id": publication_id(body), "knowledge_id": "knowledge-" + publication_id(body),
             "knowledge_base_id": body["knowledge_base_id"], "source_scope": body["source_scope"],
             "identity": {key: body[key] for key in ("source_instance", "source_id", "source_record_id", "version_id",
-                                                    "raw_sha256", "artifact_key") if key in body},
+                                                    "raw_sha256", "artifact_key", "piece") if key in body},
             "raw_locator": copy.deepcopy(body["raw_locator"]), "content_sha256": body["content_sha256"],
             "upload_status": "uploaded", "parse_status": "completed", "vector_status": "ready", "index_status": "ready",
             "binding_status": "bound", "source_status": "active", "chunk_count": 1, "vector_count": 1}
@@ -696,7 +696,7 @@ class SearchClient(JournalClient):
         entry = version_or_entry if isinstance(version_or_entry, dict) else job(self.pg, version_or_entry)
         manifest = entry["manifest"]
         identity = {k: manifest[k] for k in ("source_instance", "source_id", "source_record_id", "version_id",
-                                             "raw_sha256", "artifact_key") if manifest.get(k)}
+                                             "raw_sha256", "artifact_key", "piece") if manifest.get(k)}
         self.hits.append({"chunk_id": chunk + str(len(self.hits)), "content": content, "score": 1.0 / (1 + len(self.hits)),
                           "retrieval_modes": ["keyword"], "publication_id": entry["remote_id"], "identity": identity,
                           "is_demo": True, "metadata": manifest.get("metadata")})
@@ -829,3 +829,135 @@ def test_search_stays_available_until_the_replacement_is_ready(pg, monkeypatch):
     assert index.process_once(client=journal)["state"] == "ready"
     after = search(client)
     assert after["results"] == [] and after["excluded"]["counts"] == {"changed_at_cutoff": 1}
+
+
+def test_parallel_equal_text_versions_create_one_physical_entry(pg, monkeypatch):
+    """Codex S36-01：两个事务同时入队同一记录的同一份正文，只落一个物理条目（数据库唯一索引保证）。"""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", "[]")
+    first = add_document("SYNTHETIC-parallel-same", available="2010-01-01", phase="PHASE1")
+    second = add_document("SYNTHETIC-parallel-same", available="2012-01-01", phase="PHASE2")
+    profile()
+    assert rows(pg, "SELECT * FROM index_publications") == []
+    set_targets(monkeypatch)
+    with pg.begin() as conn:
+        index._sync_targets(conn, index.targets())
+        artifacts = index.current_artifacts(conn, [first, second])
+    assert index.artifact_key(artifacts[first]) == index.artifact_key(artifacts[second])
+    barrier = threading.Barrier(2)
+
+    def enqueue(version):
+        with pg.begin() as conn:
+            barrier.wait(timeout=10)
+            count = index.enqueue_versions(conn, [version])
+            time.sleep(1)  # 事务晚一点提交，让另一个先撞上
+            return count
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        counts = list(pool.map(enqueue, [first, second]))
+    stored = rows(pg, "SELECT version_id FROM index_publications")
+    assert sorted(counts) == [0, 1] and len(stored) == 1 and stored[0]["version_id"] in {first, second}
+
+
+
+# —— 长产物分片（Codex 448/451）——
+
+def small_pieces(monkeypatch, chars=200):
+    from processing import index_pieces
+
+    monkeypatch.setattr(index_pieces, "MAX_CHARS", chars + index_pieces.UPLOAD_OVERHEAD)
+    monkeypatch.setattr(index_pieces, "MAX_BYTES", 10 ** 9)
+
+
+def long_document(native="SYNTHETIC-long"):
+    title = " ".join("Synthetic long registry wording %02d about an investigational product." % i for i in range(12))
+    return add_document(native, title=title)
+
+
+def test_a_long_artifact_is_indexed_in_pieces_and_is_searchable_only_when_every_piece_is_ready(pg, monkeypatch):
+    from processing import index_pieces
+
+    small_pieces(monkeypatch)
+    version = long_document()
+    scan()
+    entries = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
+    full = fixed_text(pg, version)
+    assert len(entries) >= 3 and [e["piece_index"] for e in entries] == list(range(1, len(entries) + 1))
+    assert len({e["artifact_key"] for e in entries}) == 1 and len({e["remote_id"] for e in entries}) == len(entries)
+    assert entries[0]["piece"]["start"] == 0 and entries[-1]["piece"]["end"] == len(full)
+    client = SearchClient(pg)
+    assert index.process_once(client=client)["state"] == "ready"
+    cover = retrieval._coverage({"external_archive"})["external_archive"]
+    assert cover["partial_artifacts"] == 1 and cover["ready_artifacts"] == 0  # 只有一片 ready：不算整篇可检索
+    for _ in range(len(entries)):
+        index.process_once(client=client)
+    assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
+    for entry, body in zip(entries, client.bodies):
+        assert body["piece"] == entry["piece"] and body["content"] == index_pieces.content(full, entry["piece"])
+    cover = retrieval._coverage({"external_archive"})["external_archive"]
+    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0
+    # 命中第 2 片：换算回全篇偏移，读的是可见版本这份产物里的原文
+    second = rows(pg, "SELECT * FROM index_publications WHERE piece_index=2")[0]
+    piece_text = full[second["piece"]["start"]:second["piece"]["end"]]
+    client.hit(second, piece_text[5:60])
+    item = search(client)["results"][0]
+    assert item["start"] == second["piece"]["start"] + 5 and full[item["start"]:item["end"]] == item["text"]
+    assert item["indexed_as"]["piece"]["index"] == 2
+
+
+def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
+    from processing import clean_text
+
+    small_pieces(monkeypatch, chars=100000)
+    long_document()
+    scan()
+    client = SearchClient(pg)
+    assert index.process_once(client=client)["state"] == "ready"
+    old = job(pg)
+    # 处理器升级，同时分片上限变小：新产物要分几片进索引
+    small_pieces(monkeypatch)
+    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    profile()
+    new = [r for r in rows(pg, "SELECT * FROM index_publications WHERE id<>:i ORDER BY piece_index", {"i": old["id"]})]
+    assert len(new) >= 2
+    due_job(pg, new[0]["id"])
+    assert index.process_once(client=client)["state"] == "ready"  # 新产物只 ready 了一片
+    due_job(pg, old["id"])
+    index.process_once(client=client)
+    assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": old["id"]})[0]["state"] == "ready"
+    assert client.disable_count == 0  # 新产物没有整份 ready：旧条目保留
+    for entry in new[1:]:
+        due_job(pg, entry["id"])
+        index.process_once(client=client)
+    due_job(pg, old["id"])
+    assert index.process_once(client=client)["desired_state"] == "superseded"
+    assert client.disable_count == 1
+
+
+def test_over_budget_content_and_chunk_budget_are_blocked_with_a_gap_not_retried_forever(pg, monkeypatch):
+    from processing import index_pieces
+
+    version, client = ready_job(pg)
+    monkeypatch.setattr(index_pieces, "MAX_CHARS", 50)  # 改造前冻结的整篇清单，现在超过单条上传预算
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET state='queued',first_send_at=NULL,knowledge_id=NULL,"
+                          "receipt='{}'::jsonb"))
+    due(pg)
+    result = index.process_once(client=JournalClient())
+    assert result["state"] == "blocked" and job(pg)["error"]["code"] == "index_content_budget"
+    small_pieces(monkeypatch, chars=100000)
+
+    class TooManyChunks(JournalClient):
+        def publish(self, body):
+            receipt = super().publish(body)
+            receipt.update(index_status="budget_exceeded", vector_status="budget_exceeded", chunk_count=2400)
+            return receipt
+
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET state='queued',attempts=0,error=NULL"))
+    due(pg)
+    result = index.process_once(client=TooManyChunks())
+    assert result["state"] == "blocked" and job(pg)["error"]["code"] == "index_chunk_budget"

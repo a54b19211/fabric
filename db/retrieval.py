@@ -23,6 +23,7 @@ from sqlalchemy import text
 from biz_rules.history_models import HistoryError
 from db import history
 from db import index_publication as index
+from processing import index_pieces
 
 SCHEMA = "datafabric.retrieval.v1"
 MODES = ("current", "operational_replay", "public_history_reconstruction")
@@ -89,14 +90,34 @@ def _artifact_rows(conn, triples):
     return out
 
 
-def _serving_old(conn, target_id, record_id, current_key, hit_key):
-    """处理器交接期（与 worker 的 retiring 同一规则）：当前产物的条目还没 ready，而被命中的旧条目仍 ready，
-    旧条目继续可检索；当前产物一旦 ready，只认当前产物。"""
-    states = dict(conn.execute(text(
-        "SELECT artifact_key,state FROM index_publications WHERE target_id=:t AND source_record_id=:n "
-        "AND artifact_key=ANY(:keys)"
-    ), {"t": target_id, "n": record_id, "keys": [current_key, hit_key]}).all())
-    return states.get(current_key) != "ready" and states.get(hit_key) == "ready"
+def _serving_old(conn, target_id, record_id, current_key, hit_key, hit_piece):
+    """处理器交接期（与 worker 的 retiring 同一规则）：当前产物还没整份 ready（每一片都 ready 才算），而被命中的
+    旧条目那一片仍 ready，旧条目继续可检索；当前产物一旦整份 ready，只认当前产物。"""
+    current_ready = conn.execute(text(
+        "SELECT bool_and(state='ready') FROM index_publications WHERE target_id=:t AND source_record_id=:n "
+        "AND artifact_key=:k"
+    ), {"t": target_id, "n": record_id, "k": current_key}).scalar()
+    hit_state = conn.execute(text(
+        "SELECT state FROM index_publications WHERE target_id=:t AND source_record_id=:n AND artifact_key=:k "
+        "AND piece_index=:p"
+    ), {"t": target_id, "n": record_id, "k": hit_key, "p": hit_piece}).scalar()
+    return not current_ready and hit_state == "ready"
+
+
+def _locate_in(full, chunk, piece):
+    """命中块 → 全篇偏移。分片的命中先在本片的全篇范围里找，找不到再连同上下文前缀（表头）一起找，
+    落在前缀里的部分不算（前缀不是这一段原件内容）。"""
+    if not piece:
+        return locate(full, chunk)
+    start, end = piece["start"], piece["end"]
+    span = locate(full[start:end], chunk)
+    if span:
+        return span[0] + start, span[1] + start
+    ctx = index_pieces.context(full, start)
+    span = locate(ctx + full[start:end], chunk) if ctx else None
+    if span and span[1] > len(ctx):
+        return max(span[0], len(ctx)) - len(ctx) + start, span[1] - len(ctx) + start
+    return None
 
 
 def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), target_ids=None):
@@ -141,8 +162,9 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
                 if not (vid and key and vid in current):
                     continue
                 current_key = index.artifact_key(current[vid])
+                hit_piece = (hit["identity"].get("piece") or {}).get("index", 0)
                 if key == current_key or (target_ids.get((source_id, is_demo)) and _serving_old(
-                        conn, target_ids[(source_id, is_demo)], record_id, current_key, key)):
+                        conn, target_ids[(source_id, is_demo)], record_id, current_key, key, hit_piece)):
                     # 旧条目只有在它的正文也是这个可见版本自己产出的（同一版本、旧处理器）时才认；
                     # 读取的正文取那一份产物本身，确认不了就剔除
                     needed.add((vid, *key.rsplit(":", 1)))
@@ -173,7 +195,7 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
             if evidence_types and not set(art["evidence_types"] or []) & set(evidence_types):
                 exclude(hit, "filtered_evidence_type")
                 continue
-            span = locate(fixed["text"], hit.get("content"))
+            span = _locate_in(fixed["text"], hit.get("content"), ident.get("piece"))
             if span is None:
                 exclude(hit, "chunk_not_in_fixed_text")
                 continue
@@ -197,28 +219,40 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
                 "profile": {"doc_type": art["doc_type"], "doc_category": art["doc_category"],
                             "evidence_types": list(art["evidence_types"] or [])},
                 "indexed_as": {"publication_id": hit.get("publication_id"), "version_id": ident["version_id"],
-                               "artifact_key": key, "chunk_id": hit.get("chunk_id")},
+                               "artifact_key": key, "piece": ident.get("piece"), "chunk_id": hit.get("chunk_id")},
                 "retrieval_modes": hit.get("retrieval_modes") or [], "recall_score": hit.get("score"),
             })
     return verified, counts, items
 
 
 def _coverage(source_ids):
-    """各来源的索引覆盖：物理条目（一条记录的一份正文）按状态计，以及覆盖的记录数。"""
+    """各来源的索引覆盖，分两层计：物理条目（片）按状态；产物（一条记录的一份正文，可能有几片）整份 ready、
+    部分 ready（有片 ready 但没全齐，不算可检索）的个数，以及整份 ready 覆盖的记录数。"""
     with history.history_engine().begin() as conn:
         rows = conn.execute(text("""
-            SELECT t.config->>'source_id' AS source_id,p.state,count(*) AS entries,
-                   count(DISTINCT p.source_record_id) AS records
+            SELECT t.config->>'source_id' AS source_id,p.state,count(*) AS entries
             FROM index_publications p JOIN index_targets t ON t.id=p.target_id
             WHERE t.enabled AND t.config->>'source_id'=ANY(:sources) GROUP BY 1,2
-        """), {"sources": list(source_ids)}).mappings()
-        out = {}
-        for row in rows:
-            entry = out.setdefault(row["source_id"], {"entries_by_state": {}, "ready_records": 0})
-            entry["entries_by_state"][row["state"]] = row["entries"]
-            if row["state"] == "ready":
-                entry["ready_records"] = row["records"]
-        return out
+        """), {"sources": list(source_ids)}).mappings().all()
+        artifacts = conn.execute(text("""
+            WITH a AS (
+              SELECT t.config->>'source_id' AS source_id,p.source_record_id,p.artifact_key,
+                     bool_and(p.state='ready') AS ready,bool_or(p.state='ready') AS some_ready
+              FROM index_publications p JOIN index_targets t ON t.id=p.target_id
+              WHERE t.enabled AND t.config->>'source_id'=ANY(:sources) AND p.state<>'disabled'
+              GROUP BY 1,2,3)
+            SELECT source_id,count(*) AS artifacts,count(*) FILTER (WHERE ready) AS ready_artifacts,
+                   count(*) FILTER (WHERE some_ready AND NOT ready) AS partial_artifacts,
+                   count(DISTINCT source_record_id) FILTER (WHERE ready) AS ready_records
+            FROM a GROUP BY 1
+        """), {"sources": list(source_ids)}).mappings().all()
+    out = {}
+    for row in rows:
+        out.setdefault(row["source_id"], {"entries_by_state": {}})["entries_by_state"][row["state"]] = row["entries"]
+    for row in artifacts:
+        out.setdefault(row["source_id"], {"entries_by_state": {}}).update(
+            {k: row[k] for k in ("artifacts", "ready_artifacts", "partial_artifacts", "ready_records")})
+    return out
 
 
 def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_categories=(), evidence_types=(),

@@ -11,3 +11,16 @@ CREATE INDEX IF NOT EXISTS index_publications_due_unsent ON index_publications (
   WHERE first_send_at IS NULL;
 CREATE INDEX IF NOT EXISTS index_publications_due_sent ON index_publications (lane, next_check_at, id)
   WHERE first_send_at IS NOT NULL;
+-- 索引分片（Codex 448/451）：太长的产物切成几片，一片一个物理条目。piece_index 0 = 不分片（身份与原来一致），
+-- 1..n = 第几片；piece 是分片身份（规则版本、序号、片数、全篇绝对范围、上下文前缀长度、字数、字节数、片摘要）。
+ALTER TABLE index_publications ADD COLUMN IF NOT EXISTS piece_index integer NOT NULL DEFAULT 0;
+ALTER TABLE index_publications ADD COLUMN IF NOT EXISTS piece jsonb;
+-- 两个唯一键都带分片序号：
+-- 具体片幂等：(目标, 版本, 产物, 片)；逻辑产物复用：同一目标、同一记录、同一份清洗正文的同一片只有一个物理
+-- 条目，并发入队由它保证（Codex S36-01）。改造前的待办 artifact_key 为空，只受前一个约束。
+DROP INDEX IF EXISTS index_publications_artifact;
+DROP INDEX IF EXISTS index_publications_record_artifact;
+CREATE UNIQUE INDEX IF NOT EXISTS index_publications_artifact_piece
+  ON index_publications (target_id, version_id, artifact_key, piece_index);
+CREATE UNIQUE INDEX IF NOT EXISTS index_publications_record_artifact_piece
+  ON index_publications (target_id, source_record_id, artifact_key, piece_index) WHERE artifact_key <> '';
