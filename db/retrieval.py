@@ -280,6 +280,13 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
         raise HistoryError("query_budget", "检索词须为1至2000字符，top_k须为1至20", 422)
     configured = [t for t in index.targets() if (not sources or t.source_id in sources)
                   and (not scopes or t.source_scope in scopes) and (is_demo is None or t.is_demo == is_demo)]
+    if history.legacy_retired():
+        # v3 6.3: a retired source is not recalled (chosen out before recall, so none of its text reaches rerank);
+        # the other sources of a mixed query stay; old ids still read through the record API
+        kept = [t for t in configured if t.source_id != "legacy_documents"]
+        if configured and not kept:
+            raise HistoryError(*history.LEGACY_RETIRED, 410)
+        configured = kept
     if not configured:
         raise HistoryError("search_scope_empty", "所选来源没有配置索引目标", 422)
     # 一个知识库一次召回，覆盖它在本次检索里的所有业务范围（同库的范围不互相挤占候选）

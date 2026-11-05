@@ -222,9 +222,7 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
     with pytest.raises(HistoryError) as error:
         legacy("nmpa", u5(NMPA_URL + "?2"), NMPA_URL + "?2", PAGE, "new-after-retirement")
     assert (error.value.code, error.value.status) == ("legacy_retired", 410)
-    with pytest.raises(HistoryError) as error:
-        publication.backfill_once(limit=5)
-    assert error.value.code == "legacy_retired"
+    assert publication.backfill_once(limit=5)["state"] == "legacy_retired"  # a state, the loop goes on
     with pytest.raises(HistoryError) as error:  # a new query does not choose legacy
         store.list_records("legacy_documents", False, "current", now, terms=["公告"])
     assert error.value.code == "legacy_retired"

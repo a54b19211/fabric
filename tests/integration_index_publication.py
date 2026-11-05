@@ -1192,3 +1192,28 @@ def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
     index.process_once(client=client)
     saved = job(pg)
     assert saved["state"] == "ready" and saved["desired_state"] != "superseded"  # kept, nothing sent to disable
+
+
+def test_a_retired_source_is_not_recalled_and_a_mixed_query_keeps_the_others(pg, monkeypatch):
+    """Codex r94: with legacy_documents retired (DATAFABRIC_LEGACY_WRITES off) semantic search does not choose it:
+    not by default, not when asked for it alone (410), and a mixed query searches only the other sources."""
+    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([
+        {"source_instance": "synthetic.index.pg", "source_id": "external_archive", "is_demo": True,
+         "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"},
+        {"source_instance": "synthetic.index.pg", "source_id": "legacy_documents", "is_demo": True,
+         "knowledge_base_id": "synthetic-legacy-kb", "source_scope": "research"}]))
+    monkeypatch.delenv("DATAFABRIC_LEGACY_WRITES")
+    client = SearchClient(pg)
+    asked = []
+    original = client.search
+    client.search = lambda body: asked.append(body["knowledge_base_id"]) or original(body)
+    search(client)
+    search(client, sources=("external_archive", "legacy_documents"))
+    assert set(asked) == {"synthetic-isolated-kb"}
+    with pytest.raises(HistoryError) as error:
+        search(client, sources=("legacy_documents",))
+    assert (error.value.code, error.value.status) == ("legacy_retired", 410)
+    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # cutover mode: still searchable
+    asked.clear()
+    search(client)
+    assert set(asked) == {"synthetic-isolated-kb", "synthetic-legacy-kb"}

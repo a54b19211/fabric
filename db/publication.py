@@ -180,7 +180,10 @@ def _seed_document(conn, row):
 
 def backfill_once(engine=None, *, limit=5):
     """固定库存上界，逐站轮转；同一总预算，库存EOF不是原站覆盖证明。"""
-    _legacy_write()  # v3 6.3: the documents-store inventory no longer seeds legacy_documents (first gate)
+    if history.legacy_retired():
+        # v3 6.3: the documents-store inventory no longer seeds legacy_documents. An explicit state, not an error:
+        # the publish loop goes on with its other work (graph subjects, pending events)
+        return {"seeded": 0, "complete": False, "state": "legacy_retired", "scope": "legacy_documents_retired"}
     engine = engine or publication_engine()
     sites = source_sites()
     disk = disk_status()
