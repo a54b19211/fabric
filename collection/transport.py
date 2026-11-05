@@ -13,6 +13,11 @@
 字节按实际读到的每一块计（含重定向和 429 的响应体、流式下载），用完当场停。超时和 429 在每一跳有界重试，
 每次重发都重新过闸、重新计数。预算停止是 BaseException（Stop），拉取函数里的 except Exception 吞不掉；
 一旦停下，同一次读取之后的任何传输都直接停。没有活动读取时（API 服务的其他调用、索引客户端等）原样放行。
+
+停在哪里（Budget.check，Codex 408）：每次发出前、每读到一块、每交付一个版本，以及导航返回时。
+截止时间：每次等待（连接、读块、整次传输、限速、重试间隔）都不超过发出那一刻的剩余时间；读块因到期超时报 deadline。
+请求数：唯一先发后计的是浏览器内部跟随的重定向（发出前拦不到，Chromium 一次导航最多跟 20 跳）。照实计数，
+导航一返回就按 request_budget 停，这一页不交付，不报读到底。
 """
 
 from __future__ import annotations
@@ -74,6 +79,8 @@ class Budget:
             raise Stop(self.stopped)
         if self.bytes > self.max_bytes:
             self.stop("byte_budget")
+        if self.requests > self.max_requests:  # 只有浏览器内部跳转会先发后计
+            self.stop("request_budget")
         if time.monotonic() >= self.deadline:
             self.stop("deadline")
 
@@ -91,10 +98,10 @@ class Budget:
 
     def take_bytes(self, n):
         self.bytes += n
-        if self.bytes > self.max_bytes:
-            self.stop("byte_budget")
+        self.check()
 
     def need_record(self):
+        self.check()
         if self.records >= self.max_records:
             self.stop("record_budget")
 
@@ -104,6 +111,24 @@ class Budget:
 
     def timeout(self, cap):
         return max(0.1, min(cap, self.deadline - time.monotonic()))
+
+    def within(self, timeout, default=3600.0):
+        """把调用方给的超时（数字、元组或 httpx 的分项字典；None 是不限）收进剩余时间。"""
+        if isinstance(timeout, dict):
+            return {key: self.within(value) for key, value in timeout.items()}
+        if isinstance(timeout, tuple):
+            return tuple(self.within(value) for value in timeout)
+        return self.timeout(default if timeout is None else timeout)
+
+    def counted(self, chunks):
+        """逐块计字节并检查；读块出错时恰因到期（读块超时收在剩余时间里）就报 deadline，否则原样抛出。"""
+        try:
+            for chunk in chunks:
+                self.take_bytes(len(chunk))
+                yield chunk
+        except Exception:
+            self.check()
+            raise
 
     def pause(self, seconds):
         if time.monotonic() + seconds >= self.deadline:
@@ -168,6 +193,7 @@ def _hop(budget, url, send, *, drain, gated=True):
         try:
             response = send()
         except Exception as error:
+            budget.check()  # 等待恰因到期而失败（超时收在剩余时间里）：报 deadline，不报来源失败
             if attempt == retries or not is_transient(error):
                 raise
             budget.pause(delay)
@@ -193,9 +219,7 @@ def _httpx_hop(original):
             self.stream, self.budget = stream, budget
 
         def __iter__(self):
-            for chunk in self.stream:
-                self.budget.take_bytes(len(chunk))
-                yield chunk
+            return self.budget.counted(self.stream)
 
         def close(self):
             self.stream.close()
@@ -206,6 +230,7 @@ def _httpx_hop(original):
             return original(self, request)
 
         def once():
+            request.extensions["timeout"] = budget.within(request.extensions.get("timeout", {}))
             response = original(self, request)
             if hasattr(response, "_content"):  # 传输层已整块读入（内存响应等）：当场计
                 budget.take_bytes(len(response._content))
@@ -230,13 +255,18 @@ class _CountedRaw:
     def __init__(self, raw, budget):
         self._raw, self._budget = raw, budget
 
-    def stream(self, *args, **kwargs):
-        for chunk in self._raw.stream(*args, **kwargs):
-            self._budget.take_bytes(len(chunk))
-            yield chunk
+    def stream(self, amt=2**16, decode_content=None):
+        if getattr(self._raw, "chunked", False) or not hasattr(self._raw, "read1"):
+            return self._budget.counted(self._raw.stream(amt, decode_content=decode_content))
+        # read(amt) 要攒满 amt 才返回，慢速返回时一块能拖过期限；read1 到多少返回多少，逐块检查
+        return self._budget.counted(iter(lambda: self._raw.read1(amt, decode_content=decode_content), b""))
 
     def read(self, *args, **kwargs):
-        data = self._raw.read(*args, **kwargs)
+        try:
+            data = self._raw.read(*args, **kwargs)
+        except Exception:
+            self._budget.check()
+            raise
         self._budget.take_bytes(len(data or b""))
         return data
 
@@ -251,6 +281,7 @@ def _requests_hop(original):
             return original(self, request, *args, **kwargs)
 
         def once():
+            kwargs["timeout"] = budget.within(kwargs.get("timeout"))
             response = original(self, request, *args, **kwargs)
             response.raw = _CountedRaw(response.raw, budget)
             return response
@@ -277,18 +308,16 @@ def _curl_request(original):
         limit = kwargs.pop("max_redirects", None)
         limit = 10 if limit is None or limit < 0 else min(limit, 10)
         stream = bool(kwargs.get("stream"))
+        timeout = kwargs.pop("timeout", getattr(self, "timeout", None))
+
+        def once():
+            return original(self, method, url, *args, allow_redirects=False, timeout=budget.within(timeout), **kwargs)
+
         for _ in range(limit + 1):
-            response = _hop(budget, url, lambda: original(self, method, url, *args, allow_redirects=False, **kwargs),
-                            drain=lambda r: r.close() if stream else budget.take_bytes(len(r.content)))
+            response = _hop(budget, url, once, drain=lambda r: r.close() if stream else budget.take_bytes(len(r.content)))
             if stream:
                 chunks = response.iter_content
-
-                def counted(*a, _chunks=chunks, **k):
-                    for chunk in _chunks(*a, **k):
-                        budget.take_bytes(len(chunk))
-                        yield chunk
-
-                response.iter_content = counted
+                response.iter_content = lambda *a, _chunks=chunks, **k: budget.counted(_chunks(*a, **k))
             else:
                 budget.take_bytes(len(response.content))
             location = response.headers.get("location")
@@ -326,7 +355,8 @@ def _route(page):
         route.fallback()
 
     def redirected(request):
-        # 浏览器内部跟随的重定向，下一跳不经过路由，发出前拦不住：照实计数（占请求数），下一次过闸时生效
+        # 浏览器内部跟随的重定向，下一跳不经过路由，发出前拦不住：照实计数（占请求数）；超了之后的请求在路由处中止，
+        # 导航返回时 check 按 request_budget 停
         budget = getattr(page, "_collection_budget", None)
         if budget is not None and request.redirected_from is not None and request.resource_type in GATED_BROWSER_TYPES:
             budget.requests += 1
@@ -336,7 +366,7 @@ def _route(page):
         budget = getattr(page, "_collection_budget", None)
         if budget is not None:
             size = _browser_body_size(request)  # 先取大小再加：取大小会切到浏览器驱动，期间别的事件也在加
-            budget.bytes += size  # 事件里不抛，下次过闸再停
+            budget.bytes += size  # 事件里不抛：下次过闸、导航返回或交付版本时 check 停
 
     page.route("**/*", handle)  # 后注册的路由先执行：先过闸，再交给 scrapling 等原有路由
     page.on("request", redirected)
@@ -374,6 +404,8 @@ def _browser_goto(original):
         if budget is None:
             return original(self, url, *args, **kwargs)
         _route(self)
+        wait = kwargs.get("timeout")  # 毫秒；None 是页面默认（30 秒），0 是不限
+        kwargs["timeout"] = budget.within(30.0 if wait is None else (wait / 1000 or None)) * 1000
         try:
             response = _hop(budget, url, lambda: original(self, url, *args, **kwargs),
                             drain=lambda r: None, gated=False)  # 导航请求本身在路由处过闸
