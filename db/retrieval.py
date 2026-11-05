@@ -90,18 +90,14 @@ def _artifact_rows(conn, triples):
     return out
 
 
-def _serving_old(conn, target_id, record_id, current_key, hit_key, hit_piece):
-    """处理器交接期（与 worker 的 retiring 同一规则）：当前产物还没整份 ready（每一片都 ready 才算），而被命中的
-    旧条目那一片仍 ready，旧条目继续可检索；当前产物一旦整份 ready，只认当前产物。"""
-    current_ready = conn.execute(text(
-        "SELECT bool_and(state='ready') FROM index_publications WHERE target_id=:t AND source_record_id=:n "
-        "AND artifact_key=:k"
-    ), {"t": target_id, "n": record_id, "k": current_key}).scalar()
+def _serving_old(conn, target_id, record_id, current, hit_key, hit_piece_key):
+    """处理器交接期（与 worker 的 retiring 同一判定 index.artifact_ready）：当前产物还没整份 ready（当前分片计划
+    的每一片都 ready 才算），而被命中的旧条目那一片仍 ready，旧条目继续可检索；当前产物一旦整份 ready，只认它。"""
     hit_state = conn.execute(text(
         "SELECT state FROM index_publications WHERE target_id=:t AND source_record_id=:n AND artifact_key=:k "
-        "AND piece_index=:p"
-    ), {"t": target_id, "n": record_id, "k": hit_key, "p": hit_piece}).scalar()
-    return not current_ready and hit_state == "ready"
+        "AND piece_key=:p"
+    ), {"t": target_id, "n": record_id, "k": hit_key, "p": hit_piece_key}).scalar()
+    return hit_state == "ready" and not index.artifact_ready(conn, target_id, record_id, current)
 
 
 def _locate_in(full, chunk, piece):
@@ -162,9 +158,9 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
                 if not (vid and key and vid in current):
                     continue
                 current_key = index.artifact_key(current[vid])
-                hit_piece = (hit["identity"].get("piece") or {}).get("index", 0)
+                hit_piece = index_pieces.key(hit["identity"].get("piece"))
                 if key == current_key or (target_ids.get((source_id, is_demo)) and _serving_old(
-                        conn, target_ids[(source_id, is_demo)], record_id, current_key, key, hit_piece)):
+                        conn, target_ids[(source_id, is_demo)], record_id, current[vid], key, hit_piece)):
                     # 旧条目只有在它的正文也是这个可见版本自己产出的（同一版本、旧处理器）时才认；
                     # 读取的正文取那一份产物本身，确认不了就剔除
                     needed.add((vid, *key.rsplit(":", 1)))

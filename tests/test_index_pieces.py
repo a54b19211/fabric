@@ -20,6 +20,17 @@ def check(text, pieces, max_chars=LIMIT, max_bytes=10 ** 9):
     assert [p["index"] for p in pieces] == list(range(1, len(pieces) + 1))
 
 
+def test_piece_key_is_rule_index_range_and_digest():
+    """Codex 456/460：唯一键用的分片身份键；不分片为空串，计划的键集合不分片时是 {\"\"}。"""
+    text = "\n".join("line %03d " % i + "y" * 60 for i in range(40))
+    pieces = ip.plan(text, [], max_chars=LIMIT)
+    p = pieces[0]
+    assert ip.key(p) == "%s:1:0-%d:%s" % (ip.RULE, p["end"], p["sha256"]) and ip.key(None) == ""
+    assert len({ip.key(q) for q in pieces}) == len(pieces)
+    assert len({ip.key(p), ip.key({**p, "end": p["end"] - 1}), ip.key({**p, "rule": "other"})}) == 3
+    assert ip.keys("short text") == {""}
+
+
 def test_short_text_is_not_split():
     assert ip.plan("short text", [], max_chars=LIMIT) == []
 

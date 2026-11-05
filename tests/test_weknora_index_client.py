@@ -267,3 +267,17 @@ def test_publication_id_uses_fixed_native_version_identity_not_mutable_content()
     assert module.publication_id(manifest) == expected
     assert module.publication_id({**manifest, "content_sha256": "d" * 64}) == expected
     assert module.publication_id({**manifest, "version_id": "e" * 64}) != expected
+
+
+def test_piece_identity_takes_rule_index_range_and_digest():
+    """Codex 456/460：同序号的片，规则、范围或片摘要变了都是另一条发布；片数、字数等描述不参与身份。"""
+    piece = {"rule": "datafabric.index_piece.v1", "index": 1, "count": 3, "start": 0, "end": 10,
+             "context_chars": 0, "chars": 10, "bytes": 10, "sha256": "f" * 64}
+    base = {"knowledge_base_id": "kb", "source_instance": "fabric", "source_id": "s", "source_record_id": "r",
+            "version_id": "v" * 64, "artifact_key": "p.v1:" + "a" * 64, "piece": piece}
+    pid = module.publication_id(base)
+    changed = [{**piece, "rule": "datafabric.index_piece.v2"}, {**piece, "end": 12},
+               {**piece, "start": 1}, {**piece, "sha256": "e" * 64}, {**piece, "index": 2}]
+    assert len({pid, *(module.publication_id({**base, "piece": p}) for p in changed)}) == 1 + len(changed)
+    assert module.publication_id({**base, "piece": {**piece, "count": 5, "chars": 11}}) == pid
+    assert module.publication_id({k: v for k, v in base.items() if k != "piece"}) != pid

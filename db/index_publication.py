@@ -99,6 +99,17 @@ def artifact_key(artifact):
     return artifact["processor_version"] + ":" + artifact["text_sha256"]
 
 
+def artifact_ready(conn, target_id, record_id, artifact):
+    """这份产物整份可检索：按当前分片计划应有的每一片（不分片即整篇一条）都有 ready 条目。按完整的预期片集合
+    判定，数据库里只有其中几片、而这几片都 ready 不算（Codex 460）。worker 的交接和检索的交接用同一个判定。"""
+    expected = index_pieces.keys(artifact["text"], artifact.get("segments") or [])
+    ready = {k for (k,) in conn.execute(text(
+        "SELECT piece_key FROM index_publications WHERE target_id=:t AND source_record_id=:n AND artifact_key=:k "
+        "AND state='ready'"
+    ), {"t": target_id, "n": record_id, "k": artifact_key(artifact)})}
+    return expected <= ready
+
+
 def _artifact_text(conn, version_id, key):
     """待办绑定的那一份正文（处理器版本:摘要）；找不到返回 None。"""
     processor, digest = key.rsplit(":", 1)
@@ -190,25 +201,27 @@ def _enqueue(conn, target, record, artifact, meta, pieces):
     版本。检索时由 Fabric 按模式和截止时间找出此刻可见的版本，它的当前产物就是这份正文才返回（db.retrieval）。
     复用键 (目标, 记录, 产物) 由数据库唯一索引保证（V028 index_publications_record_artifact）：两个事务同时入队
     同一份正文时，后一个等前一个提交后什么也不做，代表版本一经建立就不变（Codex S36-01）。
-    太长的产物分片（processing.index_pieces）：一片一个物理条目，唯一键带上分片序号；一次放得下的不分片，
-    身份与原来一致。
+    太长的产物分片（processing.index_pieces）：一片一个物理条目，唯一键带上分片身份键（规则、序号、范围、
+    片摘要）；一次放得下的不分片，身份与原来一致。
     新建后，同一记录的其他待办尽快复查（处理器升级后旧产物会被判为 superseded 并停用，记录保留）。"""
     key = artifact_key(artifact)
     lane = "new" if (datetime.now(record.first_seen_at.tzinfo) - record.first_seen_at).days < FRESH_DAYS else "backfill"
     inserted = 0
     for piece in pieces or [None]:
         manifest = _manifest(target.model_dump(), record, artifact, meta, piece)
-        ident = [target.key(), record.version_id, key] + ([piece["index"]] if piece else [])
+        piece_key = index_pieces.key(piece)
+        ident = [target.key(), record.version_id, key] + ([piece_key] if piece else [])
         inserted += conn.execute(text("""
             INSERT INTO index_publications
-              (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key,lane,piece_index,piece)
+              (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key,lane,piece_index,piece,
+               piece_key)
             VALUES (:id,:target,:version,:native,:remote,CAST(:manifest AS jsonb),:key,:lane,:piece_index,
-                    CAST(:piece AS jsonb))
+                    CAST(:piece AS jsonb),:piece_key)
             ON CONFLICT DO NOTHING
         """), {"id": sha256(canonical(ident)), "target": target.key(), "version": record.version_id,
                 "native": record.source_record_id, "remote": publication_id(manifest), "manifest": canonical(manifest),
                 "key": key, "lane": lane, "piece_index": piece["index"] if piece else 0,
-                "piece": canonical(piece) if piece else None}).rowcount
+                "piece": canonical(piece) if piece else None, "piece_key": piece_key}).rowcount
     if inserted:
         conn.execute(text("""
             UPDATE index_publications SET next_check_at=clock_timestamp()
@@ -354,31 +367,25 @@ def _current_state(row):
             "AND " + history._ROLE + "!='context_reference'"
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
-        keys = set(current)
-        if row["artifact_key"] in keys:
-            # 产物是当前的，还要分片计划也是当前的。整篇条目而现在要分片（分片之前建的）、或分片规则已换的片，
-            # 由按当前计划建的片替代：没发出过或没 ready 过的直接 superseded（超预算的整篇永远到不了 ready）；
-            # 已经 ready 的等当前计划的片全部 ready 再停用（先上后下）
-            piece = row.get("piece")
-            if not ((not piece and not index_pieces.fits(current[row["artifact_key"]]["text"])) or (
-                    piece and piece["rule"] != index_pieces.RULE)):
+        mine = current.get(row["artifact_key"])
+        if mine is not None:
+            # 产物是当前的，还要这一片属于当前分片计划（Codex 456/460）：整篇条目而现在要分片、分片规则或范围
+            # 已换的片，由按当前计划建的片替代。没发出过或没 ready 过的直接 superseded（超预算的整篇永远到不了
+            # ready）；已经 ready 的等当前计划的整套片全部 ready 再停用（先上后下）
+            if row["piece_key"] in index_pieces.keys(mine["text"], mine.get("segments") or []):
                 return "active"
             if never_sent(row) or row["state"] != "ready":
                 return "superseded"
-            replaced = conn.execute(text(
-                "SELECT count(*)>0 AND bool_and(state='ready') FROM index_publications WHERE target_id=:t "
-                "AND source_record_id=:n AND artifact_key=:k AND piece_index>0 AND piece->>'rule'=:rule"
-            ), {"t": row["target_id"], "n": row["source_record_id"], "k": row["artifact_key"],
-                "rule": index_pieces.RULE}).scalar()
-            return "superseded" if replaced else "retiring"
-        # 这份正文（处理器升级前的产物，或改造前按投影正文建的待办）已不是任何版本的当前产物。
-        # 没发出过的直接停用；发出过的，等该记录的当前产物都能检索（整份产物的每一片都 ready）后再停用，
-        # 不撤掉最后的入口；在那之前原样保留、不再上传（retiring）。检索时照样逐条校验。
-        ready = {key for (key,) in conn.execute(text(
-            "SELECT artifact_key FROM index_publications WHERE target_id=:t AND source_record_id=:n "
-            "AND artifact_key=ANY(:keys) GROUP BY artifact_key HAVING bool_and(state='ready')"
-        ), {"t": row["target_id"], "n": row["source_record_id"], "keys": list(keys)})}
-        return "superseded" if never_sent(row) or keys <= ready else "retiring"
+            replacements = [mine]
+        else:
+            # 这份正文（处理器升级前的产物，或改造前按投影正文建的待办）已不是任何版本的当前产物。
+            # 没发出过的直接停用；发出过的，等该记录的当前产物都整份可检索后再停用，不撤掉最后的入口；
+            # 在那之前原样保留、不再上传（retiring）。检索时照样逐条校验。
+            if never_sent(row):
+                return "superseded"
+            replacements = list(current.values())
+        done = all(artifact_ready(conn, row["target_id"], row["source_record_id"], a) for a in replacements)
+        return "superseded" if done else "retiring"
 
 
 def _sent(row):
@@ -499,8 +506,7 @@ def process_once(*, client=None, lane=None, sent=None):
         content = index_pieces.content(full, row["piece"]) if row.get("piece") else full
         if not content.strip():
             raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
-        if (len(content) + index_pieces.UPLOAD_OVERHEAD > index_pieces.MAX_CHARS
-                or len(content.encode()) + index_pieces.UPLOAD_OVERHEAD > index_pieces.MAX_BYTES):
+        if not index_pieces.fits(content):
             # 改造前冻结的整篇清单、或分片规则之外的超长内容：不上传，记缺口（原件与清洗产物都保留）
             return _finish(row, "blocked", desired, final=True, error={
                 "code": "index_content_budget", "message": "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，"

@@ -992,3 +992,84 @@ def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan
     assert client.disable_count == 1
     cover = retrieval._coverage({"external_archive"})["external_archive"]
     assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0
+
+
+def test_a_new_piece_rule_adds_new_pieces_beside_the_old_ones_and_retires_them_after(pg, monkeypatch):
+    """Codex 456：唯一键和编号带完整分片身份（规则、序号、范围、片摘要）：分片规则换了，同序号的新片不会被
+    旧片挡住（ON CONFLICT 悄悄跳过）；旧片在新片全部 ready 后才停用。"""
+    from processing import index_pieces
+
+    small_pieces(monkeypatch)
+    version = long_document()
+    scan()
+    client = SearchClient(pg)
+    old = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
+    while index.process_once(client=client)["state"] != "idle":
+        pass
+    assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
+    monkeypatch.setattr(index_pieces, "RULE", "datafabric.index_piece.v2-synthetic")
+    with pg.begin() as conn:
+        index.enqueue_versions(conn, [version])
+    new = rows(pg, "SELECT * FROM index_publications WHERE piece->>'rule'=:r ORDER BY piece_index",
+               {"r": "datafabric.index_piece.v2-synthetic"})
+    assert len(new) == len(old) and {r["piece_index"] for r in new} == {r["piece_index"] for r in old}
+    assert not {r["id"] for r in new} & {r["id"] for r in old}
+    assert not {r["remote_id"] for r in new} & {r["remote_id"] for r in old}
+    for _ in range(80):
+        states = {r["id"]: r["state"] for r in rows(pg, "SELECT id,state FROM index_publications")}
+        if all(states[r["id"]] == "disabled" for r in old) and all(states[r["id"]] == "ready" for r in new):
+            break
+        if index.process_once(client=client)["state"] == "idle":
+            due(pg)
+    assert all(states[r["id"]] == "disabled" for r in old) and all(states[r["id"]] == "ready" for r in new)
+    assert client.disable_count == len(old)
+
+
+def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypatch):
+    """Codex 460 的反例：旧计划 3 片都 ready，新计划要 5 片。新计划的每一片都要建出来（不被旧片的序号挡住），
+    数据库里只有其中几片 ready 时旧片照样保留、检索照样认旧片；整套新片 ready 后旧片才停用。"""
+    from processing import index_pieces
+
+    small_pieces(monkeypatch)
+    version = long_document()
+    scan()
+    client = SearchClient(pg)
+    while index.process_once(client=client)["state"] != "idle":
+        pass
+    old = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
+    small_pieces(monkeypatch, chars=120)  # 同一规则、同一产物，切点变了，片数更多
+    with pg.begin() as conn:
+        index.enqueue_versions(conn, [version])
+    new = rows(pg, "SELECT * FROM index_publications WHERE NOT id=ANY(:old) ORDER BY piece_index",
+               {"old": [r["id"] for r in old]})
+    with pg.begin() as conn:
+        artifact = index.current_artifacts(conn, [version])[version]
+    assert len(new) > len(old) >= 3 and [r["piece_index"] for r in new] == list(range(1, len(new) + 1))
+    assert index_pieces.keys(artifact["text"], artifact["segments"]) == {r["piece_key"] for r in new}
+
+    def run_only(ids, until):
+        """只让 ids 到期，处理到这些条目都到 until 状态（或已处理一轮而状态不再变）。"""
+        for _ in range(20):
+            with pg.begin() as conn:
+                conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+CASE WHEN "
+                                  "id=ANY(:ids) THEN interval '0' ELSE interval '1 day' END"), {"ids": ids})
+            while index.process_once(client=client)["state"] != "idle":
+                pass
+            states = {r["id"]: r["state"] for r in rows(pg, "SELECT id,state FROM index_publications")}
+            if all(states[i] == until for i in ids):
+                return states
+        return states
+
+    run_only([r["id"] for r in new if r["piece_index"] > len(old)], "ready")  # 只有序号在旧片数之后的几片 ready
+    states = run_only([r["id"] for r in old], "disabled")  # 旧片复查：新计划还没整套 ready，必须保留
+    assert all(states[r["id"]] == "ready" for r in old) and client.disable_count == 0
+    with pg.begin() as conn:
+        assert retrieval._serving_old(conn, old[0]["target_id"], old[0]["source_record_id"], artifact,
+                                      old[0]["artifact_key"], old[0]["piece_key"])
+    run_only([r["id"] for r in new], "ready")
+    states = run_only([r["id"] for r in old], "disabled")
+    assert all(states[r["id"]] == "ready" for r in new) and all(states[r["id"]] == "disabled" for r in old)
+    assert client.disable_count == len(old)
+    with pg.begin() as conn:
+        assert not retrieval._serving_old(conn, old[0]["target_id"], old[0]["source_record_id"], artifact,
+                                          old[0]["artifact_key"], old[0]["piece_key"])

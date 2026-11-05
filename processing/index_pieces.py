@@ -62,6 +62,20 @@ def _hard_cuts(text, start, end, step):
     return cuts
 
 
+def key(piece):
+    """分片的身份键（唯一键、本地编号、发布编号都用它）：规则版本、序号、全篇范围、片摘要；不分片为空串。
+    规则换了、范围或内容变了都是另一片，不会与旧片相撞（Codex 456）。"""
+    if not piece:
+        return ""
+    return "%s:%d:%d-%d:%s" % (piece["rule"], piece["index"], piece["start"], piece["end"], piece["sha256"])
+
+
+def keys(text, segments=()):
+    """按当前计划，这份产物应有的全部分片身份键；不分片为 {""}（整篇一条）。交接判定按这个完整集合，
+    不按数据库里现存的行（Codex 460）。"""
+    return {key(p) for p in plan(text, segments)} or {""}
+
+
 def fits(text):
     """整篇一次放得下（不用分片）：字符数和 UTF-8 字节数（加上上传附加的一行）都不超过上限。"""
     return (len(text) + UPLOAD_OVERHEAD <= MAX_CHARS
