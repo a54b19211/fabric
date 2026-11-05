@@ -529,9 +529,7 @@ def _current_version(conn, run, item):
             "SELECT version_id,payload FROM " + _VERSIONS + " "
             "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
             "AND " + _ROLE + "!='context_reference' "
-            "ORDER BY COALESCE(proof_available_at,first_seen_at) DESC,"
-            + _SOURCE_UPDATED_ORDER
-            + " DESC NULLS LAST,published_seq DESC LIMIT 1"
+            "ORDER BY " + _LATEST + " LIMIT 1"
         ),
         {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
     ).mappings().first()
@@ -1194,10 +1192,22 @@ def _eligibility(mode):
     raise HistoryError("unsupported_mode", "不支持该历史读取模式")
 
 
+# 整源字面检索（ILIKE 扫正文）只在不大的来源上做；超过这个版本数立即返回 query_budget，引导用 WeKnora 检索
+# （POST /api/history/search）。给了记录编号或采用范围的读取不受影响。
+LITERAL_SEARCH_MAX_VERSIONS = 20000
+
+
 def _read_filters(
     conn, source_id, is_demo, mode, cutoff, max_seq, run_id, ids, terms, kind
 ):
-    _source(conn, source_id)
+    source = _source(conn, source_id)
+    if terms and not ids and not run_id and source["published_seq"] > LITERAL_SEARCH_MAX_VERSIONS:
+        raise HistoryError(
+            "query_budget",
+            "该来源有 " + str(source["published_seq"]) + " 个版本，整源字面检索超出读取预算；"
+            "请用 POST /api/history/search（WeKnora 检索），或给出记录编号、采用范围",
+            422,
+        )
     cutoff = _cutoff(cutoff)
     if cutoff > _now(conn):
         raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
@@ -1283,6 +1293,21 @@ _ROLE = "COALESCE(publication_role," + _ROLE_FROM_PAYLOAD + ")"
 _SOURCE_UPDATED_ORDER = (
     "(CASE WHEN publication_role IS NULL THEN " + _SOURCE_UPDATED_FROM_PAYLOAD + " ELSE source_updated_rank END)"
 )
+# 一条记录的“最新版本”：最晚的证明或首次可见时间，再看来源自己的更新时间，最后看发布序号。
+# 当前头版、截止时间下可见的版本、变更列表的头版都用这一条规则。
+_LATEST = (
+    "COALESCE(proof_available_at,first_seen_at) DESC," + _SOURCE_UPDATED_ORDER + " DESC NULLS LAST,published_seq DESC"
+)
+
+
+def _ranked(where, mode):
+    """截止资格先筛（不含 context_reference），再按 _LATEST 给每条记录的版本排序；ranked 里 n=1 是此刻可见的版本。
+    list_records 与 visible_versions 共用这一段，可见性只有一套规则。"""
+    return (
+        "WITH eligible AS (SELECT * FROM " + _VERSIONS + " WHERE " + where + " AND " + _eligibility(mode)
+        + " AND " + _ROLE + "!='context_reference'), ranked AS (SELECT *,row_number() OVER "
+        "(PARTITION BY source_record_id ORDER BY " + _LATEST + ") n FROM eligible) "
+    )
 _DERIVE = (
     "INSERT INTO history_version_rank(version_id,publication_role,source_updated_rank) SELECT version_id,"
     + _ROLE_FROM_PAYLOAD
@@ -1386,15 +1411,8 @@ def list_records(
         rows = (
             conn.execute(
                 text(
-                    """
-          WITH eligible AS ("""
-                    + base
-                    + " AND "
-                    + eligible
-                    + """),
-          ranked AS (SELECT *,row_number() OVER (PARTITION BY source_record_id ORDER BY COALESCE(proof_available_at,first_seen_at) DESC, """
-                    + _SOURCE_UPDATED_ORDER
-                    + """ DESC NULLS LAST,published_seq DESC) n FROM eligible)
+                    _ranked(where, mode)
+                    + """
           SELECT payload FROM ranked WHERE n=1 AND source_record_id>:last AND """
                     + term_filter
                     + """ ORDER BY source_record_id LIMIT :limit
@@ -1525,6 +1543,24 @@ def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
         return record
 
 
+def visible_versions(source_id, is_demo, mode, cutoff, source_record_ids):
+    """每条记录在本模式和截止时间下可见的那个版本 → {source_record_id: version_id}；此时不可见的不在结果里。
+    与 list_records 同一套条件（_read_filters：来源许可、未来截止时间、已发布范围；_ranked：截止资格先筛再取最新），
+    只是不读载荷。供检索命中的校验用（db.retrieval）；来源不可读、模式不支持时照常报错。"""
+    _derived_mode(source_id, mode)
+    ids = sorted(set(source_record_ids))
+    if not 1 <= len(ids) <= 200:
+        raise HistoryError("query_budget", "一次最多核对 200 条记录")
+    with history_engine().begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+        source = _source(conn, source_id)
+        where, params, _, _ = _read_filters(
+            conn, source_id, is_demo, mode, cutoff, source["published_seq"], None, ids, (), None)
+        rows = conn.execute(text(
+            _ranked(where, mode) + "SELECT source_record_id,version_id FROM ranked WHERE n=1"), params).mappings()
+        return {row["source_record_id"]: row["version_id"] for row in rows}
+
+
 def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
     if not 0 <= after or not 1 <= limit <= 100:
         raise HistoryError("query_budget", "变更读取参数不合法")
@@ -1575,9 +1611,7 @@ def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
                 "FROM " + _VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
                 "AND published_seq<=:max_seq AND source_record_id=ANY(:ids) "
                 "AND " + _ROLE + "!='context_reference' "
-                "ORDER BY source_record_id,COALESCE(proof_available_at,first_seen_at) DESC,"
-                + _SOURCE_UPDATED_ORDER
-                + " DESC NULLS LAST,published_seq DESC"
+                "ORDER BY source_record_id," + _LATEST
             ),
             {"source": source_id, "demo": is_demo, "max_seq": max_seq, "ids": head_ids},
         ).mappings()

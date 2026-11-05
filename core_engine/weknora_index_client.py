@@ -40,13 +40,13 @@ class WeKnoraIndexClient:
         if self.owned:
             self.client.close()
 
-    def _request(self, method, path, body=None, *, allow_missing=False):
-        deadline = time.monotonic() + 20
+    def _request(self, method, path, body=None, *, allow_missing=False, seconds=20, wait=5):
+        deadline = time.monotonic() + seconds
         try:
             with self.client.stream(
                 method, self.base + "/api/v1/kdd" + path,
                 headers={"Authorization": "Bearer " + self.token, "Accept-Encoding": "identity"},
-                json=body, timeout=httpx.Timeout(5),
+                json=body, timeout=httpx.Timeout(wait),
             ) as response:
                 if time.monotonic() >= deadline:
                     raise httpx.ReadTimeout("deadline")
@@ -84,6 +84,14 @@ class WeKnoraIndexClient:
 
     def publish(self, body):
         return self._request("POST", "/publications", body)
+
+    def search(self, body):
+        """候选召回（整库关键词 + 向量，不重排）；先算查询向量、两路检索，最多等 30 秒。"""
+        return self._request("POST", "/search", body, seconds=30, wait=25)
+
+    def rerank(self, body):
+        """只给已经通过 Fabric 校验的片段重排。"""
+        return self._request("POST", "/rerank", body, seconds=30, wait=25)
 
     def disable(self, pid, reason):
         return self._request(

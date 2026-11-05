@@ -5,7 +5,7 @@ process()：
 2. 逐个认领（derived_text_claims，带租约；中断后租约过期可再认领），两个实例不会同时解析同一版本；
 3. 同 sha256 的文件已有成功结果就复用；否则在事务外解析；
 4. 写结果时核对认领仍属于自己，attempt 在同一事务里取下一个号（主键防重复），然后释放认领；
-5. 成功时同一事务把它放进 WeKnora 待办（按派生产物区分，见 db.index_publication）。
+5. 进索引由清洗段负责：附件解析成功后，清洗段给它画像时同一事务入队（db.index_publication）。
 整批受 time_budget_seconds 约束，到时不再认领新的。
 """
 
@@ -159,10 +159,6 @@ def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, t
                      "AND processor_version=:pv AND lease_token=:t"),
                 {"v": row["version_id"], "pv": attachment_parse.PROCESSOR_VERSION, "t": token},
             )
-            if result["status"] == "parsed":
-                from db.index_publication import enqueue_attachment
-
-                enqueue_attachment(conn, row["version_id"])
         counts[result["status"]] += 1
     return counts
 

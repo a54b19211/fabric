@@ -349,6 +349,34 @@ def clean_text_route(
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
 
+class SearchRequest(BaseModel):
+    """检索请求（v3 3.6）。cutoff 不给就是现在；mode 决定按哪种时间判可见（见 db.retrieval）。"""
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=1, max_length=2000)
+    mode: Mode = "current"
+    cutoff: datetime | None = None
+    sources: list[str] = Field(default_factory=list, max_length=16)
+    scopes: list[str] = Field(default_factory=list, max_length=16)
+    is_demo: bool | None = None
+    doc_categories: list[str] = Field(default_factory=list, max_length=16)
+    evidence_types: list[str] = Field(default_factory=list, max_length=16)
+    top_k: int = Field(default=10, ge=1, le=20)
+
+
+@router.post("/search", dependencies=[Depends(require_read)])
+def search_route(body: SearchRequest):
+    """检索的唯一入口：WeKnora 召回候选，Fabric 逐条校验（来源许可、本模式和截止时间下可见的版本、固定正文），
+    只有通过的片段才重排、才返回。剔除的给原因计数；不足 top_k 如实写明。"""
+    from datetime import timezone
+
+    from db import retrieval
+
+    cutoff = body.cutoff or datetime.now(timezone.utc)
+    return _call(retrieval.search, body.query, body.mode, cutoff, sources=body.sources, scopes=body.scopes,
+                 is_demo=body.is_demo, doc_categories=body.doc_categories, evidence_types=body.evidence_types,
+                 top_k=body.top_k)
+
+
 @router.get("/collection/catalog", dependencies=[Depends(require_read)])
 def collection_catalog():
     """来源目录：已接通、已登记未接通、被拒绝（含原因）的来源，缺口如实列出。"""

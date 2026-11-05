@@ -20,6 +20,7 @@
    - 其他来源：投影里的 clean_text 按 Markdown 规则清洗（偏移回到投影正文，写明定位基准）。
 2. 编号（derived_identifiers）：在这份正文上抽取，偏移指这份正文。
 3. 画像（derived_profiles）：分类、四维质量、分流（processing.profile）。
+4. 索引待办（db.index_publication.enqueue_versions）：画像写下的同一事务里，按画像所基于的那份正文入队。
 图谱等派生来源不在这一层处理。
 """
 
@@ -309,6 +310,11 @@ def _process_rows(conn, key, rows, counts):
                               AND text_processor_version=:tpv)
         """), profile_rows)
         counts["profiled"] += len(profile_rows)
+        # 清洗正文合格就能建索引（v3 3.6）：同一事务放进索引待办；没配置索引目标时什么也不做
+        from db.index_publication import enqueue_versions
+
+        counts["index_enqueued"] = counts.get("index_enqueued", 0) + enqueue_versions(
+            conn, [row["v"] for row in profile_rows])
 
 
 def _process_waiting(engine, key, counts, limit=500):

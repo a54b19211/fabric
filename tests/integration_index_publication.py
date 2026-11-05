@@ -1,4 +1,4 @@
-"""Real PostgreSQL fault recovery in an isolated schema; no upstream network or public writes."""
+"""Real PostgreSQL fault recovery and retrieval checks (v3 3.6) in an isolated schema; no upstream network."""
 
 import copy
 import json
@@ -15,7 +15,7 @@ from sqlalchemy.engine import make_url
 from biz_rules.collected_document import collected_document
 from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError, canonical
 from core_engine.weknora_index_client import IndexServiceError, publication_id
-from db import history, index_publication as index
+from db import clean_stage, history, index_publication as index, retrieval
 from integration_history import archive, raw_record
 from migration import history as history_migration
 from migration import index_publication as index_migration
@@ -86,8 +86,9 @@ def due(pg, version=None):
             conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()"))
 
 
-def add_document(native="SYNTHETIC-index", *, available="2019-01-01", phase="PHASE1"):
-    return history.import_archive(archive([raw_record(native, phase)], available), "index-" + uuid4().hex).version_ids[0]
+def add_document(native="SYNTHETIC-index", *, available="2019-01-01", phase="PHASE1", **extra):
+    return history.import_archive(archive([raw_record(native, phase, **extra)], available),
+                                  "index-" + uuid4().hex).version_ids[0]
 
 
 def add_collected(*, withdrawn=False):
@@ -97,6 +98,23 @@ def add_collected(*, withdrawn=False):
     request = ArchiveImport(source_id="legacy_documents", is_demo=True, scope_description="synthetic fixed-version withdrawal test", declared_count=1, declared_complete=False,
                             records=[ArchiveRecord(source_record_id="legacy:clinicaltrials:SYNTHETIC-collected", record_kind="document", raw_content=value.model_dump_json())])
     return history.import_archive(request, "collected-" + uuid4().hex).version_ids[0]
+
+
+def profile():
+    """清洗段画像；画像时同一事务入队（前提是索引目标已同步过）。"""
+    return clean_stage.process(time_budget_seconds=60)
+
+
+def scan(batch_size=100):
+    """先画像（新增入队），再做回填扫描（已画像而没有待办的版本）。"""
+    profile()
+    return index.scan_committed(batch_size=batch_size)
+
+
+def due_job(pg, job_id):
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+interval '1 day'"))
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp() WHERE id=:id"), {"id": job_id})
 
 
 def receipt_for(body):
@@ -157,15 +175,18 @@ class JournalClient:
 
 def ready_job(pg):
     version = add_document()
-    index.scan_committed()
+    scan()
     client = JournalClient()
     assert index.process_once(client=client)["state"] == "ready"
     return version, client
 
 
 def test_scan_and_cursor_rollback_together_then_replay_without_duplicates(pg):
-    index.scan_committed()
     versions = [add_document("SYNTHETIC-A"), add_document("SYNTHETIC-B")]
+    profile()  # 目标还没同步：画像不入队，回填扫描负责
+    assert rows(pg, "SELECT * FROM index_publications") == []
+    with pg.begin() as conn:
+        index._sync_targets(conn, index.targets())
     inserts = 0
 
     def fail_second_insert(conn, cursor, statement, parameters, context, executemany):
@@ -214,14 +235,14 @@ def test_uncommitted_version_is_invisible_and_does_not_advance_cursor(pg):
     finally:
         release.set()
         event.remove(pg, "commit", pause_writer_commit)
-    index.scan_committed()
+    scan()
     assert job(pg)["version_id"] == version
     assert rows(pg, "SELECT scanned_seq FROM index_targets")[0]["scanned_seq"] == 1
 
 
 def test_unknown_committed_post_reconciles_before_replay_and_keeps_one_knowledge(pg):
     add_document()
-    index.scan_committed()
+    scan()
     client = JournalClient()
     client.after_commit = IndexServiceError("index_timeout", "synthetic lost ACK", 504)
     assert index.process_once(client=client)["state"] == "waiting"
@@ -239,7 +260,7 @@ def test_unknown_committed_post_reconciles_before_replay_and_keeps_one_knowledge
 
 def test_active_missing_receipt_replays_only_same_reserved_identity_after_get(pg):
     add_document()
-    index.scan_committed()
+    scan()
     client = JournalClient()
     client.after_commit = IndexServiceError("index_timeout", "synthetic lost ACK", 504)
     assert index.process_once(client=client)["state"] == "waiting"
@@ -253,7 +274,7 @@ def test_active_missing_receipt_replays_only_same_reserved_identity_after_get(pg
 
 def test_process_interrupt_preserves_send_intent_and_expired_lease_recovers(pg):
     add_document()
-    index.scan_committed()
+    scan()
     client = JournalClient()
     client.after_commit = ProcessStopped("synthetic abrupt worker exit after remote commit")
     with pytest.raises(ProcessStopped):
@@ -271,7 +292,7 @@ def test_process_interrupt_preserves_send_intent_and_expired_lease_recovers(pg):
 
 def test_expired_worker_cannot_send_or_confirm_new_owners_lease(pg):
     add_document()
-    index.scan_committed()
+    scan()
     stale = index._claim()
     with pg.begin() as conn:
         conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second'"))
@@ -307,7 +328,7 @@ def test_revocation_waits_for_terminal_parse_and_keeps_auditing_after_disable(pg
 
 def test_revocation_during_remote_upload_cannot_confirm_ready(pg):
     add_document()
-    index.scan_committed()
+    scan()
     client = JournalClient()
     original_publish = client.publish
 
@@ -369,51 +390,68 @@ def test_removing_environment_target_keeps_cleanup_for_existing_publication(pg, 
     monkeypatch.delenv("DATAFABRIC_INDEX_TARGETS")
     monkeypatch.setattr(index, "WeKnoraIndexClient", lambda: client)
     due(pg)
-    index.index_tick(batch_size=1)
+    index.scan_committed()
+    index.process_once()
     assert rows(pg, "SELECT enabled FROM index_targets")[0]["enabled"] is False
     assert job(pg)["state"] == "disabled" and job(pg)["desired_state"] == "revoked"
     assert client.disable_count == 1
 
 
-def test_late_older_archive_does_not_supersede_head_but_new_revision_does(pg):
-    newer = add_document(available="2020-01-01", phase="PHASE2")
-    older = add_document(available="2010-01-01", phase="PHASE1")
-    index.scan_committed()
+def test_corrections_keep_history_indexed_and_each_text_is_indexed_once(pg):
+    """v3 3.6 / Codex 429：更正不停用旧正文（旧截止时间仍要检索得到）；清洗正文相同的版本只建一条。"""
+    newer = add_document(available="2020-01-01", title="Synthetic trial, 2020 wording")
+    older = add_document(available="2010-01-01", title="Synthetic trial, 2010 wording")
+    scan()
     client = JournalClient()
-    due(pg, older)
-    assert index.process_once(client=client)["desired_state"] == "superseded"
-    assert client.upload_count == 0
-    due(pg, newer)
-    assert index.process_once(client=client)["state"] == "ready"
-    corrected = add_document(available="2021-01-01", phase="PHASE3")
-    index.scan_committed()
-    due(pg, newer)
-    assert index.process_once(client=client)["desired_state"] == "superseded"
-    assert client.disable_count == 1
-    due(pg, corrected)
-    assert index.process_once(client=client)["state"] == "ready"
-    assert client.upload_count == 2
+    for _ in range(2):
+        assert index.process_once(client=client)["state"] == "ready"
+    corrected = add_document(available="2021-01-01", title="Synthetic trial, corrected wording")
+    scan()
+    due(pg)
+    for _ in range(3):
+        index.process_once(client=client)
+    states = {r["version_id"]: r["state"] for r in rows(pg, "SELECT version_id,state FROM index_publications")}
+    assert states == {newer: "ready", older: "ready", corrected: "ready"}
+    assert client.disable_count == 0 and client.upload_count == 3
+    # 同一记录：正文相同的版本只建一条，代表版本是最早产出这份正文的版本
+    versions = [r["version_id"] for r in rows(pg, "SELECT version_id FROM history_versions ORDER BY published_seq")]
+    with pg.begin() as conn:
+        keys = {v: index.artifact_key(a) for v, a in index.current_artifacts(conn, versions).items()}
+    assert len(rows(pg, "SELECT * FROM index_publications")) == len(set(keys.values()))
 
 
-def test_withdrawal_tombstone_disables_prior_index_without_uploading_empty_body(pg, monkeypatch):
+def test_same_text_versions_share_one_entry_with_a_fixed_representative(pg):
+    first = add_document("SYNTHETIC-same", available="2010-01-01", phase="PHASE1")
+    second = add_document("SYNTHETIC-same", available="2012-01-01", phase="PHASE2")  # 原件变了，清洗正文没变
+    assert first != second
+    scan()
+    with pg.begin() as conn:
+        artifacts = index.current_artifacts(conn, [first, second])
+    assert index.artifact_key(artifacts[first]) == index.artifact_key(artifacts[second])
+    entries = rows(pg, "SELECT version_id,artifact_key FROM index_publications")
+    assert [e["version_id"] for e in entries] == [first]  # 一条，代表版本固定为最早的
+    scan()  # 再扫描、再画像不改已有条目
+    assert rows(pg, "SELECT version_id,artifact_key FROM index_publications") == entries
+
+
+def test_withdrawal_does_not_disable_the_indexed_text(pg, monkeypatch):
+    """撤回是一个新版本：当前模式下检索时剔除（withdrawn），撤回之前的截止时间仍可检索；索引条目保留。"""
     set_targets(monkeypatch, source_id="legacy_documents")
     active = add_collected()
-    index.scan_committed()
+    scan()
     client = JournalClient()
     assert index.process_once(client=client)["state"] == "ready"
-    withdrawn = add_collected(withdrawn=True)
-    index.scan_committed()
-    due(pg, active)
-    assert index.process_once(client=client)["desired_state"] == "superseded"
-    due(pg, withdrawn)
-    result = index.process_once(client=client)
-    assert result["state"] == "disabled" and result["desired_state"] == "withdrawn"
-    assert client.upload_count == 1 and client.disable_count == 1
+    add_collected(withdrawn=True)
+    scan()
+    due(pg)
+    index.process_once(client=client)
+    assert job(pg, active)["state"] == "ready"
+    assert client.upload_count == 1 and client.disable_count == 0
 
 
 def test_sent_then_revoked_missing_remote_is_not_confirmed_disabled(pg):
     add_document()
-    index.scan_committed()
+    scan()
     claimed = index._claim()
     index._sent(claimed)
     index._finish(claimed, "waiting", "active")
@@ -429,7 +467,7 @@ def test_sent_then_revoked_missing_remote_is_not_confirmed_disabled(pg):
 
 def test_conflicting_receipt_is_rejected_before_any_recovery_post(pg):
     add_document()
-    index.scan_committed()
+    scan()
     saved = job(pg)
     wrong = receipt_for(saved["manifest"])
     wrong.update(binding_status="pending", knowledge_id=None)
@@ -458,23 +496,148 @@ def test_a_sent_job_is_confirmed_even_behind_a_backlog_of_new_uploads(pg):
 
     client = Parsing()
     first = add_document("SYNTHETIC-sent")
-    index.scan_committed()
+    scan()
     assert index.process_once(client=client)["state"] == "indexing"
     client.parsing = False
     client.journal[publication_id(client.bodies[0])].update(receipt_for(client.bodies[0]))  # parsed now
     for i in range(30):
         add_document(f"SYNTHETIC-backlog-{i}")
-    index.scan_committed(batch_size=100)
+    scan(batch_size=100)
     with pg.begin() as conn:  # the backlog became due before the sent job's next check
         conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 hour' WHERE version_id<>:v"), {"v": first})
         conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp() WHERE version_id=:v"), {"v": first})
-    assert index.process_once(client=client, sent=True)["state"] == "ready"
+    assert index.process_once(client=client, lane="new", sent=True)["state"] == "ready"
     assert job(pg, first)["state"] == "ready"
-    assert index.process_once(client=client, sent=False)["state"] in {"ready", "indexing"}  # new uploads still move
+    assert index.process_once(client=client, lane="new", sent=False)["state"] in {"ready", "indexing"}
+
+
+def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
+    """v3 3.6：清洗正文合格就入队（画像同一事务），清单带检索元数据；发给桥接的只有它认识的字段。"""
+    index.scan_committed()  # 同步目标
+    version = add_document("SYNTHETIC-meta", available="2019-01-01")
+    assert rows(pg, "SELECT * FROM index_publications") == []
+    counts = profile()
+    assert counts["index_enqueued"] == 1
+    saved = job(pg, version)
+    meta = saved["manifest"]["metadata"]
+    from processing import clean_text, profile as profile_module
+    assert saved["lane"] == "new" and saved["created_at"] is not None
+    assert saved["artifact_key"].startswith(clean_text.PROCESSOR_VERSION + ":")
+    assert saved["manifest"]["content_sha256"] == meta["artifact_sha256"] == saved["artifact_key"].split(":")[1]
+    assert meta["source_id"] == "external_archive" and meta["version_id"] == version
+    assert meta["processor_version"] == clean_text.PROCESSOR_VERSION and meta["first_seen_at"]
+    assert meta["proof_kind"] == "reviewed_archive" and meta["proof_available_at"].startswith("2019-01-01")
+    assert meta["doc_type"] and "doc_category" in meta
+    with pg.begin() as conn:
+        assert conn.execute(text("SELECT count(*) FROM derived_profiles WHERE version_id=:v AND processor_version=:p"),
+                            {"v": version, "p": profile_module.PROCESSOR_VERSION}).scalar_one() == 1
+    client = JournalClient()
+    assert index.process_once(client=client)["state"] == "ready"
+    assert set(client.bodies[0]) <= set(index.BRIDGE_FIELDS) | {"title", "content"}
+    assert client.bodies[0]["metadata"] == meta
+    assert job(pg, version)["ready_at"] is not None
+
+
+def test_enqueue_failure_rolls_back_the_profile_and_retries_cleanly(pg):
+    index.scan_committed()
+    add_document("SYNTHETIC-rollback")
+
+    def fail_enqueue(conn, cursor, statement, parameters, context, executemany):
+        if "INSERT INTO index_publications" in statement:
+            raise RuntimeError("synthetic enqueue failure")
+
+    event.listen(pg, "before_cursor_execute", fail_enqueue)
+    try:
+        assert profile()["failed_chunks"] >= 1  # 块重试到上限后进死信
+    finally:
+        event.remove(pg, "before_cursor_execute", fail_enqueue)
+    assert rows(pg, "SELECT * FROM derived_profiles") == [] and rows(pg, "SELECT * FROM index_publications") == []
+    clean_stage.retry_failed()
+    assert profile()["profiled"] == 1
+    assert len(rows(pg, "SELECT * FROM index_publications")) == 1
+
+
+def test_clean_processor_upgrade_hands_over_only_after_the_new_entry_is_ready(pg, monkeypatch):
+    """Codex 429/431：新产物能检索后才停旧条目，不撤掉最后的入口；旧记录保留。"""
+    from processing import clean_text
+
+    version, client = ready_job(pg)
+    old = job(pg)
+    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    profile()
+    new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
+    assert new["artifact_key"].startswith("synthetic.clean_text.v99:") and new["version_id"] == version
+    due_job(pg, old["id"])
+    assert index.process_once(client=client)["state"] == "ready"  # 新的还没 ready：旧的保留（retiring，不联网）
+    assert client.disable_count == 0
+    assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": old["id"]})[0]["state"] == "ready"
+    due_job(pg, new["id"])
+    assert index.process_once(client=client)["state"] == "ready"
+    # 新条目刚 ready：旧条目马上复查，判 superseded 并停用
+    assert index.process_once(client=client)["desired_state"] == "superseded"
+    states = {r["id"]: (r["state"], r["desired_state"]) for r in rows(pg, "SELECT * FROM index_publications")}
+    assert states == {old["id"]: ("disabled", "superseded"), new["id"]: ("ready", "active")}
+    assert client.disable_count == 1
+
+
+def test_pre_36_projection_entries_hand_over_and_never_sent_ones_stay_local(pg):
+    """改造前按投影正文建的待办（artifact_key 为空）：r72 有 ready 而 first_send_at 为空的行，须对账后停用；
+    确认没发出过的直接停用，不联网。"""
+    version = add_document("SYNTHETIC-legacy")
+    scan()
+    artifact_job = job(pg)
+    legacy_manifest = {**artifact_job["manifest"], "content_sha256": "c" * 64}
+    for key in ("artifact_key", "processor_version", "artifact_sha256", "locator_kind", "parent_record_id", "metadata"):
+        legacy_manifest.pop(key, None)
+    legacy_remote = publication_id(legacy_manifest)
+    client = JournalClient()
+    client.journal[legacy_remote] = receipt_for(legacy_manifest)
+    with pg.begin() as conn:  # r72 的样子：ready、有知识编号和回执，但 first_send_at 为空
+        conn.execute(text("""
+            INSERT INTO index_publications (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key,
+              state,knowledge_id,receipt)
+            VALUES (:id,:t,:v,:n,:r,CAST(:m AS jsonb),'','ready','knowledge-legacy',CAST(:receipt AS jsonb))
+        """), {"id": "d" * 64, "t": artifact_job["target_id"], "v": version, "n": artifact_job["source_record_id"],
+               "r": legacy_remote, "m": canonical(legacy_manifest), "receipt": canonical(client.journal[legacy_remote])})
+    due_job(pg, "d" * 64)
+    before = len(client.events)
+    index.process_once(client=client)  # 产物条目还没 ready：旧条目保留（retiring），不联网
+    assert len(client.events) == before
+    assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": "d" * 64})[0]["state"] == "ready"
+    due_job(pg, artifact_job["id"])
+    assert index.process_once(client=client)["state"] == "ready"
+    result = index.process_once(client=client)
+    assert result["desired_state"] == "superseded" and result["state"] == "disabled"
+    assert ("disable", legacy_remote, "superseded") in client.events
+
+
+def test_never_sent_entry_is_disabled_locally_without_network(pg):
+    version = add_document("SYNTHETIC-local")
+    scan()
+    saved = job(pg)
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+    client = JournalClient()
+    result = index.process_once(client=client)
+    assert result == {"id": saved["id"], "state": "disabled", "desired_state": "revoked"}
+    assert client.events == []
+    assert job(pg, version)["state"] == "disabled"
+
+
+def test_worker_threads_take_lanes_until_everything_is_ready(pg, monkeypatch):
+    for i in range(6):
+        add_document(f"SYNTHETIC-worker-{i}")
+    scan()
+    client = JournalClient()
+    monkeypatch.setattr(index, "WeKnoraIndexClient", lambda: client)
+    counts = index.run_worker(concurrency=2, rounds=8, idle_seconds=0, scan_every_seconds=1e9)
+    assert sum(c.get("ready", 0) for c in counts) >= 6
+    assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
+    assert client.upload_count == 6
 
 
 def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg, monkeypatch, tmp_path):
-    """v3 3.3a/3.6：附件正文在加工层；解析成功后才进索引，发布的是派生正文，回指附件版本。"""
+    """v3 3.3a/3.6：附件正文在加工层；解析成功、清洗段画像后才进索引，发布的是派生正文，回指附件版本。"""
     from db import derived_text
     from integration_history import _fetch_attachment
     from processing import attachment_parse as ap
@@ -483,17 +646,19 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
         "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
         "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
-    index.scan_committed()
+    scan()
     assert rows(pg, "SELECT * FROM index_publications") == []  # 还没有正文：不入索引待办
     monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 附件\n\n批准文号 国药准字H00000000。", "error": ""})
     assert derived_text.process(batch=5, retry_after_seconds=0)["parsed"] == 1
+    assert rows(pg, "SELECT * FROM index_publications") == []  # 解析完还要画像
+    profile()
     queued = job(pg, version)
-    assert queued["manifest"]["content_kind"] == "attachment_text"
+    assert queued["artifact_key"].startswith(ap.PROCESSOR_VERSION + ":")
     assert queued["manifest"]["parent_record_id"] == "https://www.nmpa.gov.cn/xxgk/ggtg/1.html"
     client = JournalClient()
     assert index.process_once(client=client)["state"] == "ready"
     assert client.bodies[-1]["content"].endswith("国药准字H00000000。")
-    index.scan_committed()  # 再扫描不重复建待办
+    scan()  # 再扫描不重复建待办
     assert len(rows(pg, "SELECT * FROM index_publications")) == 1
 
 
@@ -508,41 +673,128 @@ def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
         "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
     monkeypatch.setattr(ap, "_mineru", lambda p: {"success": False, "markdown": "", "error": "x"})
     derived_text.process(batch=5, retry_after_seconds=0)
-    index.scan_committed()
+    scan()
     assert rows(pg, "SELECT * FROM index_publications") == []
 
 
-def test_processor_upgrade_supersedes_the_old_artifact_and_keeps_its_record(pg, monkeypatch, tmp_path):
-    """Codex r59：处理器升级后同一附件版本重跑，旧索引要停用、新正文要上线，旧记录保留。"""
-    from db import derived_text
-    from integration_history import _fetch_attachment
-    from processing import attachment_parse as ap
+# —— 检索校验（db.retrieval）——
 
-    version, _ = _fetch_attachment(tmp_path, monkeypatch, "upgrade")
-    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
-        "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
-        "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
-    index.scan_committed()
-    monkeypatch.setattr(ap, "PROCESSOR_VERSION", "synthetic.attachment_parse.v1")
-    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 旧解析", "error": ""})
-    derived_text.process(batch=5, retry_after_seconds=0)
-    client = JournalClient()
-    first = index.process_once(client=client)
-    assert first["state"] == "ready", rows(pg, "SELECT error, artifact_key FROM index_publications")
-    monkeypatch.setattr(ap, "PROCESSOR_VERSION", "synthetic.attachment_parse.v2")
-    monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 新解析", "error": ""})
-    derived_text.process(batch=5, retry_after_seconds=0)
-    jobs = {r["artifact_key"].split(":")[0]: r for r in rows(pg, "SELECT * FROM index_publications")}
-    assert set(jobs) == {"synthetic.attachment_parse.v1", "synthetic.attachment_parse.v2"}
-    for _ in range(4):
-        due(pg)
-        index.process_once(client=client)
-    jobs = {r["artifact_key"].split(":")[0]: r for r in rows(pg, "SELECT * FROM index_publications")}
-    assert jobs["synthetic.attachment_parse.v1"]["state"] == "disabled"
-    assert jobs["synthetic.attachment_parse.v1"]["desired_state"] == "superseded"
-    assert jobs["synthetic.attachment_parse.v2"]["state"] == "ready", jobs["synthetic.attachment_parse.v2"]["error"]
-    assert any(b.get("artifact_key", "").startswith("synthetic.attachment_parse.v2:") and b["content"] == "# 新解析"
-               for b in client.bodies)
-    # 发给桥接服务的只有它认识的字段（extra=forbid），说明字段留在 Fabric 清单里
-    allowed = set(index.BRIDGE_FIELDS) | {"title", "content"}
-    assert all(set(b) <= allowed for b in client.bodies)
+class SearchClient(JournalClient):
+    """桥接服务的替身：召回 = 给定的命中（只来自已发布的条目）；重排记下收到的正文。"""
+
+    def __init__(self, pg):
+        super().__init__()
+        self.pg, self.hits, self.reranked = pg, [], []
+
+    def hit(self, version_or_entry, content, *, chunk="c"):
+        entry = version_or_entry if isinstance(version_or_entry, dict) else job(self.pg, version_or_entry)
+        manifest = entry["manifest"]
+        identity = {k: manifest[k] for k in ("source_instance", "source_id", "source_record_id", "version_id",
+                                             "raw_sha256", "artifact_key") if manifest.get(k)}
+        self.hits.append({"chunk_id": chunk + str(len(self.hits)), "content": content, "score": 1.0 / (1 + len(self.hits)),
+                          "retrieval_modes": ["keyword"], "publication_id": entry["remote_id"], "identity": identity,
+                          "is_demo": True, "metadata": manifest.get("metadata")})
+
+    def search(self, body):
+        self.events.append(("search", body["knowledge_base_id"]))
+        return {"results": copy.deepcopy(self.hits), "execution": {"keyword": "succeeded", "vector": "succeeded"}}
+
+    def rerank(self, body):
+        self.reranked.extend(body["documents"])
+        return {"scores": [{"index": i, "relevance_score": 1.0 - i / 100} for i in range(len(body["documents"]))],
+                "rerank_model": {"model_id": "synthetic"}, "usage": None, "usage_status": "unknown"}
+
+
+def fixed_text(pg, version):
+    with pg.begin() as conn:
+        return index.current_artifacts(conn, [version])[version]["text"]
+
+
+def search(client, mode="current", cutoff=None, **kw):
+    return retrieval.search("phase", mode, cutoff or datetime.now(timezone.utc), client=client, **kw)
+
+
+def test_retrieval_binds_each_hit_to_the_version_visible_at_the_cutoff(pg):
+    v1 = add_document("SYNTHETIC-r", available="2019-01-01", title="Synthetic phase one wording")
+    v2 = add_document("SYNTHETIC-r", available="2020-01-01", title="Synthetic phase two wording, corrected")
+    scan()
+    client = SearchClient(pg)
+    t1, t2 = fixed_text(pg, v1), fixed_text(pg, v2)
+    client.hit(v1, t1[:40])
+    client.hit(v2, t2[:40])
+    now = search(client)
+    assert [(r["version_id"], r["text"]) for r in now["results"]] == [(v2, t2[:40])]
+    assert now["excluded"]["counts"] == {"changed_at_cutoff": 1}
+    assert now["excluded"]["items"][0]["indexed_version_id"] == v1
+    past = search(client, "public_history_reconstruction", datetime(2019, 6, 1, tzinfo=timezone.utc))
+    assert [r["version_id"] for r in past["results"]] == [v1]
+    assert past["results"][0]["available_at"].startswith("2019-01-01")
+    assert past["excluded"]["counts"] == {"changed_at_cutoff": 1}  # 那时可见的是 v1，v2 的正文还不存在
+    before_any = search(client, "public_history_reconstruction", datetime(2018, 1, 1, tzinfo=timezone.utc))
+    assert before_any["results"] == [] and before_any["execution"]["insufficient"]
+    # 只有通过校验的片段进了重排
+    assert set(client.reranked) == {t1[:40], t2[:40]}
+
+
+def test_returned_evidence_uses_the_visible_version_not_the_representative(pg):
+    first = add_document("SYNTHETIC-rep", available="2010-01-01", phase="PHASE1")
+    second = add_document("SYNTHETIC-rep", available="2012-01-01", phase="PHASE2")  # 同一正文
+    scan()
+    entries = rows(pg, "SELECT * FROM index_publications")
+    assert len(entries) == 1
+    client = SearchClient(pg)
+    client.hit(entries[0], fixed_text(pg, second)[:30])
+    result = search(client)
+    item = result["results"][0]
+    raw = {r["version_id"]: r["raw"] for r in rows(pg, "SELECT version_id,payload->>'raw_sha256' AS raw FROM history_versions")}
+    assert item["version_id"] == second and item["raw_sha256"] == raw[second]
+    assert item["indexed_as"]["version_id"] == first
+    assert item["artifact"]["artifact_key"] == entries[0]["artifact_key"]
+
+
+def test_retrieval_masks_withdrawal_revocation_and_unproven_history_immediately(pg, monkeypatch):
+    set_targets(monkeypatch, source_id="legacy_documents")
+    active = add_collected()
+    scan()
+    client = SearchClient(pg)
+    client.hit(active, fixed_text(pg, active)[:20])
+    assert [r["version_id"] for r in search(client)["results"]] == [active]
+    add_collected(withdrawn=True)
+    result = search(client)
+    assert result["results"] == [] and result["excluded"]["counts"] == {"withdrawn": 1}
+    # 没有外部可得证明的来源，历史重建模式不返回
+    past = search(client, "public_history_reconstruction")
+    assert past["excluded"]["counts"] == {"mode_unsupported_for_source": 1}
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='legacy_documents'"))
+    revoked = search(client)
+    assert revoked["excluded"] == {"counts": {"not_readable": 1}, "items": []}  # 无权材料只给计数
+    assert "Synthetic" not in json.dumps(revoked)
+
+
+def test_crowded_candidates_report_insufficient_results_and_unlocatable_chunks(pg):
+    version = add_document("SYNTHETIC-crowd", available="2019-01-01")
+    scan()
+    client = SearchClient(pg)
+    text_ = fixed_text(pg, version)
+    for _ in range(5):
+        client.hit(version, text_[:25])  # 同一段：去重后一条
+    client.hit(version, "this sentence is not in the fixed text")
+    result = search(client, top_k=5)
+    assert len(result["results"]) == 1 and result["execution"]["insufficient"]
+    assert result["excluded"]["counts"] == {"chunk_not_in_fixed_text": 1}
+    assert result["results"][0]["locators"] or result["results"][0]["locator_kind"] is not None
+    assert "this sentence" not in " ".join(client.reranked)
+    assert result["coverage"]["external_archive"]["entries_by_state"] == {"queued": 1}
+
+
+def test_literal_search_over_a_huge_source_returns_query_budget(pg, monkeypatch):
+    add_document("SYNTHETIC-literal")
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET published_seq=published_seq+30000 WHERE source_id='external_archive'"))
+    with pytest.raises(HistoryError) as error:
+        history.list_records("external_archive", True, "current", datetime.now(timezone.utc), terms=["SYNTHETIC"])
+    assert error.value.code == "query_budget" and "/api/history/search" in error.value.message
+    # 给了记录编号的精确读取不受影响
+    history.list_records("external_archive", True, "current", datetime.now(timezone.utc),
+                         source_record_ids=["SYNTHETIC-literal"], terms=["SYNTHETIC"])
