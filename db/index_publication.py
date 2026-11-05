@@ -310,8 +310,16 @@ def scan_committed(*, batch_size=100):
                 """), {"seq": versions[-1]["published_seq"], "id": target.key()})
     return {"enqueued": count, "configured_targets": len(configured)}
 
+# 认领租约：长于最慢的一次桥接调用（停用最长 180 秒，加状态核对和余量）。租约短于调用就必然在结果落库前
+# 失效，结果写不进去。
+LEASE_SECONDS = 300
+
+
 def _claim(lane=None, sent=None):
-    """下一个到期作业。lane=new/backfill、sent=True/False 只在那一类里找（各有部分索引）；None 不限。"""
+    """下一个到期作业。lane=new/backfill、sent=True/False 只在那一类里找（各有部分索引）；None 不限。
+    认领同时把下次检查推到租约之后：处理超时、进程中断的作业排到后面，不会每次都被最先认领、挡住其后的
+    整个队列（隔离实测：120 秒租约下慢停用一再失租、反复重发，1,312 条 indexing 一直轮不到）。
+    正常结束时 _finish 另定下次检查。"""
     where = ""
     if lane is not None:
         where += " AND p.lane=:lane"
@@ -330,9 +338,10 @@ def _claim(lane=None, sent=None):
         token = uuid4().hex
         conn.execute(text("""
             UPDATE index_publications SET lease_token=:token,
-              lease_until=clock_timestamp()+interval '120 seconds',
+              lease_until=clock_timestamp()+make_interval(secs => :lease),
+              next_check_at=clock_timestamp()+make_interval(secs => :lease),
               updated_at=clock_timestamp() WHERE id=:id
-        """), {"id": row["id"], "token": token})
+        """), {"id": row["id"], "token": token, "lease": LEASE_SECONDS})
         return dict(row, lease_token=token)
 
 

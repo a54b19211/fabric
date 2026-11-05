@@ -283,8 +283,9 @@ def test_process_interrupt_preserves_send_intent_and_expired_lease_recovers(pg):
     assert saved["first_send_at"] is not None and saved["state"] == "sending"
     assert saved["lease_token"]
     assert index.process_once(client=client)["state"] == "idle"
-    with pg.begin() as conn:
-        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second'"))
+    with pg.begin() as conn:  # the lease's time has passed (claiming moved the next check to the lease's end)
+        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second',"
+                          "next_check_at=clock_timestamp()-interval '1 second'"))
     assert index.process_once(client=client)["state"] == "ready"
     assert client.upload_count == 1
     assert job(pg)["lease_token"] is None
@@ -294,8 +295,9 @@ def test_expired_worker_cannot_send_or_confirm_new_owners_lease(pg):
     add_document()
     scan()
     stale = index._claim()
-    with pg.begin() as conn:
-        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second'"))
+    with pg.begin() as conn:  # the lease's time has passed (claiming moved the next check to the lease's end)
+        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second',"
+                          "next_check_at=clock_timestamp()-interval '1 second'"))
     current = index._claim()
     assert stale["lease_token"] != current["lease_token"]
     for operation in (lambda: index._sent(stale), lambda: index._finish(stale, "ready", "active")):
@@ -1150,3 +1152,29 @@ def test_ready_pieces_that_do_not_reach_the_verified_end_are_partial_coverage(pg
         conn.execute(text("DELETE FROM index_publications WHERE id<>:id"), {"id": pieces[0]["id"]})
     got = cover()
     assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
+
+
+def test_a_job_that_overruns_its_lease_goes_behind_the_others_and_the_lease_covers_the_slowest_call(pg):
+    """Isolated run: a slow disable (up to 180 s) under a 120 s lease lost its lease every time, kept its old
+    next_check_at and was claimed first again, so the jobs behind it never ran. The lease now outlasts the
+    slowest bridge call, and claiming a job moves its next check past the lease."""
+    import inspect
+
+    from core_engine import weknora_index_client
+
+    assert "seconds=180" in inspect.getsource(weknora_index_client.WeKnoraIndexClient.disable)
+    assert index.LEASE_SECONDS > 180 + 20
+    first = add_document("SYNTHETIC-lease-a")
+    second = add_document("SYNTHETIC-lease-b")
+    scan()
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 hour' "
+                          "WHERE version_id=:v"), {"v": first})
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 minute' "
+                          "WHERE version_id=:v"), {"v": second})
+    claimed = index._claim()
+    assert claimed["version_id"] == first
+    with pg.begin() as conn:  # the worker died or overran: its lease is gone, the result never recorded
+        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second' "
+                          "WHERE id=:i"), {"i": claimed["id"]})
+    assert index._claim()["version_id"] == second  # not the same job again at the head of the queue
