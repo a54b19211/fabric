@@ -18,7 +18,8 @@ DEADLINE = 5
 
 
 class _Server:
-    """/trickle 每 0.25 秒 1 字节，共 40 字节（10 秒）；/stall 发完响应头后停 20 秒；/hop/N 连续 302 到 /hop/0。"""
+    """/trickle 每 0.25 秒 1 字节，共 40 字节（10 秒）；/stall 发完响应头后停 20 秒；
+    /midstall 第 0、2、4 秒各 1 字节后停 20 秒（Codex 418）；/hop/N 连续 302 到 /hop/0。"""
 
     def __init__(self):
         self.hits = []
@@ -47,6 +48,13 @@ class _Server:
                     self.end_headers()
                     self.wfile.flush()
                     if self.path == "/stall":
+                        time.sleep(20)
+                        return
+                    if self.path == "/midstall":
+                        for k in range(3):
+                            time.sleep(2 if k else 0)
+                            self.wfile.write(b"x")
+                            self.wfile.flush()
                         time.sleep(20)
                         return
                     for _ in range(40):
@@ -92,7 +100,7 @@ def _assert_deadline(batch, elapsed):
     assert DEADLINE - 0.2 <= elapsed < DEADLINE + 1.0
 
 
-@pytest.mark.parametrize("path", ["/trickle", "/stall"])
+@pytest.mark.parametrize("path", ["/trickle", "/stall", "/midstall"])
 def test_httpx_stream_stops_at_the_run_deadline(monkeypatch, path):
     with _Server() as server, httpx.Client(trust_env=False, timeout=60.0) as client:
         batch, elapsed = _read(monkeypatch, lambda: client.get(server.url(path)))
@@ -100,7 +108,7 @@ def test_httpx_stream_stops_at_the_run_deadline(monkeypatch, path):
     assert len(server.hits) == 1  # 到期不重试
 
 
-@pytest.mark.parametrize("path", ["/trickle", "/stall"])
+@pytest.mark.parametrize("path", ["/trickle", "/stall", "/midstall"])
 def test_requests_stream_stops_at_the_run_deadline(monkeypatch, path):
     requests = pytest.importorskip("requests")
     with _Server() as server, requests.Session() as session:
@@ -109,7 +117,7 @@ def test_requests_stream_stops_at_the_run_deadline(monkeypatch, path):
     _assert_deadline(batch, elapsed)
 
 
-@pytest.mark.parametrize("path", ["/trickle", "/stall"])
+@pytest.mark.parametrize("path", ["/trickle", "/stall", "/midstall"])
 def test_curl_transfer_stops_at_the_run_deadline(monkeypatch, path):
     curl = pytest.importorskip("curl_cffi.requests")
     with _Server() as server, curl.Session() as session:
