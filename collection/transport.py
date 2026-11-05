@@ -16,7 +16,8 @@
 
 停在哪里（Budget.check，Codex 408）：每次发出前、每读到一块、每交付一个版本，以及导航返回时。
 截止时间：每次等待（连接、读块、整次传输、限速、重试间隔）都不超过开始等待那一刻的剩余时间——读块的超时在每次
-阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的套接字读处，requests 在 urllib3 的套接字上），读块因到期超时报 deadline。
+阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的 SyncStream.read，requests 在 http.client 底下的
+SocketIO.readinto；响应头、chunk 内部、正文都从这两处读），读块因到期超时报 deadline。
 请求数：唯一先发后计的是浏览器内部跟随的重定向（发出前拦不到，Chromium 一次导航最多跟 20 跳）。照实计数，
 导航一返回就按 request_budget 停，这一页不交付，不报读到底。
 """
@@ -26,6 +27,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import os
+import socket
 import time
 from contextlib import contextmanager
 from urllib.parse import urljoin
@@ -111,7 +113,9 @@ class Budget:
         self.records += 1
 
     def timeout(self, cap):
-        return max(0.1, min(cap, self.deadline - time.monotonic()))
+        """一次等待的上限：调用方的上限与剩余时间取小。多给 50ms，让被期限截断的等待一定在到期之后才超时，
+        失败处的 check 就能认出是 deadline（定时器早到亚毫秒会被当成普通超时）。"""
+        return max(0.1, min(cap, self.deadline - time.monotonic() + 0.05))
 
     def within(self, timeout, default=3600.0):
         """把调用方给的超时（数字、元组或 httpx 的分项字典；None 是不限）收进剩余时间。"""
@@ -121,17 +125,10 @@ class Budget:
             return tuple(self.within(value) for value in timeout)
         return self.timeout(default if timeout is None else timeout)
 
-    def counted(self, chunks, before=None):
-        """逐块计字节并检查；before 在每次阻塞读之前调用（把等待收进剩余时间）。
-        读块出错时恰因到期就报 deadline，否则原样抛出。"""
+    def counted(self, chunks):
+        """逐块计字节并检查；读块出错时恰因到期（每次套接字读都收在剩余时间里）就报 deadline，否则原样抛出。"""
         try:
-            chunks = iter(chunks)
-            while True:
-                if before is not None:
-                    before()
-                chunk = next(chunks, None)
-                if chunk is None:
-                    return
+            for chunk in chunks:
                 self.take_bytes(len(chunk))
                 yield chunk
         except Exception:
@@ -182,7 +179,7 @@ def is_transient(error: BaseException) -> bool:
         seen.add(id(error))
         if isinstance(error, TimeoutError) or any(
             cls.__name__ in {"TimeoutException", "TimeoutError", "ReadTimeout", "ConnectTimeout",
-                             "WriteTimeout", "PoolTimeout"}
+                             "WriteTimeout", "PoolTimeout", "Timeout"}  # Timeout：curl_cffi
             for cls in type(error).__mro__
         ):
             return True
@@ -257,8 +254,10 @@ def _httpx_hop(original):
     return send
 
 
-def _socket_read(original):
-    """httpcore 每次阻塞读都按调用方给的读超时重设套接字：收进当前剩余时间，已用的时间照扣。"""
+# —— 套接字读：每一次阻塞读都收进当前剩余时间（读超时是发送时设的，不会随已用时间减少）——
+
+def _httpcore_read(original):
+    """httpx 经 httpcore：响应头、chunk、正文的每次 recv 都走 SyncStream.read，按传入的读超时重设套接字。"""
 
     def read(self, max_bytes, timeout=None):
         budget = _ACTIVE.get()
@@ -267,29 +266,35 @@ def _socket_read(original):
     return read
 
 
+def _socketio_readinto(original):
+    """requests 经 urllib3 / http.client：响应头、chunk、正文的每次 recv 都走 socket.makefile 底下的 SocketIO.readinto。"""
+
+    def readinto(self, buffer):
+        budget = _ACTIVE.get()
+        if budget is not None:
+            try:
+                self._sock.settimeout(budget.within(self._sock.gettimeout()))
+            except OSError:  # 套接字已关：交给原读取报错
+                pass
+        return original(self, buffer)
+
+    return readinto
+
+
 # —— requests ——
 
 class _CountedRaw:
     def __init__(self, raw, budget):
         self._raw, self._budget = raw, budget
 
-    def _wait(self):
-        """下一次阻塞读之前，把套接字超时收进当前剩余时间（发送时设的超时不会随已用时间减少）。"""
-        # 连接还持有套接字就取连接的；连接已放手（HTTP/1.0、Connection: close）时，正文从响应文件底下的套接字读
-        sock = getattr(getattr(self._raw, "_connection", None), "sock", None) or getattr(
-            getattr(getattr(getattr(self._raw, "_fp", None), "fp", None), "raw", None), "_sock", None)
-        if sock is not None:
-            sock.settimeout(self._budget.within(sock.gettimeout()))
-
     def stream(self, amt=2**16, decode_content=None):
         if getattr(self._raw, "chunked", False) or not hasattr(self._raw, "read1"):
             chunks = self._raw.stream(amt, decode_content=decode_content)
         else:  # read(amt) 要攒满 amt 才返回，慢速返回时一块能拖过期限；read1 到多少返回多少
             chunks = iter(lambda: self._raw.read1(amt, decode_content=decode_content), b"")
-        return self._budget.counted(chunks, before=self._wait)
+        return self._budget.counted(chunks)
 
     def read(self, *args, **kwargs):
-        self._wait()
         try:
             data = self._raw.read(*args, **kwargs)
         except Exception:
@@ -462,7 +467,8 @@ def install():
     from httpcore._backends.sync import SyncStream
 
     _patch(HttpxClient, "_send_single_request", _httpx_hop)
-    _patch(SyncStream, "read", _socket_read)
+    _patch(SyncStream, "read", _httpcore_read)
+    _patch(socket.SocketIO, "readinto", _socketio_readinto)
     try:
         from requests.adapters import HTTPAdapter
 

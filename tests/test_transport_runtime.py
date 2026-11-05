@@ -15,11 +15,14 @@ from biz_rules.history_models import FetchRequest
 from collection import rate, site_crawler
 
 DEADLINE = 5
+SLOW = ["/trickle", "/stall", "/midstall", "/slowhead", "/chunked"]
 
 
 class _Server:
-    """/trickle 每 0.25 秒 1 字节，共 40 字节（10 秒）；/stall 发完响应头后停 20 秒；
-    /midstall 第 0、2、4 秒各 1 字节后停 20 秒（Codex 418）；/hop/N 连续 302 到 /hop/0。"""
+    """截止时间矩阵（Codex 418/421），期限 5 秒，每条都比期限长：
+    /trickle 正文每 0.25 秒 1 字节，共 40 字节（10 秒）；/stall 发完响应头后停 20 秒；
+    /midstall 正文第 0、2、4 秒各 1 字节后停 20 秒；/slowhead 响应头的一行每 0.25 秒 1 字节，共 32 字节（8 秒）；
+    /chunked 声明一个 32 字节的块，块内每 0.25 秒 1 字节（8 秒）。/hop/N 连续 302 到 /hop/0。"""
 
     def __init__(self):
         self.hits = []
@@ -29,9 +32,28 @@ class _Server:
             def log_message(self, *args):
                 pass
 
+            def drip(self, n):
+                for _ in range(n):
+                    time.sleep(0.25)
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+
             def do_GET(self):
                 hits.append(self.path)
                 try:
+                    if self.path == "/slowhead":
+                        self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                        self.drip(32)
+                        self.wfile.write(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                        return
+                    if self.path == "/chunked":
+                        self.send_response(200)
+                        self.send_header("Transfer-Encoding", "chunked")
+                        self.end_headers()
+                        self.wfile.write(b"20\r\n")
+                        self.drip(32)
+                        self.wfile.write(b"\r\n0\r\n\r\n")
+                        return
                     if self.path.startswith("/hop/"):
                         n = int(self.path.rsplit("/", 1)[1])
                         body = b"" if n else b"<html><body>final page</body></html>"
@@ -57,10 +79,7 @@ class _Server:
                             self.wfile.flush()
                         time.sleep(20)
                         return
-                    for _ in range(40):
-                        time.sleep(0.25)
-                        self.wfile.write(b"x")
-                        self.wfile.flush()
+                    self.drip(40)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
@@ -100,7 +119,7 @@ def _assert_deadline(batch, elapsed):
     assert DEADLINE - 0.2 <= elapsed < DEADLINE + 1.0
 
 
-@pytest.mark.parametrize("path", ["/trickle", "/stall", "/midstall"])
+@pytest.mark.parametrize("path", SLOW)
 def test_httpx_stream_stops_at_the_run_deadline(monkeypatch, path):
     with _Server() as server, httpx.Client(trust_env=False, timeout=60.0) as client:
         batch, elapsed = _read(monkeypatch, lambda: client.get(server.url(path)))
@@ -108,7 +127,7 @@ def test_httpx_stream_stops_at_the_run_deadline(monkeypatch, path):
     assert len(server.hits) == 1  # 到期不重试
 
 
-@pytest.mark.parametrize("path", ["/trickle", "/stall", "/midstall"])
+@pytest.mark.parametrize("path", SLOW)
 def test_requests_stream_stops_at_the_run_deadline(monkeypatch, path):
     requests = pytest.importorskip("requests")
     with _Server() as server, requests.Session() as session:
@@ -117,7 +136,7 @@ def test_requests_stream_stops_at_the_run_deadline(monkeypatch, path):
     _assert_deadline(batch, elapsed)
 
 
-@pytest.mark.parametrize("path", ["/trickle", "/stall", "/midstall"])
+@pytest.mark.parametrize("path", SLOW)
 def test_curl_transfer_stops_at_the_run_deadline(monkeypatch, path):
     curl = pytest.importorskip("curl_cffi.requests")
     with _Server() as server, curl.Session() as session:
