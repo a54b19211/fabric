@@ -356,16 +356,18 @@ _SENT = "(p.first_send_at IS NOT NULL OR p.knowledge_id IS NOT NULL OR p.receipt
 # An upload stops counting as in flight only when it is settled: ready / disabled, or (not being sent again)
 # its parse ended upstream or it was proven rejected before anything was created. blocked, waiting or an
 # expired lease never release it - the remote outcome may still be open (Codex DECISION T-30 r2).
-# Evidence about the current attempt only: a receipt naming a later physical attempt than the one known when
-# this upload was reserved (attempt_floor). An earlier attempt's rejection, or a stale receipt saved after a lost
-# response, never releases a new attempt's slot; without such evidence only ready / disabled release it.
-_AFTER_ATTEMPT = ("(p.attempt_floor IS NULL OR "
-                  "COALESCE((p.receipt->'last_attempt'->>'attempt')::int,0)>p.attempt_floor)")
-_RELEASED = ("(p.state IN ('ready','disabled') OR (p.state<>'sending' AND " + _AFTER_ATTEMPT + " AND ("
-             "COALESCE(p.receipt->>'parse_status','') IN ('completed','failed','cancelled') OR "
-             "(COALESCE(p.receipt->>'upload_status','')='rejected' AND p.knowledge_id IS NULL))))")
-# COALESCE: a receipt without these fields must not turn the test into NULL (NOT NULL would drop an open upload
-# out of the in-flight count - found by the integration test)
+# Evidence about the current attempt only (Codex T30 r108/r111): the receipt's latest physical attempt must be a
+# later one than the attempt known when this upload was reserved (attempt_floor, 0 when none was known), and its
+# outcome must be the evidence itself - "rejected" for a rejection, "uploaded" for an ended parse. in_flight or
+# unknown attempts, stale receipts saved after a lost response, and receipts without last_attempt release nothing;
+# only ready / disabled do.
+_LAST = "COALESCE((p.receipt->'last_attempt'->>'attempt')::int,0)>COALESCE(p.attempt_floor,0)"
+_OUTCOME = "COALESCE(p.receipt->'last_attempt'->>'outcome','')"
+_RELEASED = ("(p.state IN ('ready','disabled') OR (p.state<>'sending' AND " + _LAST + " AND ("
+             "(COALESCE(p.receipt->>'upload_status','')='rejected' AND p.knowledge_id IS NULL AND "
+             + _OUTCOME + " IN ('rejected','rejected_observed')) OR "
+             "(COALESCE(p.receipt->>'parse_status','') IN ('completed','failed','cancelled') AND "
+             + _OUTCOME + "='uploaded'))))")
 _RETIRE = "(p.state='disabling' OR (COALESCE(p.desired_state,'active') NOT IN ('active','unknown') AND p.state<>'disabled'))"
 CLASS_SQL = {
     "R": _RETIRE,
@@ -401,8 +403,9 @@ def limits():
             "burst": _env_number("DATAFABRIC_INDEX_UPLOAD_BURST", 10, float)}
 
 
-# An upload whose size is unknown (sent before sizes were recorded and not recoverable) counts as the largest
-# single upload allowed, never as zero.
+# An upload whose size is unknown (sent before sizes were recorded and not recoverable from its content) is never
+# counted as zero: it blocks new uploads of its knowledge base until its size is known or it settles. The current
+# single-upload limit used in the sums is no proof for an old upload, only a placeholder for display.
 _SIZE = ("COALESCE(sum(COALESCE(p.sent_chars,:uc)),0),COALESCE(sum(COALESCE(p.sent_bytes,:ub)),0),"
          "count(*) FILTER (WHERE p.sent_chars IS NULL OR p.sent_bytes IS NULL)")
 
@@ -423,12 +426,14 @@ def _inflight(conn, kb, exclude=None):
 def _gated(conn, lim):
     """{knowledge base: reason} where no new upload may start now: in-flight entries or size full, or no token."""
     out = {}
-    for kb, n, c, b, _ in conn.execute(text(
+    for kb, n, c, b, unknown in conn.execute(text(
         "SELECT p.manifest->>'knowledge_base_id'," "count(*)," + _SIZE + " FROM index_publications p "
         "WHERE p.state NOT IN ('ready','disabled') AND " + _SENT + " AND NOT " + _RELEASED + " GROUP BY 1"
     ), _unknown_size()):
         if n >= lim["max_inflight"]:
             out[kb] = "inflight_entries"
+        elif unknown:
+            out[kb] = "inflight_size_unknown"
         elif c >= lim["max_inflight_chars"] or b >= lim["max_inflight_bytes"]:
             out[kb] = "inflight_size"
     for (kb,) in conn.execute(text(
@@ -471,10 +476,12 @@ def _reserve(row, content, receipt=None):
     chars, size = len(content), len(content.encode())
     with history.history_engine().begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "index_kb:" + kb})
-        n, c, b, _ = _inflight(conn, kb, exclude=row["id"])
+        n, c, b, unknown = _inflight(conn, kb, exclude=row["id"])
         reason = None
         if n + 1 > lim["max_inflight"]:
             reason = "inflight_entries"
+        elif unknown:
+            reason = "inflight_size_unknown"  # an earlier upload of unknown size: no new one until it is known
         elif n and (c + chars > lim["max_inflight_chars"] or b + size > lim["max_inflight_bytes"]):
             reason = "inflight_size"  # one upload alone may exceed the size budget, never two together
         if reason is None:

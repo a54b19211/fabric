@@ -239,6 +239,15 @@ def test_inflight_budget_is_atomic_across_workers_and_only_settled_uploads_relea
         conn.execute(text("UPDATE index_publications SET receipt=receipt||jsonb_build_object('last_attempt',"
                           "jsonb_build_object('attempt',1,'outcome','uploaded')) WHERE id=:id"), {"id": g[3]})
         assert count() == 3
+        # a later attempt that is still in flight or unknown proves nothing (Codex r111)
+        for outcome in ("in_flight", "unknown"):
+            conn.execute(text("UPDATE index_publications SET receipt=receipt||jsonb_build_object('last_attempt',"
+                              "jsonb_build_object('attempt',2,'outcome',CAST(:o AS text))) WHERE id=:id"),
+                         {"id": g[2], "o": outcome})
+            assert count() == 4, outcome
+        conn.execute(text("UPDATE index_publications SET receipt=receipt||jsonb_build_object('last_attempt',"
+                          "jsonb_build_object('attempt',2,'outcome','rejected')) WHERE id=:id"), {"id": g[2]})
+        assert count() == 3
         sizes = conn.execute(text("SELECT sent_chars,sent_bytes FROM index_publications WHERE id=:id"), {"id": g[4]}).one()
     assert tuple(sizes) == (len("fixed text " * 10), len(("fixed text " * 10).encode()))
 
@@ -344,3 +353,17 @@ def test_migration_recovers_the_size_of_earlier_uploads(pg):
     got = {r["id"]: (r["sent_chars"], r["sent_bytes"]) for r in rows(pg, "SELECT id,sent_chars,sent_bytes FROM index_publications")}
     assert got[piece] == (123, 456)
     assert got[base["id"]] == tuple(text_row)
+
+
+def test_an_upload_of_unknown_size_blocks_new_uploads_until_known(pg, monkeypatch):
+    base = base_job(pg)
+    (legacy,) = clone(pg, base, state="'indexing'", desired_state="'active'", receipt="'{}'::jsonb",
+                      sent_chars="NULL", sent_bytes="NULL", **SENT)
+    candidate = lease_all(pg, clone(pg, base, state="'queued'", desired_state="'active'", lane="'new'", **UNSENT))[0]
+    assert index._reserve(candidate, "x") == "inflight_size_unknown"
+    status = index.scheduler_status()
+    (kb,) = [k for k in status["knowledge_bases"] if k["knowledge_base_id"] == KB]
+    assert kb["inflight"]["unknown_size_entries"] == 1 and kb["gate"]["inflight_size_unknown"]["denials"] == 1
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET sent_chars=10,sent_bytes=10 WHERE id=:id"), {"id": legacy})
+    assert index._reserve(candidate, "x") is None

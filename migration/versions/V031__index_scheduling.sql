@@ -28,7 +28,8 @@ CREATE INDEX IF NOT EXISTS index_publications_open_by_kb
 ALTER TABLE index_publications ADD COLUMN IF NOT EXISTS attempt_floor integer;
 ALTER TABLE index_gate_stats ADD COLUMN IF NOT EXISTS closed_since timestamptz;
 -- sizes of uploads sent before this migration: a piece knows its own size, a whole entry is its clean text.
--- Rows still without a size count as the largest upload allowed (never as zero).
+-- A row still without a size is unknown: it blocks new uploads of its knowledge base until its size is known
+-- or it settles (the current single-upload limit proves nothing about an old upload).
 UPDATE index_publications SET sent_chars=(piece->>'chars')::bigint,sent_bytes=(piece->>'bytes')::bigint
   WHERE sent_chars IS NULL AND piece IS NOT NULL AND piece ? 'chars' AND piece ? 'bytes';
 UPDATE index_publications p SET sent_chars=length(c.text),sent_bytes=octet_length(c.text)
