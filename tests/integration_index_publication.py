@@ -1115,3 +1115,38 @@ def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, 
                                                   "schemaname=current_schema() AND tablename='index_publications'")}
         assert {"index_publications_artifact_piece_key", "index_publications_record_artifact_piece_key"} <= names
         assert not names & {"index_publications_artifact_piece", "index_publications_record_artifact_piece"}
+
+
+def test_ready_pieces_that_do_not_reach_the_verified_end_are_partial_coverage(pg, monkeypatch):
+    """Codex r84：只剩首片且 ready 时，现存片的最大终点不是全文长度；全篇长只取末片（序号 = 片数）的终点，
+    没有末片就是部分覆盖。首片加末片都 ready 而中间缺：仍是部分；整套齐了才是整份。"""
+    small_pieces(monkeypatch, chars=400)
+    long_document("SYNTHETIC-missing-tail")
+    scan()
+    pieces = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
+    assert len(pieces) >= 3
+    client = SearchClient(pg)
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+interval '1 day'"))
+    due_job(pg, pieces[0]["id"])
+    assert index.process_once(client=client)["state"] == "ready"
+    cover = lambda: retrieval._coverage({"external_archive"})["external_archive"]  # noqa: E731
+    with pg.begin() as conn:  # 只剩首片
+        kept = conn.execute(text("SELECT * FROM index_publications WHERE id<>:id"), {"id": pieces[0]["id"]})
+        others = [dict(r) for r in kept.mappings()]
+        conn.execute(text("UPDATE index_publications SET state='disabled' WHERE id<>:id"), {"id": pieces[0]["id"]})
+    got = cover()
+    assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
+    with pg.begin() as conn:  # 首片和末片 ready，中间缺
+        conn.execute(text("UPDATE index_publications SET state='ready' WHERE id=:id"), {"id": pieces[-1]["id"]})
+    got = cover()
+    assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
+    with pg.begin() as conn:  # 整套 ready
+        conn.execute(text("UPDATE index_publications SET state='ready' WHERE id=ANY(:ids)"),
+                     {"ids": [r["id"] for r in others]})
+    got = cover()
+    assert got["ready_artifacts"] == 1 and got["partial_artifacts"] == 0
+    with pg.begin() as conn:  # 只有首片这一行（其余行都不在）：末片不在，全篇长未知
+        conn.execute(text("DELETE FROM index_publications WHERE id<>:id"), {"id": pieces[0]["id"]})
+    got = cover()
+    assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1

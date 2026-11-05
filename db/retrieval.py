@@ -224,7 +224,9 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
 def _coverage(source_ids):
     """各来源的索引覆盖，分两层计：物理条目（片）按状态；产物（一条记录的一份正文，可能有几片）整份可检索、
     部分可检索的个数，以及整份可检索覆盖的记录数。
-    整份可检索 = 整篇条目 ready，或 ready 的片首尾相接覆盖全篇 [0, 全篇长)（全篇长取该产物各片的最大终点）。
+    整份可检索 = 整篇条目 ready，或 ready 的片首尾相接覆盖全篇 [0, 全篇长)。全篇长只取可验证的末片（序号等于
+    片数的那一片，按分片规则它的终点就是全文长度，同一产物各计划相同）；没有末片的行，全篇长未知，不算整份
+    可检索，绝不从现存片的最大终点倒推全文（Codex r84：只剩首片时尾部缺失被当成完整）。
     按覆盖算、不按“现存的行都 ready”（Codex 460）：新计划只建出、只 ready 了几片不算；交接期旧计划的整套片
     仍 ready 时算（检索照样认它们）。worker 何时停用旧片另由当前计划的整套片判定（index.artifact_ready）。"""
     with history.history_engine().begin() as conn:
@@ -236,11 +238,12 @@ def _coverage(source_ids):
         artifacts = conn.execute(text("""
             WITH p AS (
               SELECT t.config->>'source_id' AS source_id,p.source_record_id AS record,p.artifact_key AS artifact,
-                     p.state,p.piece IS NULL AS whole,(p.piece->>'start')::int AS s,(p.piece->>'end')::int AS e
+                     p.state,p.piece IS NULL AS whole,(p.piece->>'start')::int AS s,(p.piece->>'end')::int AS e,
+                     (p.piece->>'index')=(p.piece->>'count') AS last
               FROM index_publications p JOIN index_targets t ON t.id=p.target_id
               WHERE t.enabled AND t.config->>'source_id'=ANY(:sources)),
             a AS (
-              SELECT source_id,record,artifact,max(e) AS length,bool_or(state='ready') AS some_ready
+              SELECT source_id,record,artifact,max(e) FILTER (WHERE last) AS length,bool_or(state='ready') AS some_ready
               FROM p GROUP BY 1,2,3 HAVING bool_or(state<>'disabled')),
             r AS (  -- ready 的片按起点排；reach：排在它前面的片到达的最远处
               SELECT source_id,record,artifact,whole,s,e,max(e) OVER (PARTITION BY source_id,record,artifact
