@@ -14,6 +14,8 @@
   normalize_whitespace(原文[start:end]) == 段文本（测试逐段验证）。
 - 临床登记：source = JSON pointer（来自投影时记下的 locators）。
 - 文献：source = 原始 JSON 字符串里标题/摘要字符串字面量的 [start, end)（不含两侧引号），外加 JSON pointer。
+- WHO 疫情通报（v12）：source = 原件 JSON pointer（/Title、/Overview……）+ 该节内的块序号；HTML 转换后的
+  文字不是原件子串，不给字符偏移。
 
 不编造：没有正文就返回空 text，并在 warnings 里说明（no_body / no_abstract / summary_missing ...），不补写。
 """
@@ -24,7 +26,9 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v11"
+# v12: WHO DON from its raw JSON (clean_who: title as a level-1 heading, <table> as markdown tables);
+# every other source as in v11. v11 artifacts are kept (a processor upgrade is a new set of results).
+PROCESSOR_VERSION = "datafabric.clean_text.v12"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -651,5 +655,160 @@ def clean_literature(raw_json: str) -> dict:
         cursor += len(cleaned)
     body = "\n\n".join(parts)
     if not body:
+        warnings.append("no_body")
+    return _result(body, segments, detect_language(body), 0, warnings)
+
+
+# ---------------------------------------------------------------- WHO 疫情通报（v12）
+
+# v11 读的是采集投影的 clean_text：标题是普通首行，各节 HTML 由 get_text 压平，<table> 的单元格被拼成一串，
+# 行列关系丢失（S18 mpox 的 /Overview）。v12 直接从原件 JSON 清洗：标题写成一级 markdown 标题；各节按 HTML
+# 的块写出（段落、列表项、标题），<table> 写成 markdown 管道表格（表头行 + 分隔行 + 数据行），表题在表前单独
+# 一段。节的取舍与投影相同（WHO_SECTIONS），不新增也不删内容；不在任何块里的文字照样成段，不丢。
+# 转换后的文字不是原件字符串的子串，所以每段的 source 是原件 JSON pointer 加该节内的块序号，不是字符偏移。
+WHO_SECTIONS = ("Summary", "Overview", "Epidemiology", "Response", "Advice", "Assessment")
+_INLINE_TAGS = {"a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "kbd", "mark",
+                "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var", "wbr", "br", "img"}
+_HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def _who_text(node) -> str:
+    return normalize_whitespace(node.get_text(" ", strip=True)).replace("\n", " ")
+
+
+def _cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
+def _who_table(table) -> tuple[str | None, str]:
+    """(表题或 None, markdown 管道表格)。合并单元格（colspan）后面补空格子，保持列数；行少于列数的补齐。"""
+    caption = table.find("caption")
+    caption_text = _who_text(caption) if caption else None
+    rows = []
+    for tr in table.find_all("tr"):
+        if tr.find_parent("table") is not table:
+            continue  # 嵌套表格的行属于里面那张表（它在单元格文字里，不丢）
+        cells = []
+        for c in tr.find_all(["th", "td"], recursive=False):
+            cells.append(_cell(_who_text(c)))
+            try:
+                span = max(1, min(int(c.get("colspan") or 1), 50))
+            except (TypeError, ValueError):
+                span = 1
+            cells.extend([""] * (span - 1))
+        if cells:
+            rows.append(cells)
+    if not rows:
+        return caption_text, ""
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    lines = ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
+    lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return caption_text, "\n".join(lines)
+
+
+def _who_blocks(html: str):
+    """一节 HTML 的块，按文档顺序：[(kind, text)]，kind 为 heading / paragraph / list / table。"""
+    from bs4 import BeautifulSoup, Comment, NavigableString
+
+    soup = BeautifulSoup(html, "html.parser")
+    out, inline = [], []
+
+    def flush():
+        text = normalize_whitespace(" ".join(inline)).replace("\n", " ")
+        inline.clear()
+        if text:
+            out.append(("paragraph", text))
+
+    def walk(node):
+        for child in node.children:
+            if isinstance(child, Comment):
+                continue
+            if isinstance(child, NavigableString):
+                if child.strip():
+                    inline.append(str(child))
+                continue
+            name = child.name
+            if name in _INLINE_TAGS:
+                text = child.get_text(" ", strip=True)
+                if text:
+                    inline.append(text)
+                continue
+            flush()
+            if name in _HEADING_TAGS:
+                text = _who_text(child)
+                if text:
+                    out.append(("heading", "#" * max(2, int(name[1])) + " " + text))
+            elif name == "p":
+                text = _who_text(child)
+                if text:
+                    out.append(("paragraph", text))
+            elif name in ("ul", "ol"):
+                for li in child.find_all("li", recursive=False):
+                    text = _who_text(li)
+                    if text:
+                        out.append(("list", "- " + text))
+                rest = [c for c in child.children if getattr(c, "name", None) != "li"]
+                for c in rest:  # 列表里不在 <li> 中的文字也不丢
+                    text = c.get_text(" ", strip=True) if hasattr(c, "get_text") else str(c).strip()
+                    if text:
+                        out.append(("paragraph", normalize_whitespace(text).replace("\n", " ")))
+            elif name == "li":
+                text = _who_text(child)
+                if text:
+                    out.append(("list", "- " + text))
+            elif name == "table":
+                caption, table = _who_table(child)
+                if caption:
+                    out.append(("paragraph", caption))
+                if table:
+                    out.append(("table", table))
+            elif name == "figure":
+                text = _who_text(child)
+                if text:
+                    out.append(("paragraph", text))
+            else:  # div / section / blockquote / 未知容器：进去按块读
+                walk(child)
+        return out
+
+    walk(soup)
+    flush()
+    return out
+
+
+def clean_who(raw_json: str) -> dict:
+    """WHO DON 原件（JSON 字符串）→ 正文：一级标题 + 各节的块。每段 source = {json_pointer, block}。
+
+    不编造：缺标题记 no_title，没有任何正文记 no_body；节不是字符串的记 section_not_text 并跳过该节。
+    """
+    data = json.loads(raw_json)
+    parts, segments, cursor, warnings = [], [], 0, []
+
+    def add(text, kind, pointer, block):
+        nonlocal cursor
+        if parts:
+            cursor += 2
+        segments.append({"start": cursor, "end": cursor + len(text), "kind": kind,
+                         "source": {"json_pointer": pointer, "within": "raw", "block": block}})
+        parts.append(text)
+        cursor += len(text)
+
+    title = normalize_whitespace(data.get("Title") or "").replace("\n", " ") if isinstance(data.get("Title"), str) \
+        else ""
+    if title:
+        add("# " + title, "heading", "/Title", 0)
+    else:
+        warnings.append("no_title")
+    for key in WHO_SECTIONS:
+        value = data.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str):
+            warnings.append("section_not_text:" + key)
+            continue
+        for i, (kind, text) in enumerate(_who_blocks(value)):
+            add(text, kind, "/" + key, i)
+    body = "\n\n".join(parts)
+    if len(parts) <= (1 if title else 0):
         warnings.append("no_body")
     return _result(body, segments, detect_language(body), 0, warnings)

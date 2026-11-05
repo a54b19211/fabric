@@ -71,6 +71,9 @@ def _cleaner_input(row):
             return {"invalid_raw_sha256": hashlib.sha256((row["raw"] or "").encode()).hexdigest(),
                     "raw": row["raw"] or ""}, "raw_json"
         return {"title": data.get("title"), "abstractText": data.get("abstractText")}, "literature_fields"
+    if source == "who_don":
+        # v12: from the raw JSON (the projection's clean_text flattened <table> and has no title heading)
+        return {"raw": row["raw"] or ""}, "who_raw_json"
     if source in SITE_SOURCES and facts.get("role") in ("web_capture", "site_record"):
         try:
             markdown = (json.loads(row["raw"] or "{}").get("parsed") or {}).get("markdown") or ""
@@ -115,6 +118,8 @@ def _clean_by_basis(source, inp, basis):
         return clean_text.clean_registry(inp["facts"], inp["locators"], summary=inp["summary"])
     if basis == "raw_json":
         return clean_text.clean_literature(inp["raw"])
+    if basis == "who_raw_json":
+        return clean_text.clean_who(inp["raw"])
     if basis == "literature_fields":
         out = clean_text.clean_literature(json.dumps({k: v for k, v in inp.items() if v is not None},
                                                      ensure_ascii=False))
@@ -144,7 +149,8 @@ _CHUNK_SQL = """
     SELECT version_id, source_id, is_demo, source_record_id, record_kind, published_seq,
            payload->'facts' AS facts, payload->'field_locators' AS locators, payload->>'clean_text' AS clean_text,
            payload->>'title' AS title,
-           CASE WHEN source_id='europe_pmc' OR payload->'facts'->>'role' IN ('web_capture','site_record')
+           CASE WHEN source_id IN ('europe_pmc', 'who_don')
+                     OR payload->'facts'->>'role' IN ('web_capture','site_record')
                 THEN payload->>'raw_content' END AS raw,
            CASE WHEN source_id='clinicaltrials'
                 THEN (payload->>'raw_content')::jsonb #>> '{protocolSection,descriptionModule,briefSummary}'
