@@ -215,10 +215,11 @@ def test_registry_order_format_and_pointers():
                     "eligibility", "has_results", "trial_id", "zz_extra"]
     assert all(s["kind"] == "field" for s in segs[1:])
     lines = out["text"].split("\n")
-    assert lines[1] == '状态 status: "TERMINATED"'
-    assert lines[3] == '分期 phase: ["PHASE2","PHASE3"]'
-    assert '"description":"10 mg/kg IV q3w","name":"Drug X"' in out["text"]
-    assert lines[-1] == '其他字段 zz_extra: {"a":"不","b":2}'
+    assert lines[1] == "状态 status: TERMINATED"
+    assert lines[3] == "分期 phase: PHASE2; PHASE3"
+    assert "干预措施 interventions: [1] description: 10 mg/kg IV q3w; name: Drug X" in out["text"]
+    assert lines[-1] == "其他字段 zz_extra: a: 不; b: 2"
+    assert '{"' not in out["text"] and '":' not in out["text"]  # v7：不写 JSON
     assert segs[1]["source"] == {"json_pointer": "/p/status"}
     assert segs[-1]["source"] == {"json_pointer": None}
     for term in ["未见疗效", "撤回", "≥18", "不超过", "无显著", "mg/kg", "no significant", "Corrected"]:
@@ -228,7 +229,7 @@ def test_registry_order_format_and_pointers():
 
 def test_registry_missing_fields_not_invented_and_summary_missing():
     out = ct.clean_registry({"status": "RECRUITING", "why_stopped": None}, {})
-    assert out["text"] == '状态 status: "RECRUITING"'
+    assert out["text"] == "状态 status: RECRUITING"
     assert "why_stopped" not in out["text"] and "null" not in out["text"]
     assert "enrollment" not in out["text"]
     assert out["warnings"] == ["summary_missing"]
@@ -239,17 +240,41 @@ def test_registry_long_fields_are_kept_whole_for_search():
     """v2：入组标准等长字段完整保留（v1 的 4000 字截断在真实 CT 上截掉了 1796/4496 个版本的关键内容）。"""
     long = "未见异常；" * 1000
     out = ct.clean_registry({"eligibility": long}, {"eligibility": {"json_pointer": "/e"}}, summary="s")
-    assert json.dumps(long, ensure_ascii=False) in out["text"] and out["warnings"] == []
+    assert long in out["text"] and out["warnings"] == []
 
 
 def test_registry_long_value_cut_with_explicit_note():
     long = "未见异常；" * 50000
     out = ct.clean_registry({"eligibility": long}, {"eligibility": {"json_pointer": "/e"}}, summary="s")
-    full = json.dumps(long, ensure_ascii=False)
     line = seg_text(out, out["segments"][1])
-    assert line.endswith("…（共 %d 字符，见原件）" % len(full))
-    assert line == "入选标准 eligibility: " + full[:ct.MAX_FIELD_CHARS] + "…（共 %d 字符，见原件）" % len(full)
+    assert line == ("入选标准 eligibility:\n" + long[:ct.MAX_FIELD_CHARS]
+                    + "\n…（本字段共 %d 字，完整内容见原件）" % len(long))
     assert "field_truncated:eligibility" in out["warnings"]
+
+
+def test_registry_v7_renders_structure_readably_and_caps_result_tables():
+    """v7：结构化字段写成可读行；数值表一样的结果模块按上限截断并写明总量（v6 有 16 万字的不良事件 JSON）。"""
+    events = {"eventGroups": [{"id": "EG%03d" % i, "title": "Arm %d" % i, "seriousNumAffected": i} for i in range(500)]}
+    outcomes = [{"measure": "Overall survival", "timeFrame": "up to 5 years", "description": "OS per RECIST"}]
+    sites = [{"facility": "Site %d" % i, "city": "Beijing", "country": "China", "status": "RECRUITING",
+              "geoPoint": {"lat": 39.9, "lon": 116.4}, "contacts": [{"name": "Dr X", "email": "x@example.org"}]}
+             for i in range(3)] + [{"facility": "Site US", "city": "Boston", "country": "United States"}]
+    out = ct.clean_registry({"results_adverse_events": events, "primary_outcomes": outcomes, "locations": sites},
+                            {"results_adverse_events": {"json_pointer": "/resultsSection/adverseEventsModule"}},
+                            summary="s")
+    text = out["text"]
+    assert ("主要终点 primary_outcomes: [1] description: OS per RECIST; measure: Overall survival; "
+            "timeFrame: up to 5 years") in text
+    # v8：地点先写全部国家及地点数，每个地点只写机构、城市、州/省、国家；状态、坐标、联系人不进正文
+    assert ("研究地点 locations:\ncountries: China (3); United States (1)\n"
+            "sites[1] city: Beijing; country: China; facility: Site 0") in text
+    assert "x@example.org" not in text and "Dr X" not in text and "geoPoint" not in text and "RECRUITING" not in text
+    block = seg_text(out, next(s for s in out["segments"]
+                               if s["source"]["json_pointer"] == "/resultsSection/adverseEventsModule"))
+    assert block.startswith("结果-不良事件 results_adverse_events:\neventGroups[1] id: EG000; seriousNumAffected: 0")
+    assert len(block) < ct.FIELD_LIMITS["results_adverse_events"] + 200 and "完整内容见原件" in block
+    assert out["warnings"] == ["field_truncated:results_adverse_events"]
+    assert '{"' not in text
 
 
 def test_registry_empty():

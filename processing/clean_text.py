@@ -24,7 +24,7 @@ import json
 import re
 from json.decoder import scanstring
 
-PROCESSOR_VERSION = "datafabric.clean_text.v6"
+PROCESSOR_VERSION = "datafabric.clean_text.v8"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -313,6 +313,16 @@ SUMMARY_POINTER = "/protocolSection/descriptionModule/briefSummary"
 # v2：清洗正文是检索（WeKnora 分块）和抽取的输入，入组标准、终点、地点等长字段必须完整保留；
 # v1 的 4000 字截断在真实 CT 数据上截了 1796/4496 个版本的关键内容，只在极端情况下才截。
 MAX_FIELD_CHARS = 200000
+# v7/v8：结构化字段写成可读的逐行文本，不再整块 JSON（v6 在 4,496 个真实 CT 版本的正文里全都有 JSON 块，单个不良事件字段
+# 就有 16 万字：关键词落在 "groupId" 这类字段名上，正文膨胀超过索引分块上限）。方案、入组标准、干预、终点等
+# 方案字段照旧完整保留；只有数值表一样的结果模块和地点名单按下表封顶，写明总量，完整内容回原件按 json_pointer 读。
+FIELD_LIMITS = {
+    "results_adverse_events": 4000,
+    "results_baseline": 4000,
+    "results_participant_flow": 3000,
+    "results_outcome_measures": 20000,
+    "locations": 8000,
+}
 
 # 固定阅读顺序：先看状态与终止原因，再看设计、时间、人群与终点，最后是申办方与结果；其余字段按键名排序附后。
 REGISTRY_ORDER = [
@@ -374,11 +384,81 @@ def _strings_in(value):
             yield from _strings_in(v)
 
 
+def _leaf(value):
+    return normalize_whitespace(value) if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _empty(value):
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _readable(value, path=""):
+    """结构化值 → 可读的逐行文本（确定的顺序）：标量直接写；只含标量的字典写成一行“键: 值; 键: 值”；
+    只含标量的列表写成一行，用“; ”分隔；含结构的列表逐项展开，项前标 [序号]；更深的嵌套用“上级.键”写路径。
+    空值不写。"""
+    if isinstance(value, dict):
+        items = sorted((k, v) for k, v in value.items() if not _empty(v))
+        if all(not isinstance(v, (dict, list)) for _, v in items):
+            if items:
+                yield (path + " " if path else "") + "; ".join(k + ": " + _leaf(v) for k, v in items)
+            return
+        for k, v in items:
+            yield from _readable(v, path + "." + k if path else k)
+    elif isinstance(value, list):
+        values = [v for v in value if not _empty(v)]
+        if all(not isinstance(v, (dict, list)) for v in values):
+            if values:
+                yield (path + ": " if path else "") + "; ".join(_leaf(v) for v in values)
+            return
+        for i, v in enumerate(values, 1):
+            yield from _readable(v, path + "[" + str(i) + "]")
+    elif not _empty(value):
+        yield (path + ": " if path else "") + _leaf(value)
+
+
+_SITE_FIELDS = ("facility", "city", "state", "country")
+
+
+def _locations(value):
+    """研究地点：先写全部国家及各自地点数（截断也不丢“在哪些国家做”），每个地点只写机构、城市、州/省、国家；
+    招募状态、坐标、联系人（个人信息）不进正文，完整内容回原件按 json_pointer 读。"""
+    if not isinstance(value, list):
+        return value
+    sites = [{k: site[k] for k in _SITE_FIELDS if site.get(k)} for site in value if isinstance(site, dict)]
+    countries = {}
+    for site in sites:
+        if site.get("country"):
+            countries[site["country"]] = countries.get(site["country"], 0) + 1
+    ranked = sorted(countries.items(), key=lambda item: (-item[1], item[0]))
+    return {"countries": ["%s (%d)" % item for item in ranked], "sites": [s for s in sites if s]}
+
+
+def _render_field(key, value):
+    """一个字段的正文：标量或一行就写在“字段名 field_key: ”后面；多行另起，逐行写。超过上限的写到上限为止
+    （按行截断），末尾写明本字段总字数，返回 (正文, 是否截断)。"""
+    lines = list(_readable(_locations(value) if key == "locations" else value))
+    if not lines:
+        return "", False
+    limit = FIELD_LIMITS.get(key, MAX_FIELD_CHARS)
+    total = sum(len(line) for line in lines) + len(lines) - 1
+    if total <= limit:
+        return (lines[0] if len(lines) == 1 else "\n" + "\n".join(lines)), False
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept = kept or [lines[0][:limit]]
+    return "\n" + "\n".join(kept) + "\n…（本字段共 %d 字，完整内容见原件）" % total, True
+
+
 def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -> dict:
     """临床登记（ClinicalTrials.gov）已投影的字段 → 逐字段的正文。
 
-    每个存在的字段一段“字段名 field_key: 紧凑 JSON”；值为 None 视同字段缺失，直接不写（不写 0 / null）。
-    值超过 MAX_FIELD_CHARS 字符就截断，并在行尾写明“…（共 N 字符，见原件）”，同时记 field_truncated:<key>。
+    每个存在的字段一段，以“字段名 field_key:”开头：标量写在同一行；结构化的值写成可读的逐行文本
+    （见 _readable，v7 起不再写 JSON）。值为 None 视同字段缺失，直接不写（不写 0 / null）。
+    超过上限（FIELD_LIMITS，其余 MAX_FIELD_CHARS）的按行截断，末尾写明本字段总字数，记 field_truncated:<key>。
     """
     facts = facts or {}
     locators = locators or {}
@@ -407,13 +487,15 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
     ordered += sorted(k for k in present if k not in REGISTRY_ORDER)
     for key in ordered:
         value = facts[key]
-        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if len(rendered) > MAX_FIELD_CHARS:
-            rendered = rendered[:MAX_FIELD_CHARS] + "…（共 %d 字符，见原件）" % len(rendered)
+        rendered, truncated = _render_field(key, value)
+        if not rendered.strip():
+            continue
+        if truncated:
             warnings.append("field_truncated:" + key)
         locator = locators.get(key)
         pointer = locator.get("json_pointer") if isinstance(locator, dict) else None
-        add(REGISTRY_LABELS.get(key, _DEFAULT_LABEL) + " " + key + ": " + rendered, "field", pointer)
+        add(REGISTRY_LABELS.get(key, _DEFAULT_LABEL) + " " + key + ":" + ("" if rendered.startswith("\n") else " ")
+            + rendered, "field", pointer)
         lang_texts.extend(_strings_in(value))
 
     body = "\n".join(parts)
