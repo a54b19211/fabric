@@ -353,9 +353,24 @@ def _current_state(row):
             "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
             "AND " + history._ROLE + "!='context_reference'"
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
-        keys = {artifact_key(a) for a in current_artifacts(conn, versions).values()}
+        current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
+        keys = set(current)
         if row["artifact_key"] in keys:
-            return "active"
+            # 产物是当前的，还要分片计划也是当前的。整篇条目而现在要分片（分片之前建的）、或分片规则已换的片，
+            # 由按当前计划建的片替代：没发出过或没 ready 过的直接 superseded（超预算的整篇永远到不了 ready）；
+            # 已经 ready 的等当前计划的片全部 ready 再停用（先上后下）
+            piece = row.get("piece")
+            if not ((not piece and not index_pieces.fits(current[row["artifact_key"]]["text"])) or (
+                    piece and piece["rule"] != index_pieces.RULE)):
+                return "active"
+            if never_sent(row) or row["state"] != "ready":
+                return "superseded"
+            replaced = conn.execute(text(
+                "SELECT count(*)>0 AND bool_and(state='ready') FROM index_publications WHERE target_id=:t "
+                "AND source_record_id=:n AND artifact_key=:k AND piece_index>0 AND piece->>'rule'=:rule"
+            ), {"t": row["target_id"], "n": row["source_record_id"], "k": row["artifact_key"],
+                "rule": index_pieces.RULE}).scalar()
+            return "superseded" if replaced else "retiring"
         # 这份正文（处理器升级前的产物，或改造前按投影正文建的待办）已不是任何版本的当前产物。
         # 没发出过的直接停用；发出过的，等该记录的当前产物都能检索（整份产物的每一片都 ready）后再停用，
         # 不撤掉最后的入口；在那之前原样保留、不再上传（retiring）。检索时照样逐条校验。

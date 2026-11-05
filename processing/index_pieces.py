@@ -62,6 +62,12 @@ def _hard_cuts(text, start, end, step):
     return cuts
 
 
+def fits(text):
+    """整篇一次放得下（不用分片）：字符数和 UTF-8 字节数（加上上传附加的一行）都不超过上限。"""
+    return (len(text) + UPLOAD_OVERHEAD <= MAX_CHARS
+            and len(text.encode()) + UPLOAD_OVERHEAD <= MAX_BYTES)
+
+
 def plan(text, segments=(), *, max_chars=None, max_bytes=None):
     """整篇正文 → 分片计划 [分片身份…]；一次放得下返回 []（不分片）。上限默认取模块当前的 MAX_CHARS / MAX_BYTES。"""
     max_chars = MAX_CHARS if max_chars is None else max_chars

@@ -937,17 +937,19 @@ def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
     assert client.disable_count == 1
 
 
-def test_over_budget_content_and_chunk_budget_are_blocked_with_a_gap_not_retried_forever(pg, monkeypatch):
+def test_over_budget_whole_entries_are_replaced_and_chunk_budget_is_blocked_not_retried_forever(pg, monkeypatch):
     from processing import index_pieces
 
     version, client = ready_job(pg)
-    monkeypatch.setattr(index_pieces, "MAX_CHARS", 50)  # 改造前冻结的整篇清单，现在超过单条上传预算
+    monkeypatch.setattr(index_pieces, "MAX_CHARS", 50)  # 分片之前冻结的整篇清单，现在超过单条上传预算
     with pg.begin() as conn:
         conn.execute(text("UPDATE index_publications SET state='queued',first_send_at=NULL,knowledge_id=NULL,"
                           "receipt='{}'::jsonb"))
     due(pg)
-    result = index.process_once(client=JournalClient())
-    assert result["state"] == "blocked" and job(pg)["error"]["code"] == "index_content_budget"
+    plain = JournalClient()
+    result = index.process_once(client=plain)
+    # 没发出过：由当前分片计划替代，直接本地停用，不上传、不联网，也不无休止 indexing
+    assert result["state"] == "disabled" and result["desired_state"] == "superseded" and plain.events == []
     small_pieces(monkeypatch, chars=100000)
 
     class TooManyChunks(JournalClient):
@@ -961,3 +963,32 @@ def test_over_budget_content_and_chunk_budget_are_blocked_with_a_gap_not_retried
     due(pg)
     result = index.process_once(client=TooManyChunks())
     assert result["state"] == "blocked" and job(pg)["error"]["code"] == "index_chunk_budget"
+
+
+def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan(pg, monkeypatch):
+    """整篇条目建于分片之前（或分片规则换了）：按当前计划建的片替代它，产物在新片全部 ready 后才算可检索。"""
+    small_pieces(monkeypatch, chars=100000)
+    version = long_document()
+    scan()
+    client = SearchClient(pg)
+    assert index.process_once(client=client)["state"] == "ready"
+    whole = job(pg)
+    small_pieces(monkeypatch)  # 现在这份产物要分片
+    with pg.begin() as conn:
+        index.enqueue_versions(conn, [version])
+    pieces = rows(pg, "SELECT * FROM index_publications WHERE piece_index>0 ORDER BY piece_index")
+    assert len(pieces) >= 3 and {p["artifact_key"] for p in pieces} == {whole["artifact_key"]}
+    due_job(pg, whole["id"])
+    index.process_once(client=client)  # 整篇已 ready：新片还没全 ready，保留（retiring），不撤掉入口
+    assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": whole["id"]})[0]["state"] == "ready"
+    assert client.disable_count == 0
+    for _ in range(60):
+        states = {r["piece_index"]: r["state"] for r in rows(pg, "SELECT piece_index,state FROM index_publications")}
+        if states[0] == "disabled" and all(states[p["piece_index"]] == "ready" for p in pieces):
+            break
+        if index.process_once(client=client)["state"] == "idle":
+            due(pg)  # 都处理过一轮了，再让它们到期复查
+    assert states[0] == "disabled" and all(states[p["piece_index"]] == "ready" for p in pieces)
+    assert client.disable_count == 1
+    cover = retrieval._coverage({"external_archive"})["external_archive"]
+    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0
