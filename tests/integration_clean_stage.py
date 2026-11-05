@@ -78,6 +78,11 @@ def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, monkeyp
     with pytest.raises(HistoryError):
         clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW(), processor_version="x;drop")
     lit = clean_stage.for_versions("europe_pmc", False, [paper], "current", NOW())["versions"][paper]
+    # v3 6.2: stored and returned with the profile (experiment type candidates, obtainable reading level)
+    assert got["profile"]["experiment_types"] == [{"type": "human", "basis": "registry_record", "locators": []}]
+    assert got["profile"]["reading_level"]["level"] == "registry_record"
+    assert lit["profile"]["reading_level"]["level"] == "abstract"
+    assert {e["type"] for e in lit["profile"]["experiment_types"]} == {"unknown"}
     assert "No significant" in lit["clean"]["text"] and "≥3×ULN" in lit["clean"]["text"]
     assert lit["profile"]["doc_type"] == "primary_research"
     notice = clean_stage.for_versions("nmpa", False, [page], "current", NOW())["versions"][page]

@@ -272,14 +272,17 @@ def _process_rows(conn, key, rows, counts):
         structured = facts.get("structured") or {}
         lead = " ".join(str(x) for x in (r.get("title"), structured.get("summary"), structured.get("category")) if x)
         prof = profile.profile(source_id=r["source_id"], role=facts.get("role"), chars=len(body), warnings=warnings,
-                               identifiers=found, pub_types=pub_types, parse_status=parse_status, lead_text=lead)
+                               identifiers=found, pub_types=pub_types, parse_status=parse_status, lead_text=lead,
+                               text=body)
         profile_rows.append({"v": r["version_id"], "pv": prof["processor_version"], "tpv": text_pv,
                              "source": r["source_id"], "demo": r["is_demo"], "doc": prof["doc_type"],
                              "cat": prof.get("doc_category"),
                              "cats": json.dumps(prof.get("evidence_categories") or []),
                              "ev": json.dumps(prof["evidence_types"]), "dec": json.dumps(prof["decisions"]),
                              "q": json.dumps(prof["quality"], ensure_ascii=False), "route": prof["route"],
-                             "reasons": json.dumps(prof["route_reasons"], ensure_ascii=False)})
+                             "reasons": json.dumps(prof["route_reasons"], ensure_ascii=False),
+                             "exp": json.dumps(prof["experiment_types"], ensure_ascii=False),
+                             "level": json.dumps(prof["reading_level"])})
         counts[prof["route"]] = counts.get(prof["route"], 0) + 1
     if clean_rows:
         conn.execute(text("""
@@ -303,9 +306,9 @@ def _process_rows(conn, key, rows, counts):
             INSERT INTO derived_profiles
               (version_id,processor_version,text_processor_version,source_id,is_demo,doc_type,doc_category,
                evidence_categories,evidence_types,
-               decisions,quality,route,route_reasons)
+               decisions,quality,route,route_reasons,experiment_types,reading_level)
             SELECT :v,:pv,:tpv,:source,:demo,:doc,:cat,CAST(:cats AS jsonb),CAST(:ev AS jsonb),CAST(:dec AS jsonb),CAST(:q AS jsonb),
-                   :route,CAST(:reasons AS jsonb)
+                   :route,CAST(:reasons AS jsonb),CAST(:exp AS jsonb),CAST(:level AS jsonb)
             WHERE NOT EXISTS (SELECT 1 FROM derived_profiles WHERE version_id=:v AND processor_version=:pv
                               AND text_processor_version=:tpv)
         """), profile_rows)
@@ -485,7 +488,7 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_versio
             params).mappings().all()
         profiles = conn.execute(text(
             "SELECT version_id,doc_type,doc_category,evidence_categories,evidence_types,decisions,quality,route,"
-            "route_reasons,text_processor_version "
+            "route_reasons,experiment_types,reading_level,text_processor_version "
             "FROM derived_profiles WHERE version_id=ANY(:ids) AND processor_version=:prof"), params).mappings().all()
     out = {v: {"state": "not_visible_or_not_processed"} for v in version_ids}
     for v in visible:

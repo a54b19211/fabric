@@ -132,7 +132,7 @@ def run(source, **kw):
 
 
 def test_profile_credibility_and_doc_types_come_from_the_registry():
-    assert pf.PROCESSOR_VERSION == "datafabric.profile.v4"
+    assert pf.PROCESSOR_VERSION == "datafabric.profile.v5"
     assert pf.CREDIBILITY == {k: t.credibility for k, t in et.FINE_TYPES.items() if t.credibility}
     allowed = set(et.FINE_TYPES) | set(et.DOC_ROLES) | {et.UNKNOWN}
     raw_types = (None, ["review"], ["research-article"], ["preprint"], ["editorial"])

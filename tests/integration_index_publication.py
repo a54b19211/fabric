@@ -1178,3 +1178,16 @@ def test_a_job_that_overruns_its_lease_goes_behind_the_others_and_the_lease_cove
         conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second' "
                           "WHERE id=:i"), {"i": claimed["id"]})
     assert index._claim()["version_id"] == second  # not the same job again at the head of the queue
+
+
+def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
+    """v3 6.2 bumped the profile version: until versions are profiled again no artifact is current, and a sent
+    entry must then be kept (retiring), not disabled because "every replacement is ready" held vacuously."""
+    from processing import profile as profile_module
+
+    version, client = ready_job(pg)
+    monkeypatch.setattr(profile_module, "PROCESSOR_VERSION", "datafabric.profile.v999")
+    due(pg)
+    index.process_once(client=client)
+    saved = job(pg)
+    assert saved["state"] == "ready" and saved["desired_state"] != "superseded"  # kept, nothing sent to disable

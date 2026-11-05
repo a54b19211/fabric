@@ -10,6 +10,13 @@
   2. source_credibility：来源可信度——按证据细类在注册表里的可信度类别给出（官方登记、官方通报、监管文件、文献索引、未证实…）；
   3. entity_match：实体匹配——这一层不做消歧（唐的图谱负责），只记录抽到了几个编号，状态 not_assessed；
   4. fact_check：事实核验——这一层不做（潘的核验），状态 not_checked。
+- v3 6.2 可复用注释（v5）：
+  - experiment_types：实验类型候选（in_vitro 体外 / animal 动物 / human 人体，可多值），每个带依据和原句定位
+    （清洗正文里的字符范围和原文）。登记记录按来源性质是 human；监管公告、标签、召回等不是研究材料，记
+    not_applicable；文献和附件按固定词规则（EXPERIMENT_RULE）找，找不到写 unknown。这是候选注释，不是判定：
+    一篇动物研究里提到“患者”也会被标出 human，评价交给汪的机制评价。
+  - reading_level：这个版本在 Fabric 里实际可取得的材料层级（全文附件 / 摘要 / 只有标题 / 登记记录 / 页面
+    正文 / 库存冻结件 / 无正文）和依据、字符数。模型某次实际读到的窗口是另一回事，由雷达的出站绑定记录。
 - 分流（Codex：缺正文、弱来源、格式错误分别记录，不能把“弱”当隔离理由）：
   - quarantine：只有 format=broken（无正文可定位、解析失败）；元数据照常保留，原因写明；
   - weak_signal：内容短（< WEAK_CHARS）或来源未证实；照常进入后续（发现、检索），带标签，不能被升级为确定事实；
@@ -18,9 +25,11 @@
 
 from __future__ import annotations
 
+import re
+
 from contracts.evidence_types import FINE_TYPES, UNKNOWN, categories_of, document_category
 
-PROCESSOR_VERSION = "datafabric.profile.v4"
+PROCESSOR_VERSION = "datafabric.profile.v5"
 WEAK_CHARS = 200
 
 DEGRADING = ("field_truncated", "no_abstract", "no_title", "html_sup_sub_unpaired", "summary_missing")
@@ -66,9 +75,62 @@ def _doc_category(doc_type, evidence, lead_text):
     return UNKNOWN
 
 
+EXPERIMENT_RULE = "datafabric.experiment_type_rule.v1"
+EXPERIMENT_TERMS = {
+    "in_vitro": re.compile(r"\bin vitro\b|\bcell lines?\b|\bcell cultures?\b|\bcultured (?:cells|neurons|"
+                           r"cardiomyocytes|hepatocytes)\b|\borganoids?\b|体外实验|体外研究|细胞系|细胞实验", re.I),
+    "animal": re.compile(r"\bmice\b|\bmouse\b|\brats?\b|\bmurine\b|\brodents?\b|\bzebrafish\b|"
+                         r"\bnon-human primates?\b|\bmonkeys?\b|\banimal models?\b|\bxenografts?\b|小鼠|大鼠|"
+                         r"动物模型|动物实验", re.I),
+    "human": re.compile(r"\bpatients?\b|\bparticipants?\b|\bhealthy volunteers?\b|\bhuman subjects?\b|"
+                        r"\brandomi[sz]ed\b|\bclinical trials?\b|\bcohorts?\b|患者|受试者|临床试验", re.I),
+}
+EXPERIMENT_LOCATORS = 3  # matches kept per type
+# 不是研究材料的来源角色/类型：实验类型不适用
+NOT_RESEARCH_SOURCES = {"nmpa", "cde", "cde_xxgk", "fda_api_drug_label", "fda_api_enforcement", "fda_crl",
+                        "who_don", "sec_companyfacts"}
+REGISTRY_SOURCES = {"clinicaltrials", "chictr"}
+LITERATURE_SOURCES = {"europe_pmc", "pubmed"}
+
+
+def experiment_types(source_id, role, text):
+    """[{type, basis, locators: [{start, end, text}]}]：按来源性质或固定词规则；可多值；找不到 unknown。"""
+    if role != "attachment" and source_id in REGISTRY_SOURCES:
+        return [{"type": "human", "basis": "registry_record", "locators": []}]
+    if role != "attachment" and source_id in NOT_RESEARCH_SOURCES:
+        return [{"type": "not_applicable", "basis": "source_is_not_research", "locators": []}]
+    found = []
+    for kind, pattern in EXPERIMENT_TERMS.items():
+        hits = [{"start": m.start(), "end": m.end(), "text": m.group()}
+                for _, m in zip(range(EXPERIMENT_LOCATORS), pattern.finditer(text or ""))]
+        if hits:
+            found.append({"type": kind, "basis": EXPERIMENT_RULE, "locators": hits})
+    return found or [{"type": "unknown", "basis": EXPERIMENT_RULE, "locators": []}]
+
+
+def reading_level(source_id, role, chars, warnings, parse_status):
+    """这个版本可取得的材料层级 {level, basis, chars}（不是模型的实际窗口）。"""
+    if chars == 0:
+        level, basis = "none", "no_body"
+    elif role == "attachment":
+        level, basis = ("full_text", "attachment_parse") if parse_status == "parsed" else ("none", "attachment_" + str(
+            parse_status))
+    elif source_id in LITERATURE_SOURCES:
+        level, basis = (("title_only", "no_abstract") if any(w.startswith("no_abstract") for w in warnings)
+                        else ("abstract", "literature_record"))
+    elif source_id in REGISTRY_SOURCES:
+        level, basis = "registry_record", "registry_fields"
+    elif source_id == "legacy_documents":
+        level, basis = "stored_document", "legacy_frozen_text"
+    else:
+        level, basis = "page_text", "source_page_or_record"
+    return {"level": level, "basis": basis, "chars": chars}
+
+
 def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=None, parse_status=None,
-            lead_text="") -> dict:
-    """lead_text：标题、摘要和来源给的类别字段拼成的短文本，只用于按内容分大类（不传正文）。"""
+            lead_text="", text="") -> dict:
+    """lead_text：标题、摘要和来源给的类别字段拼成的短文本，只用于按内容分大类。text：清洗正文，只用于
+    实验类型的词规则和定位（定位是它的字符范围）。"""
     from collection.catalog import CATALOG
 
     spec = CATALOG.get(source_id)
@@ -122,4 +184,6 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
         "quality": quality,
         "route": route,
         "route_reasons": reasons,
+        "experiment_types": experiment_types(source_id, role, text),
+        "reading_level": reading_level(source_id, role, chars, warnings, parse_status),
     }

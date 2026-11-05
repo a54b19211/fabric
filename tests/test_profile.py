@@ -62,3 +62,35 @@ def test_unknown_source_is_honest():
     p = run("some_future_source")
     assert p["quality"]["source_credibility"]["state"] == "unknown"
     assert p["evidence_types"] == [] and p["decisions"] == []
+
+
+def test_experiment_types_are_candidates_with_their_basis_and_place_in_the_text():
+    """v3 6.2: in vitro / animal / human, several at once, each with the rule and where in the cleaned text;
+    a registry record is human by its source, a regulatory notice is not research, no signal is unknown."""
+    text = "XYZ-101 inhibited growth in cell lines and in a mouse xenograft model; 40 patients enrolled."
+    found = {e["type"]: e for e in pf.experiment_types("europe_pmc", None, text)}
+    assert set(found) == {"in_vitro", "animal", "human"}
+    for e in found.values():
+        assert e["basis"] == pf.EXPERIMENT_RULE
+        assert all(text[loc["start"]:loc["end"]] == loc["text"] for loc in e["locators"])
+    assert [loc["text"] for loc in found["animal"]["locators"]] == ["mouse", "xenograft"]
+    assert pf.experiment_types("clinicaltrials", None, "") == [
+        {"type": "human", "basis": "registry_record", "locators": []}]
+    assert pf.experiment_types("nmpa", None, "患者") == [
+        {"type": "not_applicable", "basis": "source_is_not_research", "locators": []}]
+    assert pf.experiment_types("nmpa", "attachment", "小鼠实验")[0]["type"] == "animal"  # an attachment is read
+    assert pf.experiment_types("europe_pmc", None, "A review of policy.") == [
+        {"type": "unknown", "basis": pf.EXPERIMENT_RULE, "locators": []}]
+
+
+def test_reading_level_is_what_fabric_has_not_what_a_model_read():
+    assert pf.reading_level("europe_pmc", None, 900, [], None) == {
+        "level": "abstract", "basis": "literature_record", "chars": 900}
+    assert pf.reading_level("europe_pmc", None, 40, ["no_abstract"], None)["level"] == "title_only"
+    assert pf.reading_level("pubmed", "attachment", 90000, [], "parsed")["level"] == "full_text"
+    assert pf.reading_level("nmpa", "attachment", 0, [], "failed")["level"] == "none"
+    assert pf.reading_level("clinicaltrials", None, 2400, [], None)["level"] == "registry_record"
+    assert pf.reading_level("nmpa", None, 300, [], None)["level"] == "page_text"
+    got = pf.profile(source_id="europe_pmc", chars=10, warnings=[], identifiers=[], text="in vitro")
+    assert got["processor_version"] == "datafabric.profile.v5"
+    assert got["experiment_types"][0]["type"] == "in_vitro" and got["reading_level"]["level"] == "abstract"

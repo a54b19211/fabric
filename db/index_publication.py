@@ -393,6 +393,10 @@ def _current_state(row):
             if never_sent(row):
                 return "superseded"
             replacements = list(current.values())
+            if not replacements:
+                # 还没有任何当前产物可替代它（新版本的清洗或画像还没做完，例如画像处理器刚升级）：不撤掉最后的
+                # 入口；“全部替代产物已 ready”在一个替代都没有时不能算成立
+                return "retiring"
         done = all(artifact_ready(conn, row["target_id"], row["source_record_id"], a) for a in replacements)
         return "superseded" if done else "retiring"
 
