@@ -345,6 +345,213 @@ def _claim(lane=None, sent=None):
         return dict(row, lease_token=token)
 
 
+# ---- T-30 scheduling ------------------------------------------------------------------------------------
+# Job classes, mutually exclusive (decided in this order, from the row's own fields):
+#   R retire: disabling, or no longer wanted (desired_state not active/unknown) and not yet disabled
+#   P poll:   sent (send evidence) and not settled: confirm, bind, recover, or retry an upload proven rejected
+#   F first upload (lane new) / B backfill first upload (lane backfill): never sent
+#   C recheck: ready, blocked or disabled entries checked again on their schedule
+# Every class has a guaranteed share of each worker's turns (ROTATION); an empty class gives its turn to the next.
+_SENT = "(p.first_send_at IS NOT NULL OR p.knowledge_id IS NOT NULL OR p.receipt<>'{}'::jsonb)"
+# An upload stops counting as in flight only when it is settled: ready / disabled, or (not being sent again)
+# its parse ended upstream or it was proven rejected before anything was created. blocked, waiting or an
+# expired lease never release it - the remote outcome may still be open (Codex DECISION T-30 r2).
+_RELEASED = ("(p.state IN ('ready','disabled') OR (p.state<>'sending' AND ("
+             "COALESCE(p.receipt->>'parse_status','') IN ('completed','failed','cancelled') OR "
+             "(COALESCE(p.receipt->>'upload_status','')='rejected' AND p.knowledge_id IS NULL))))")
+# COALESCE: a receipt without these fields must not turn the test into NULL (NOT NULL would drop an open upload
+# out of the in-flight count - found by the integration test)
+_RETIRE = "(p.state='disabling' OR (COALESCE(p.desired_state,'active') NOT IN ('active','unknown') AND p.state<>'disabled'))"
+CLASS_SQL = {
+    "R": _RETIRE,
+    "P": f"(NOT {_RETIRE} AND p.state IN ('queued','sending','indexing','waiting') AND {_SENT})",
+    "F": f"(NOT {_RETIRE} AND p.lane IS DISTINCT FROM 'backfill' AND p.state IN ('queued','waiting') AND NOT {_SENT})",
+    "B": f"(NOT {_RETIRE} AND p.lane='backfill' AND p.state IN ('queued','waiting') AND NOT {_SENT})",
+    "C": f"(NOT {_RETIRE} AND p.state IN ('ready','blocked','disabled'))",
+}
+CLASS_OF = ("CASE WHEN " + CLASS_SQL["R"] + " THEN 'R' WHEN " + CLASS_SQL["P"] + " THEN 'P' WHEN " + CLASS_SQL["F"]
+            + " THEN 'F' WHEN " + CLASS_SQL["B"] + " THEN 'B' WHEN " + CLASS_SQL["C"] + " THEN 'C' END")
+# One worker thread's turns: first uploads 2, polls 3, retire 1, backfill 1, recheck 1 of every 8.
+ROTATION = ("F", "P", "R", "F", "P", "B", "C", "P")
+UPLOAD_CLASSES = ("F", "B")
+
+
+def _env_number(name, default, cast=int):
+    try:
+        value = cast(os.environ.get(name) or default)
+    except ValueError:
+        raise HistoryError("index_target_configuration", name + " 必须是正数", 503) from None
+    if value <= 0:
+        raise HistoryError("index_target_configuration", name + " 必须是正数", 503)
+    return value
+
+
+def limits():
+    """The shared upload budget of one knowledge base: entries / characters / bytes in flight, and the send
+    bucket (uploads per minute, burst)."""
+    return {"max_inflight": _env_number("DATAFABRIC_INDEX_MAX_INFLIGHT", 200),
+            "max_inflight_chars": _env_number("DATAFABRIC_INDEX_MAX_INFLIGHT_CHARS", 20_000_000),
+            "max_inflight_bytes": _env_number("DATAFABRIC_INDEX_MAX_INFLIGHT_BYTES", 60_000_000),
+            "uploads_per_minute": _env_number("DATAFABRIC_INDEX_UPLOADS_PER_MINUTE", 60, float),
+            "burst": _env_number("DATAFABRIC_INDEX_UPLOAD_BURST", 10, float)}
+
+
+def _inflight(conn, kb, exclude=None):
+    return conn.execute(text(
+        "SELECT count(*),COALESCE(sum(p.sent_chars),0),COALESCE(sum(p.sent_bytes),0) FROM index_publications p "
+        "WHERE p.manifest->>'knowledge_base_id'=:kb AND p.state NOT IN ('ready','disabled') AND " + _SENT
+        + " AND NOT " + _RELEASED + (" AND p.id<>:id" if exclude else "")
+    ), {"kb": kb, "id": exclude}).one()
+
+
+def _gated(conn, lim):
+    """Knowledge bases where no new upload may start now (in-flight budget full, or no send token)."""
+    full = conn.execute(text(
+        "SELECT kb FROM (SELECT p.manifest->>'knowledge_base_id' AS kb,count(*) AS n,"
+        "COALESCE(sum(p.sent_chars),0) AS c,COALESCE(sum(p.sent_bytes),0) AS b FROM index_publications p "
+        "WHERE p.state NOT IN ('ready','disabled') AND " + _SENT + " AND NOT " + _RELEASED + " GROUP BY 1) x "
+        "WHERE n>=:n OR c>=:c OR b>=:b "
+        "UNION SELECT knowledge_base_id FROM index_send_bucket "
+        "WHERE LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0)<1"
+    ), {"n": lim["max_inflight"], "c": lim["max_inflight_chars"], "b": lim["max_inflight_bytes"],
+        "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalars().all()
+    return list(full)
+
+
+def _gate_denied(conn, kb, reason):
+    """Count a denial and the time the gate has been closed (gaps between denials capped at 60 s)."""
+    conn.execute(text("""
+        INSERT INTO index_gate_stats(knowledge_base_id,reason,denials,blocked_seconds,last_at)
+        VALUES (:kb,:reason,1,0,clock_timestamp())
+        ON CONFLICT (knowledge_base_id,reason) DO UPDATE SET denials=index_gate_stats.denials+1,
+          blocked_seconds=index_gate_stats.blocked_seconds
+            +LEAST(60,EXTRACT(EPOCH FROM clock_timestamp()-index_gate_stats.last_at)),
+          last_at=clock_timestamp()
+    """), {"kb": kb, "reason": reason})
+
+
+def _reserve(row, content):
+    """Before one physical upload (a first upload or the retry of one proven rejected): under the knowledge
+    base's advisory lock - shared by every worker and process - check the in-flight entries, characters and
+    bytes, take a send token, and mark the job sending with its size, all in one transaction. Returns None
+    when granted, or the reason it was not (nothing is sent then)."""
+    kb, lim = row["manifest"]["knowledge_base_id"], limits()
+    chars, size = len(content), len(content.encode())
+    with history.history_engine().begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "index_kb:" + kb})
+        n, c, b = _inflight(conn, kb, exclude=row["id"])
+        reason = None
+        if n + 1 > lim["max_inflight"]:
+            reason = "inflight_entries"
+        elif n and (c + chars > lim["max_inflight_chars"] or b + size > lim["max_inflight_bytes"]):
+            reason = "inflight_size"  # one upload alone may exceed the size budget, never two together
+        if reason is None:
+            bucket = conn.execute(text(
+                "SELECT LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0) "
+                "FROM index_send_bucket WHERE knowledge_base_id=:kb FOR UPDATE"
+            ), {"kb": kb, "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalar()
+            tokens = lim["burst"] if bucket is None else float(bucket)
+            if tokens < 1:
+                reason = "send_rate"
+            conn.execute(text("""
+                INSERT INTO index_send_bucket(knowledge_base_id,tokens,refilled_at) VALUES (:kb,:t,clock_timestamp())
+                ON CONFLICT (knowledge_base_id) DO UPDATE SET tokens=:t,refilled_at=clock_timestamp()
+            """), {"kb": kb, "t": tokens if reason else tokens - 1})
+        if reason:
+            _gate_denied(conn, kb, reason)
+            return reason
+        changed = conn.execute(text("""
+            UPDATE index_publications SET first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',
+              sent_chars=:chars,sent_bytes=:size,updated_at=clock_timestamp()
+            WHERE id=:id AND lease_token=:token AND lease_until>clock_timestamp()
+        """), {"id": row["id"], "token": row["lease_token"], "chars": chars, "size": size})
+        if changed.rowcount != 1:
+            raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
+    return None
+
+
+def _claim_class(klass):
+    """The next due job of one class: the source served least recently in this class first, then by due time.
+    An upload class skips knowledge bases whose gate is closed, so their jobs do not burn turns."""
+    gated = _gated_now() if klass in UPLOAD_CLASSES else []
+    with history.history_engine().begin() as conn:
+        row = conn.execute(text("""
+            SELECT p.*,t.config,t.enabled FROM index_publications p
+            JOIN index_targets t ON t.id=p.target_id
+            LEFT JOIN index_claim_cursor c ON c.class=:k AND c.source_id=t.config->>'source_id'
+            WHERE p.next_check_at<=clock_timestamp()
+              AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp())
+              AND """ + CLASS_SQL[klass] + """
+              AND NOT (p.manifest->>'knowledge_base_id' = ANY(:gated))
+            ORDER BY c.last_claimed_at NULLS FIRST,p.next_check_at,p.id
+            FOR UPDATE OF p SKIP LOCKED LIMIT 1
+        """), {"k": klass, "gated": gated}).mappings().first()
+        if row is None:
+            return None
+        token = uuid4().hex
+        conn.execute(text("""
+            UPDATE index_publications SET lease_token=:token,
+              lease_until=clock_timestamp()+make_interval(secs => :lease),
+              next_check_at=clock_timestamp()+make_interval(secs => :lease),
+              updated_at=clock_timestamp() WHERE id=:id
+        """), {"id": row["id"], "token": token, "lease": LEASE_SECONDS})
+        conn.execute(text("""
+            INSERT INTO index_claim_cursor(class,source_id,last_claimed_at) VALUES (:k,:s,clock_timestamp())
+            ON CONFLICT (class,source_id) DO UPDATE SET last_claimed_at=clock_timestamp()
+        """), {"k": klass, "s": row["config"]["source_id"]})
+        return dict(row, lease_token=token, job_class=klass)
+
+
+def _gated_now():
+    with history.history_engine().begin() as conn:
+        return _gated(conn, limits())
+
+
+def scheduler_status():
+    """Observable progress per class x source (due, leased, oldest due wait, last claim) and per knowledge base
+    (in flight against its budget, send tokens, gate denials and blocked time), plus the last hour's first
+    sends, ready and failures."""
+    lim = limits()
+    with history.history_engine().begin() as conn:
+        classes = [dict(r) for r in conn.execute(text(
+            "SELECT " + CLASS_OF + " AS class,t.config->>'source_id' AS source_id,"
+            "count(*) FILTER (WHERE p.next_check_at<=clock_timestamp() AND (p.lease_until IS NULL OR "
+            "p.lease_until<clock_timestamp())) AS due,"
+            "count(*) FILTER (WHERE p.lease_until>=clock_timestamp()) AS leased,"
+            "EXTRACT(EPOCH FROM clock_timestamp()-min(p.next_check_at) FILTER (WHERE p.next_check_at<=clock_timestamp()"
+            " AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp()))) AS oldest_due_seconds,"
+            "max(c.last_claimed_at) AS last_claimed_at "
+            "FROM index_publications p JOIN index_targets t ON t.id=p.target_id "
+            "LEFT JOIN index_claim_cursor c ON c.source_id=t.config->>'source_id' AND c.class=(" + CLASS_OF + ") "
+            "GROUP BY 1,2 ORDER BY 1,2")).mappings()]
+        kbs = sorted({r for (r,) in conn.execute(text(
+            "SELECT DISTINCT manifest->>'knowledge_base_id' FROM index_publications"))} - {None})
+        budget = []
+        for kb in kbs:
+            n, c, b = _inflight(conn, kb)
+            tokens = conn.execute(text(
+                "SELECT LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0) "
+                "FROM index_send_bucket WHERE knowledge_base_id=:kb"
+            ), {"kb": kb, "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalar()
+            gates = {r["reason"]: {"denials": r["denials"], "blocked_seconds": round(float(r["blocked_seconds"]), 1),
+                                   "last_at": r["last_at"].isoformat() if r["last_at"] else None}
+                     for r in conn.execute(text(
+                         "SELECT reason,denials,blocked_seconds,last_at FROM index_gate_stats WHERE knowledge_base_id=:kb"
+                     ), {"kb": kb}).mappings()}
+            budget.append({"knowledge_base_id": kb, "inflight": {"entries": n, "chars": int(c), "bytes": int(b)},
+                           "send_tokens": None if tokens is None else round(float(tokens), 2), "gate": gates})
+        hour = conn.execute(text(
+            "SELECT count(*) FILTER (WHERE first_send_at>clock_timestamp()-interval '1 hour') AS first_sends,"
+            "count(*) FILTER (WHERE ready_at>clock_timestamp()-interval '1 hour') AS ready,"
+            "count(*) FILTER (WHERE error IS NOT NULL AND updated_at>clock_timestamp()-interval '1 hour') AS failed "
+            "FROM index_publications")).mappings().one()
+    for r in classes:
+        r["oldest_due_seconds"] = None if r["oldest_due_seconds"] is None else round(float(r["oldest_due_seconds"]), 1)
+        r["last_claimed_at"] = r["last_claimed_at"].isoformat() if r["last_claimed_at"] else None
+    return {"rotation": list(ROTATION), "limits": lim, "classes": classes, "knowledge_bases": budget,
+            "last_hour": dict(hour)}
+
+
 def never_sent(row):
     """确认从没发出过：首次发送时间、远端知识编号、回执都没有，状态是 queued，或是因此在本地停用的 disabled
     （之后每次复查仍不联网）。改造前有 ready 而 first_send_at 为空的行（Codex r72）、发出后丢了回执的
@@ -474,13 +681,20 @@ def _hold(row, seconds):
     return {"id": row["id"], "state": row["state"], "desired_state": row["desired_state"]}
 
 
-def process_once(*, client=None, lane=None, sent=None):
-    """处理一个到期作业。先在（lane, sent）那一类里找，没有就退到同 lane，再退到不限。"""
+def process_once(*, client=None, classes=None, lane=None, sent=None):
+    """处理一个到期作业。默认按作业类别（T-30：classes 依次尝试，空的让给下一类）；lane/sent 仍可显式指定
+    （旧调用，先在那一类里找，没有就退到同 lane，再退到不限）。"""
     row = None
-    for want in dict.fromkeys(((lane, sent), (lane, None), (None, None))):
-        row = _claim(*want)
-        if row is not None:
-            break
+    if lane is None and sent is None:
+        for klass in dict.fromkeys(classes or ROTATION):
+            row = _claim_class(klass)
+            if row is not None:
+                break
+    else:
+        for want in dict.fromkeys(((lane, sent), (lane, None), (None, None))):
+            row = _claim(*want)
+            if row is not None:
+                break
     if row is None:
         return {"state": "idle"}
     desired = "unknown"
@@ -527,8 +741,16 @@ def process_once(*, client=None, lane=None, sent=None):
         if sha256(content) != row["manifest"]["content_sha256"]:
             raise HistoryError("index_content_changed", "清洗产物与冻结摘要不符", 409)
         if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
-            _sent(row)
             # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
+            # 桥接还不知道这条（首传），或明确记为建档前拒收（重传）：这才是一次物理上传，无论哪一类作业领到，
+            # 都先过同一个原子在途预算和共享发送令牌（T-30）。补绑定、对账找回只是 GET/补投影，不占名额。
+            physical = receipt is None or (receipt.get("upload_status") == "rejected" and not receipt.get("knowledge_id"))
+            if physical:
+                denied = _reserve(row, content)
+                if denied:
+                    return _hold(row, 15)
+            else:
+                _sent(row)
             receipt = client.publish(_bridge_body(row, content))
         _validate_receipt(row, receipt)
         verified_receipt = receipt
@@ -564,12 +786,6 @@ def process_once(*, client=None, lane=None, sent=None):
             client.close()
 
 
-# 一个 worker 线程轮到的（lane, sent）：新增 3 份、回填 1 份；同一 lane 里“确认已发出的”和“发新的”交替。
-# 已发出的作业 15 秒后再查，若只按到期时间排，会排在整个积压后面，ready 要等积压清完。
-SLOTS = (("new", True), ("new", False), ("new", True), ("backfill", False),
-         ("new", False), ("new", True), ("new", False), ("backfill", True))
-
-
 def configured():
     """有索引目标配置，或库里还有目标（配置移除＝停止使用，旧绑定仍要撤回对账）。"""
     if os.environ.get("DATAFABRIC_INDEX_TARGETS"):
@@ -598,8 +814,8 @@ def run_worker(*, concurrency=2, scan_every_seconds=30.0, idle_seconds=5.0, stop
                 if slot == 0 and time.monotonic() - last_scan >= scan_every_seconds:
                     last_scan = time.monotonic()
                     scan_committed()
-                lane, sent = SLOTS[(slot + n) % len(SLOTS)]
-                state = process_once(lane=lane, sent=sent)["state"]
+                turn = (slot + n) % len(ROTATION)
+                state = process_once(classes=ROTATION[turn:] + ROTATION[:turn])["state"]
             except Exception:  # noqa: BLE001 -- 库或配置暂不可用：待办与水位都在库里，稍后再来
                 state = "unavailable"
             counts[slot][state] = counts[slot].get(state, 0) + 1

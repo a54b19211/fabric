@@ -62,13 +62,15 @@ def test_reported_source_failure_exits_nonzero(monkeypatch, state):
     assert exc.value.code == 1
 
 
-def test_index_worker_rotates_lanes_and_survives_unavailable_database(monkeypatch):
+def test_index_worker_rotates_job_classes_and_survives_unavailable_database(monkeypatch):
+    from collections import Counter
+
     from db import index_publication
 
     claims, scans = [], []
 
-    def process_once(*, lane, sent):
-        claims.append((lane, sent))
+    def process_once(*, classes):
+        claims.append(tuple(classes))
         if len(claims) == 3:
             raise RuntimeError("synthetic database outage")
         return {"state": "ready"}
@@ -81,9 +83,10 @@ def test_index_worker_rotates_lanes_and_survives_unavailable_database(monkeypatc
     monkeypatch.setattr(index_publication, "scan_committed", scan)
     counts = index_publication.run_worker(concurrency=1, rounds=8, idle_seconds=0, scan_every_seconds=0)
     assert len(scans) == 8 and sum(counts[0].values()) == 8 and counts[0]["unavailable"] == 8
-    # 扫描失败的轮次不处理作业；扫描恢复后按 3:1 轮换新增与回填（见 SLOTS）
+    # 扫描失败的轮次不处理作业；扫描恢复后按 T-30 的 8 格轮转：每轮先试本格的类，空了依次让给其余各类
     monkeypatch.setattr(index_publication, "scan_committed", lambda: None)
     claims.clear()
     counts = index_publication.run_worker(concurrency=1, rounds=8, idle_seconds=0, scan_every_seconds=1e9)
-    assert counts[0] == {"ready": 7, "unavailable": 1}
-    assert [lane for lane, _ in claims].count("backfill") == 2 and len(claims) == 8
+    assert counts[0] == {"ready": 7, "unavailable": 1} and len(claims) == 8
+    assert all(set(c) == {"F", "P", "R", "B", "C"} for c in claims)
+    assert Counter(c[0] for c in claims) == {"F": 2, "P": 3, "R": 1, "B": 1, "C": 1}

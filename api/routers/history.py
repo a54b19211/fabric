@@ -577,6 +577,15 @@ def index_counts():
     return {"states": {s: counts.get(s, 0) for s in STATES} | counts, "total": sum(counts.values())}
 
 
+@router.get("/index/scheduler", dependencies=[Depends(require_admin)])
+def index_scheduler():
+    """T-30：按作业类别 x 来源的到期、在租、最久等待和最近领取；按知识库的在途预算、发送令牌、闸门拒绝与阻塞时长；
+    最近一小时首发、ready、失败数。"""
+    from db.index_publication import scheduler_status
+
+    return _call(scheduler_status)
+
+
 @router.post("/index/{publication_id}/retry", dependencies=[Depends(require_admin)])
 def index_retry(publication_id: str):
     from db.index_publication import retry

@@ -15,7 +15,7 @@ from sqlalchemy import text
 from db.history import history_engine
 
 VERSIONS = ("V020__weknora_index.sql", "V024__index_artifact.sql", "V027__index_publications_recent.sql",
-            "V028__index_worker.sql")
+            "V028__index_worker.sql", "V031__index_scheduling.sql")
 
 
 def migrate_index():
