@@ -155,7 +155,7 @@ def _manifest(target, record, artifact, meta):
         "raw_sha256": record.raw_sha256,
     }
     return {
-        **identity, "knowledge_base_id": target["knowledge_base_id"],
+        **identity, "knowledge_base_id": target["knowledge_base_id"], "is_demo": target["is_demo"],
         "source_scope": target["source_scope"],
         "raw_locator": {k: identity[k] for k in identity if k != "raw_sha256"},
         "title": (record.title or record.source_record_id)[:255],
@@ -169,13 +169,16 @@ def _manifest(target, record, artifact, meta):
 
 
 # 桥接服务（extensions/kdd Publication，extra=forbid）认识的字段；Fabric 清单里其余的说明字段只留在本地
+# is_demo：演示目标的发布必须带上（桥接按它隔离演示与真实知识库；不带等于真实）
 BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256", "artifact_key",
-                 "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata")
+                 "is_demo", "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata")
 
 
-def _bridge_body(manifest, content):
+def _bridge_body(row, content):
+    """发给桥接的请求体。is_demo 取自索引目标（权威，不依赖清单是何时冻结的）。"""
+    manifest = row["manifest"]
     body = {k: manifest[k] for k in BRIDGE_FIELDS if k in manifest}
-    return {**body, "title": manifest["title"][:255], "content": content}
+    return {**body, "is_demo": bool(row["config"]["is_demo"]), "title": manifest["title"][:255], "content": content}
 
 
 def _enqueue(conn, target, record, artifact, meta):
@@ -307,10 +310,11 @@ def _claim(lane=None, sent=None):
 
 
 def never_sent(row):
-    """确认从没发出过：首次发送时间、远端知识编号、回执都没有，状态仍是 queued。
-    改造前有 ready 而 first_send_at 为空的行（Codex r72），所以不能只看 first_send_at；其余一律先向桥接对账。"""
+    """确认从没发出过：首次发送时间、远端知识编号、回执都没有，状态是 queued，或是因此在本地停用的 disabled
+    （之后每次复查仍不联网）。改造前有 ready 而 first_send_at 为空的行（Codex r72）、发出后丢了回执的
+    waiting / sending 行都不算，一律先向桥接对账。"""
     return (row["first_send_at"] is None and not row["knowledge_id"] and not row["receipt"]
-            and row["state"] == "queued")
+            and row["state"] in ("queued", "disabled"))
 
 
 def _current_state(row):
@@ -468,7 +472,7 @@ def process_once(*, client=None, lane=None, sent=None):
         if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
             _sent(row)
             # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
-            receipt = client.publish(_bridge_body(row["manifest"], content))
+            receipt = client.publish(_bridge_body(row, content))
         _validate_receipt(row, receipt)
         verified_receipt = receipt
         # 网络请求期间可能撤权/换头版；不能以旧资格确认ready。

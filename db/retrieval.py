@@ -13,8 +13,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import text
 
@@ -24,26 +26,39 @@ from db import index_publication as index
 
 SCHEMA = "datafabric.retrieval.v1"
 MODES = ("current", "operational_replay", "public_history_reconstruction")
-CANDIDATES = 60  # 每个知识库召回的候选上限（桥接服务的上限）
+CANDIDATES = 60  # 每个知识库一次召回的候选上限（桥接服务的上限）
 MAX_EXCLUDED_ITEMS = 50
 _FIXED_LINE = re.compile(r"\A\s*<!-- Fabric fixed version [0-9a-f]{64} -->\s*")
 _WITHDRAWN = {"withdrawn", "deleted", "retracted"}
 
 
-def locate(fixed, chunk):
-    """命中块在固定正文里的位置 (start, end)；找不到返回 None。先按原样找；分块时空白可能被改写，
-    再按“词序一致、空白任意”找。桥接上传时加的固定版本注释行先去掉。"""
-    chunk = _FIXED_LINE.sub("", chunk or "").strip()
-    if not chunk:
-        return None
+def _find(fixed, chunk):
     at = fixed.find(chunk)
     if at >= 0:
         return at, at + len(chunk)
     words = chunk.split()
-    if len(words) > 400:
+    if not words or len(words) > 400:
         return None
     match = re.search(r"\s+".join(re.escape(w) for w in words), fixed)
     return (match.start(), match.end()) if match else None
+
+
+_TABLE_RULE = re.compile(r"^\|?\s*:?-{3,}")
+
+
+def locate(fixed, chunk):
+    """命中块在固定正文里的位置 (start, end)；找不到返回 None。先按原样找；分块时空白可能被改写，
+    再按“词序一致、空白任意”找。桥接上传时加的固定版本注释行先去掉。
+    长表格分块时 WeKnora 会在每块前面重复表头（表头行 + 分隔行）：表头确实在正文里时，定位表头之后的行。"""
+    chunk = _FIXED_LINE.sub("", chunk or "").strip()
+    if not chunk:
+        return None
+    span = _find(fixed, chunk)
+    if span is None:
+        lines = chunk.split("\n")
+        if len(lines) > 2 and _TABLE_RULE.match(lines[1].strip()) and _find(fixed, "\n".join(lines[:2])):
+            span = _find(fixed, "\n".join(lines[2:]).strip())
+    return span
 
 
 def _overlapping(segments, start, end):
@@ -61,21 +76,33 @@ def _versions(conn, version_ids):
     return {row["version_id"]: dict(row) for row in rows}
 
 
-def _artifact_rows(conn, pairs):
+def _artifact_rows(conn, triples):
     """(版本, 处理器版本, 摘要) → 那一份清洗产物的正文和段落定位（同一处理器版本下最新一次成功结果）。"""
     out = {}
-    for version_id, processor, digest in pairs:
+    for version_id, processor, digest in triples:
         row = conn.execute(text(
             "SELECT text,segments,locator_kind FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv "
             "AND status='parsed' AND text_sha256=:sha ORDER BY attempt DESC LIMIT 1"
         ), {"v": version_id, "pv": processor, "sha": digest}).mappings().first()
         if row:
-            out[version_id] = dict(row)
+            out[(version_id, processor, digest)] = dict(row)
     return out
 
 
-def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=()):
-    """逐条校验候选 → (通过的条目, 剔除计数, 可读来源里剔除的条目)。"""
+def _serving_old(conn, target_id, record_id, current_key, hit_key):
+    """处理器交接期（与 worker 的 retiring 同一规则）：当前产物的条目还没 ready，而被命中的旧条目仍 ready，
+    旧条目继续可检索；当前产物一旦 ready，只认当前产物。"""
+    states = dict(conn.execute(text(
+        "SELECT artifact_key,state FROM index_publications WHERE target_id=:t AND source_record_id=:n "
+        "AND artifact_key=ANY(:keys)"
+    ), {"t": target_id, "n": record_id, "keys": [current_key, hit_key]}).all())
+    return states.get(current_key) != "ready" and states.get(hit_key) == "ready"
+
+
+def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), target_ids=None):
+    """逐条校验候选 → (通过的条目, 剔除计数, 可读来源里剔除的条目)。target_ids：(来源, is_demo) → 索引目标，
+    处理器交接期判断旧条目是否仍在服务要用。"""
+    target_ids = target_ids or {}
     verified, counts, items = [], Counter(), []
 
     def exclude(hit, reason, readable=True):
@@ -107,12 +134,20 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=()):
         with history.history_engine().begin() as conn:
             facts = _versions(conn, set(visible.values()))
             current = index.current_artifacts(conn, set(visible.values()))
-            needed = set()
+            needed, serving = set(), set()
             for hit in hits:
-                vid = visible.get(hit["identity"]["source_record_id"])
-                key = hit["identity"].get("artifact_key")
-                if vid and key and vid in current and index.artifact_key(current[vid]) == key:
-                    needed.add((vid, current[vid]["processor_version"], current[vid]["text_sha256"]))
+                record_id = hit["identity"]["source_record_id"]
+                vid, key = visible.get(record_id), hit["identity"].get("artifact_key")
+                if not (vid and key and vid in current):
+                    continue
+                current_key = index.artifact_key(current[vid])
+                if key == current_key or (target_ids.get((source_id, is_demo)) and _serving_old(
+                        conn, target_ids[(source_id, is_demo)], record_id, current_key, key)):
+                    # 旧条目只有在它的正文也是这个可见版本自己产出的（同一版本、旧处理器）时才认；
+                    # 读取的正文取那一份产物本身，确认不了就剔除
+                    needed.add((vid, *key.rsplit(":", 1)))
+                    if key != current_key:
+                        serving.add((vid, key))
             artifacts = _artifact_rows(conn, needed)
         for hit in hits:
             ident = hit["identity"]
@@ -126,17 +161,18 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=()):
                 continue
             key = ident.get("artifact_key")
             art = current.get(vid)
-            if not key or art is None or index.artifact_key(art) != key or vid not in artifacts:
+            fixed = artifacts.get((vid, *key.rsplit(":", 1))) if key else None
+            if art is None or fixed is None:
                 # 此刻可见的版本，正文已不是被索引的这一份（更正后的版本，或改造前的投影待办）
                 exclude(hit, "changed_at_cutoff")
                 continue
+            processor, digest = key.rsplit(":", 1)
             if doc_categories and art["doc_category"] not in doc_categories:
                 exclude(hit, "filtered_doc_category")
                 continue
             if evidence_types and not set(art["evidence_types"] or []) & set(evidence_types):
                 exclude(hit, "filtered_evidence_type")
                 continue
-            fixed = artifacts[vid]
             span = locate(fixed["text"], hit.get("content"))
             if span is None:
                 exclude(hit, "chunk_not_in_fixed_text")
@@ -151,10 +187,13 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=()):
                 "published_at": fact["published_at"],
                 "available_at": available.isoformat() if available else None,
                 "proof": fact["proof"] if mode == "public_history_reconstruction" else None,
+                # 复现引用（v3 6.1）：可见版本、加工产物（处理器版本 + 正文摘要）、读到的片段、偏移与定位、片段摘要
                 "text": fixed["text"][start:end], "start": start, "end": end,
+                "text_sha256": hashlib.sha256(fixed["text"][start:end].encode()).hexdigest(),
                 "locator_kind": fixed["locator_kind"], "locators": _overlapping(fixed["segments"], start, end),
-                "artifact": {"artifact_key": key, "processor_version": art["processor_version"],
-                             "text_sha256": art["text_sha256"]},
+                "artifact": {"artifact_key": key, "processor_version": processor, "text_sha256": digest,
+                             # 处理器交接期：新产物的条目还没 ready，读的是这个版本在旧处理器下的产物
+                             "handover": (vid, key) in serving},
                 "profile": {"doc_type": art["doc_type"], "doc_category": art["doc_category"],
                             "evidence_types": list(art["evidence_types"] or [])},
                 "indexed_as": {"publication_id": hit.get("publication_id"), "version_id": ident["version_id"],
@@ -193,25 +232,32 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
                   and (not scopes or t.source_scope in scopes) and (is_demo is None or t.is_demo == is_demo)]
     if not configured:
         raise HistoryError("search_scope_empty", "所选来源没有配置索引目标", 422)
-    groups = {}
+    # 一个知识库一次召回，覆盖它在本次检索里的所有业务范围（同库的范围不互相挤占候选）
+    groups, scopes_of = {}, {}
     for target in configured:
-        groups.setdefault((target.knowledge_base_id, target.source_scope, target.is_demo), set()).add(
+        groups.setdefault((target.knowledge_base_id, target.is_demo), set()).add(
             (target.source_instance, target.source_id))
+        scopes_of.setdefault((target.knowledge_base_id, target.is_demo), set()).add(target.source_scope)
     owned = client is None
     client = client or index.WeKnoraIndexClient()
     try:
         candidates, recall = [], []
-        for (kb, scope, is_demo), allowed in groups.items():
-            answer = client.search({"knowledge_base_id": kb, "source_scope": scope, "is_demo": is_demo,
-                                    "query_text": query, "top_k": CANDIDATES})
-            recall.append({"knowledge_base_id": kb, "source_scope": scope, "is_demo": is_demo,
-                           "returned": len(answer.get("results") or []), "execution": answer.get("execution")})
+        # 每个知识库一次召回，几个知识库之间并行发出
+        with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
+            answers = list(pool.map(lambda group: client.search({
+                "knowledge_base_id": group[0], "source_scopes": sorted(scopes_of[group]), "is_demo": group[1],
+                "query_text": query, "top_k": CANDIDATES}), list(groups)))
+        for ((kb, is_demo), allowed), answer in zip(groups.items(), answers):
+            recall.append({"knowledge_base_id": kb, "source_scopes": sorted(scopes_of[(kb, is_demo)]),
+                           "is_demo": is_demo, "returned": len(answer.get("results") or []),
+                           "execution": answer.get("execution")})
             for hit in answer.get("results") or []:
                 ident = hit.get("identity") or {}
                 if (ident.get("source_instance"), ident.get("source_id")) in allowed:
                     candidates.append(hit)
         verified, counts, items = verify(candidates, mode, cutoff, doc_categories=doc_categories,
-                                         evidence_types=evidence_types)
+                                         evidence_types=evidence_types,
+                                         target_ids={(t.source_id, t.is_demo): t.key() for t in configured})
         # 去重：同一可见版本的同一段只留召回分数最高的一条
         best = {}
         for item in verified:

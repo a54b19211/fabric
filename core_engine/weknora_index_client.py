@@ -94,7 +94,8 @@ class WeKnoraIndexClient:
         return self._request("POST", "/rerank", body, seconds=30, wait=25)
 
     def disable(self, pid, reason):
+        """桥接逐块停用（每块一次上游调用），长文档要几十秒：给足时间，超时仍按结果待核对处理。"""
         return self._request(
             "POST", "/publications/" + pid + "/disable",
-            {"reason": "Fabric current state: " + reason, "state": reason},
+            {"reason": "Fabric current state: " + reason, "state": reason}, seconds=180, wait=170,
         )

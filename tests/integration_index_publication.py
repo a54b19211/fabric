@@ -534,6 +534,7 @@ def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
     client = JournalClient()
     assert index.process_once(client=client)["state"] == "ready"
     assert set(client.bodies[0]) <= set(index.BRIDGE_FIELDS) | {"title", "content"}
+    assert client.bodies[0]["is_demo"] is True  # 演示目标：桥接按它隔离演示与真实知识库
     assert client.bodies[0]["metadata"] == meta
     assert job(pg, version)["ready_at"] is not None
 
@@ -622,6 +623,11 @@ def test_never_sent_entry_is_disabled_locally_without_network(pg):
     assert result == {"id": saved["id"], "state": "disabled", "desired_state": "revoked"}
     assert client.events == []
     assert job(pg, version)["state"] == "disabled"
+    # 隔离实测发现（3.6）：本地停用后每 5 分钟复查一次，复查时仍认得“从没发出过”，不去桥接对账
+    for _ in range(2):
+        due(pg)
+        assert index.process_once(client=client)["state"] == "disabled"
+    assert client.events == [] and job(pg, version)["attempts"] == 0 and job(pg, version)["error"] is None
 
 
 def test_worker_threads_take_lanes_until_everything_is_ready(pg, monkeypatch):
@@ -798,3 +804,28 @@ def test_literal_search_over_a_huge_source_returns_query_budget(pg, monkeypatch)
     # 给了记录编号的精确读取不受影响
     history.list_records("external_archive", True, "current", datetime.now(timezone.utc),
                          source_record_ids=["SYNTHETIC-literal"], terms=["SYNTHETIC"])
+
+
+def test_search_stays_available_until_the_replacement_is_ready(pg, monkeypatch):
+    """Codex 441：处理器交接期，检索选用的产物与 worker 的交接状态一致——新产物的条目 ready 之前，
+    仍在服务的旧条目照样能检索到；新条目 ready 之后只认新产物。"""
+    from processing import clean_text
+
+    version, journal = ready_job(pg)
+    old = job(pg)
+    body = fixed_text(pg, version)
+    client = SearchClient(pg)
+    client.hit(old, body[:40])
+    assert [r["artifact"]["handover"] for r in search(client)["results"]] == [False]
+    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    profile()
+    new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
+    due_job(pg, old["id"])
+    index.process_once(client=journal)  # 旧条目 retiring：保留、不联网
+    during = search(client)
+    assert [(r["version_id"], r["artifact"]["handover"]) for r in during["results"]] == [(version, True)]
+    assert during["results"][0]["artifact"]["artifact_key"] == old["artifact_key"]
+    due_job(pg, new["id"])
+    assert index.process_once(client=journal)["state"] == "ready"
+    after = search(client)
+    assert after["results"] == [] and after["excluded"]["counts"] == {"changed_at_cutoff": 1}
