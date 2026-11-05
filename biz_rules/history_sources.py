@@ -389,6 +389,34 @@ def stable_raw(source_id, raw):
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 def project_record(source_id: str, item: ArchiveRecord) -> dict:
+    """原件 → 投影。v3 6.3 的迁入封装（{"legacy_migration": {...}, 解析器可读的正文}）：只把正文交给该来源原有的
+    解析器，同一处把迁入块写进 facts、publication_role 记为 migrated_record，解析器版本带上转换器版本；原件本身
+    （封装）原样保存。没有可用证明，这里也不造证明。"""
+    migration, item = _migration_envelope(source_id, item)
+    projected = _project_record(source_id, item)
+    if migration is None:
+        return projected
+    return dict(projected, facts={**projected["facts"], "legacy_migration": migration,
+                                  "publication_role": "migrated_record"},
+                parser_version=projected["parser_version"] + "+" + migration["converter"])
+
+
+def _migration_envelope(source_id, item):
+    if item.raw_media_type != "application/json" or '"legacy_migration"' not in item.raw_content[:200000]:
+        return None, item
+    data = parse_json(item.raw_content)
+    if not isinstance(data, dict) or "legacy_migration" not in data:
+        return None, item
+    from collection.legacy_migration import CONVERTER
+
+    block = data.pop("legacy_migration")
+    if (not isinstance(block, dict) or block.get("converter") != CONVERTER or source_id == "legacy_documents"
+            or not re.fullmatch(r"[0-9a-f]{64}", str(block.get("legacy_version_id") or ""))):
+        raise HistoryError("invalid_migration_envelope", "迁入封装不符合固定契约", 422)
+    return block, item.model_copy(update={"raw_content": json.dumps(data, ensure_ascii=False, sort_keys=True)})
+
+
+def _project_record(source_id: str, item: ArchiveRecord) -> dict:
     if source_id == "pubmed" and item.raw_media_type == "application/xml":
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":

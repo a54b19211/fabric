@@ -1293,9 +1293,11 @@ _ROLE = "COALESCE(publication_role," + _ROLE_FROM_PAYLOAD + ")"
 _SOURCE_UPDATED_ORDER = (
     "(CASE WHEN publication_role IS NULL THEN " + _SOURCE_UPDATED_FROM_PAYLOAD + " ELSE source_updated_rank END)"
 )
-# 一条记录的“最新版本”：最晚的证明或首次可见时间，再看来源自己的更新时间，最后看发布序号。
-# 当前头版、截止时间下可见的版本、变更列表的头版都用这一条规则。
+# 一条记录的“最新版本”：原生版本先于 v3 6.3 迁入的旧版本（旧内容晚迁入不抢原生现版，也不让原生的撤回/
+# 更正“复活”）；同类之间看最晚的证明或首次可见时间，再看来源自己的更新时间，最后看发布序号。
+# 当前头版、截止时间下可见的版本（先按模式和截止时间筛，再排序）、变更列表的头版都用这一条规则。
 _LATEST = (
+    "(" + _ROLE + "='migrated_record'),"
     "COALESCE(proof_available_at,first_seen_at) DESC," + _SOURCE_UPDATED_ORDER + " DESC NULLS LAST,published_seq DESC"
 )
 
@@ -1540,7 +1542,25 @@ def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
         _check_observation_visibility(conn, record, mode, cutoff)
         if record.record_kind == "graph":
             _check_graph_document_visibility(conn, record, mode, cutoff)
+        if source_id == "legacy_documents":
+            record = _with_legacy_alias(conn, record, mode, cutoff)
         return record
+
+
+def _with_legacy_alias(conn, record, mode, cutoff):
+    """v3 6.3: a legacy version read by its old id stays exactly that version (content, locators, times) and
+    says what it became. Migrated: the real source must be readable now, or the old id is blocked too (no way
+    round a revoked source); the alias then reports the real version's visibility at this mode and cutoff and
+    the real record's current version there (withdrawn or not). Pending: its reason; no access is widened."""
+    from collection.legacy_migration import alias
+
+    target = conn.execute(text(
+        "SELECT real_source_id FROM legacy_aliases WHERE legacy_version_id=:v AND status='imported'"),
+        {"v": record.version_id}).scalar()
+    if target:
+        _source(conn, target)
+    info = alias(conn, record.version_id, mode, cutoff)
+    return record.model_copy(update={"migration": info}) if info else record
 
 
 def visible_versions(source_id, is_demo, mode, cutoff, source_record_ids):

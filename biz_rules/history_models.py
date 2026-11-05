@@ -175,6 +175,8 @@ class HistoryRecord(Model):
     availability_proof: AvailabilityProof
     mapping_review: MappingReview | None = None
     published_seq: int
+    # v3 6.3：按旧编号读 legacy 版本时附上它迁成了什么（db.history._with_legacy_alias），不存进版本
+    migration: dict[str, Any] | None = None
 
 
 class ArchiveRecord(Model):

@@ -35,6 +35,9 @@ from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES �
 WEB_SCHEMA = "datafabric.web_capture.v1"
 RECORD_SCHEMA = "datafabric.site_record.v1"
 ATT_SCHEMA = "datafabric.attachment.v1"
+# v3 6.3: a legacy document rebuilt for this parser by collection.legacy_migration (the old crawler's markdown
+# of a page or record); never a web capture or an API response of ours
+LEGACY_SCHEMA = "datafabric.site.legacy_capture.v1"
 HTML_INLINE_BYTES = 700 * 1024
 
 from config.crawler_settings import SITE_PROFILES  # noqa: E402  站点配置
@@ -462,6 +465,11 @@ def project_capture(source_id: str, item: ArchiveRecord) -> dict:
         }
         title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
         published = source_time(parsed.get("publish_date") or None, "site_publish_date")
+    elif role == "legacy_capture" and data.get("schema_version") == LEGACY_SCHEMA:
+        parsed = data.get("parsed") or {}
+        facts = {"role": role, "capture_kind": data.get("kind"), "parse_method": "legacy_documents_markdown"}
+        title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
+        published = source_time(parsed.get("publish_date") or None, "site_publish_date")
     elif role == "attachment" and data.get("schema_version") == ATT_SCHEMA:
         facts = {
             k: data.get(k)
@@ -470,10 +478,11 @@ def project_capture(source_id: str, item: ArchiveRecord) -> dict:
         facts["role"] = role
         title, clean_text, published = data.get("file_name") or "", "", None
     else:
-        raise HistoryError("invalid_source_fields", "站点原件不符合 web_capture / site_record / attachment 契约")
+        raise HistoryError("invalid_source_fields",
+                           "站点原件不符合 web_capture / site_record / attachment / legacy_capture 契约")
     if role == "attachment":
         expected = attachment_record_id(data.get("parent_record_id") or "", data.get("url") or "")
-    elif role == "site_record":
+    elif role in ("site_record", "legacy_capture"):
         expected = data.get("record_id")
     else:
         expected = data.get("url")
