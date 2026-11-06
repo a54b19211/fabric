@@ -2,8 +2,8 @@
 
 真实 PostgreSQL 隔离 schema（沿用 integration_history 的 pg 夹具：127.0.0.1:18436/fabric_history，
 每次建临时 schema 跑完删除）；MinerU 换成替身，对外 HTTP 用 MockTransport，不联网。
-运行（一行）：DATAFABRIC_HISTORY_DATABASE_URL=postgresql+psycopg://<user>:<pw>@127.0.0.1:18436/fabric_history
-      PYTHONPATH=/tmp/itest-deps:. <venv>/bin/python -m pytest -p no:cacheprovider tests/integration_local_files.py
+运行：bash ops/run_integration_tests.sh tests/integration_local_files.py（临时 PostgreSQL 容器，固定端口只在私有
+网络命名空间里；依赖来自 make venv 的 .venv，见 README「开发环境与测试」）
 """
 
 import hashlib
