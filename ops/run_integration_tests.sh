@@ -6,11 +6,19 @@
 # Several fixtures only accept fixed loopback ports (18436, 18636, 18736, 18737), which may be taken on the
 # host. Those groups run inside a private network namespace (unshare -rn) in which small forwarders on
 # 127.0.0.1 reach the containers through their unix sockets; on the host the containers listen on 127.0.0.1
-# above 19800 only. Every container this script starts is named <prefix>-<role>-<random> and removed by that
-# exact name on exit, also when a step fails. Nothing else is touched.
+# above 19800 only.
+#
+# Containers: each one is started with the label fabric-itest.run=<this run's random id>, and only the IDs
+# docker returned for this run (or, when `docker run` created a container but could not start it, the ID of
+# the container with this run's label and exact name) are registered, with their image and anonymous
+# volumes, as JSON lines in the manifest. The teardown - on success, on failure and on interruption - checks
+# each registered ID still carries this run's label, stops it, removes it with its anonymous volumes
+# (`docker rm -v`; nothing is scanned or pruned) and records what it removed and whether anything is left.
+# The manifest is kept. A container this run did not create is never stopped or removed.
 #
 # PYTHON           the interpreter with the locked dependencies (default .venv/bin/python, `make venv`)
 # ITEST_PREFIX     container name prefix (default fabric-itest)
+# ITEST_MANIFEST   the container manifest (default /tmp/fabric-itest-<run id>.containers.jsonl)
 # BIOCHECK_SRC     a BioCheck checkout for the real-checker tests (default ../clean-biocheck; without one
 #                  those tests are reported as skipped)
 # BIOCHECK_PYTHON  the interpreter of that checkout (default $BIOCHECK_SRC/.venv/bin/python)
@@ -28,27 +36,94 @@ REDIS_IMAGE=redis:7.4-alpine
 R=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 PW=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 PG=$PREFIX-pg-$R RTPG=$PREFIX-pg-rt-$R RD=$PREFIX-redis-$R RDS=$PREFIX-redis-sock-$R
+LABEL=fabric-itest.run
+MANIFEST=${ITEST_MANIFEST:-/tmp/fabric-itest-$R.containers.jsonl}
 WORK=$(mktemp -d /tmp/fabric-itest.XXXXXX)
 SOCK=$WORK/pgsock RSOCK=$WORK/redissock RUN=$WORK/run
-cleanup() {
-  docker stop -t 20 "$PG" "$RDS" >/dev/null 2>&1
-  docker rm -f "$PG" "$RTPG" "$RD" "$RDS" >/dev/null 2>&1
-  rm -rf "$WORK" 2>/dev/null
+
+# ---- containers: register only what this run created; tear down only that ----
+IDS=""  # registered container IDs, newest first (torn down in that order)
+declare -A VOLUMES=()
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+record() { printf '{"at":"%s",%s}\n' "$(now)" "$1" >> "$MANIFEST"; }
+json_list() { local out="" v; for v in "$@"; do out="$out${out:+,}\"$v\""; done; printf '[%s]' "$out"; }
+
+register() {  # role name id
+  local vols image
+  IDS="$3 $IDS"
+  vols=$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$3" 2>/dev/null)
+  image=$(docker inspect -f '{{.Config.Image}} {{.Image}}' "$3" 2>/dev/null)
+  VOLUMES[$3]=$vols
+  # shellcheck disable=SC2086
+  record "\"event\":\"created\",\"role\":\"$1\",\"name\":\"$2\",\"id\":\"$3\",\"image\":\"${image% *}\",\"image_id\":\"${image#* }\",\"anonymous_volumes\":$(json_list $vols)"
 }
-trap cleanup EXIT
+
+start() {  # role name [docker run options...] image [command...]
+  local role=$1 name=$2 id rc
+  shift 2
+  id=$(docker run -d --name "$name" --label "$LABEL=$R" "$@")
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$id" ]; then
+    register "$role" "$name" "$id"
+    return 0
+  fi
+  # `docker run` can create the container and then fail to start it (e.g. a port taken meanwhile)
+  id=$(docker ps -aq --no-trunc --filter "label=$LABEL=$R" --filter "name=^/$name\$" 2>/dev/null)
+  record "\"event\":\"start_failed\",\"role\":\"$role\",\"name\":\"$name\",\"exit\":$rc,\"created_id\":\"$id\""
+  [ -n "$id" ] && register "$role" "$name" "$id"
+  return 1
+}
+
+teardown() {
+  local rc=$1 id v label left="" vleft=""
+  for id in $IDS; do
+    label=$(docker inspect -f "{{index .Config.Labels \"$LABEL\"}}" "$id" 2>/dev/null)
+    if [ -z "$label" ] && ! docker inspect "$id" >/dev/null 2>&1; then
+      record "\"event\":\"already_gone\",\"id\":\"$id\""
+    elif [ "$label" != "$R" ]; then
+      record "\"event\":\"not_touched\",\"id\":\"$id\",\"reason\":\"label is not this run's\""
+      continue
+    else
+      docker stop -t 20 "$id" >/dev/null 2>&1
+      docker rm -v "$id" >/dev/null 2>&1
+    fi
+    docker inspect "$id" >/dev/null 2>&1 && left="$left $id"
+    for v in ${VOLUMES[$id]}; do
+      # the container's own anonymous volume, recorded at creation; gone with `rm -v` unless removed apart
+      docker volume inspect "$v" >/dev/null 2>&1 && docker volume rm "$v" >/dev/null 2>&1
+      docker volume inspect "$v" >/dev/null 2>&1 && vleft="$vleft $v"
+    done
+    # shellcheck disable=SC2086
+    record "\"event\":\"removed\",\"id\":\"$id\",\"container_left\":$(docker inspect "$id" >/dev/null 2>&1 && echo true || echo false),\"volumes\":$(json_list ${VOLUMES[$id]})"
+  done
+  rm -rf "$WORK" 2>/dev/null
+  # shellcheck disable=SC2086
+  record "\"event\":\"teardown\",\"exit\":$rc,\"containers_left\":$(json_list $left),\"volumes_left\":$(json_list $vleft)"
+  echo "containers of this run torn down (manifest $MANIFEST)" >&2
+  if [ -n "$left$vleft" ]; then
+    echo "left behind:$left$vleft" >&2
+    [ "$rc" -eq 0 ] && rc=3
+  fi
+  exit "$rc"
+}
+trap 'teardown $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+record "\"event\":\"run\",\"run\":\"$R\",\"prefix\":\"$PREFIX\",\"label\":\"$LABEL=$R\""
+
 free_port() { for p in $(seq "$1" 19990); do ss -ltn | grep -q ":$p " || { echo "$p"; return; }; done; }
 P1=$(free_port 19871); P2=$(free_port $((P1 + 1))); P3=$(free_port $((P2 + 1))); P4=$(free_port $((P3 + 1)))
 mkdir -p "$SOCK" "$RSOCK" "$RUN"
 chmod 777 "$RSOCK"  # the redis user of the container writes its socket here
 
-docker run -d --name "$PG" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_DB=fabric_history \
+start pg "$PG" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_DB=fabric_history \
   -v "$SOCK":/var/run/postgresql -p "127.0.0.1:$P1:5432" "$PG_IMAGE" >/dev/null || exit 2
-docker run -d --name "$RTPG" -e POSTGRES_USER=datafabric_runtime_test -e POSTGRES_DB=datafabric_runtime_test \
+start pg-runtime "$RTPG" -e POSTGRES_USER=datafabric_runtime_test -e POSTGRES_DB=datafabric_runtime_test \
   -e POSTGRES_HOST_AUTH_METHOD=trust -p "127.0.0.1:$P2:5432" "$PG_IMAGE" >/dev/null || exit 2
-docker run -d --name "$RD" -p "127.0.0.1:$P3:6379" "$REDIS_IMAGE" >/dev/null || exit 2
-docker run -d --name "$RDS" -v "$RSOCK":/sock -p "127.0.0.1:$P4:6379" "$REDIS_IMAGE" \
+start redis "$RD" -p "127.0.0.1:$P3:6379" "$REDIS_IMAGE" >/dev/null || exit 2
+start redis-sock "$RDS" -v "$RSOCK":/sock -p "127.0.0.1:$P4:6379" "$REDIS_IMAGE" \
   redis-server --unixsocket /sock/redis.sock --unixsocketperm 777 >/dev/null || exit 2
-echo "containers: $PG (127.0.0.1:$P1), $RTPG ($P2), $RD ($P3), $RDS ($P4)"
+echo "containers: $PG (127.0.0.1:$P1), $RTPG ($P2), $RD ($P3), $RDS ($P4); manifest $MANIFEST"
 for c in "$PG" "$RTPG"; do
   for _ in $(seq 60); do docker exec "$c" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
 done
