@@ -9,14 +9,20 @@ import time
 
 from db.history import backfill_rank
 
-parser = argparse.ArgumentParser()
-parser.add_argument("sources", nargs="+")
-parser.add_argument("--batch", type=int, default=500)
-parser.add_argument("--pause", type=float, default=0.2)
-args = parser.parse_args()
-for source in args.sources:
-    total = 0
-    while added := backfill_rank(source, batch=args.batch):
-        total += added
-        time.sleep(args.pause)
-    print(source, "added", total, flush=True)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("sources", nargs="+")
+    parser.add_argument("--batch", type=int, default=500)
+    parser.add_argument("--pause", type=float, default=0.2)
+    args = parser.parse_args()
+    for source in args.sources:
+        total = 0
+        while added := backfill_rank(source, batch=args.batch):
+            total += added
+            time.sleep(args.pause)
+        print(source, "added", total, flush=True)
+
+
+if __name__ == "__main__":
+    main()
