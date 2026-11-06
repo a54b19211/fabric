@@ -10,7 +10,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -18,6 +18,7 @@ from biz_rules.history_models import (
     ArchiveRecord,
     FetchRequest,
     HistoryError,
+    TimeValue,
     canonical,
     sha256,
     source_time,
@@ -453,6 +454,7 @@ def _migration_envelope(source_id, item):
 
 
 def _project_record(source_id: str, item: ArchiveRecord) -> dict:
+    """Dispatch to the source's projector: sources with a module of their own, then the field projections."""
     if source_id == "pubmed" and item.raw_media_type == "application/xml":
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
@@ -469,239 +471,245 @@ def _project_record(source_id: str, item: ArchiveRecord) -> dict:
 
         return project_attachment(source_id, item)
     data = parse_json(item.raw_content)
-    if source_id == "gdelt_doc":
-        from biz_rules.gdelt_news import project_gdelt
-        return project_gdelt(item, data)
-    if source_id == "sec_companyfacts":
-        from biz_rules.sec_xbrl import project_sec
-
-        return project_sec(item, data)
-    if source_id == "who_don":
-        from biz_rules.who_don import project_who
-
-        return project_who(item, data)
-    if (
-        source_id == "external_archive"
-        and data.get("schema_version") == "datafabric.observation.v1"
-    ):
-        from biz_rules.observations import project_observation
-
-        try:
-            return project_observation(item, data)
-        except ValueError:
-            raise HistoryError(
-                "invalid_observation", "观测值、期间或口径不符合固定契约"
-            ) from None
+    own = _OWN_PROJECTORS.get(source_id)
+    if own is not None:
+        return own(item, data)
+    if source_id == "external_archive" and data.get("schema_version") == "datafabric.observation.v1":
+        return _project_observation(item, data)
     if source_id in {"legacy_documents", "reviewed_graph", "primekg_graph"}:
-        from biz_rules.reviewed_graph import project_graph_record
-
-        try:
-            return project_graph_record(source_id, item, data)
-        except ValueError:
-            raise HistoryError(
-                "invalid_graph_fields", "图包或旧文档桥字段不符合固定契约"
-            ) from None
-    source_url, published, updated, event_time = None, None, None, None
-    if source_id == "clinicaltrials":
-        facts, locators = _facts(data, TRIAL_PATHS)
-        for key in ("phase", "conditions"):
-            if facts.get(key) is not None and (
-                not isinstance(facts[key], list)
-                or any(not isinstance(value, str) for value in facts[key])
-            ):
-                raise HistoryError(
-                    "invalid_source_fields", "临床登记数组字段类型不合法"
-                )
-        if facts.get("status") is not None and not isinstance(facts["status"], str):
-            raise HistoryError("invalid_source_fields", "临床登记状态须为来源字符串")
-        number = facts.get("enrollment")
-        if number is not None and (
-            not isinstance(number, int) or isinstance(number, bool) or number < 0
-        ):
-            raise HistoryError(
-                "invalid_source_fields", "临床登记人数类型不合法；未知不补零"
-            )
-        native = facts.get("trial_id")
-        if (
-            not isinstance(native, str)
-            or not re.fullmatch(NCT_ID, native)
-            or native != item.source_record_id
-        ):
-            raise HistoryError("native_id_mismatch", "临床登记ID与原件不一致")
-        title = (
-            _pointer(data, "/protocolSection/identificationModule/briefTitle") or native
-        )
-        source_url = "https://clinicaltrials.gov/study/" + native
-        published = source_time(
-            _pointer(
-                data, "/protocolSection/statusModule/studyFirstPostDateStruct/date"
-            ),
-            "registry_first_posted",
-        )
-        updated = source_time(
-            _pointer(
-                data, "/protocolSection/statusModule/lastUpdatePostDateStruct/date"
-            ),
-            "registry_update_posted",
-        )
-        event_time = source_time(
-            facts.get("start_date"),
-            "registry_start_" + str(facts.get("start_date_type", "unknown")),
-        )
-        clean_text = _pointer(
-            data, "/protocolSection/descriptionModule/briefSummary"
-        ) or str(title)
-        kind = "trial"
-    elif source_id == "fda_crl":
-        if item.source_record_id != crl_id(data):
-            raise HistoryError("native_id_mismatch", "FDA复合来源ID与原件不一致")
-        fields = {
-            "application_numbers": "/application_number",
-            "letter_date": "/letter_date",
-            "letter_type": "/letter_type",
-            "file_name": "/file_name",
-            "company_name": "/company_name",
-            "text": "/text",
-            "approver_name": "/approver_name",
-            "approver_title": "/approver_title",
-            "approval_status": "/approval_status",
-        }
-        facts, locators = _facts(data, fields)
-        title = " / ".join(
-            str(data.get(k, "")) for k in ("file_name", "letter_type", "letter_date")
-        )
-        clean_text = data.get("text") or ""
-        if not isinstance(clean_text, str):
-            raise HistoryError("invalid_source_fields", "FDA信函text字段不是文本")
-        date = data.get("letter_date")
-        try:
-            event_time = source_time(
-                datetime.strptime(date, "%m/%d/%Y").date().isoformat(), "letter_signed"
-            )
-        except (TypeError, ValueError):
-            event_time = source_time(date, "letter_signed")
-        # 信函签字日期不是网页公开日期，不能自动填source_published_at。
-        kind = "document"
-    elif source_id == "europe_pmc":
-        native = str(data.get("source", "")) + ":" + str(data.get("id", ""))
-        if (
-            not data.get("source")
-            or not data.get("id")
-            or native != item.source_record_id
-        ):
-            raise HistoryError("native_id_mismatch", "Europe PMC source:id与原件不一致")
-        fields = {
-            "source": "/source",
-            "id": "/id",
-            "pmid": "/pmid",
-            "pmcid": "/pmcid",
-            "doi": "/doi",
-            "publication_types": "/pubTypeList",
-            "publication_date": "/firstPublicationDate",
-            "abstract": "/abstractText",
-            "correction_links": "/commentCorrectionList",
-            "license": "/license",
-            "is_open_access": "/isOpenAccess",
-            "in_europepmc": "/inEPMC",
-            "date_of_revision": "/dateOfRevision",
-            "authors": "/authorList",
-            "author_ids": "/authorIdList",
-            "author_string": "/authorString",
-            "affiliation": "/affiliation",
-            "journal": "/journalInfo",
-            "keywords": "/keywordList",
-            "mesh_headings": "/meshHeadingList",
-            "chemicals": "/chemicalList",
-            "grants": "/grantsList",
-            "fulltext_links": "/fullTextUrlList",
-            "fulltext_ids": "/fullTextIdList",
-            "data_links": "/dataLinksTagsList",
-            "cross_references": "/dbCrossReferenceList",
-            "publication_status": "/publicationStatus",
-            "language": "/language",
-            "first_index_date": "/firstIndexDate",
-            "fulltext_received_date": "/fullTextReceivedDate",
-        }
-        facts, locators = _facts(data, fields)
-        title = data.get("title") or native
-        clean_text = str(title) + "\n\n" + str(data.get("abstractText") or "")
-        published = source_time(
-            data.get("firstPublicationDate"),
-            "europepmc_first_publication_may_be_imputed",
-        )
-        updated = source_time(data.get("dateOfRevision"), "europepmc_revision")
-        source_url = (
-            "https://europepmc.org/article/"
-            + str(data["source"])
-            + "/"
-            + str(data["id"])
-        )
-        kind = "document"
-    elif source_id == "external_archive":
-        kind = data.get("record_kind")
-        if kind not in ("trial", "program", "outcome", "document"):
-            raise HistoryError(
-                "unsupported_record_kind",
-                "历史原件须明确trial/program/outcome/document",
-            )
-        facts, locators = _facts(
-            data, {key: "/" + key for key in sorted(EXTERNAL_FIELDS)}
-        )
-        title = data.get("title")
-        if not isinstance(title, str) or not title.strip():
-            raise HistoryError("invalid_source_fields", "历史原件须有明确标题")
-        if kind == "trial" and not isinstance(facts.get("trial_id"), str):
-            raise HistoryError("invalid_source_fields", "trial原件缺登记ID")
-        if kind == "program" and not isinstance(facts.get("program_id"), str):
-            raise HistoryError("invalid_source_fields", "program原件缺有出处项目ID")
-        if kind == "outcome":
-            _validate_outcome(facts)
-        for key in (
-            "mapping_available_at",
-            "public_available_at",
-            "observation_start",
-            "observation_end",
-            "event_at",
-        ):
-            if facts.get(key) is not None and source_time(facts[key]) is None:
-                raise HistoryError("invalid_source_time", "历史原件时间格式/时区不合法")
-        clean_text = str(title) + "\n\n" + str(facts.get("summary") or "")
-        published = source_time(
-            data.get("source_published_at"), "archive_source_published"
-        )
-        updated = source_time(data.get("source_updated_at"), "archive_source_updated")
-        event_time = (
-            source_time(facts.get("event_at"), "outcome_event")
-            if kind == "outcome"
-            else source_time(data.get("event_time"), "archive_source_event")
-        )
-        source_url = data.get("source_reference")
-        if source_url is not None and (
-            not isinstance(source_url, str) or len(source_url) > 2000
-        ):
-            raise HistoryError("invalid_source_fields", "来源引用格式错误")
-    else:
+        return _project_graph(source_id, item, data)
+    fields = _FIELD_PROJECTORS.get(source_id)
+    if fields is None:
         raise HistoryError("unsupported_source", "该来源没有可执行的固定投影")
-    if item.record_kind != kind:
+    return _assemble(source_id, item, fields(item, data))
+
+
+def _project_gdelt(item, data):
+    from biz_rules.gdelt_news import project_gdelt
+
+    return project_gdelt(item, data)
+
+
+def _project_sec(item, data):
+    from biz_rules.sec_xbrl import project_sec
+
+    return project_sec(item, data)
+
+
+def _project_who(item, data):
+    from biz_rules.who_don import project_who
+
+    return project_who(item, data)
+
+
+# Sources whose projection lives in a module of its own (imported on use)
+_OWN_PROJECTORS = {"gdelt_doc": _project_gdelt, "sec_companyfacts": _project_sec, "who_don": _project_who}
+
+
+def _project_observation(item, data):
+    from biz_rules.observations import project_observation
+
+    try:
+        return project_observation(item, data)
+    except ValueError:
+        raise HistoryError("invalid_observation", "观测值、期间或口径不符合固定契约") from None
+
+
+def _project_graph(source_id, item, data):
+    from biz_rules.reviewed_graph import project_graph_record
+
+    try:
+        return project_graph_record(source_id, item, data)
+    except ValueError:
+        raise HistoryError("invalid_graph_fields", "图包或旧文档桥字段不符合固定契约") from None
+
+
+class _Projection(NamedTuple):
+    """What a field projection reads from one original; _assemble checks it and builds the projected record."""
+
+    kind: str | None
+    title: object
+    clean_text: str
+    facts: dict
+    locators: dict
+    source_url: str | None = None
+    published: TimeValue | None = None
+    updated: TimeValue | None = None
+    event_time: TimeValue | None = None
+
+
+_PARSER_VERSIONS = {
+    "clinicaltrials": "datafabric.clinicaltrials.native.v0.2",
+    "europe_pmc": "datafabric.europepmc.core.v0.2",
+}
+
+
+def _assemble(source_id, item, p: _Projection) -> dict:
+    if item.record_kind != p.kind:
         raise HistoryError("record_kind_mismatch", "原件类型与导入声明不一致")
-    if not isinstance(title, str) or len(title) > 10000:
+    if not isinstance(p.title, str) or len(p.title) > 10000:
         raise HistoryError("invalid_source_fields", "来源标题格式错误")
     projected = {
-        "record_kind": kind,
-        "title": title,
-        "source_url": source_url,
-        "clean_text": clean_text,
-        "facts": facts,
-        "field_locators": locators,
-        "event_time": event_time.model_dump(mode="json") if event_time else None,
-        "source_published_at": published.model_dump(mode="json") if published else None,
-        "source_updated_at": updated.model_dump(mode="json") if updated else None,
+        "record_kind": p.kind,
+        "title": p.title,
+        "source_url": p.source_url,
+        "clean_text": p.clean_text,
+        "facts": p.facts,
+        "field_locators": p.locators,
+        "event_time": p.event_time.model_dump(mode="json") if p.event_time else None,
+        "source_published_at": p.published.model_dump(mode="json") if p.published else None,
+        "source_updated_at": p.updated.model_dump(mode="json") if p.updated else None,
     }
-    if source_id == "clinicaltrials":
-        projected["parser_version"] = "datafabric.clinicaltrials.native.v0.2"
-    elif source_id == "europe_pmc":
-        projected["parser_version"] = "datafabric.europepmc.core.v0.2"
+    if source_id in _PARSER_VERSIONS:
+        projected["parser_version"] = _PARSER_VERSIONS[source_id]
     return projected
+
+
+def _clinicaltrials_fields(item, data) -> _Projection:
+    facts, locators = _facts(data, TRIAL_PATHS)
+    for key in ("phase", "conditions"):
+        if facts.get(key) is not None and (
+            not isinstance(facts[key], list) or any(not isinstance(value, str) for value in facts[key])
+        ):
+            raise HistoryError("invalid_source_fields", "临床登记数组字段类型不合法")
+    if facts.get("status") is not None and not isinstance(facts["status"], str):
+        raise HistoryError("invalid_source_fields", "临床登记状态须为来源字符串")
+    number = facts.get("enrollment")
+    if number is not None and (not isinstance(number, int) or isinstance(number, bool) or number < 0):
+        raise HistoryError("invalid_source_fields", "临床登记人数类型不合法；未知不补零")
+    native = facts.get("trial_id")
+    if not isinstance(native, str) or not re.fullmatch(NCT_ID, native) or native != item.source_record_id:
+        raise HistoryError("native_id_mismatch", "临床登记ID与原件不一致")
+    title = _pointer(data, "/protocolSection/identificationModule/briefTitle") or native
+    status = "/protocolSection/statusModule/"
+    published = source_time(_pointer(data, status + "studyFirstPostDateStruct/date"), "registry_first_posted")
+    updated = source_time(_pointer(data, status + "lastUpdatePostDateStruct/date"), "registry_update_posted")
+    event_time = source_time(facts.get("start_date"), "registry_start_" + str(facts.get("start_date_type", "unknown")))
+    return _Projection(kind="trial", title=title, facts=facts, locators=locators,
+                       clean_text=_pointer(data, "/protocolSection/descriptionModule/briefSummary") or str(title),
+                       source_url="https://clinicaltrials.gov/study/" + native,
+                       published=published, updated=updated, event_time=event_time)
+
+
+FDA_CRL_FIELDS = {
+    "application_numbers": "/application_number",
+    "letter_date": "/letter_date",
+    "letter_type": "/letter_type",
+    "file_name": "/file_name",
+    "company_name": "/company_name",
+    "text": "/text",
+    "approver_name": "/approver_name",
+    "approver_title": "/approver_title",
+    "approval_status": "/approval_status",
+}
+
+
+def _fda_crl_fields(item, data) -> _Projection:
+    if item.source_record_id != crl_id(data):
+        raise HistoryError("native_id_mismatch", "FDA复合来源ID与原件不一致")
+    facts, locators = _facts(data, FDA_CRL_FIELDS)
+    title = " / ".join(str(data.get(k, "")) for k in ("file_name", "letter_type", "letter_date"))
+    clean_text = data.get("text") or ""
+    if not isinstance(clean_text, str):
+        raise HistoryError("invalid_source_fields", "FDA信函text字段不是文本")
+    date = data.get("letter_date")
+    try:
+        event_time = source_time(datetime.strptime(date, "%m/%d/%Y").date().isoformat(), "letter_signed")
+    except (TypeError, ValueError):
+        event_time = source_time(date, "letter_signed")
+    # 信函签字日期不是网页公开日期，不能自动填source_published_at。
+    return _Projection(kind="document", title=title, clean_text=clean_text, facts=facts, locators=locators,
+                       event_time=event_time)
+
+
+EUROPE_PMC_FIELDS = {
+    "source": "/source",
+    "id": "/id",
+    "pmid": "/pmid",
+    "pmcid": "/pmcid",
+    "doi": "/doi",
+    "publication_types": "/pubTypeList",
+    "publication_date": "/firstPublicationDate",
+    "abstract": "/abstractText",
+    "correction_links": "/commentCorrectionList",
+    "license": "/license",
+    "is_open_access": "/isOpenAccess",
+    "in_europepmc": "/inEPMC",
+    "date_of_revision": "/dateOfRevision",
+    "authors": "/authorList",
+    "author_ids": "/authorIdList",
+    "author_string": "/authorString",
+    "affiliation": "/affiliation",
+    "journal": "/journalInfo",
+    "keywords": "/keywordList",
+    "mesh_headings": "/meshHeadingList",
+    "chemicals": "/chemicalList",
+    "grants": "/grantsList",
+    "fulltext_links": "/fullTextUrlList",
+    "fulltext_ids": "/fullTextIdList",
+    "data_links": "/dataLinksTagsList",
+    "cross_references": "/dbCrossReferenceList",
+    "publication_status": "/publicationStatus",
+    "language": "/language",
+    "first_index_date": "/firstIndexDate",
+    "fulltext_received_date": "/fullTextReceivedDate",
+}
+
+
+def _europe_pmc_fields(item, data) -> _Projection:
+    native = str(data.get("source", "")) + ":" + str(data.get("id", ""))
+    if not data.get("source") or not data.get("id") or native != item.source_record_id:
+        raise HistoryError("native_id_mismatch", "Europe PMC source:id与原件不一致")
+    facts, locators = _facts(data, EUROPE_PMC_FIELDS)
+    title = data.get("title") or native
+    return _Projection(
+        kind="document", title=title, facts=facts, locators=locators,
+        clean_text=str(title) + "\n\n" + str(data.get("abstractText") or ""),
+        published=source_time(data.get("firstPublicationDate"), "europepmc_first_publication_may_be_imputed"),
+        updated=source_time(data.get("dateOfRevision"), "europepmc_revision"),
+        source_url="https://europepmc.org/article/" + str(data["source"]) + "/" + str(data["id"]),
+    )
+
+
+_ARCHIVE_TIMES = ("mapping_available_at", "public_available_at", "observation_start", "observation_end", "event_at")
+
+
+def _external_archive_fields(item, data) -> _Projection:
+    kind = data.get("record_kind")
+    if kind not in ("trial", "program", "outcome", "document"):
+        raise HistoryError("unsupported_record_kind", "历史原件须明确trial/program/outcome/document")
+    facts, locators = _facts(data, {key: "/" + key for key in sorted(EXTERNAL_FIELDS)})
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise HistoryError("invalid_source_fields", "历史原件须有明确标题")
+    if kind == "trial" and not isinstance(facts.get("trial_id"), str):
+        raise HistoryError("invalid_source_fields", "trial原件缺登记ID")
+    if kind == "program" and not isinstance(facts.get("program_id"), str):
+        raise HistoryError("invalid_source_fields", "program原件缺有出处项目ID")
+    if kind == "outcome":
+        _validate_outcome(facts)
+    for key in _ARCHIVE_TIMES:
+        if facts.get(key) is not None and source_time(facts[key]) is None:
+            raise HistoryError("invalid_source_time", "历史原件时间格式/时区不合法")
+    published = source_time(data.get("source_published_at"), "archive_source_published")
+    updated = source_time(data.get("source_updated_at"), "archive_source_updated")
+    event_time = (source_time(facts.get("event_at"), "outcome_event") if kind == "outcome"
+                  else source_time(data.get("event_time"), "archive_source_event"))
+    source_url = data.get("source_reference")
+    if source_url is not None and (not isinstance(source_url, str) or len(source_url) > 2000):
+        raise HistoryError("invalid_source_fields", "来源引用格式错误")
+    return _Projection(kind=kind, title=title, facts=facts, locators=locators, source_url=source_url,
+                       clean_text=str(title) + "\n\n" + str(facts.get("summary") or ""),
+                       published=published, updated=updated, event_time=event_time)
+
+
+# Sources projected field by field from their JSON original
+_FIELD_PROJECTORS = {
+    "clinicaltrials": _clinicaltrials_fields,
+    "fda_crl": _fda_crl_fields,
+    "europe_pmc": _europe_pmc_fields,
+    "external_archive": _external_archive_fields,
+}
 
 
 def _validate_outcome(facts):
