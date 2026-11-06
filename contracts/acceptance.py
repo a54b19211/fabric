@@ -234,7 +234,7 @@ def same_record(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
 
 # “不比谁先报警，比谁先判断对”的出处：归档报告 13.5 实验 D，不是 v3 章节（不能假托 v3）
 JUDGED_FIRST_SOURCE = (
-    "/home/zk_test/zk_projects/.branch-archive-20261101/opus 5.5报告.md 第 554–558 行"
+    "/home/zk_test/.local/share/bioradar-archive/branch-archive-20261101/opus 5.5报告.md 第 554–558 行"
     "（sha256=687718eaaa63409dc0ed3053db02ad515208a754f9d3da1248f867335b6c4928）"
 )
 

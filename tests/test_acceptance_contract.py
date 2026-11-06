@@ -661,7 +661,7 @@ def test_wuhan_replay_target_vs_status(cases):
 def test_judged_first_cites_archive_not_v3(cases):
     # “不比谁先报警，比谁先判断对”出自归档报告 13.5 实验 D（第 554–558 行），不能假托 v3 章节
     src = acc.JUDGED_FIRST_SOURCE
-    assert "/.branch-archive-20261101/opus 5.5报告.md" in src and "第 554–558 行" in src
+    assert "/bioradar-archive/branch-archive-20261101/opus 5.5报告.md" in src and "第 554–558 行" in src
     assert "sha256=687718eaaa63409dc0ed3053db02ad515208a754f9d3da1248f867335b6c4928" in src
     assert "JUDGED_FIRST_SOURCE" in acc.CHECK_KINDS["judged_correctly_first"]
     details = [k.detail for c in cases for k in c.checks if k.kind == "judged_correctly_first"]
