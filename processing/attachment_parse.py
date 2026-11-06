@@ -11,7 +11,7 @@
   加 XML 不改变其他格式的结果，此前也没有 .xml 附件（download_pdf 只产出 pdf/doc/docx/xls/xlsx/bin），
   所以处理器版本不升。
 
-定位（Codex r59）：按格式给实际能给的定位，不强行编页码。
+定位：按格式给实际能给的定位，不强行编页码。
 - 原生 PDF：MinerU content_list 的 page_idx → pdf_page；
 - DOC/PPT 经转换（LibreOffice 或云端内部转换）得到的页码 → converted_page，注明不是原文件页码；
 - DOCX 原生解析没有分页（11-04 实测所有块 page_idx=0）→ block（第几个内容块）；

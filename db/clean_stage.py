@@ -74,7 +74,7 @@ def _cleaner_input(row):
                     "raw": row["raw"] or ""}, "raw_json"
         return {"title": data.get("title"), "abstractText": data.get("abstractText")}, "literature_fields"
     if source == "who_don":
-        # v12: from the raw JSON (the projection's clean_text flattened <table> and has no title heading)
+        # from the raw JSON: the projection's clean_text flattened <table> and has no title heading
         return {"raw": row["raw"] or ""}, "who_raw_json"
     if source in SITE_SOURCES and facts.get("role") in ("web_capture", "site_record"):
         try:
@@ -88,7 +88,7 @@ def _cleaner_input(row):
 
 
 # 定位基准：段落 source 的偏移相对什么。网页/站点记录是原件 JSON 里 /parsed/markdown 字段解码后的值；
-# 投影正文是这个版本记录本身的 /clean_text 字段（不在原件里）。v5 起存进每段，API 和契约照原样带出去。
+# 投影正文是这个版本记录本身的 /clean_text 字段（不在原件里）。存进每段，API 和契约照原样带出去。
 _ANCHORS = {
     "raw_json:/parsed/markdown": {"json_pointer": "/parsed/markdown", "within": "raw"},
     "projection_clean_text": {"json_pointer": "/clean_text", "within": "record"},

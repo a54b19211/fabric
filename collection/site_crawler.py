@@ -141,7 +141,7 @@ _Stop = transport.Stop  # 预算用完（BaseException，拉取函数里的 exce
 
 class _Resume(_Stop):
     """预算在某一父项的附件中途用完：attachment 是下一个要读的附件序号；page_recorded 表示这一页的
-    页面版本已经保存，续读时只为拿附件链接和会话重取页面，不再占版本名额（Codex r61：否则 max_records=1
+    页面版本已经保存，续读时只为拿附件链接和会话重取页面，不再占版本名额（否则 max_records=1
     时每轮都被父页面占满，永远读不到附件）。"""
 
     def __init__(self, reason, attachment, page_recorded=False):
@@ -163,7 +163,7 @@ class _Reader:
         self.spec = spec(self.site)
         self.records: list[ArchiveRecord | None] = []
         # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_attempted ...）。放在读取结果里，
-        # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本（Codex r61）。
+        # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本。
         self.coverage: list[dict] = []
 
     def before_record(self):

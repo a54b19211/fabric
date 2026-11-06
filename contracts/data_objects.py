@@ -129,7 +129,7 @@ class Derived(Strict):
 
 
 class Relation(Strict):
-    """关联而不是输入：派生结果没有读它的内容，所以不参与可见时间计算（Codex r63）。
+    """关联而不是输入：派生结果没有读它的内容，所以不参与可见时间计算。
     例如附件解析正文只读附件本身，所在公告页是关联；固定版本未知时 version_id 为空并写明依据。"""
 
     kind: Literal["attachment_of"]
@@ -212,7 +212,7 @@ class DomainEvent(Derived):
     @model_validator(mode="after")
     def support_is_provenance(self):
         """支持和更正引用的版本必须也在输入里：这样它们才进入权限来源、撤权遮蔽和可见时间的计算
-        （Codex r63：否则一个不可见或已撤权的版本也能给事件“作证”）。同一版本在支持里只能出现一次。"""
+        （否则一个不可见或已撤权的版本也能给事件“作证”）。同一版本在支持里只能出现一次。"""
         inputs = {(r.source_id, r.record_id, r.version_id) for r in self.inputs}
         outside = [r.version_id for r in [x.ref for x in self.support] + list(self.corrections)
                    if (r.source_id, r.record_id, r.version_id) not in inputs]
@@ -275,7 +275,7 @@ class JudgmentVersion(Strict):
 
 def merge_visibility(inputs: list[VersionRef], times: dict[str, tuple[datetime, datetime | None]]) -> Visibility:
     """多个输入的可见时间。times 按版本号给出每个输入自己的（首次所见, 历史证明时间）：
-    必须和输入一一对应，缺一个或多一个都报错，不能拿别的版本的时间顶替（Codex r63）。
+    必须和输入一一对应，缺一个或多一个都报错，不能拿别的版本的时间顶替。
     首次所见取最晚；证明只有全部输入都有时才取最晚，否则没有证明。"""
     wanted = [ref.version_id for ref in inputs]
     if not wanted or set(times) != set(wanted):

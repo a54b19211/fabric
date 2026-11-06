@@ -68,7 +68,7 @@ def front_matter(markdown: str) -> tuple[dict, str]:
 
 
 def of_site(url: str, pattern: str) -> bool:
-    """The URL is one of the site's own pages by its parsed parts (Codex r92): http(s), no user info, the default
+    """The URL is one of the site's own pages by its parsed parts: http(s), no user info, the default
     port, a hostname that is the site's host or a subdomain of it, and a path under the site's detail path when
     the site names one ("chictr.org.cn/showproj"). A site URL carried in the query, fragment or user info of
     another page proves nothing."""

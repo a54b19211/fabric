@@ -101,7 +101,7 @@ def artifact_key(artifact):
 
 def artifact_ready(conn, target_id, record_id, artifact):
     """这份产物整份可检索：按当前分片计划应有的每一片（不分片即整篇一条）都有 ready 条目。按完整的预期片集合
-    判定，数据库里只有其中几片、而这几片都 ready 不算（Codex 460）。worker 的交接和检索的交接用同一个判定。"""
+    判定，数据库里只有其中几片、而这几片都 ready 不算。worker 的交接和检索的交接用同一个判定。"""
     expected = index_pieces.keys(artifact["text"], artifact.get("segments") or [])
     ready = {k for (k,) in conn.execute(text(
         "SELECT piece_key FROM index_publications WHERE target_id=:t AND source_record_id=:n AND artifact_key=:k "
@@ -202,7 +202,7 @@ def _enqueue(conn, target, record, artifact, meta, pieces):
     """一条（目标, 记录, 产物）的索引待办：同一记录里清洗正文相同的版本只建一条，代表版本是最先产出这份正文的
     版本。检索时由 Fabric 按模式和截止时间找出此刻可见的版本，它的当前产物就是这份正文才返回（db.retrieval）。
     复用键 (目标, 记录, 产物) 由数据库唯一索引保证（V028 index_publications_record_artifact）：两个事务同时入队
-    同一份正文时，后一个等前一个提交后什么也不做，代表版本一经建立就不变（Codex S36-01）。
+    同一份正文时，后一个等前一个提交后什么也不做，代表版本一经建立就不变。
     太长的产物分片（processing.index_pieces）：一片一个物理条目，唯一键带上分片身份键（规则、序号、范围、
     片摘要）；一次放得下的不分片，身份与原来一致。
     新建后，同一记录的其他待办尽快复查（处理器升级后旧产物会被判为 superseded 并停用，记录保留）。"""
@@ -348,8 +348,8 @@ def _claim(lane=None, sent=None):
 _SENT = "(p.first_send_at IS NOT NULL OR p.knowledge_id IS NOT NULL OR p.receipt<>'{}'::jsonb)"
 # An upload stops counting as in flight only when it is settled: ready / disabled, or (not being sent again)
 # its parse ended upstream or it was proven rejected before anything was created. blocked, waiting or an
-# expired lease never release it - the remote outcome may still be open (Codex DECISION T-30 r2).
-# Evidence about the current attempt only (Codex T30 r108/r111): the receipt's latest physical attempt must be a
+# expired lease never release it - the remote outcome may still be open.
+# Evidence about the current attempt only: the receipt's latest physical attempt must be a
 # later one than the attempt known when this upload was reserved (attempt_floor, 0 when none was known), and its
 # outcome must be the evidence itself - "rejected" for a rejection, "uploaded" for an ended parse. in_flight or
 # unknown attempts, stale receipts saved after a lost response, and receipts without last_attempt release nothing;
@@ -595,7 +595,7 @@ def scheduler_status():
 
 def never_sent(row):
     """确认从没发出过：首次发送时间、远端知识编号、回执都没有，状态是 queued，或是因此在本地停用的 disabled
-    （之后每次复查仍不联网）。改造前有 ready 而 first_send_at 为空的行（Codex r72）、发出后丢了回执的
+    （之后每次复查仍不联网）。改造前有 ready 而 first_send_at 为空的行、发出后丢了回执的
     waiting / sending 行都不算，一律先向桥接对账。"""
     return (row["first_send_at"] is None and not row["knowledge_id"] and not row["receipt"]
             and row["state"] in ("queued", "disabled"))
@@ -626,7 +626,7 @@ def _current_state(row):
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
         mine = current.get(row["artifact_key"])
         if mine is not None:
-            # 产物是当前的，还要这一片属于当前分片计划（Codex 456/460）：整篇条目而现在要分片、分片规则或范围
+            # 产物是当前的，还要这一片属于当前分片计划：整篇条目而现在要分片、分片规则或范围
             # 已换的片，由按当前计划建的片替代。没发出过或没 ready 过的直接 superseded（超预算的整篇永远到不了
             # ready）；已经 ready 的等当前计划的整套片全部 ready 再停用（先上后下）
             if row["piece_key"] in index_pieces.keys(mine["text"], mine.get("segments") or []):

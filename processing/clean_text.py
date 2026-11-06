@@ -26,8 +26,8 @@ import json
 import re
 from json.decoder import scanstring
 
-# v12: WHO DON from its raw JSON (clean_who: title as a level-1 heading, <table> as markdown tables);
-# every other source as in v11. v11 artifacts are kept (a processor upgrade is a new set of results).
+# Any rule change is a new version: results are stored per processor version and earlier artifacts are kept
+# (what each version changed: docs/decisions/0002-processor-versions.md).
 PROCESSOR_VERSION = "datafabric.clean_text.v12"
 
 # ---------------------------------------------------------------- 空白与语言
@@ -314,11 +314,11 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
 # ---------------------------------------------------------------- 临床登记
 
 SUMMARY_POINTER = "/protocolSection/descriptionModule/briefSummary"
-# 清洗正文是语义完整的规范产物：字段一律完整保留，不按字数截断。v1 的 4,000 字截断丢过入组标准、终点；
-# v7/v8 对结果表和地点的封顶又会丢不良事件、分组、单位、分母、离散度（Codex 448）。长度预算只用在索引分片、
+# 清洗正文是语义完整的规范产物：字段一律完整保留，不按字数截断：截断会丢入组标准、终点，
+# 对结果表和地点封顶会丢不良事件、分组、单位、分母、离散度。长度预算只用在索引分片、
 # 展示摘要和模型阅读窗口上（db.index_publication 的分片），不用在这里。
-# v7 起结构化字段写成可读的逐行文本，不写 JSON（v6 在 4,496 个真实 CT 版本的正文里全都有 JSON 块）。
-# 唯一不进默认正文的是研究地点联系人里纯联络用途的信息（Codex 451）：电话、分机、邮件，以及角色为 CONTACT
+# 结构化字段写成可读的逐行文本，不写 JSON 块。
+# 唯一不进默认正文的是研究地点联系人里纯联络用途的信息：电话、分机、邮件，以及角色为 CONTACT
 # （联络人）的条目（姓名与角色标签）。研究者等其他角色、角色不明的保留姓名与角色。原件保留，按 json_pointer 可读；用到排除规则的
 # 产物在 warnings 里记 excluded_by_rule:<规则版本>。
 CONTACT_RULE = "datafabric.site_contact_rule.v2"
@@ -525,7 +525,7 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
 # - 行内标签（i/b/em/strong/u/sup/sub/span/sc/small）直接去掉，不加空格，避免把一个词拆开；
 # - 块级标签（p/br/h1-h6/div/li）替换为一个空格，避免“BACKGROUND</h4>Patients”粘成一个词；随后空白规范化。
 # 只认白名单里的标签名，“p < 0.05”“ALT>3×ULN”这类比较符号不会被当成标签。
-# 上下标不能直接去标签：“10<sup>-3</sup>”变成“10-3”、“IC<sub>50</sub>”变成“IC50”会改含义（Codex r63）。
+# 上下标不能直接去标签：“10<sup>-3</sup>”变成“10-3”、“IC<sub>50</sub>”变成“IC50”会改含义。
 # 成对的 sup 写成 ^(…)，sub/inf 写成 _(…)；括号总是加上，“10^(-3)”不会和“10^-3 M”的读法混淆。
 # 不成对的（缺闭合、嵌套被截断）记 html_sup_sub_unpaired，提醒下游回看原件。
 _INLINE_TAG = re.compile(r"(?i)</?(?:i|b|em|strong|u|sup|sub|span|sc|small|inf)(?:\s[^<>]*)?/?>")
@@ -689,7 +689,7 @@ def _span(cell, name):
 
 def _who_table(table) -> tuple[str | None, str, int]:
     """(表题或 None, markdown 管道表格, 占位格数)。单元格按真实网格排：rowspan 从上一行延续下来的格子、
-    colspan 向右展开的格子都写成空占位格，所以每个值留在它自己的列（Codex r153：只保住词序不够，
+    colspan 向右展开的格子都写成空占位格，所以每个值留在它自己的列（只保住词序不够，
     数字不能错到别的指标列）。占位格不重复文字，也不编；数量随段一起记下，下游知道表里有合并格。"""
     caption = table.find("caption")
     caption_text = _who_text(caption) if caption else None
