@@ -15,12 +15,13 @@ LOCK_INPUTS = requirements.txt requirements-contract.txt
 LOCK_FLAGS = --generate-hashes --python-version 3.10 --python-platform x86_64-unknown-linux-gnu \
 	--find-links $(EXTRACTION_CONTRACT_WHEELS)
 
-.PHONY: help venv test test-integration check check-install check-lock lock
+.PHONY: help venv test test-integration metrics check check-install check-lock lock
 help:
 	@echo 'make venv              $(VENV) from requirements.lock only (hash-checked, Python $(PYTHON))'
 	@echo 'make test              the unit suite (tests/test_*.py, no database)'
 	@echo 'make test-integration  tests/integration_*.py on throwaway PostgreSQL/Redis containers'
-	@echo 'make check             test + test-integration + check-lock'
+	@echo 'make metrics           function size / complexity gate (ops/metrics_exceptions.txt: frozen violators, list only shrinks)'
+	@echo 'make check             test + metrics + test-integration + check-lock'
 	@echo 'make check-install     a throwaway venv from the lock; import every module'
 	@echo 'make check-lock        requirements.lock still matches $(LOCK_INPUTS) (reads the index)'
 	@echo 'make lock              re-resolve requirements.lock after a change of $(LOCK_INPUTS)'
@@ -34,7 +35,9 @@ test: venv
 test-integration: venv
 	PYTHON=$(abspath $(PY)) BIOCHECK_SRC=$(abspath $(BIOCHECK_SRC)) BIOCHECK_PYTHON=$(abspath $(BIOCHECK_PYTHON)) \
 	  bash ops/run_integration_tests.sh
-check: test test-integration check-lock
+metrics: venv
+	$(PY) ops/code_metrics.py --check
+check: test metrics test-integration check-lock
 check-install:
 	UV=$(UV) PYTHON=$(PYTHON) EXTRACTION_CONTRACT_WHEELS=$(EXTRACTION_CONTRACT_WHEELS) bash ops/check_clean_install.sh
 # the lock is re-resolved with itself as the preference: unchanged inputs give the same pins.
