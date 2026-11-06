@@ -32,6 +32,7 @@ from biz_rules.history_models import HistoryError
 from extraction_contract import CONTRACT, canonical, verdict
 from extraction_contract import derived_status as _derived_status
 from db import history
+from db.lease import LeaseQueue
 
 LEASE_SECONDS = 120
 WINDOW, MAX_ITEMS, MAX_PASSAGES, MAX_CHARS = 200, 50, 8, 20000
@@ -95,36 +96,26 @@ def _key(task):
     return {k: task[k] for k in TASK_KEY}
 
 
+TASKS = LeaseQueue("derived_extraction_check_tasks", TASK_KEY)
+
 _WHERE = ("version_id=:version_id AND producer=:producer AND producer_version=:producer_version "
           "AND text_processor_version=:text_processor_version AND checker_version=:checker_version")
 
 
 def _claim():
     with history.history_engine().begin() as conn:
-        row = conn.execute(text("""
-            SELECT * FROM derived_extraction_check_tasks
-            WHERE state IN ('queued','waiting') AND checker_version=:c AND next_check_at<=clock_timestamp()
-              AND (lease_until IS NULL OR lease_until<clock_timestamp())
-            ORDER BY next_check_at,version_id FOR UPDATE SKIP LOCKED LIMIT 1
-        """), {"c": expected_checker()}).mappings().first()
-        if row is None:
-            return None
-        token = uuid4().hex
-        conn.execute(text("UPDATE derived_extraction_check_tasks SET lease_token=:t,lease_until=clock_timestamp()"
-                          "+make_interval(secs=>:lease),updated_at=clock_timestamp() WHERE " + _WHERE),
-                     {"t": token, "lease": LEASE_SECONDS, **_key(row)})
-        return dict(row, lease_token=token)
+        return TASKS.claim(conn, lease_seconds=LEASE_SECONDS, params={"c": expected_checker()},
+                           where="q.state IN ('queued','waiting') AND q.checker_version=:c "
+                                 "AND q.next_check_at<=clock_timestamp()",
+                           order_by="q.next_check_at,q.version_id", also_set="updated_at=clock_timestamp()")
 
 
 def _own(conn, task, renew=False):
     """True while the lease is still this worker's (locked for the rest of the transaction); renew extends it."""
-    row = conn.execute(text("SELECT 1 FROM derived_extraction_check_tasks WHERE " + _WHERE +
-                            " AND lease_token=:t AND lease_until>clock_timestamp() FOR UPDATE"),
-                       {"t": task["lease_token"], **_key(task)}).first()
-    if row and renew:
-        conn.execute(text("UPDATE derived_extraction_check_tasks SET lease_until=clock_timestamp()"
-                          "+make_interval(secs=>:lease) WHERE " + _WHERE), {"lease": LEASE_SECONDS, **_key(task)})
-    return row is not None
+    owned = TASKS.holds(conn, task, lock=True)
+    if owned and renew:
+        TASKS.renew(conn, task, LEASE_SECONDS)
+    return owned
 
 
 def _readable(conn, source_id):
@@ -142,11 +133,10 @@ def _finish(task, state, *, delay=0, error=None):
     if error and attempts >= 6:
         state = "blocked"
     with history.history_engine().begin() as conn:
-        conn.execute(text("UPDATE derived_extraction_check_tasks SET state=:s,attempts=:a,error=CAST(:e AS jsonb),"
-                          "lease_token=NULL,lease_until=NULL,next_check_at=clock_timestamp()+make_interval(secs=>:d),"
-                          "updated_at=clock_timestamp() WHERE " + _WHERE + " AND lease_token=:t"),
-                     {"s": state, "a": attempts, "e": json.dumps(error) if error else None, "d": delay,
-                      "t": task["lease_token"], **_key(task)})
+        TASKS.release(conn, task, "state=:s,attempts=:a,error=CAST(:e AS jsonb),"
+                      "next_check_at=clock_timestamp()+make_interval(secs=>:d),updated_at=clock_timestamp()",
+                      {"s": state, "a": attempts, "e": json.dumps(error) if error else None, "d": delay},
+                      unexpired=False)
     return state
 
 
