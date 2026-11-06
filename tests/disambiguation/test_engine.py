@@ -22,8 +22,8 @@ def _entity(name="阿斯利康", etype="Company"):
 
 
 class TestDisambiguateEntities:
-    def test_step2_alias_sets_dict_id(self):
-        # 只有 Step2 别名精确匹配才落锤 dict_id
+    def test_step2_alias_keeps_dict_id_as_proposal(self):
+        # Weak aliases preserve the selected candidate without authorizing a link.
         result = DisambiguationResult(
             status=STATUS_AUTO_MATCHED,
             dict_id=42,
@@ -33,7 +33,8 @@ class TestDisambiguateEntities:
         )
         with patch("disambiguation.engine.disambiguate", return_value=result):
             entities = disambiguate_entities([_entity()])
-        assert entities[0]["dict_id"] == 42
+        assert entities[0]["dict_id"] is None
+        assert entities[0]["_disambig"]["dict_id"] == 42
         assert entities[0]["confidence_score"] == 0.95
 
     def test_step1_strong_id_sets_dict_id(self):
@@ -43,6 +44,7 @@ class TestDisambiguateEntities:
             dict_id=7,
             confidence=0.99,
             match_step="step1_strong_id",
+            auto_link=True,
             reason="external id matched",
             candidates=[CandidateEntity(dict_id=7, name="阿斯利康", match_type="external_id")],
         )
@@ -53,7 +55,7 @@ class TestDisambiguateEntities:
         assert entities[0]["_disambig"]["match_step"] == "step1_strong_id"
 
     def test_step5_reranker_does_not_set_dict_id(self):
-        # Step3/5 即使命中，也不写 dict_id（只有 Step1 强 ID + Step2 精确匹配落锤）
+        # Reranker scores remain proposals, even for a preferred candidate.
         result = DisambiguationResult(
             status=STATUS_CANDIDATE_MATCHED,
             dict_id=7,
@@ -97,7 +99,9 @@ class TestDisambiguateEntities:
             entities = disambiguate_entities([_entity()])
         cands = entities[0]["_disambig"]["candidates"]
         assert len(cands) == 2
-        assert cands[0] == {"dict_id": 1, "name": "A", "similarity_score": 0.6, "match_type": "reranker"}
+        assert cands[0]["dict_id"] == 1
+        assert cands[0]["similarity_score"] == 0.6
+        assert cands[0]["match_type"] == "reranker"
 
 
 class TestDisambiguate:
@@ -107,7 +111,7 @@ class TestDisambiguate:
             reason="external id matched", match_step="step1_strong_id",
         )
         with patch("disambiguation.engine.match_strong_id", return_value=result), \
-             patch("disambiguation.engine.lookup_alias") as mock_lookup:
+             patch("disambiguation.engine.lookup_alias_candidates") as mock_lookup:
             r = disambiguate("阿斯利康", "Company", {})
         assert r.dict_id == 42
         assert r.match_step == "step1_strong_id"
@@ -116,7 +120,7 @@ class TestDisambiguate:
     def test_step2_alias_original_confidence(self):
         # 第一个候选名命中 → 0.95 / exact_original
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=100):
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[{"dict_id": 100}]):
             r = disambiguate("阿斯利康", "Company", {})
         assert r.dict_id == 100
         assert r.confidence == 0.95
@@ -126,7 +130,7 @@ class TestDisambiguate:
     def test_step2_alias_middle_confidence(self):
         # 第二个候选名（idx=1）命中 → 0.90 / exact_alias
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", side_effect=[None, 200]):
+             patch("disambiguation.engine.lookup_alias_candidates", side_effect=[[], [{"dict_id": 200}]]):
             r = disambiguate("阿斯利康", "Company", {"name_en": "AZ"})
         assert r.dict_id == 200
         assert r.confidence == 0.90
@@ -136,8 +140,8 @@ class TestDisambiguate:
         # 第 6 个候选名（idx=5）命中 → 0.85 / exact_normalized
         data = {"name_en": "AZ", "aliases": ["a", "b", "c", "d"]}
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias",
-                   side_effect=[None, None, None, None, None, 300]):
+             patch("disambiguation.engine.lookup_alias_candidates",
+                   side_effect=[[], [], [], [], [], [{"dict_id": 300}]]):
             r = disambiguate("阿斯利康", "Company", data)
         assert r.dict_id == 300
         assert r.confidence == 0.85
@@ -149,7 +153,7 @@ class TestDisambiguate:
             match_step="step3_drug_cas", reason="drug CAS",
         )
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
              patch("disambiguation.engine.match_by_entity_rules", return_value=result):
             r = disambiguate("阿司匹林", "Drug", {"cas_number": "50-78-2"})
         assert r.dict_id == 7
@@ -162,7 +166,7 @@ class TestDisambiguate:
             match_step="step3_target_rule", reason="target gene",
         )
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
              patch("disambiguation.engine.match_by_entity_rules", return_value=step3), \
              patch("disambiguation.engine.generate_embedding", return_value=None), \
              patch("disambiguation.engine.rank_with_reranker") as mock_reranker:
@@ -177,7 +181,7 @@ class TestDisambiguate:
             match_step="step5_reranker", reason="reranker top1",
         )
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
              patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
              patch("disambiguation.engine.generate_embedding", return_value=[0.1] * 1024), \
              patch("disambiguation.engine.search_similar_entities", return_value=[
@@ -191,9 +195,51 @@ class TestDisambiguate:
 
     def test_no_match_new_entity(self):
         with patch("disambiguation.engine.match_strong_id", return_value=None), \
-             patch("disambiguation.engine.lookup_alias", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
              patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
-             patch("disambiguation.engine.generate_embedding", return_value=None):
+             patch("disambiguation.engine.generate_embedding", return_value=[0.1]), \
+             patch("disambiguation.engine.search_similar_entities", return_value=[]):
             r = disambiguate("X", "Drug", {})
         assert r.status == STATUS_NEW_ENTITY
         assert r.match_step == "step_none"
+
+
+class TestNormalizedAlignment:
+    """Step0.5 对齐规范化（normalized_name）接入行为：写入 + 进 Step4 向量召回 + 不进 Step2。"""
+
+    def test_normalized_name_written_to_entity_data(self):
+        data = {"name_en": ""}
+        with patch("disambiguation.engine.match_strong_id", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
+             patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
+             patch("disambiguation.engine.generate_embedding", return_value=None):
+            disambiguate("盐酸二甲双胍片", "Drug", data)
+        assert data["normalized_name"] == "二甲双胍"
+
+    def test_normalized_name_used_for_vector_recall(self):
+        # normalized_name 作为 vector_normalized 键进 Step4（generate_embedding 收到剥离后核心名）
+        emb_calls = []
+
+        def fake_embedding(name):
+            emb_calls.append(name)
+            return None
+
+        data = {"name_en": ""}
+        with patch("disambiguation.engine.match_strong_id", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
+             patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
+             patch("disambiguation.engine.generate_embedding", side_effect=fake_embedding):
+            disambiguate("盐酸二甲双胍片", "Drug", data)
+        assert "盐酸二甲双胍片" in emb_calls
+        assert "二甲双胍" in emb_calls  # 剥离后核心名参与向量召回
+
+    def test_normalized_name_not_in_step2(self):
+        # 过剥零容忍：normalized_name（剥离后）不进 Step2 精确匹配
+        data = {"name_en": ""}
+        with patch("disambiguation.engine.match_strong_id", return_value=None), \
+             patch("disambiguation.engine.lookup_alias_candidates", return_value=[]) as mock_lookup, \
+             patch("disambiguation.engine.match_by_entity_rules", return_value=None), \
+             patch("disambiguation.engine.generate_embedding", return_value=None):
+            disambiguate("盐酸二甲双胍片", "Drug", data)
+        called_names = [c.args[0] for c in mock_lookup.call_args_list]
+        assert "二甲双胍" not in called_names

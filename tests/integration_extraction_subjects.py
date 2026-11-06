@@ -27,7 +27,7 @@ def _setup(monkeypatch):
                        '["clinicaltrials","legacy_documents","reviewed_graph","external_archive"]')
     monkeypatch.setattr(tq, "is_extraction_paused", lambda: False)
     monkeypatch.setattr(flow, "run_extraction_for_uuids", lambda uuids: {"submitted": len(uuids)})
-    monkeypatch.setattr(flow, "_disambiguate", lambda entities, session=None: entities)
+    monkeypatch.setattr(flow, "_disambiguate", lambda entities, session=None, **_: entities)
     seen = []
 
     def llm(chunk, source_site):

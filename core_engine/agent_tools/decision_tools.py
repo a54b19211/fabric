@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Agent 决策工具 — 审批/拒绝/冲突裁决/提交最终判断。"""
 
+import json
+import math
+
 from langchain_core.tools import tool
 from loguru import logger
 
@@ -9,7 +12,6 @@ from db.repository import (
     reject_entity as _reject_entity,
     approve_relation as _approve_relation,
     reject_relation as _reject_relation,
-    resolve_merge,
 )
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation
@@ -149,25 +151,33 @@ def resolve_attribute_conflict(
     resolution: str,
     resolved_value: str = "",
     reviewer: str = "auto",
+    reason: str = "",
+    confidence: float = 0.0,
 ) -> str:
-    """解决属性冲突。
+    """提交属性冲突的待审建议，不修改字典或冲突的实际状态。
 
     Args:
         merge_id: 冲突记录 ID（来自 merge-queue）
         resolution: keep_existing（保留现有值）| accept_new（接受新值）| custom（自定义值）
         resolved_value: resolution=custom 时的自定义值
-        reviewer: 审核人标识
+        reviewer: 旧参数兼容；机器工具不取得人工审核身份
+        reason: 建议理由
+        confidence: 模型给出的置信度，未知为0
 
     Returns:
-        操作结果描述
+        建议JSON，由AgentRunner统一保存为待审AgentRun
     """
-    try:
-        resolve_merge(merge_id, resolution, reviewer, resolved_value if resolved_value else None)
-        logger.info(f"[AgentTool] 已解决冲突: merge_id={merge_id} → {resolution}")
-        return f"已解决: 冲突 merge_id={merge_id} → {resolution}"
-    except Exception as e:
-        logger.error(f"[AgentTool] resolve_attribute_conflict 失败: {e}")
-        return f"冲突解决失败: {str(e)}"
+    if resolution not in {"keep_existing", "accept_new", "custom", "escalated"}:
+        return "错误: 未知属性冲突建议"
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        return "错误: confidence 必须在0至1之间"
+    if resolution == "custom" and not resolved_value:
+        return "错误: custom 建议必须提供自定义值"
+    return json.dumps({
+        "merge_id": merge_id, "decision_type": "proposal", "proposed_decision": resolution,
+        "resolved_value": resolved_value, "reason": reason, "confidence": confidence,
+        "applied": False,
+    }, ensure_ascii=False)
 
 
 @tool

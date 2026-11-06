@@ -1,5 +1,7 @@
 # 环境变量（含密钥，绝对不能提交！）
 .env
+.env.*
+!.env.example
 
 # AI 会话规范（本地工作流，不入库）
 AGENTS.md
@@ -21,8 +23,14 @@ AGENTS.md
 开题报告-初稿.docx
 开题报告-初稿-最新.docx
 开题报告-定稿.docx
+开题报告定稿.docx
 开题报告-编辑记录.md
+开题报告-定稿_未规范化备份.docx
+task_doc/开题答辩讲稿.md
+task_doc/T4-进度交接-20261030.md
 上游数据链路问题反馈.md
+代码改动核对与衔接反馈.md
+T4-规范化-执行清单.md
 测试集建立流程.mmd
 测试集建立流程.png
 技术路线图.mmd
@@ -32,6 +40,9 @@ AGENTS.md
 
 # AI 协作本地记忆（含连接串草稿，不入库）
 .workbuddy/
+
+# 工作记录（团队协作/过程文档，不入库，本地留存）
+工作记录/
 
 # 空壳嵌套仓库（只剩孤儿 .git，add 会被识别成 submodule gitlink）
 /Weknora-frontend/
@@ -51,6 +62,7 @@ build/
 venv/
 .venv/
 env/
+zk_env/
 
 # IDE
 .idea/

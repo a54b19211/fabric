@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from sqlalchemy import text
 
@@ -123,8 +124,16 @@ def subject_text(doc) -> str:
     return row["text"] or ""
 
 
-def load_subject(uuid: str):
-    """(正文, 来源站点, 文档类型)；主体不存在返回 None。抽取 worker 和 RQ 任务共用这一个读取。"""
+class Subject(NamedTuple):
+    text: str
+    source_site: str
+    doc_type: str
+    # documents 库存的正文是来源原件（可按原字段做规则映射）；history 主体的正文是清洗正文
+    is_history: bool
+
+
+def load_subject(uuid: str) -> Subject | None:
+    """主体的正文、来源站点、文档类型；主体不存在返回 None。抽取 worker 和 RQ 任务共用这一个读取。"""
     from db.models import Document
     from db.session import get_session
 
@@ -134,4 +143,5 @@ def load_subject(uuid: str):
         doc = session.query(Document).filter(Document.uuid == uuid, Document.is_deleted == False).first()  # noqa: E712
         if doc is None:
             return None
-        return subject_text(doc), doc.source_site or "", doc.doc_type or ""
+        return Subject(subject_text(doc), doc.source_site or "", doc.doc_type or "",
+                       bool(getattr(doc, "history_version_id", None)))

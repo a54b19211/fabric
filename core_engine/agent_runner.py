@@ -15,10 +15,6 @@ from core_engine.agents.conflict_resolver import get_conflict_resolver_graph
 from core_engine.agents.semantic_matcher import get_semantic_matcher_graph
 from core_engine.agents.entity_merge import get_entity_merge_graph
 from db.repository import (
-    approve_entity_with_alias_writeback,
-    reject_entity as _reject_entity,
-    approve_relation as _approve_relation,
-    reject_relation as _reject_relation,
     create_identity_merge_proposal,
 )
 from db.session import get_session
@@ -35,7 +31,7 @@ class AgentRunner:
     # ── Agent A: 实体审核 (Pipeline 模式) ────────────────────────────────
 
     def run_entity_review(self, entity_id: int) -> dict:
-        """运行单个实体审核。三步 Pipeline → 执行决策 → 持久化。"""
+        """运行单个实体审核。三步 Pipeline → 保存审核提案（不修改业务审核状态）。"""
         run_id = str(uuid.uuid4())[:12]
         logger.info(f"[AgentRunner] 启动实体审核: entity_id={entity_id}, run_id={run_id}")
 
@@ -50,41 +46,8 @@ class AgentRunner:
             logger.error(f"[AgentRunner] Pipeline 执行失败: entity_id={entity_id} | {e}")
             return {"decision": "error", "reason": str(e), "confidence": 0.0, "run_id": run_id}
 
-        decision = result["decision"]
-        reason = result["reason"]
-        confidence = result["confidence"]
-        steps = result["steps"]
-        entity_name = entity.get("entity_name", "")
-        document_title = entity.get("document_title", "")
-
-        # 执行决策
-        try:
-            if decision == "approved":
-                approve_entity_with_alias_writeback(
-                    entity_id, reviewer="auto", note=reason, dict_id=None, force_new=True,
-                )
-            elif decision == "rejected":
-                _reject_entity(entity_id, reviewer="auto", note=reason)
-        except Exception as e:
-            logger.error(f"[AgentRunner] 执行决策失败: entity_id={entity_id} decision={decision} | {e}")
-
-        # 持久化
-        self._save_run(
-            run_id=run_id, agent_type="entity_review", target_id=entity_id,
-            entity_name=entity_name, document_title=document_title,
-            document_uuid=entity.get("document_uuid", ""),
-            decision=decision, reason=reason, confidence=confidence, steps=steps,
-        )
-
-        return {
-            "run_id": run_id,
-            "decision": decision,
-            "reason": reason,
-            "confidence": confidence,
-            "entity_name": entity_name,
-            "document_title": document_title,
-            "steps": steps,
-        }
+        return self._save_review_proposal("entity", entity_id, entity, result, run_id,
+                                          entity.get("entity_name", ""))
 
     def run_batch_entity_review(self, entity_ids: list[int]) -> list[dict]:
         """并发批量实体审核。"""
@@ -116,7 +79,10 @@ class AgentRunner:
                     "document_uuid": document_uuid,
                     "document_title": "",
                     "total": 0, "approved": 0, "rejected": 0, "escalated": 0, "error": 0,
+                    "proposed_approved": 0, "proposed_rejected": 0, "proposed_escalated": 0,
                     "relation_total": 0, "relation_approved": 0, "relation_rejected": 0, "relation_error": 0,
+                    "relation_proposed_approved": 0, "relation_proposed_rejected": 0,
+                    "relation_proposed_escalated": 0, "relation_results": [],
                     "results": [],
                 }
 
@@ -149,9 +115,8 @@ class AgentRunner:
                         "steps": [],
                     })
 
-        approved = sum(1 for r in results if r.get("decision") == "approved")
-        rejected = sum(1 for r in results if r.get("decision") == "rejected")
-        escalated = sum(1 for r in results if r.get("decision") == "escalated")
+        # This runner applies no business review decisions.
+        approved = rejected = escalated = 0
         error = sum(1 for r in results if r.get("decision") == "error")
 
         run_ids = [r["run_id"] for r in results if r.get("run_id")]
@@ -189,8 +154,7 @@ class AgentRunner:
             rel_run_ids = [r["run_id"] for r in relation_results if r.get("run_id")]
             run_ids.extend(rel_run_ids)
 
-        rel_approved = sum(1 for r in relation_results if r.get("decision") == "approved")
-        rel_rejected = sum(1 for r in relation_results if r.get("decision") == "rejected")
+        rel_approved = rel_rejected = 0
         rel_error = sum(1 for r in relation_results if r.get("decision") == "error")
 
         if run_ids:
@@ -208,10 +172,16 @@ class AgentRunner:
             "rejected": rejected,
             "escalated": escalated,
             "error": error,
+            "proposed_approved": sum(r.get("decision") == "proposal_approved" for r in results),
+            "proposed_rejected": sum(r.get("decision") == "proposal_rejected" for r in results),
+            "proposed_escalated": sum(r.get("decision") == "proposal_escalated" for r in results),
             "relation_total": len(relations),
             "relation_approved": rel_approved,
             "relation_rejected": rel_rejected,
             "relation_error": rel_error,
+            "relation_proposed_approved": sum(r.get("decision") == "proposal_approved" for r in relation_results),
+            "relation_proposed_rejected": sum(r.get("decision") == "proposal_rejected" for r in relation_results),
+            "relation_proposed_escalated": sum(r.get("decision") == "proposal_escalated" for r in relation_results),
             "results": results,
             "relation_results": relation_results,
         }
@@ -229,7 +199,7 @@ class AgentRunner:
     # ── Agent A 扩展: 关系审核 (Pipeline 模式) ──────────────────────────
 
     def run_relation_review(self, relation_id: int) -> dict:
-        """运行单个关系审核。三步 Pipeline → 执行决策 → 持久化。"""
+        """运行单个关系审核。三步 Pipeline → 保存审核提案（不修改业务审核状态）。"""
         run_id = str(uuid.uuid4())[:12]
         logger.info(f"[AgentRunner] 启动关系审核: relation_id={relation_id}, run_id={run_id}")
 
@@ -243,49 +213,48 @@ class AgentRunner:
             logger.error(f"[AgentRunner] 关系 Pipeline 失败: relation_id={relation_id} | {e}")
             return {"decision": "error", "reason": str(e), "confidence": 0.0, "run_id": run_id}
 
-        decision = result["decision"]
-        reason = result["reason"]
-        confidence = result["confidence"]
-        steps = result["steps"]
+        entity_name = (f"{rel.get('from_entity_name', '')} → {rel.get('to_entity_name', '')} "
+                       f"({rel.get('relation_type', '')})")
+        return self._save_review_proposal("relation", relation_id, rel, result, run_id, entity_name)
 
-        rel_from = rel.get("from_entity_name", "")
-        rel_to = rel.get("to_entity_name", "")
-        rel_type = rel.get("relation_type", "")
-        entity_name = f"{rel_from} → {rel_to} ({rel_type})"
-
-        # 执行决策
-        try:
-            if decision == "approved":
-                _approve_relation(relation_id, reviewer="auto", note=reason)
-            elif decision == "rejected":
-                _reject_relation(relation_id, reviewer="auto", note=reason)
-        except Exception as e:
-            logger.error(f"[AgentRunner] 关系决策执行失败: relation_id={relation_id} | {e}")
-
-        self._save_run(
-            run_id=run_id, agent_type="relation_review", target_id=relation_id,
-            decision=decision, reason=reason, confidence=confidence, steps=steps,
-            entity_name=entity_name,
-            document_uuid=rel.get("document_uuid", ""),
-        )
-
+    def _save_review_proposal(self, kind: str, target_id: int, target: dict,
+                              result: dict, run_id: str, entity_name: str) -> dict:
+        """AgentRun stores the suggestion; only human review actions apply decisions."""
+        proposed = result["decision"]
+        allowed = ({"keep_existing", "accept_new", "custom", "escalated"} if kind == "conflict"
+                   else {"approved", "rejected", "escalated"})
+        decision = f"proposal_{proposed}" if proposed in allowed else "error"
+        steps = list(result.get("steps") or [])
+        steps.append({
+            "type": "review_proposal", "target_kind": kind, "target_id": target_id,
+            "proposed_decision": proposed, "applied": False,
+            "review_status": target.get("review_status"),
+            "model_version": getattr(self.config, "model_name", None) or None,
+        })
+        saved = bool(self._save_run(
+            run_id=run_id, agent_type="conflict_resolution" if kind == "conflict" else f"{kind}_review", target_id=target_id,
+            entity_name=entity_name, document_title=target.get("document_title", ""),
+            document_uuid=target.get("document_uuid", ""), decision=decision,
+            reason=result["reason"], confidence=result["confidence"], steps=steps,
+        ))
         return {
-            "run_id": run_id,
-            "decision": decision,
-            "reason": reason,
-            "confidence": confidence,
-            "entity_name": entity_name,
-            "steps": steps,
+            "run_id": run_id, "decision": decision if saved else "error",
+            "decision_type": "proposal", "proposed_decision": proposed,
+            "applied": False, "review_status": target.get("review_status"),
+            "proposal_saved": saved,
+            "reason": result["reason"] if saved else f"proposal persistence failed: {result['reason']}",
+            "confidence": result["confidence"], "entity_name": entity_name,
+            "document_title": target.get("document_title", ""), "steps": steps,
         }
 
-    # ── Agent B: 冲突裁决 (ReAct 模式, 保持不变) ────────────────────────
+    # ── Agent B: 冲突建议 (ReAct 模式) ────────────────────────────────
 
     def run_conflict_resolution(self, merge_id: int,
                                  dict_id: int, entity_type: str, entity_name: str,
                                  field_name: str, existing_value: Any, new_value: Any,
                                  existing_source_site: str = "", new_source_site: str = "",
                                  existing_source_doc: str = "", new_source_doc: str = "") -> dict:
-        """运行属性冲突裁决。"""
+        """运行属性冲突建议，统一保存AgentRun；不执行实际裁决。"""
         run_id = str(uuid.uuid4())[:12]
         logger.info(f"[AgentRunner] 冲突裁决: merge_id={merge_id}, field={field_name}")
 
@@ -316,18 +285,17 @@ class AgentRunner:
             return {"decision": "error", "reason": str(e), "confidence": 0.0, "run_id": run_id}
 
         steps = self._extract_steps(result.get("messages", []))
-        self._save_run(run_id, "conflict_resolution", merge_id,
-                       result.get("decision", "keep_existing"),
-                       result.get("reason", ""),
-                       result.get("confidence", 0.0), steps)
-        return {
-            "run_id": run_id,
-            "decision": result.get("decision", "keep_existing"),
-            "resolved_value": result.get("resolved_value", ""),
-            "reason": result.get("reason", ""),
-            "confidence": result.get("confidence", 0.0),
-            "steps": steps,
-        }
+        value = result.get("resolved_value", "")
+        steps.append({"type": "conflict_proposal", "applied": False, "resolved_value": value,
+                      "input": {key: initial_state[key] for key in (
+                          "merge_id", "dict_id", "entity_type", "entity_name", "field_name", "existing_value",
+                          "new_value", "existing_source_site", "new_source_site", "existing_source_doc", "new_source_doc")}})
+        proposal = self._save_review_proposal("conflict", merge_id, {}, {
+            "decision": result.get("decision") or "escalated", "reason": result.get("reason", ""),
+            "confidence": result.get("confidence", 0.0), "steps": steps,
+        }, run_id, entity_name)
+        proposal["resolved_value"] = value
+        return proposal
 
     # ── Agent C: 语义匹配 (ReAct 模式, 保持不变) ────────────────────────
 
@@ -646,6 +614,7 @@ class AgentRunner:
                     ExtractedEntity.confidence_reason,
                     ExtractedEntity.source_doc_uuid,
                     ExtractedEntity.dict_id,
+                    ExtractedEntity.review_status,
                     Document.title.label("document_title"),
                 )
                 .outerjoin(Document, ExtractedEntity.source_doc_uuid == Document.uuid)
@@ -669,6 +638,7 @@ class AgentRunner:
                 "document_uuid": row.source_doc_uuid,
                 "document_title": row.document_title or "",
                 "entity_dict_id": row.dict_id,
+                "review_status": row.review_status,
             }
 
     def _load_relation(self, relation_id: int) -> dict | None:
@@ -686,6 +656,7 @@ class AgentRunner:
             return {
                 "id": row.id,
                 "relation_type": row.relation_type,
+                "review_status": row.review_status,
                 "from_entity_name": from_ent.entity_name if from_ent else "",
                 "from_entity_type": from_ent.entity_type if from_ent else "",
                 "to_entity_name": to_ent.entity_name if to_ent else "",
@@ -812,6 +783,8 @@ class AgentRunner:
                     "type": "ai",
                     "content": content,
                     "tool_calls": tool_names,
+                    "tool_inputs": [{"name": call.get("name"), "args": call.get("args")}
+                                    for call in tool_calls],
                 })
             elif isinstance(msg, ToolMessage):
                 steps.append({
@@ -827,7 +800,7 @@ class AgentRunner:
                   entity_name: str = "", document_title: str = "",
                   document_uuid: str = "", batch_id: str = ""):
         try:
-            save_agent_run(
+            return save_agent_run(
                 run_id=run_id, agent_type=agent_type, target_id=target_id,
                 entity_name=entity_name, document_title=document_title,
                 document_uuid=document_uuid, batch_id=batch_id,
@@ -835,6 +808,7 @@ class AgentRunner:
             )
         except Exception as e:
             logger.error(f"[AgentRunner] 保存运行记录失败: {e}")
+            return 0
 
 
 _runner: AgentRunner | None = None

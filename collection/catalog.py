@@ -338,6 +338,23 @@ SPECS: tuple[CollectionSpec, ...] = (
         supply_system="openrxiv",
     ),
     CollectionSpec(
+        source_id="gdelt_doc",
+        name="GDELT DOC 新闻索引",
+        status="active",
+        plugin="gdelt_doc",
+        evidence_types=("media",),
+        decisions=("D",),
+        # 支持显式起止时间窗（updated_since/until，按 seendate），但没有续页：一页满了就不知道窗口里还剩多少，
+        # 所以不能做持续增量（不进 WATCHABLE），只做宿主显式指定的有界读取
+        incremental=Incremental(
+            "none", "seendate", "GDELT 观察到这条新闻的时间；不是新闻发布时间，也不是本地首次见到的时间"
+        ),
+        rate_group="gdeltproject.org",
+        min_interval_seconds=5.0,
+        coverage={"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
+        notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条",
+    ),
+    CollectionSpec(
         source_id="drugs_fda",
         name="Drugs@FDA",
         status="declared",

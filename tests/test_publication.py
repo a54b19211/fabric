@@ -129,6 +129,7 @@ def test_publisher_backfill_budget_is_separate_and_zero_keeps_consuming(
 
     from flows import history_publish
 
+    monkeypatch.setattr(history_publish, "refresh_once", lambda: [])
     calls = []
     argv = ["history_publish", "--once", "--poll-seconds", "30", "--batch-size", "20"]
     if backfill is not None:

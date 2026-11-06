@@ -286,13 +286,37 @@ def _evidence(original, ref, quote):
     if not quote or not isinstance(quote, str):
         return None
     start = original.original_raw_content.find(quote)
-    if start < 0 or len(quote) > 8000:
+    if start < 0 or len(quote) > 8000 or original.original_raw_content.find(quote, start + 1) >= 0:
         return None
     return GraphEvidence(
         **ref.model_dump(),
         quote=quote,
         locator=GraphLocator(start=start, end=start + len(quote)),
     )
+
+
+def _auditor(actor, at):
+    return bool(actor and str(actor).strip() and at
+                and str(actor).strip().casefold() not in {"auto", "system", "agent", "unknown"})
+
+
+def _item_evidence(item, original, ref):
+    """确认依据只能用当时核过的那个版本；旧source_text仅供候选展示。"""
+    for proof in item.get("current_review_evidence") or []:
+        if (proof.get("version_id") == ref.version_id
+                and proof.get("source_id") == ref.source_id
+                and proof.get("source_record_id") == ref.source_record_id
+                and proof.get("raw_sha256") == ref.raw_sha256
+                and proof.get("source_doc_uuid") == original.source_doc_uuid):
+            bound = _evidence(original, ref, proof.get("quote"))
+            if bound is not None:
+                return bound, True
+    for proof in item.get("evidence") or []:
+        if proof.get("source_doc_uuid") == original.source_doc_uuid:
+            bound = _evidence(original, ref, proof.get("quote"))
+            if bound is not None:
+                return bound, False
+    return _evidence(original, ref, item.get("source_text")), False
 
 
 def build_document_bundle(observation, documents, document_refs):
@@ -311,23 +335,36 @@ def build_document_bundle(observation, documents, document_refs):
         raise HistoryError(
             "legacy_document_scope_mismatch", "本批所选UUID与原件/采用清单不一致"
         )
-    verified = set(observation.get("verified_dict_ids", []))
+    dictionary_context = observation.get("dictionary_context") or {}
     mentions, nodes, edges = {}, {}, []
     truncated = observation.get("selection_truncated") is True
     for item in sorted(observation["entities"], key=lambda item: int(item["id"])):
-        uuid, status = item["source_doc_uuid"], item["review_status"]
+        uuid, status = item.get("observation_source_doc_uuid") or item["source_doc_uuid"], item["review_status"]
         if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
             raise HistoryError(
                 "legacy_review_scope_mismatch", "实体不在所选文档或审核范围"
             )
-        if item["id"] in mentions:
+        mention_key = (uuid, item["id"])
+        if mention_key in mentions:
             raise HistoryError(
                 "duplicate_legacy_mention",
                 "源实体ID重复或读取期间状态漂移，请重新捕获本批",
             )
         dict_id = item.get("dict_id")
+        evidence, fixed_proof = _item_evidence(item, doc_map[uuid], ref_map[uuid])
+        context = item.get("dict_context") or dictionary_context.get(str(dict_id)) or {}
         confirmed = (
-            status == "approved" and dict_id is not None and str(dict_id) in verified
+            status == "approved" and dict_id is not None and fixed_proof
+            and context.get("id") == dict_id and context.get("is_verified") is True
+            and _auditor(context.get("verified_by"), context.get("verified_at"))
+            and bool(context.get("verification_basis"))
+            and _auditor(item.get("identity_confirmed_by"), item.get("identity_confirmed_at"))
+            and bool(item.get("identity_confirmation_basis"))
+        )
+        review = GraphReview(
+            status=status,
+            reviewed_by=item.get("identity_confirmed_by") if confirmed else item.get("reviewed_by") or None,
+            reviewed_at=item.get("identity_confirmed_at") if confirmed else item.get("reviewed_at"),
         )
         # 自动提议的dict_id不是已确认映射，不能污染人工已确认节点的别名/证据。
         node_namespace = namespace + (
@@ -335,12 +372,11 @@ def build_document_bundle(observation, documents, document_refs):
         )
         node_id = str(dict_id if confirmed else item["id"])
         identity = GraphIdentity(namespace=node_namespace, id=node_id)
-        mentions[item["id"]] = identity
+        mentions[mention_key] = identity
         key = identity_key(identity)
         if key not in nodes and len(nodes) >= 100:
             truncated = True
             continue
-        evidence = _evidence(doc_map[uuid], ref_map[uuid], item.get("source_text"))
         node = nodes.get(key)
         if node is None:
             node = GraphNode(
@@ -351,13 +387,14 @@ def build_document_bundle(observation, documents, document_refs):
                 external_ids={},
                 identity_status="confirmed" if confirmed else "unresolved",
                 identity_review_basis=(
-                    "legacy_approved_and_verified_dict"
+                    item["identity_confirmation_basis"]
                     if confirmed
                     else "source_proposed_dict_id:" + str(dict_id) + ";unverified"
                     if dict_id is not None
                     else None
                 ),
-                review=GraphReview(status=status),
+                review=review,
+                properties={key: item[key] for key in ("first_seen_at", "valid_from", "valid_to") if item.get(key) is not None},
                 mention_ids=[],
                 evidence=[],
             )
@@ -368,22 +405,24 @@ def build_document_bundle(observation, documents, document_refs):
             )
         if confirmed:
             node.identity_status = "confirmed"
-            node.identity_review_basis = "legacy_approved_and_verified_dict"
-            node.review = GraphReview(status="approved")
+            node.identity_review_basis = item["identity_confirmation_basis"]
+            node.review = review
         if item["entity_name"] != node.name and item["entity_name"] not in node.aliases:
             node.aliases.append(item["entity_name"])
-        node.mention_ids.append(namespace + ".extracted_entity:" + str(item["id"]))
+        mention_id = namespace + ".extracted_entity:" + str(item["id"])
+        if mention_id not in node.mention_ids:
+            node.mention_ids.append(mention_id)
         if evidence is not None and evidence not in node.evidence:
             node.evidence.append(evidence)
     for item in sorted(observation["relations"], key=lambda item: int(item["id"])):
-        uuid, status = item["source_doc_uuid"], item["review_status"]
+        uuid, status = item.get("observation_source_doc_uuid") or item["source_doc_uuid"], item["review_status"]
         if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
             raise HistoryError(
                 "legacy_review_scope_mismatch", "关系不在所选文档或审核范围"
             )
         source, target = (
-            mentions.get(item.get("from_entity_id")),
-            mentions.get(item.get("to_entity_id")),
+            mentions.get((uuid, item.get("from_entity_id"))),
+            mentions.get((uuid, item.get("to_entity_id"))),
         )
         if (
             source is None
@@ -397,19 +436,21 @@ def build_document_bundle(observation, documents, document_refs):
             truncated = True
             break
         props = item.get("relation_props") or {}
-        evidence = _evidence(doc_map[uuid], ref_map[uuid], item.get("source_text"))
+        evidence, fixed_proof = _item_evidence(item, doc_map[uuid], ref_map[uuid])
+        relation_reviewed = fixed_proof and _auditor(item.get("reviewed_by"), item.get("reviewed_at"))
         edges.append(
             GraphEdge(
-                id=namespace + ".relation:" + str(item["id"]),
+                id=namespace + ".relation:" + str(item["id"]) + ":" + sha256(uuid)[:16],
                 source=source,
                 target=target,
                 relation_type=item["relation_type"],
                 relation_props=props,
                 valid_from=source_time(
-                    props.get("start_date"), "source_relation_start"
+                    item.get("valid_from") or props.get("start_date"), "source_relation_start"
                 ),
-                valid_to=source_time(props.get("end_date"), "source_relation_end"),
-                review=GraphReview(status=status),
+                valid_to=source_time(item.get("valid_to") or props.get("end_date"), "source_relation_end"),
+                review=GraphReview(status=status, reviewed_by=item.get("reviewed_by") if relation_reviewed else None,
+                                   reviewed_at=item.get("reviewed_at") if relation_reviewed else None),
                 source_doc_uuid=uuid,
                 binding_status="bound" if evidence is not None else "unbound",
                 evidence=[evidence] if evidence is not None else [],
@@ -424,7 +465,8 @@ def build_document_bundle(observation, documents, document_refs):
         target = GraphIdentity(
             namespace=namespace + ".entity_dict", id=str(item["keeper_dict_id"])
         )
-        if item.get("is_rolled_back") is not False or identity_key(target) not in nodes:
+        if (item.get("is_rolled_back") is not False or identity_key(target) not in nodes
+                or not _auditor(item.get("reviewer"), item.get("created_at"))):
             continue
         for absorbed in item["absorbed_dict_ids"]:
             redirects.append(
@@ -467,13 +509,38 @@ def build_document_bundle(observation, documents, document_refs):
         edges=edges,
         redirects=redirects,
         limitations=[
-            "身份状态来自源系统当前审核/字典标志，不是机制证据评价或专业批准",
+            "人工确认身份须同时有对象确认、字典审核和本次固定原文证据；旧verified标志不足以确认",
             "auto_approved仍为自动审核且身份未确认；别名只来自本批mention原名，不披露全字典汇总",
             "pending关系仅为未审核候选；原文绑定与事实审核是两件事，不能据此升级为人工审核或机制证据",
             "当前别名/合并没有历史资格；有效时间仅保留来源关系属性，未知不取文档日期",
             "无审核关系只说明此所选范围缺少可用关系，不代表现实不存在",
         ],
     )
+
+
+def bind_document_text(bundle, versions):
+    """原MD与清洗正文可能偏移；只在相同冻结版本的正文中重新定位唯一原句。"""
+    def bound(items):
+        result = []
+        for evidence in items:
+            record = versions[evidence.version_id]
+            start = record.clean_text.find(evidence.quote)
+            if start >= 0 and record.clean_text.find(evidence.quote, start + 1) < 0:
+                result.append(evidence.model_copy(update={
+                    "locator": GraphLocator(start=start, end=start + len(evidence.quote))}))
+        return result
+
+    for node in bundle.nodes:
+        node.evidence = bound(node.evidence)
+        if node.identity_status == "confirmed" and not node.evidence:
+            node.identity_status = "unresolved"
+            node.identity_review_basis = "confirmed_source_not_bound_to_current_text"
+    for edge in bundle.edges:
+        edge.evidence = bound(edge.evidence)
+        if not edge.evidence:
+            edge.binding_status = "unbound"
+            edge.unbound_reason = "来源句子在已采用正文中缺失或多处出现，未作模糊定位"
+    return bundle
 
 
 def publish_native_graph(records, key, *, max_nodes=100, max_edges=200):

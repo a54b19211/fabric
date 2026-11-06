@@ -74,8 +74,9 @@ def pg_engine():
     parsed = make_url(url)
     assert (
         parsed.host == "127.0.0.1"
-        and parsed.port == 18436
-        and parsed.database == "fabric_history"
+        and (parsed.port, parsed.database) in {
+            (18436, "fabric_history"), (18636, "bioradar_kdd_opus_history"),
+        }
     )
     engine = create_engine(url)
     schema = "test_history_" + uuid.uuid4().hex
@@ -562,6 +563,28 @@ def _published_graph(pg, monkeypatch, key="graph-fixture"):
 
     _graph_sources(monkeypatch)
     observation = _synthetic_graph_observation()
+    original = _fixture_document(observation["documents"][0])
+    frozen = store.import_archive(ArchiveImport(source_id="legacy_documents", is_demo=True,
+        scope_description="synthetic source before explicit fixture review", declared_count=1,
+        records=[ArchiveRecord(source_record_id=document_native_id(original), record_kind="document",
+            raw_content=original.model_dump_json())]), key + ":fixture-source")
+    saved = store.read_version(frozen.version_ids[0], "legacy_documents", document_native_id(original),
+        True, "current", datetime.now().astimezone())
+    stamp = datetime.now().astimezone().isoformat()
+    observation["dictionary_context"] = {}
+    # These are explicit synthetic audit inputs; the real review producer is tested separately.
+    for entity in observation["entities"]:
+        observation["dictionary_context"][str(entity["dict_id"])] = {
+            "id": entity["dict_id"], "is_verified": True, "verified_by": "synthetic-reviewer",
+            "verified_at": stamp, "verification_basis": "synthetic source check"}
+        entity.update(identity_confirmed_by="synthetic-reviewer", identity_confirmed_at=stamp,
+                      identity_confirmation_basis="synthetic fixed-source confirmation")
+    for item in observation["entities"] + observation["relations"]:
+        item["current_review_evidence"] = [{
+            "source_id": saved.source_id, "source_record_id": saved.source_record_id,
+            "version_id": saved.version_id, "raw_sha256": saved.raw_sha256,
+            "source_doc_uuid": original.source_doc_uuid, "quote": item["source_text"]}]
+    observation["relations"][0].update(reviewed_by="synthetic-reviewer", reviewed_at=stamp)
     run = _publish_fixture_graph(observation, key)
     with pg.begin() as conn:
         payload = conn.execute(
@@ -1114,6 +1137,28 @@ def test_the_same_europe_pmc_record_in_another_key_order_is_not_a_new_version(pg
     assert current.items[0].version_id == changed.version_ids[0]
 
 
+def test_a_version_stored_before_document_evidence_still_matches_its_original(pg, monkeypatch):
+    """Versions first seen before biz_rules.document_evidence existed carry no document_evidence. It is derived from
+    the original and the projection, so it is not part of the version identity: observing the same original again
+    reuses that version instead of adding one per record (docs/decisions/0001-merge-server-fix.md)."""
+    from biz_rules import document_evidence
+
+    raw = json.dumps({"source": "MED", "id": "123", "title": "Example", "abstractText": "A"}, sort_keys=True)
+    with monkeypatch.context() as before_merge:
+        before_merge.setattr(document_evidence, "attach_document_evidence", lambda source_id, item, projected: projected)
+        first = _fetch_europe_pmc_raw(raw, "evidence-before")
+    again = _fetch_europe_pmc_raw(raw, "evidence-after")
+    assert again.version_ids == first.version_ids
+    with pg.begin() as conn:
+        payload = conn.execute(text("SELECT payload FROM history_versions WHERE source_id='europe_pmc'")).scalar_one()
+    assert payload.get("document_evidence") is None
+    changed = _fetch_europe_pmc_raw(raw.replace('"A"', '"B"'), "evidence-changed")
+    assert changed.version_ids != first.version_ids
+    with pg.begin() as conn:
+        latest = conn.execute(text(
+            "SELECT payload FROM history_versions WHERE version_id=:v"), {"v": changed.version_ids[0]}).scalar_one()
+    assert latest["document_evidence"]["text_level"] == "abstract"
+
 def _ranks(pg):
     with pg.begin() as conn:
         return conn.execute(text(
@@ -1413,8 +1458,12 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
 
 # ——测试用：把一批明确的 documents 原件和审核图写进 history（生产上由 db.publication 自动发表）——
 from biz_rules.history_models import ArchiveImport, ArchiveRecord, canonical, sha256  # noqa: E402,F811
-from biz_rules.reviewed_graph import GraphDocumentRef, StoredDocument, document_native_id  # noqa: E402
-from flows.graph_publish import build_document_bundle  # noqa: E402
+from biz_rules.reviewed_graph import (  # noqa: E402
+    GraphDocumentRef,
+    StoredDocument,
+    document_native_id,
+)
+from flows.graph_publish import bind_document_text, build_document_bundle  # noqa: E402
 
 
 def _fixture_document(value):
@@ -1458,7 +1507,7 @@ def _publish_fixture_graph(observation, key):
     run = store.import_archive(request, key + ":documents")
     with store.history_engine().begin() as conn:
         now = store._now(conn)
-    refs = []
+    refs, versions = [], {}
     for version_id, doc in zip(run.version_ids, documents, strict=True):
         record = store.read_version(
             version_id,
@@ -1468,6 +1517,7 @@ def _publish_fixture_graph(observation, key):
             "current",
             now,
         )
+        versions[record.version_id] = record
         refs.append(
             GraphDocumentRef(
                 source_id=record.source_id,
@@ -1477,7 +1527,7 @@ def _publish_fixture_graph(observation, key):
                 origin_doc_uuid=doc.source_doc_uuid,
             )
         )
-    bundle = build_document_bundle(observation, documents, refs)
+    bundle = bind_document_text(build_document_bundle(observation, documents, refs), versions)
     native = "legacy-graph:" + sha256(
         canonical(
             {
@@ -1521,3 +1571,76 @@ def test_migration_refreshes_site_source_descriptions_but_not_access(pg):
         catalog = conn.execute(text("SELECT catalog FROM history_sources WHERE source_id='nmpa'")).scalar_one()
     assert catalog["name"] == SOURCE_CATALOG["nmpa"]["name"] and catalog["acquisition_channel"] == "site_plugin"
     assert catalog["access"] == "kept"  # 许可字段不被迁移改动
+
+
+def test_document_full_text_correction_survives_real_storage_and_old_version_read(pg):
+    original = ArchiveRecord(
+        source_record_id="SYNTHETIC-order-original", record_kind="document",
+        raw_content=json.dumps({"record_kind":"document","title":"原始公告",
+            "summary":"摘要没有金额","full_text":"完整原文：40套、8000万元。",
+            "material_kind":"corporate_disclosure"}, ensure_ascii=False))
+    old_run = store.import_archive(archive([original]), "fulltext-original")
+    old = store.read_version(old_run.version_ids[0], "external_archive",
+                             original.source_record_id, True, "current",
+                             datetime.now().astimezone())
+    correction = ArchiveRecord(
+        source_record_id="SYNTHETIC-order-correction", record_kind="document",
+        raw_content=json.dumps({"record_kind":"document","title":"更正公告",
+            "full_text":"前述公告更正为32套、6400万元。", "material_kind":"corporate_disclosure",
+            "document_relations":[{"relation_type":"corrects","target_source_id":"external_archive",
+                "target_source_record_id":original.source_record_id,"target_version_id":old.version_id}]},
+            ensure_ascii=False))
+    new_run = store.import_archive(archive([correction], available="2016-07-01"), "fulltext-correction")
+    repeated = store.import_archive(archive([correction], available="2016-07-01"), "fulltext-correction")
+    assert repeated.id == new_run.id
+    new = store.read_version(new_run.version_ids[0], "external_archive",
+                             correction.source_record_id, True, "current",
+                             datetime.now().astimezone())
+    assert new.clean_text.endswith("32套、6400万元。")
+    relation = new.document_evidence.document_relations[0]
+    assert relation.target_version_id == old.version_id
+    assert relation.basis_locator.json_pointer == "/document_relations/0"
+    again = store.read_version(old.version_id, "external_archive", original.source_record_id,
+                               True, "current", datetime.now().astimezone())
+    assert again.raw_content == old.raw_content == original.raw_content
+    assert again.clean_text.endswith("40套、8000万元。")
+
+
+def test_public_fetch_same_call_key_creates_one_durable_run(pg):
+    request = FetchRequest(source_id="clinicaltrials", query="synthetic", max_records=1, max_pages=1)
+    first, fresh = store.create_fetch(request, "stable-topic-fetch-call")
+    repeated, again = store.create_fetch(request, "stable-topic-fetch-call")
+    assert fresh is True and again is False and first.id == repeated.id
+    assert first.is_demo is False  # public fetch never converts a demo to real evidence
+    with pytest.raises(Exception, match="不同采用请求"):
+        store.create_fetch(FetchRequest(source_id="clinicaltrials", query="other"),
+                           "stable-topic-fetch-call")
+
+def test_gdelt_index_changes_keep_old_original_and_public_material_type(pg, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
+    import httpx
+
+    from biz_rules.gdelt_news import article_id
+    from biz_rules.history_sources import read_public
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["gdelt_doc"]')
+    title = ["SYNTHETIC first headline"]
+    def response(request):
+        return httpx.Response(200, json={"articles": [{
+            "url": "https://example.org/news?id=1", "title": title[0], "seendate": "20261030T010000Z"}]})
+    original_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original_client(transport=httpx.MockTransport(response), **kw))
+    request = FetchRequest(source_id="gdelt_doc", query="synthetic", max_records=2)
+    old, _ = store.create_fetch(request, "gdelt-integration-a")
+    store.job_input(old.id, old.attempt)
+    old = store.finish_fetch(old.id, old.attempt, read_public(request))
+    title[0] = "SYNTHETIC corrected headline"
+    new, _ = store.create_fetch(request, "gdelt-integration-b")
+    store.job_input(new.id, new.attempt)
+    new = store.finish_fetch(new.id, new.attempt, read_public(request))
+    native = article_id({"url": "https://example.org/news?id=1"})
+    assert old.version_ids != new.version_ids
+    saved = store.read_version(old.version_ids[0], "gdelt_doc", native, False, "current", datetime.now().astimezone())
+    assert saved.clean_text == "SYNTHETIC first headline"
+    assert saved.document_evidence.text_level == "title"
+    assert saved.document_evidence.material_kind == "news_report"
+    assert saved.availability_proof.kind == "unverified"  # seen date isn't proof of historical availability

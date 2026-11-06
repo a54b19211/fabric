@@ -204,7 +204,9 @@ def local_file(
 
 @router.post("/fetch", response_model=RunView, dependencies=[Depends(require_admin)])
 def fetch(body: FetchRequest, idempotency_key: str = Header(alias="Idempotency-Key")):
-    from flows.history_fetch import enqueue_fetch
+    from flows.history_fetch import enqueue_fetch, require_fetch_allowed
+
+    _call(require_fetch_allowed, body)
 
     run, fresh = _call(store.create_fetch, body, idempotency_key)
     return _call(enqueue_fetch, run) if fresh else run
@@ -223,8 +225,9 @@ def run(run_id: str):
     dependencies=[Depends(require_admin)],
 )
 def retry(run_id: str, body: RetryRequest):
-    from flows.history_fetch import retry_inactive
+    from flows.history_fetch import require_retry_allowed, retry_inactive
 
+    _call(require_retry_allowed)
     return _call(retry_inactive, run_id, body.expected_attempt)
 
 

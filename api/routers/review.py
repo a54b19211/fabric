@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """审核操作接口"""
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from loguru import logger
 
 from api.schemas.request import (
@@ -15,6 +15,7 @@ from api.schemas.request import (
     BatchResolveMergeRequest,
     MergeEntitiesRequest,
     RollbackMergeRequest,
+    IdentityProposalDecisionRequest, PrimeKGMappingRequest,
 )
 from api.schemas.response import (
     EntityListResponse, EntityItem,
@@ -46,32 +47,49 @@ from db.repository import (
     merge_entities, rollback_merge,
     get_merge_logs,
     get_identity_merge_proposals, resolve_identity_merge_proposal,
+    get_object_evidence, create_primekg_mapping_proposal,
+    get_primekg_mapping_proposals, resolve_primekg_mapping_proposal,
 )
+from api.review_auth import require_review_principal, optional_review_principal
+from biz_rules.history_models import HistoryError
+from db.identity import get_objects_evidence, get_current_review_evidence
 from db.session import get_session
-from db.models import ExtractedEntity, EntityRelation, EntityDict
+from db.models import ExtractedEntity, EntityRelation, EntityDict, EntitySourceEvidence
 from collections import deque
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import aliased
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
 
 def _extract_disambig(entity_data: dict | None) -> DisambigInfo | None:
-    """从 entity_data JSONB 中提取 _disambig 消歧元数据。"""
-    if not entity_data:
-        return None
-    raw = entity_data.get("_disambig")
+    raw = (entity_data or {}).get('_disambig')
     if not raw:
         return None
-    try:
-        return DisambigInfo(
-            status=raw.get("status", ""),
-            candidates=[DisambigCandidate(**c) for c in raw.get("candidates", [])],
-            match_step=raw.get("match_step", ""),
-        )
-    except Exception as e:
-        logger.warning(f"[Review] _disambig 解析失败: {e}")
+    values = dict(raw)
+    values['candidates'] = [{**candidate,
+        'similarity_score': candidate.get('similarity_score', candidate.get('score', 0.0))}
+        for candidate in raw.get('candidates') or []]
+    return DisambigInfo(**values)
+
+
+def _source_review_fields(row):
+    values = {key: getattr(row, key, None) for key in (
+        'source_version_id', 'source_quote', 'source_char_start', 'source_char_end',
+        'first_seen_at', 'valid_from', 'valid_to', 'reviewed_at')}
+    values.update({key: getattr(row, key, '') or '' for key in ('source_site', 'reviewed_by', 'reviewer_note')})
+    return values
+
+
+def _mention_review_fields(row):
+    return {key: getattr(row, key, None) for key in (
+        'identity_confirmed_by', 'identity_confirmed_at', 'identity_confirmation_basis')}
+
+
+def _dictionary_context(row):
+    if row is None:
         return None
+    return {key: getattr(row, key) for key in ('id', 'is_verified', 'verified_by', 'verified_at', 'verification_basis')}
 
 
 # ── 实体 ───────────────────────────────────────────────────────────────
@@ -98,11 +116,18 @@ def list_entities(
         if source_site:
             q = q.filter(ExtractedEntity.source_site == source_site)
         if source_doc_uuid:
-            q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
+            recorded_source = session.query(EntitySourceEvidence.id).filter(
+                EntitySourceEvidence.object_type == 'entity', EntitySourceEvidence.object_id == ExtractedEntity.id,
+                EntitySourceEvidence.source_doc_uuid == source_doc_uuid).exists()
+            q = q.filter(or_(ExtractedEntity.source_doc_uuid == source_doc_uuid, recorded_source))
 
         total = q.count()
         rows = q.offset((page - 1) * page_size).limit(page_size).all()
 
+        dict_ids = {row.dict_id for row in rows if row.dict_id}
+        dictionaries = {row.id: row for row in session.query(EntityDict).filter(EntityDict.id.in_(dict_ids)).all()} if dict_ids else {}
+        evidence_map = get_objects_evidence('entity', [row.id for row in rows], session=session)
+        review_evidence_map = get_current_review_evidence('entity', [row.id for row in rows], session=session)
         items = [
             EntityItem(
                 id=r.id,
@@ -115,7 +140,11 @@ def list_entities(
                 source_text=r.source_text,
                 review_status=r.review_status,
                 dict_id=r.dict_id,
+                evidence=evidence_map.get(r.id, []),
+                current_review_evidence=review_evidence_map.get(r.id, []),
                 disambig=_extract_disambig(r.entity_data),
+                **_source_review_fields(r), **_mention_review_fields(r),
+                dict_context=_dictionary_context(dictionaries.get(r.dict_id)),
             )
             for r in rows
         ]
@@ -151,7 +180,11 @@ def get_entity(entity_id: int):
                 source_text=row.source_text or "",
                 review_status=row.review_status or "",
                 dict_id=row.dict_id,
+                evidence=get_object_evidence('entity', row.id, session=session),
+                current_review_evidence=get_current_review_evidence('entity', [row.id], session=session).get(row.id, []),
                 disambig=_extract_disambig(row.entity_data),
+                **_source_review_fields(row), **_mention_review_fields(row),
+                dict_context=_dictionary_context(session.get(EntityDict, row.dict_id) if row.dict_id else None),
             )
             
         except HTTPException:
@@ -215,8 +248,10 @@ def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
 
 
 @router.post("/entities/{entity_id}/approve", response_model=ReviewActionResponse)
-def approve_entity_api(entity_id: int, body: ReviewActionRequest):
+def approve_entity_api(entity_id: int, body: ReviewActionRequest, principal=Depends(optional_review_principal)):
     """审核通过单个实体（含 alias 回写 + embedding 生成）。"""
+    if body.confirm_identity and principal is None:
+        raise HTTPException(status_code=403, detail='A trusted review token is required to confirm identity')
     with get_session() as session:
         if session is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
@@ -232,11 +267,17 @@ def approve_entity_api(entity_id: int, body: ReviewActionRequest):
             entity_id, reviewer=body.reviewer, note=body.note or "",
             dict_id=body.dict_id,
             force_new=body.force_new,
+            confirm_identity=body.confirm_identity, basis=body.basis,
+            evidence=body.evidence or None, review_context=principal,
         )
         logger.info(f"[API] 审核实体通过: id={entity_id}, reviewer={body.reviewer}, dict_id={body.dict_id}, force_new={body.force_new}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
+    except HistoryError as exc:
+        raise HTTPException(status_code=exc.status, detail={'code': exc.code, 'message': exc.message})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"[API] 审核实体失败: id={entity_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
@@ -345,13 +386,20 @@ def list_relations(
             if source_site:
                 q = q.filter(EntityRelation.source_site == source_site)
             if source_doc_uuid:
-                q = q.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+                recorded_source = session.query(EntitySourceEvidence.id).filter(
+                    EntitySourceEvidence.object_type == 'relation', EntitySourceEvidence.object_id == EntityRelation.id,
+                    EntitySourceEvidence.source_doc_uuid == source_doc_uuid).exists()
+                q = q.filter(or_(EntityRelation.source_doc_uuid == source_doc_uuid, recorded_source))
 
             total = q.count()
             rows = q.offset((page - 1) * page_size).limit(page_size).all()
 
+            evidence_map = get_objects_evidence('relation', [row.EntityRelation.id for row in rows], session=session)
+            review_evidence_map = get_current_review_evidence('relation', [row.EntityRelation.id for row in rows], session=session)
             items = [
                 RelationItem(
+                    evidence=evidence_map.get(r.EntityRelation.id, []),
+                    current_review_evidence=review_evidence_map.get(r.EntityRelation.id, []),
                     id=r.EntityRelation.id,
                     source_doc_uuid=r.EntityRelation.source_doc_uuid or "",
                     relation_type=r.EntityRelation.relation_type or "",
@@ -363,6 +411,7 @@ def list_relations(
                     confidence_score=r.EntityRelation.confidence_score or 0.0,
                     source_text=r.EntityRelation.source_text or "",
                     review_status=r.EntityRelation.review_status or "",
+                    **_source_review_fields(r.EntityRelation),
                 )
                 for r in rows
             ]
@@ -375,14 +424,31 @@ def list_relations(
             raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
+@router.get('/relations/{relation_id}', response_model=RelationItem)
+def get_relation(relation_id: int):
+    with get_session() as session:
+        if session is None:
+            raise HTTPException(status_code=503, detail='Database is not configured')
+        row = session.get(EntityRelation, relation_id)
+        if row is None or row.is_deleted:
+            raise HTTPException(status_code=404, detail='Relation does not exist')
+        return RelationItem(current_review_evidence=get_current_review_evidence('relation', [row.id], session=session).get(row.id, []),
+                            evidence=get_object_evidence('relation', row.id, session=session), id=row.id, source_doc_uuid=row.source_doc_uuid, relation_type=row.relation_type,
+                            from_entity_id=row.from_entity_id, to_entity_id=row.to_entity_id,
+                            relation_props=row.relation_props or {}, confidence_score=row.confidence_score or 0.0,
+                            source_text=row.source_text or '', review_status=row.review_status,
+                            **_source_review_fields(row))
+
+
 @router.post("/relations/batch/approve", response_model=ReviewActionResponse)
-def batch_approve_relations_api(body: BatchApproveRelationsRequest):
+def batch_approve_relations_api(body: BatchApproveRelationsRequest, principal=Depends(require_review_principal)):
     """批量审核通过关系"""
     try:
         result = batch_approve_relations(
             source_doc_uuid=body.source_doc_uuid or "",
             source_site=body.source_site or "",
-            reviewer=body.reviewer,
+            reviewer=principal.subject,
+            review_context=principal,
             note=body.note or "",
             min_confidence=body.min_confidence
         )
@@ -427,7 +493,7 @@ def batch_reject_relations_api(body: BatchRejectRelationsRequest):
 
 
 @router.post("/relations/{relation_id}/approve", response_model=ReviewActionResponse)
-def approve_relation_api(relation_id: int, body: ReviewActionRequest):
+def approve_relation_api(relation_id: int, body: ReviewActionRequest, principal=Depends(require_review_principal)):
     """审核通过单个关系"""
     with get_session() as session:
         if session is None:
@@ -440,11 +506,15 @@ def approve_relation_api(relation_id: int, body: ReviewActionRequest):
             raise HTTPException(status_code=404, detail="关系不存在")
 
     try:
-        approve_relation(relation_id, reviewer=body.reviewer, note=body.note or "")
+        approve_relation(relation_id, reviewer=principal.subject, note=body.note or "", evidence=body.evidence or None, review_context=principal)
         logger.info(f"[API] 审核关系通过: id={relation_id}, reviewer={body.reviewer}")
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
+    except HistoryError as exc:
+        raise HTTPException(status_code=exc.status, detail={'code': exc.code, 'message': exc.message})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"[API] 审核关系失败: id={relation_id} | {e}")
         raise HTTPException(status_code=500, detail=f"审核失败: {str(e)}")
@@ -488,10 +558,10 @@ def list_merge_queue(limit: int = Query(50, ge=1, le=200)):
 
 
 @router.post("/merge-queue/{merge_id}/resolve", response_model=ReviewActionResponse)
-def resolve_merge_api(merge_id: int, body: ResolveMergeRequest):
+def resolve_merge_api(merge_id: int, body: ResolveMergeRequest, principal=Depends(require_review_principal)):
     """解决单个合并冲突。resolution: accept_new | keep_existing | custom"""
     try:
-        resolve_merge(merge_id, body.resolution, body.reviewer, body.resolved_value)
+        resolve_merge(merge_id, body.resolution, principal.subject, body.resolved_value, review_context=principal)
         logger.info(f"[API] 合并冲突解决: merge_id={merge_id} resolution={body.resolution}")
         return ReviewActionResponse(success=True)
     except Exception as e:
@@ -500,10 +570,10 @@ def resolve_merge_api(merge_id: int, body: ResolveMergeRequest):
 
 
 @router.post("/merge-queue/resolve-batch", response_model=ReviewActionResponse)
-def batch_resolve_merge_api(body: BatchResolveMergeRequest):
+def batch_resolve_merge_api(body: BatchResolveMergeRequest, principal=Depends(require_review_principal)):
     """批量解决合并冲突：一次请求解决同 dict_id 下所有冲突字段。"""
     try:
-        result = batch_resolve_merges(body.decisions, body.reviewer)
+        result = batch_resolve_merges(body.decisions, principal.subject, review_context=principal)
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error", "批量解决失败"))
         logger.info(f"[API] 批量合并冲突解决: {result['resolved_count']} 条")
@@ -601,6 +671,15 @@ def get_review_graph(
             ExtractedEntity.source_site,
             ExtractedEntity.confidence_score,
             EntityDict.is_verified,
+            ExtractedEntity.source_version_id, ExtractedEntity.source_quote,
+            ExtractedEntity.source_char_start, ExtractedEntity.source_char_end,
+            ExtractedEntity.first_seen_at, ExtractedEntity.valid_from, ExtractedEntity.valid_to,
+            ExtractedEntity.reviewed_by, ExtractedEntity.reviewed_at, ExtractedEntity.reviewer_note,
+            ExtractedEntity.identity_confirmed_by, ExtractedEntity.identity_confirmed_at,
+            ExtractedEntity.identity_confirmation_basis,
+            EntityDict.verified_by.label('dict_verified_by'), EntityDict.verified_at.label('dict_verified_at'),
+            EntityDict.verification_basis.label('dict_verification_basis'),
+
         )
 
         def _fetch_nodes(entity_ids: list[int]) -> list[GraphNode]:
@@ -610,9 +689,13 @@ def get_review_graph(
                 .filter(ExtractedEntity.id.in_(entity_ids))
                 .all()
             )
+            evidence_map = get_objects_evidence('entity', entity_ids, session=session)
+            review_evidence_map = get_current_review_evidence('entity', entity_ids, session=session)
             row_map = {r.id: r for r in rows}
             return [
                 GraphNode(
+                    evidence=evidence_map.get(eid, []),
+                    current_review_evidence=review_evidence_map.get(eid, []),
                     id=row_map[eid].id,
                     entity_type=row_map[eid].entity_type or "",
                     entity_name=row_map[eid].entity_name or "",
@@ -620,9 +703,12 @@ def get_review_graph(
                     dict_id=row_map[eid].dict_id,
                     review_status=row_map[eid].review_status or "",
                     source_doc_uuid=row_map[eid].source_doc_uuid or "",
-                    source_site=row_map[eid].source_site or "",
                     confidence_score=row_map[eid].confidence_score or 0.0,
                     is_verified=row_map[eid].is_verified if row_map[eid].is_verified is not None else False,
+                    **_source_review_fields(row_map[eid]), **_mention_review_fields(row_map[eid]),
+                    dict_context={'id': row_map[eid].dict_id, 'is_verified': row_map[eid].is_verified,
+                                  'verified_by': row_map[eid].dict_verified_by, 'verified_at': row_map[eid].dict_verified_at,
+                                  'verification_basis': row_map[eid].dict_verification_basis} if row_map[eid].dict_id else None,
                 )
                 for eid in entity_ids
             ]
@@ -639,6 +725,10 @@ def get_review_graph(
                 EntityRelation.review_status,
                 EntityRelation.relation_props,
                 EntityRelation.source_doc_uuid,
+                EntityRelation.source_site, EntityRelation.source_version_id, EntityRelation.source_quote,
+                EntityRelation.source_char_start, EntityRelation.source_char_end,
+                EntityRelation.first_seen_at, EntityRelation.valid_from, EntityRelation.valid_to,
+                EntityRelation.reviewed_by, EntityRelation.reviewed_at, EntityRelation.reviewer_note,
             ).filter(
                 EntityRelation.review_status.in_(statuses),
                 EntityRelation.is_deleted == False,
@@ -647,8 +737,13 @@ def get_review_graph(
             )
             if source_doc_uuid:
                 rq = rq.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+            rows = rq.all()
+            evidence_map = get_objects_evidence('relation', [row.id for row in rows], session=session)
+            review_evidence_map = get_current_review_evidence('relation', [row.id for row in rows], session=session)
             return [
                 GraphEdge(
+                    evidence=evidence_map.get(r.id, []),
+                    current_review_evidence=review_evidence_map.get(r.id, []),
                     id=r.id,
                     relation_type=r.relation_type or "",
                     from_entity_id=r.from_entity_id,
@@ -656,8 +751,9 @@ def get_review_graph(
                     review_status=r.review_status or "",
                     relation_props=r.relation_props or {},
                     source_doc_uuid=r.source_doc_uuid or "",
+                    **_source_review_fields(r),
                 )
-                for r in rq.all()
+                for r in rows
             ]
 
         # ══════════════════════════════════════════════════════════════════
@@ -887,6 +983,8 @@ def patch_entity(entity_id: int, body: PatchEntityRequest):
         existing = dict(row.entity_data or {})
         existing.update(body.entity_data)
         row.entity_data = existing
+        from db.identity import clear_entity_confirmation
+        clear_entity_confirmation(row)
 
         # 已推送的实体重置同步状态
         if row.weknora_graph_status == "pushed":
@@ -915,6 +1013,9 @@ def patch_relation(relation_id: int, body: PatchRelationRequest):
         existing = dict(row.relation_props or {})
         existing.update(body.relation_props)
         row.relation_props = existing
+        row.review_status = "pending"
+        row.reviewed_by = ""
+        row.reviewed_at = None
 
         if row.weknora_graph_status == "pushed":
             row.weknora_graph_status = "pending"
@@ -960,7 +1061,7 @@ def compare_entities_api(dict_ids: str = Query("", description="逗号分隔的 
 
 
 @router.post("/merge-entities", response_model=MergeEntitiesResponse)
-def merge_entities_api(body: MergeEntitiesRequest):
+def merge_entities_api(body: MergeEntitiesRequest, principal=Depends(require_review_principal)):
     """执行实体身份合并。后端根据 field_decisions 自动计算合并结果。"""
     try:
         if body.keeper_dict_id in body.absorbed_dict_ids:
@@ -969,7 +1070,8 @@ def merge_entities_api(body: MergeEntitiesRequest):
             keeper_dict_id=body.keeper_dict_id,
             absorbed_dict_ids=body.absorbed_dict_ids,
             field_decisions=body.field_decisions,
-            reviewer=body.reviewer,
+            reviewer=principal.subject,
+            review_context=principal,
             note=body.note,
         )
         if not result.get("success"):
@@ -981,16 +1083,18 @@ def merge_entities_api(body: MergeEntitiesRequest):
         return MergeEntitiesResponse(**result)
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"[API] 实体合并失败: {e}")
         raise HTTPException(status_code=500, detail=f"合并失败: {str(e)}")
 
 
 @router.post("/rollback-merge", response_model=RollbackMergeResponse)
-def rollback_merge_api(body: RollbackMergeRequest):
+def rollback_merge_api(body: RollbackMergeRequest, principal=Depends(require_review_principal)):
     """回滚实体合并：从 entity_merge_log 快照恢复合并前状态。"""
     try:
-        result = rollback_merge(body.merge_log_id, body.reason)
+        result = rollback_merge(body.merge_log_id, body.reason, review_context=principal)
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error", "回滚失败"))
         logger.info(
@@ -1000,95 +1104,100 @@ def rollback_merge_api(body: RollbackMergeRequest):
         return RollbackMergeResponse(**result)
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"[API] 合并回滚失败: merge_log={body.merge_log_id} | {e}")
         raise HTTPException(status_code=500, detail=f"回滚失败: {str(e)}")
 
 
-@router.get("/merge-logs", response_model=MergeLogListResponse)
-def list_merge_logs(limit: int = Query(50, ge=1, le=200)):
-    """查询实体合并日志列表。"""
+@router.get('/merge-logs')
+def list_merge_logs(limit: int = Query(50, ge=1, le=500), dict_ids: str = Query(''),
+                    include_rolled_back: bool = Query(True)):
     try:
-        rows = get_merge_logs(limit)
-        items = [MergeLogItem(**r) for r in rows]
-        return MergeLogListResponse(total=len(items), items=items)
-    except Exception as e:
-        logger.error(f"[API] 合并日志查询失败: {e}")
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        selected = [int(value.strip()) for value in dict_ids.split(',') if value.strip()] if dict_ids else None
+        if selected is not None and len(selected) > 500:
+            raise ValueError('At most 500 dictionary IDs per log lookup')
+        items = get_merge_logs(limit=limit, include_rolled_back=include_rolled_back, dict_ids=selected)
+        return {'total': len(items), 'items': items}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-# ── 身份合并提案 ───────────────────────────────────────────────────────────
+@router.get('/entity-link-proposals')
+@router.get('/identity-merge-proposals')
+def list_identity_merge_proposals(status: str = Query('pending'), limit: int = Query(100, ge=1, le=500)):
+    items = get_identity_merge_proposals(status=status, limit=limit)
+    return {'total': len(items), 'items': items}
 
-@router.get("/identity-merge-proposals", response_model=IdentityMergeProposalListResponse)
-def list_identity_merge_proposals(
-    status: str = Query("pending", description="pending | approved | rejected"),
-    limit: int = Query(100, ge=1, le=500),
-):
-    """查询身份合并提案列表。Agent D 判断 extracted_entity 应链接到 entity_dict 时创建。"""
+
+@router.post('/entity-link-proposals/{proposal_id}/accept', response_model=ReviewActionResponse)
+@router.post('/identity-merge-proposals/{proposal_id}/approve', response_model=ReviewActionResponse)
+def approve_identity_merge_proposal(proposal_id: int, body: IdentityProposalDecisionRequest,
+                                    principal=Depends(require_review_principal)):
     try:
-        items = get_identity_merge_proposals(status=status, limit=limit)
-        return IdentityMergeProposalListResponse(
-            total=len(items),
-            items=[IdentityMergeProposalItem(**d) for d in items],
-        )
-    except Exception as e:
-        logger.error(f"[API] 身份合并提案查询失败: {e}")
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        resolve_identity_merge_proposal(proposal_id, 'approved', principal.subject, body.note, review_context=principal)
+        return ReviewActionResponse(success=True, message='Identity link accepted; content review is unchanged')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/identity-merge-proposals/{proposal_id}/approve", response_model=ReviewActionResponse)
-def approve_identity_merge_proposal(proposal_id: int, body: IdentityMergeProposalResolveRequest):
-    """批准身份合并提案：确认链接 extracted_entity → entity_dict。"""
+@router.post('/entity-link-proposals/{proposal_id}/reject', response_model=ReviewActionResponse)
+@router.post('/identity-merge-proposals/{proposal_id}/reject', response_model=ReviewActionResponse)
+def reject_identity_merge_proposal(proposal_id: int, body: IdentityProposalDecisionRequest,
+                                   principal=Depends(require_review_principal)):
     try:
-        # 先获取提案详情
-        proposals = get_identity_merge_proposals(status="pending", limit=500)
-        proposal = next((p for p in proposals if p["id"] == proposal_id), None)
-        if proposal is None:
-            raise HTTPException(status_code=404, detail="提案不存在或已处理")
-
-        # 执行链接：approve entity 到目标 dict
-        approve_entity_with_alias_writeback(
-            proposal["source_entity_id"],
-            reviewer=body.reviewer,
-            note=f"Agent 身份合并确认。{body.note}".strip(),
-            dict_id=proposal["target_dict_id"],
-            force_new=False,
-        )
-
-        # 标记提案为 approved
-        resolve_identity_merge_proposal(proposal_id, "approved", body.reviewer, body.note)
-
-        logger.info(
-            f"[API] 身份合并提案已批准: proposal_id={proposal_id} "
-            f"entity_id={proposal['source_entity_id']} → dict_id={proposal['target_dict_id']}"
-        )
-        return ReviewActionResponse(success=True, message="已链接实体并批准提案")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[API] 身份合并提案批准失败: proposal_id={proposal_id} | {e}")
-        raise HTTPException(status_code=500, detail=f"批准失败: {str(e)}")
+        resolve_identity_merge_proposal(proposal_id, 'rejected', principal.subject, body.note, review_context=principal)
+        return ReviewActionResponse(success=True, message='Proposal rejected')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/identity-merge-proposals/{proposal_id}/reject", response_model=ReviewActionResponse)
-def reject_identity_merge_proposal(proposal_id: int, body: IdentityMergeProposalResolveRequest):
-    """拒绝身份合并提案：实体保持 pending，提案标记为 rejected。"""
+@router.post('/entity-link-proposals/{proposal_id}/withdraw', response_model=ReviewActionResponse)
+@router.post('/identity-merge-proposals/{proposal_id}/withdraw', response_model=ReviewActionResponse)
+def withdraw_identity_merge_proposal(proposal_id: int, body: IdentityProposalDecisionRequest,
+                                     principal=Depends(require_review_principal)):
     try:
-        proposals = get_identity_merge_proposals(status="pending", limit=500)
-        proposal = next((p for p in proposals if p["id"] == proposal_id), None)
-        if proposal is None:
-            raise HTTPException(status_code=404, detail="提案不存在或已处理")
+        resolve_identity_merge_proposal(proposal_id, 'withdrawn', principal.subject, body.note, review_context=principal)
+        return ReviewActionResponse(success=True, message='Identity link restored from merge log')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-        # 标记提案为 rejected（实体本身保持 pending，等后续处理）
-        resolve_identity_merge_proposal(proposal_id, "rejected", body.reviewer, body.note)
 
-        logger.info(
-            f"[API] 身份合并提案已拒绝: proposal_id={proposal_id} "
-            f"entity_id={proposal['source_entity_id']}"
-        )
-        return ReviewActionResponse(success=True, message="已拒绝提案")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[API] 身份合并提案拒绝失败: proposal_id={proposal_id} | {e}")
-        raise HTTPException(status_code=500, detail=f"拒绝失败: {str(e)}")
+@router.get('/entities/{entity_id}/evidence')
+def entity_evidence(entity_id: int):
+    return {'items': get_object_evidence('entity', entity_id)}
+
+
+@router.get('/relations/{relation_id}/evidence')
+def relation_evidence(relation_id: int):
+    return {'items': get_object_evidence('relation', relation_id)}
+
+
+@router.post('/primekg-mapping-proposals')
+def propose_primekg_mapping(body: PrimeKGMappingRequest):
+    try:
+        return {'id': create_primekg_mapping_proposal(**body.model_dump()), 'status': 'pending'}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get('/primekg-mapping-proposals')
+def list_primekg_mapping_proposals(status: str = Query('pending'), dict_id: int | None = None,
+                                   limit: int = Query(100, ge=1, le=500)):
+    return {'items': get_primekg_mapping_proposals(status=status, dict_id=dict_id, limit=limit)}
+
+
+@router.post('/primekg-mapping-proposals/{proposal_id}/{decision}', response_model=ReviewActionResponse)
+def decide_primekg_mapping(proposal_id: int, decision: str, body: IdentityProposalDecisionRequest,
+                           principal=Depends(require_review_principal)):
+    status = {'accept': 'approved', 'reject': 'rejected', 'withdraw': 'withdrawn'}.get(decision)
+    if status is None:
+        raise HTTPException(status_code=400, detail='Unknown mapping decision')
+    try:
+        resolve_primekg_mapping_proposal(proposal_id, status, principal.subject, body.note, review_context=principal)
+        return ReviewActionResponse(success=True)
+    except HistoryError as exc:
+        raise HTTPException(status_code=exc.status, detail={'code': exc.code, 'message': exc.message})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

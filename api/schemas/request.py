@@ -23,6 +23,9 @@ class ReviewActionRequest(BaseModel):
     note: str = ""
     dict_id: Optional[int] = None  # 指定链接到的 entity_dict id，None=保持消歧结果
     force_new: bool = False  # 以新实体创建，忽略 dict_id
+    confirm_identity: bool = False
+    basis: str = ""
+    evidence: list[dict] = Field(default_factory=list)
 
 
 class BatchApproveEntitiesRequest(BaseModel):
@@ -95,3 +98,17 @@ class BatchResolveMergeRequest(BaseModel):
 class RollbackMergeRequest(BaseModel):
     merge_log_id: int
     reason: str = ""
+
+
+class IdentityProposalDecisionRequest(BaseModel):
+    reviewer: str
+    note: str = ""
+
+
+class PrimeKGMappingRequest(BaseModel):
+    dict_id: int
+    namespace: str = Field(min_length=1)
+    native_id: str = Field(min_length=1)
+    method: str = Field(min_length=1)
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence: dict = Field(default_factory=dict)

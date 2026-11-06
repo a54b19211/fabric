@@ -27,11 +27,24 @@ def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
     return text.strip()
 
 
-def full_to_half(text: str) -> str:
-    """全角字符转半角（仅 ASCII 全角区间 + 全角空格）；与编号抽取用的是同一个实现。"""
+_FULLWIDTH_ALNUM = re.compile(r"[\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]")
+
+
+def full_to_half(text: str, alnum_only: bool = False) -> str:
+    """全角字符转半角。
+
+    alnum_only=False（默认）：全角 ASCII 区间 + 全角空格，与编号抽取用的是同一个实现
+    （processing.identifiers.fold_fullwidth）；适合只关心数字、字母的场景。
+    alnum_only=True：只转全角数字、全角字母和全角空格。U+FF01–FF5E 里也有中文标点（，；：！？（）），
+    整段转换会把「主要目的：」改成「主要目的:」，处理中文字段值时用这一档。
+    """
+    if not text:
+        return ""
+    if alnum_only:
+        return _FULLWIDTH_ALNUM.sub(lambda m: chr(ord(m.group()) - 0xFEE0), text.replace("\u3000", " "))
     from processing.identifiers import fold_fullwidth
 
-    return fold_fullwidth(text) if text else ""
+    return fold_fullwidth(text)
 
 
 def remove_extra_whitespace(text: str) -> str:

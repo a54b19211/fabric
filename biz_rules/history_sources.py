@@ -5,6 +5,7 @@ from __future__ import annotations
 from processing.identifiers import NCT_ID
 import json
 import math
+import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -24,6 +25,23 @@ from biz_rules.history_models import (
 from collection import transport
 
 SOURCE_CATALOG = {
+    "gdelt_doc": {
+        "name": "GDELT DOC 新闻索引",
+        "business_types": ["population_need", "corporate_finance", "regulatory", "literature"],
+        "acquisition_channel": "public_api", "access": "public_metadata",
+        "license_url": "https://www.gdeltproject.org/about.html#termsofuse",
+        "attribution": "The GDELT Project — https://www.gdeltproject.org/",
+        "history_coverage": "仅本地采用后版本；实时DOC接口不是十年新闻档案",
+        "native_id": "完整新闻URL的SHA256，query参数保留",
+        "native_analysis_mode": "news_index_not_independent_evidence",
+        "read_scope": "查询的有界新闻索引；默认最近24小时，支持显式起止窗口",
+        "limitations": [
+            "只有标题、原网址和索引元数据，没有新闻全文；第三方正文另核许可",
+            "GDELT seendate是索引观察时间，不是新闻发布时间或本地首次见到时间",
+            "没有连续分页；达到上限需宿主缩小时间窗，不能推断已覆盖所有报道",
+            "转载和共同源尚未核实，不能按网址数量计算独立证据数",
+        ],
+    },
     "sec_companyfacts": {
         "name": "SEC XBRL 公司概念事实",
         "business_types": ["corporate_finance", "research_capacity"],
@@ -321,6 +339,15 @@ EXTERNAL_FIELDS = {
     "summary",
     "source_published_at",
     "source_updated_at",
+    # 仅交接原件声明和精确位置；不据字段名确认主体、数值口径或来源许可。
+    "company_name",
+    "period_start",
+    "period_end",
+    "unit",
+    "metric_role",
+    "value",
+    "license",
+    "license_url",
 }
 
 
@@ -388,12 +415,21 @@ def stable_raw(source_id, raw):
             node.pop(path[-1])
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+
+
 def project_record(source_id: str, item: ArchiveRecord) -> dict:
     """原件 → 投影。v3 6.3 的迁入封装（{"legacy_migration": {...}, 解析器可读的正文}）：只把正文交给该来源原有的
     解析器，同一处把迁入块写进 facts、publication_role 记为 migrated_record，解析器版本带上转换器版本；原件本身
-    （封装）原样保存。没有可用证明，这里也不造证明。"""
+    （封装）原样保存。没有可用证明，这里也不造证明。来源已给出的材料性质、全文和文档关联
+    （biz_rules.document_evidence）附在解析器的投影上，按拆掉迁入封装后的原件计算。"""
+    from biz_rules.document_evidence import attach_document_evidence
+
     migration, item = _migration_envelope(source_id, item)
     projected = _project_record(source_id, item)
+    try:
+        projected = attach_document_evidence(source_id, item, projected)
+    except (ValueError, TypeError, AttributeError):
+        raise HistoryError("invalid_document_evidence", "材料类型、全文或文档关联依据不符合契约") from None
     if migration is None:
         return projected
     return dict(projected, facts={**projected["facts"], "legacy_migration": migration,
@@ -433,6 +469,9 @@ def _project_record(source_id: str, item: ArchiveRecord) -> dict:
 
         return project_attachment(source_id, item)
     data = parse_json(item.raw_content)
+    if source_id == "gdelt_doc":
+        from biz_rules.gdelt_news import project_gdelt
+        return project_gdelt(item, data)
     if source_id == "sec_companyfacts":
         from biz_rules.sec_xbrl import project_sec
 
@@ -844,12 +883,28 @@ def _read_sec(request):
     return read_sec(request)
 
 
+def _read_gdelt(request):
+    from biz_rules.gdelt_news import read_gdelt
+
+    return read_gdelt(request)
+
+
+def require_public_fetch_enabled():
+    """Keep the legacy default; every configured value must explicitly mean true."""
+    if os.environ.get("DATAFABRIC_HISTORY_FETCH_ENABLED", "true").strip().lower() != "true":
+        raise HistoryError("public_fetch_disabled", "当前环境已关闭公开来源采集；归档与固定版本读取不受影响", 403)
+
+
 def read_public(request: FetchRequest) -> dict:
     """唯一读取入口：按来源目录找到插件并读取。新来源在 collection.catalog 声明，再在 PLUGINS 注册。
     整次读取共用一个预算（collection.transport.Budget）：插件里的每一次真实传输都在发出处过闸计量，
-    返回的请求数、字节数就是这一份计量。"""
+    返回的请求数、字节数就是这一份计量。模拟补采（is_demo）只读隔离原件包（flows.history_fetch），
+    从不到这里；DATAFABRIC_HISTORY_FETCH_ENABLED 不为 true 时公开读取整体关闭。"""
     from collection.catalog import spec
 
+    if request.is_demo:
+        raise HistoryError("demo_public_fetch_forbidden", "模拟补采不得调用外部公开来源", 403)
+    require_public_fetch_enabled()
     declared = spec(request.source_id)
     if not declared.fetchable:
         raise HistoryError("source_not_connected", "该来源在目录中尚未接通", 503)
@@ -1155,4 +1210,5 @@ PLUGINS = {
     "public_api_reader": _read_public_api,
     "who_don": _read_who,
     "sec_xbrl": _read_sec,
+    "gdelt_doc": _read_gdelt,
 }

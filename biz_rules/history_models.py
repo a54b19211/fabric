@@ -149,6 +149,83 @@ class MappingReview(Model):
     available_at: TimeValue
 
 
+class SourceRecordReference(Model):
+    source_id: str = Field(min_length=1, max_length=80)
+    source_record_id: str = Field(min_length=1, max_length=400)
+    version_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class DocumentBasisLocator(Model):
+    """位置只证明原件这样写过，不证明被转述的说法属实。"""
+    json_pointer: str | None = Field(default=None, pattern=r"^/")
+    xpath: str | None = Field(default=None, min_length=1, max_length=2000)
+    start: int | None = Field(default=None, ge=0)
+    end: int | None = Field(default=None, ge=0)
+    quote: str | None = Field(default=None, min_length=1, max_length=10000)
+
+    @model_validator(mode="after")
+    def complete_locator(self):
+        has_text = any(value is not None for value in (self.start, self.end, self.quote))
+        if has_text and (self.start is None or self.end is None or self.quote is None
+                         or self.end <= self.start or self.end - self.start != len(self.quote)):
+            raise ValueError("正文位置必须同时提供精确quote和Unicode起止下标")
+        if not self.json_pointer and not self.xpath and not has_text:
+            raise ValueError("依据必须提供原件JSON路径或正文位置")
+        return self
+
+
+class DocumentRelation(Model):
+    relation_type: Literal["corrects", "retracts", "supplements", "reposts"]
+    target_source_id: str = Field(min_length=1, max_length=80)
+    target_source_record_id: str = Field(min_length=1, max_length=400)
+    target_version_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    basis_locator: DocumentBasisLocator | None = None
+
+
+class SourceIndependence(Model):
+    shared_identifiers: list[str] = Field(default_factory=list, max_length=20)
+    # 同名来源或不同网站均不证明研究相互独立。
+    status: Literal["unknown", "same_origin"] = "unknown"
+    origin_group_id: str | None = Field(default=None, min_length=1, max_length=500)
+    original_source: SourceRecordReference | None = None
+    basis: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class InformationEnvironmentEvent(Model):
+    event_type: Literal["reported_deletion", "official_denial", "moderation", "access_failure"]
+    description: str = Field(min_length=1, max_length=2000)
+    reported_at: TimeValue | None = None
+    detected_at: datetime | None = None
+    target: SourceRecordReference | None = None
+    basis_locator: DocumentBasisLocator
+    # 删除、辟谣和访问失败不是疾病真伪或传播风险的判定。
+
+    @field_validator("detected_at")
+    @classmethod
+    def detected_time_has_timezone(cls, value):
+        return utc(value) if value is not None else None
+
+
+class DocumentEvidence(Model):
+    schema_version: Literal["datafabric.document.evidence.v1"] = "datafabric.document.evidence.v1"
+    material_kind: Literal[
+        "primary_research", "review", "trial_registry", "press_release",
+        "corporate_disclosure", "official_notice", "news_report", "social_media",
+        "repost", "conference_abstract", "graph",
+    ] | None = None
+    text_level: Literal["full_text", "abstract", "title", "excerpt", "metadata"] | None = None
+    document_relations: list[DocumentRelation] = Field(default_factory=list, max_length=100)
+    source_independence: SourceIndependence = Field(default_factory=SourceIndependence)
+    statement_status: Literal["source_reported", "unverified_report"] = "source_reported"
+    information_events: list[InformationEnvironmentEvent] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def social_is_unverified(self):
+        if self.material_kind in {"social_media", "repost"} and self.statement_status != "unverified_report":
+            raise ValueError("社媒及转载说法必须保留未证实标记")
+        return self
+
+
 class HistoryRecord(Model):
     schema_version: Literal["datafabric.history.record.v1"] = (
         "datafabric.history.record.v1"
@@ -177,6 +254,7 @@ class HistoryRecord(Model):
     published_seq: int
     # v3 6.3：按旧编号读 legacy 版本时附上它迁成了什么（db.history._with_legacy_alias），不存进版本
     migration: dict[str, Any] | None = None
+    document_evidence: DocumentEvidence | None = None
 
 
 class ArchiveRecord(Model):
@@ -263,8 +341,10 @@ class FetchContinuation(Model):
 
 
 class FetchRequest(Model):
-    # 只接受来源目录中已接通的来源（collection.catalog.FETCHABLE）
+    # 只接受来源目录中已接通的来源（collection.catalog.FETCHABLE）；external_archive 只用于隔离模拟补采
     source_id: str = Field(min_length=1, max_length=60)
+    is_demo: bool = False
+    demo_instance_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
     query: str = Field(min_length=1, max_length=500)
     source_record_ids: list[str] = Field(default_factory=list, max_length=100)
     max_records: int = Field(default=10, ge=1, le=100)
@@ -295,8 +375,16 @@ class FetchRequest(Model):
     def fixed_scope(self):
         from collection.catalog import FETCHABLE
 
-        if self.source_id not in FETCHABLE:
+        if self.is_demo != (self.demo_instance_id is not None):
+            raise ValueError("模拟补采须绑定隔离实例；真实补采不得带模拟实例")
+        if self.source_id == "external_archive" and not self.is_demo:
+            raise ValueError("归档来源仅允许隔离模拟补采")
+        if self.source_id not in FETCHABLE and self.source_id != "external_archive":
             raise ValueError("来源未在目录中接通")
+        if self.is_demo and not self.query.strip():
+            raise ValueError("模拟补采查询不能为空白")
+        if self.is_demo and (self.updated_since or self.updated_until or self.continuation):
+            raise ValueError("私有模拟包不支持公开源时间窗或续页")
         for value in (self.updated_since, self.updated_until):
             if value is not None:
                 utc(value)
@@ -306,7 +394,7 @@ class FetchRequest(Model):
             and self.updated_since > self.updated_until
         ):
             raise ValueError("来源更新窗口顺序错误")
-        if self.source_id != "who_don" and (self.updated_since or self.updated_until):
+        if self.source_id not in {"who_don", "gdelt_doc"} and (self.updated_since or self.updated_until):
             raise ValueError("此来源尚不支持更新窗口参数")
         if self.continuation is not None:
             from collection.catalog import SITE_SOURCES
@@ -319,7 +407,7 @@ class FetchRequest(Model):
 
 
 class Coverage(Model):
-    mode: Literal["declared_manifest", "bounded_public_query", "adopted_records"]
+    mode: Literal["declared_manifest", "bounded_public_query", "bounded_demo_query", "adopted_records"]
     scope_description: str
     complete: bool
     upstream_pagination_exhausted: bool | None = None
@@ -346,6 +434,9 @@ class RecordCollection(Model):
 
 
 class RunView(Model):
+    fetch_mode: Literal["public", "simulated"] | None = None
+    demo_instance_id: str | None = None
+    input_sha256: str | None = None
     id: str
     source_id: str
     is_demo: bool

@@ -1,118 +1,88 @@
-"""disambiguation.rules（强 ID + 类型规则匹配）的单元测试。"""
+"""Scoped identifier rules use mocked dictionary candidates."""
 from unittest.mock import patch
 
-from disambiguation.rules import (
-    STRONG_ID_FIELDS,
-    match_strong_id,
-    match_by_entity_rules,
-)
-from disambiguation.models import (
-    STATUS_AUTO_MATCHED,
-    STATUS_CANDIDATE_MATCHED,
-)
+from disambiguation.rules import STRONG_ID_FIELDS, match_strong_id, match_by_entity_rules
+from disambiguation.models import STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED
 
 
 class TestStrongIdFields:
-    def test_drug_has_cas(self):
-        assert "cas_number" in STRONG_ID_FIELDS["Drug"]
+    def test_cas_only_identifies_compounds(self):
+        assert "cas_number" in STRONG_ID_FIELDS["Compound"]
+        assert "cas_number" not in STRONG_ID_FIELDS.get("Drug", [])
 
-    def test_target_has_gene_symbol(self):
-        assert "gene_symbol" in STRONG_ID_FIELDS["Target"]
+    def test_gene_symbol_does_not_identify_a_target(self):
+        assert "gene_symbol" not in STRONG_ID_FIELDS.get("Target", [])
 
     def test_unknown_type_absent(self):
         assert "DealItem" not in STRONG_ID_FIELDS
 
     def test_placeholder_id_removed(self):
-        # 占位符 id 字段已移除，防止 Step1 误落锤（COMP_xxx/internal_xxx/target_xxx/拼接串）
-        assert "id" not in STRONG_ID_FIELDS["Company"]
-        assert "id" not in STRONG_ID_FIELDS["Drug"]
-        assert "id" not in STRONG_ID_FIELDS["Target"]
-        # Indication 已于 2026-09-28 整体移出强 ID（icd_code 粒度不足），
-        # 此处用 .get 兼容：即使该类型不再有强 ID 字段，占位符 id 也不应复活
-        assert "id" not in STRONG_ID_FIELDS.get("Indication", [])
+        for entity_type in ("Company", "Drug", "Target", "Indication"):
+            assert "id" not in STRONG_ID_FIELDS.get(entity_type, [])
 
-    def test_pathway_id_kept(self):
-        # Pathway 的 id 是 Reactome ID（R-HSA-xxx），可靠保留
+    def test_pathway_reactome_id_kept(self):
         assert "id" in STRONG_ID_FIELDS["Pathway"]
 
     def test_policy_doc_number_removed(self):
-        # Policy/doc_number 跨机构/跨文种不唯一 + JGXX 占位符，已移除
         assert "Policy" not in STRONG_ID_FIELDS
 
     def test_indication_icd_code_removed(self):
-        # Indication/icd_code 是分类码，粒度粗于疾病实体：
-        # 实测 C49.9 下挂着 4 种不同癌症（皮肤纤维肉瘤 / 腺泡状软组织肉瘤 /
-        # 软组织黏液软骨肉瘤 / 恶性间叶肿瘤）。同一 ICD 码不能推出同一疾病，已移除。
         assert "Indication" not in STRONG_ID_FIELDS
 
 
 class TestMatchStrongId:
     def test_hit(self):
-        with patch(
-            "disambiguation.rules.lookup_external_id",
-            return_value={"dict_id": 42, "canonical_name": "阿司匹林"},
-        ):
-            result = match_strong_id("Drug", {"cas_number": "50-78-2"})
-        assert result is not None
+        with patch("disambiguation.rules.lookup_external_id_candidates", return_value=[
+            {"dict_id": 42, "canonical_name": "阿司匹林", "external_ids": {"cas_number": "50-78-2"}},
+        ]):
+            result = match_strong_id("Compound", {"cas_number": "50-78-2"})
         assert result.status == STATUS_AUTO_MATCHED
         assert result.dict_id == 42
         assert result.confidence == 0.99
         assert result.match_step == "step1_strong_id"
         assert result.matched_name == "阿司匹林"
+        assert result.auto_link is True
 
     def test_miss(self):
-        with patch("disambiguation.rules.lookup_external_id", return_value=None):
-            result = match_strong_id("Drug", {"cas_number": "50-78-2"})
-        assert result is None
+        with patch("disambiguation.rules.lookup_external_id_candidates", return_value=[]):
+            assert match_strong_id("Compound", {"cas_number": "50-78-2"}) is None
 
     def test_no_entity_data(self):
         assert match_strong_id("Drug", None) is None
 
     def test_no_strong_id_field(self):
-        # DealItem 不在 STRONG_ID_FIELDS 中，应直接返回 None 且不调用 lookup
         assert match_strong_id("DealItem", {"name": "x"}) is None
 
     def test_empty_value_skipped(self):
-        result = match_strong_id("Drug", {"cas_number": "   "})
-        assert result is None
+        assert match_strong_id("Compound", {"cas_number": "   "}) is None
 
 
 class TestMatchByEntityRules:
     def test_company_rule(self):
-        with patch(
-            "disambiguation.rules.lookup_external_id",
-            return_value={"dict_id": 7, "canonical_name": "阿斯利康"},
-        ):
-            result = match_by_entity_rules(
-                "阿斯利康", "Company",
-                {"stock_code": "AZN", "exchange": "NASDAQ"},
-            )
-        assert result is not None
+        with patch("disambiguation.rules.lookup_external_id_candidates", return_value=[
+            {"dict_id": 7, "canonical_name": "阿斯利康", "external_ids": {"exchange": "NASDAQ"}},
+        ]):
+            result = match_by_entity_rules("阿斯利康", "Company",
+                                           {"stock_code": "AZN", "exchange": "NASDAQ"})
         assert result.status == STATUS_AUTO_MATCHED
         assert result.dict_id == 7
-        assert result.confidence == 0.95
+        assert result.auto_link is True
 
     def test_drug_cas_rule(self):
-        with patch(
-            "disambiguation.rules.lookup_external_id",
-            return_value={"dict_id": 8, "canonical_name": "阿司匹林"},
-        ):
+        with patch("disambiguation.rules.lookup_external_id_candidates", return_value=[
+            {"dict_id": 8, "canonical_name": "阿司匹林"},
+        ]):
             result = match_by_entity_rules("阿司匹林", "Drug", {"cas_number": "50-78-2"})
-        assert result is not None
-        assert result.status == STATUS_AUTO_MATCHED
-        assert result.confidence == 0.95
+        assert result.status == STATUS_CANDIDATE_MATCHED
+        assert result.auto_link is False
 
     def test_target_gene_rule(self):
-        with patch(
-            "disambiguation.rules.lookup_external_id",
-            return_value={"dict_id": 9, "canonical_name": "CLDN18"},
-        ):
-            result = match_by_entity_rules(
-                "CLDN18.2", "Target", {"gene_symbol": "CLDN18"},
-            )
-        assert result is not None
+        with patch("disambiguation.rules.lookup_external_id_candidates", return_value=[
+            {"dict_id": 9, "canonical_name": "CLDN18"},
+        ]):
+            result = match_by_entity_rules("CLDN18.2", "Target", {"gene_symbol": "CLDN18"})
         assert result.status == STATUS_CANDIDATE_MATCHED
-        assert result.confidence == 0.85
+        assert result.dict_id == result.candidates[0].dict_id == 9
 
     def test_no_entity_data(self):
         assert match_by_entity_rules("x", "Drug", None) is None
@@ -121,5 +91,4 @@ class TestMatchByEntityRules:
         assert match_by_entity_rules("x", "Foo", {"name": "x"}) is None
 
     def test_missing_required_field(self):
-        # Company 无 stock_code，应返回 None
         assert match_by_entity_rules("x", "Company", {"name": "x"}) is None

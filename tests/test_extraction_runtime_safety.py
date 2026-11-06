@@ -325,4 +325,5 @@ def test_existing_rq_job_waits_for_resume_then_extracts_with_the_original_uuid(r
     assert update.call_args_list == [call(uuid, "processing")]
     extract.assert_called_once_with(
         doc_uuid=uuid, raw_content="frozen source text", source_site="test-source", doc_type="article",
+        native_allowed=True,  # a documents-store subject: its text is the source original
     )

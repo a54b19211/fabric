@@ -240,6 +240,19 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
             },
         ],
     }
+    # Legacy is_verified alone must stay a proposal.
+    old = build_document_bundle(observation, [document], [reference])
+    assert all(node.identity_status == "unresolved" for node in old.nodes)
+    reviewed = "2026-10-31T00:00:00Z"
+    observation["dictionary_context"] = {"10": {
+        "id": 10, "is_verified": True, "verified_by": "synthetic-reviewer",
+        "verified_at": reviewed, "verification_basis": "synthetic identity check",
+    }}
+    observation["entities"][0].update(
+        identity_confirmed_by="synthetic-reviewer", identity_confirmed_at=reviewed,
+        identity_confirmation_basis="synthetic fixed evidence check",
+        current_review_evidence=[{**reference.model_dump(), "source_doc_uuid": "selected", "quote": "manual"}],
+    )
     graph = build_document_bundle(observation, [document], [reference])
     assert len(graph.nodes) == 2
     canonical = next(
@@ -256,6 +269,11 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
     )
     resolved = resolve(graph, ref(), name="auto alias")
     assert resolved.candidates == [proposed]
+    # Reusing the same quote from another revision does not carry confirmation across versions.
+    observation["entities"][0]["evidence"] = observation["entities"][0]["current_review_evidence"]
+    observation["entities"][0]["current_review_evidence"] = [{**observation["entities"][0]["evidence"][0], "version_id": "c" * 64}]
+    stale = build_document_bundle(observation, [document], [reference])
+    assert all(node.identity_status == "unresolved" for node in stale.nodes)
     observation["entities"].append(observation["entities"][1])
     with pytest.raises(HistoryError) as error:
         build_document_bundle(observation, [document], [reference])
@@ -495,3 +513,32 @@ def test_primekg_capture_separates_empty_error_and_ambiguous_identity(monkeypatc
         )
     assert error.value.code == "ambiguous_primekg_seed"
     client.close()
+
+def test_two_source_documents_can_share_mentions_without_borrowing_confirmation():
+    from biz_rules.reviewed_graph import GraphDocumentRef
+    from flows.graph_publish import build_document_bundle
+    text = "SYNTHETIC A targets SYNTHETIC B."
+    documents = [StoredDocument(source_doc_uuid=uuid, source_site="external_archive",
+        title="Synthetic", original_raw_content=text, original_raw_sha256=sha256(text))
+        for uuid in ("one", "two")]
+    refs = [GraphDocumentRef(source_id="legacy_documents", source_record_id=document_native_id(doc),
+        version_id=version * 64, raw_sha256=raw * 64, origin_doc_uuid=doc.source_doc_uuid)
+        for doc, version, raw in zip(documents, ("a", "c"), ("b", "d"))]
+    entities, relations = [], []
+    for doc, source_ref in zip(documents, refs):
+        for ident, name in [(1, "SYNTHETIC A"), (2, "SYNTHETIC B")]:
+            entities.append({"id": ident, "source_doc_uuid": "one", "observation_source_doc_uuid": doc.source_doc_uuid,
+                "entity_type": "Drug", "entity_name": name, "review_status": "approved",
+                "dict_id": ident, "source_text": name, "evidence": [{
+                    **source_ref.model_dump(), "source_doc_uuid": doc.source_doc_uuid, "quote": name}]})
+        relations.append({"id": 3, "source_doc_uuid": "one", "observation_source_doc_uuid": doc.source_doc_uuid,
+            "from_entity_id": 1, "to_entity_id": 2, "relation_type": "TARGETS",
+            "source_text": text, "review_status": "approved"})
+    observation = {"schema_version": "datafabric.legacy.graph.observation.v1", "namespace": "fixture",
+        "is_demo": True, "selected_document_uuids": ["one", "two"], "scope_record_ids": ["one", "two"],
+        "verified_dict_ids": ["1", "2"], "entities": entities, "relations": relations}
+    graph = build_document_bundle(observation, documents, refs)
+    assert len(graph.nodes) == 2 and len(graph.edges) == 2
+    assert len({edge.id for edge in graph.edges}) == 2
+    assert all(node.identity_status == "unresolved" for node in graph.nodes)
+    assert all({proof.origin_doc_uuid for proof in node.evidence} == {"one", "two"} for node in graph.nodes)

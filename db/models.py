@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -79,6 +79,49 @@ class DocExtra(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class DocAuthorityResolution(Base):
+    """标准标识符对齐结果的入库记录（A1）。
+
+    与 `doc_extra` 同级，都是 documents 的附属表（无外键，沿用软删除风格）。
+    两族共用一张表，靠 `id_type` 区分：
+      - `drug_name`：走 PubChem → ChEMBL → 本地白名单在线对齐，额外带
+        `candidate`（实际查询的候选名）/ `rule`（命中规则）/ `candidates_tried`
+      - `pmid` / `doi` / `nct_id` / `approval_number` / `cas_number`：走本地
+        格式校验族（`source_id='format'`），三元组字段为空。
+
+    `degraded=True` 表示权威库请求降级（429/5xx/网络异常），既不算命中也不算
+    未命中，统计时必须单独报，不能并进未命中率。
+    """
+    __tablename__ = "doc_authority_resolution"
+    __table_args__ = (
+        UniqueConstraint("uuid", "id_type", "resolution_key", name="uq_doc_authority_key"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    uuid: Mapped[str] = mapped_column(Text, nullable=False)  # 对应 documents.uuid
+    source_site: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    id_type: Mapped[str] = mapped_column(Text, nullable=False, default="drug_name")
+    resolution_key: Mapped[str] = mapped_column(Text, nullable=False)  # 药名原值 或 字段名
+    found: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 占位名（Placebo/盐水/包装描述）跳过查询，须从命中率分母剔除
+    skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    std_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    resolved_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidate: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rule: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidates_tried: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    candidates: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 # ── 3. attachments ────────────────────────────────────────────
 
 class Attachment(Base):
@@ -111,6 +154,9 @@ class EntityDict(Base):
     canonical_source: Mapped[str] = mapped_column(Text, default="")
     canonical_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_basis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -152,6 +198,16 @@ class ExtractedEntity(Base):
     entity_data: Mapped[dict] = mapped_column(JSONB, default=dict)    # 完整字段
     source_text: Mapped[str] = mapped_column(Text, default="")        # LLM抽取时的原文片段
     dict_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)  # 消歧命中的字典ID
+    source_version_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_quote: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_char_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_char_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    identity_confirmed_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    identity_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    identity_confirmation_basis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
     confidence_reason: Mapped[str] = mapped_column(Text, default="")
     review_status: Mapped[str] = mapped_column(Text, default="pending")
@@ -180,6 +236,13 @@ class EntityRelation(Base):
     relation_type: Mapped[str] = mapped_column(Text, nullable=False)
     relation_props: Mapped[dict] = mapped_column(JSONB, default=dict)
     source_text: Mapped[str] = mapped_column(Text, default="")        # LLM抽取时的原文片段
+    source_version_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_quote: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_char_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_char_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
     confidence_reason: Mapped[str] = mapped_column(Text, default="")
     review_status: Mapped[str] = mapped_column(Text, default="pending")
@@ -277,6 +340,7 @@ class EntityMergeLog(Base):
     is_rolled_back: Mapped[bool] = mapped_column(Boolean, default=False)
     rolled_back_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     rollback_reason: Mapped[str] = mapped_column(Text, default="")
+    rolled_back_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -295,6 +359,12 @@ class EntityIdentityMergeProposal(Base):
     agent_run_id: Mapped[str] = mapped_column(Text, default="")
     agent_reason: Mapped[str] = mapped_column(Text, default="")
     agent_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    match_step: Mapped[str] = mapped_column(Text, default="")
+    rule_version: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    model_version: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidate_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    evidence_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True, unique=True)
+    merge_log_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(Text, default="pending")  # pending | approved | rejected
     reviewer: Mapped[str] = mapped_column(Text, default="")
     review_note: Mapped[str] = mapped_column(Text, default="")
@@ -343,3 +413,43 @@ class AgentRun(Base):
     document_title: Mapped[str] = mapped_column(String(512), default="")  # V010
     document_uuid: Mapped[str] = mapped_column(String(64), default="")    # V011
     batch_id: Mapped[str] = mapped_column(String(64), default="")         # V011
+
+
+class EntitySourceEvidence(Base):
+    """Immutable observations. Replaying the same source material is idempotent."""
+    __tablename__ = "entity_source_evidence"
+    __table_args__ = (UniqueConstraint("object_type", "object_id", "evidence_key", name="uq_entity_source_evidence"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    object_type: Mapped[str] = mapped_column(Text, nullable=False)
+    object_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_doc_uuid: Mapped[str] = mapped_column(Text, nullable=False)
+    source_site: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    version_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    quote: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    char_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    match_step: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    evidence_key: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EntityPrimeKGMappingProposal(Base):
+    """Dictionary to PrimeKG mapping remains a proposal until explicitly accepted."""
+    __tablename__ = "entity_primekg_mapping_proposal"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    dict_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    native_id: Mapped[str] = mapped_column(Text, nullable=False)
+    method: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    proposal_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    reviewer: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    review_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

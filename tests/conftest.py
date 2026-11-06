@@ -46,3 +46,22 @@ def mock_get_session():
     """Mock db.session.get_session，注入 mock_session。"""
     with patch("db.session.get_session") as mock:
         yield mock
+
+
+@pytest.fixture(autouse=True)
+def _block_chembl_network(monkeypatch):
+    """默认屏蔽 ChEMBL 在线查询，保证单测不触网、结果确定。
+
+    为什么必须要有：`resolve_identifier` 的 drug_name 通路现在是
+    PubChem → ChEMBL → 本地白名单 三级。历史上只 mock 了 PubChem 的测试，
+    在「PubChem 确认未命中」时会真的去请求 EBI —— 测试变慢、依赖外网、
+    还可能因限流把 degraded 翻成 True 而随机失败。
+
+    需要验证 ChEMBL 分支的测试自己 monkeypatch 覆盖（fixture 先于测试体执行，
+    测试体里的 setattr 会生效）。
+    """
+    from core_engine import authority_client
+
+    monkeypatch.setattr(
+        authority_client, "_fetch_chembl_molecule", lambda _name, _timeout: None
+    )

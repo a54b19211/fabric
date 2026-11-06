@@ -93,12 +93,13 @@ def test_path_direction_scope_and_original_fields_are_preserved():
     graph = build_native_graph([record()])
     trial = graph_identity("clinicaltrials.NCT|NCT00000001")
     child = graph.edges[0].target
-    result = paths(graph, frozen_ref(), trial, child)
+    assert paths(graph, frozen_ref(), trial, child).status == "not_found"  # named child is unresolved
+    result = paths(graph, frozen_ref(), trial, child, review_scope="with_candidates")
     assert result.status == "found" and result.paths[0].edge_ids == [graph.edges[0].id]
     assert result.edges[0].field_evidence == graph.edges[0].field_evidence
     assert result.graph_ref.version_id == frozen_ref().version_id
     assert paths(graph, frozen_ref(), child, trial).status == "not_found"
-    assert paths(graph, frozen_ref(), child, trial, direction="in").status == "found"
+    assert paths(graph, frozen_ref(), child, trial, direction="in", review_scope="with_candidates").status == "found"
     graph.edges[0].review.status = "pending"
     assert paths(graph, frozen_ref(), trial, child).status == "not_found"
     candidate = paths(graph, frozen_ref(), trial, child, review_scope="with_candidates")
@@ -111,11 +112,11 @@ def test_path_direction_scope_and_original_fields_are_preserved():
 def test_paths_have_hard_search_budget_and_do_not_silently_complete():
     graph = build_native_graph([record()])
     result = paths(graph, frozen_ref(), graph.edges[0].target, graph.edges[1].target,
-                   direction="both", max_depth=1)
+                   direction="both", max_depth=1, review_scope="with_candidates")
     assert not result.paths and result.coverage.truncated
     assert result.coverage.stop_reason == "depth_budget"
     bounded = paths(graph, frozen_ref(), graph.edges[0].target, graph.edges[1].target,
-                    direction="both", max_expansions=1)
+                    direction="both", max_expansions=1, review_scope="with_candidates")
     assert bounded.explored_states == 1 and bounded.coverage.stop_reason == "search_budget"
     assert bounded.coverage.truncated
 
@@ -123,11 +124,11 @@ def test_paths_have_hard_search_budget_and_do_not_silently_complete():
 def test_induced_subgraph_returns_only_requested_endpoints_and_exposes_caps():
     graph = build_native_graph([record()])
     trial = GraphIdentity(namespace="clinicaltrials.NCT", id="NCT00000001")
-    selected = subgraph(graph, frozen_ref(), [trial, graph.edges[0].target])
+    selected = subgraph(graph, frozen_ref(), [trial, graph.edges[0].target], review_scope="with_candidates")
     assert len(selected.nodes) == 2 and len(selected.edges) == 1
     assert selected.edges[0].source == trial
     assert len(subgraph(graph, frozen_ref(), [trial]).edges) == 0
-    limited = subgraph(graph, frozen_ref(), [trial, graph.edges[0].target], max_nodes=1)
+    limited = subgraph(graph, frozen_ref(), [trial, graph.edges[0].target], max_nodes=1, review_scope="with_candidates")
     assert limited.coverage.truncated and not limited.edges
     with pytest.raises(HistoryError):
         subgraph(graph, frozen_ref(), [trial, trial])

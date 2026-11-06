@@ -162,6 +162,8 @@ def metadata(record, proof_available_at, artifact, identifiers):
 
 
 def _manifest(target, record, artifact, meta, piece=None):
+    if target["source_id"] != record.source_id or target["is_demo"] is not record.is_demo:
+        raise HistoryError("index_source_space_mismatch", "索引目标与固定原件来源空间不一致", 409)
     identity = {
         "source_instance": target["source_instance"], "source_id": record.source_id,
         "source_record_id": record.source_record_id, "version_id": record.version_id,
@@ -685,7 +687,8 @@ def _sent(row):
 def _validate_receipt(row, receipt):
     expected = row["manifest"]
     if (
-        receipt.get("publication_id") != row["remote_id"]
+        receipt.get("is_demo", False) is not row.get("config", {}).get("is_demo", expected.get("is_demo", False))
+        or receipt.get("publication_id") != row["remote_id"]
         or receipt.get("knowledge_base_id") != expected["knowledge_base_id"]
         or receipt.get("source_scope") != expected["source_scope"]
         or receipt.get("content_sha256") != expected["content_sha256"]
@@ -765,6 +768,8 @@ def process_once(*, client=None, classes=None, lane=None, sent=None):
     verified_receipt = None
     try:
         desired = _current_state(row)
+        if "is_demo" in row["manifest"] and row["manifest"]["is_demo"] is not row["config"]["is_demo"]:
+            raise HistoryError("index_source_space_mismatch", "索引意图与目标空间不一致", 409)
         if desired != "active" and never_sent(row):
             return _finish(row, "disabled", desired, delay=300)  # 确认从没发出过：不联网，直接停用
         if desired == "retiring":

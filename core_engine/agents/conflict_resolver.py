@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from loguru import logger
 
 from core_engine.agent_tools import CONFLICT_RESOLUTION_TOOLS
+from core_engine.agent_tools.decision_tools import resolve_attribute_conflict
 from core_engine.agents.prompts import CONFLICT_RESOLUTION_SYSTEM
 from core_engine.agent_config import AgentConfig
 
@@ -74,33 +75,34 @@ def build_conflict_resolver_graph(config: AgentConfig | None = None):
         last = state["messages"][-1]
         if hasattr(last, "tool_calls") and last.tool_calls:
             for tc in last.tool_calls:
-                if tc.get("name") == "submit_final_decision":
+                if tc.get("name") in {"submit_final_decision", "resolve_attribute_conflict"}:
                     return "finalize"
             return "tools"
         return "finalize"
 
     def finalize(state: ConflictResolutionState) -> dict:
-        import re
+        # Both the current tool and the old completion name produce suggestions only.
         for msg in reversed(state["messages"]):
-            if isinstance(msg, ToolMessage) and msg.name == "submit_final_decision":
-                content = msg.content or ""
-                dm = re.search(r'decision[:：]\s*(\w+)', content)
-                cm = re.search(r'confidence[:：]\s*([\d.]+)', content)
-                return {
-                    "decision": dm.group(1) if dm else "keep_existing",
-                    "resolved_value": state["existing_value"],
-                    "reason": content,
-                    "confidence": float(cm.group(1)) if cm else 0.5,
-                }
-        for msg in reversed(state["messages"]):
-            if isinstance(msg, AIMessage) and msg.content:
-                content = msg.content.strip()
-                if "accept_new" in content.lower() or "接受新" in content:
-                    return {"decision": "accept_new", "resolved_value": state["new_value"], "reason": content, "confidence": 0.7}
-                if "keep_existing" in content.lower() or "保留现" in content:
-                    return {"decision": "keep_existing", "resolved_value": state["existing_value"], "reason": content, "confidence": 0.7}
-                break
-        return {"decision": "keep_existing", "resolved_value": state["existing_value"], "reason": "", "confidence": 0.5}
+            if not isinstance(msg, AIMessage):
+                continue
+            for call in reversed(msg.tool_calls or []):
+                if call.get("name") not in {"submit_final_decision", "resolve_attribute_conflict"}:
+                    continue
+                args = call.get("args") or {}
+                decision = args.get("resolution") or args.get("decision")
+                value = (state["existing_value"] if decision == "keep_existing" else
+                         state["new_value"] if decision == "accept_new" else args.get("resolved_value", ""))
+                try:
+                    proposal = json.loads(resolve_attribute_conflict.invoke({
+                        "merge_id": state["merge_id"], "resolution": decision, "resolved_value": value,
+                        "reason": args.get("reason", ""), "confidence": args.get("confidence", 0.0),
+                    }))
+                    return {"decision": proposal["proposed_decision"], "resolved_value": proposal["resolved_value"],
+                            "reason": proposal["reason"], "confidence": proposal["confidence"]}
+                except (ValueError, TypeError, KeyError):
+                    continue
+        return {"decision": "escalated", "resolved_value": "", "reason": "未返回有效的结构化冲突建议，需人工复核",
+                "confidence": 0.0}
 
     graph = StateGraph(ConflictResolutionState)
     graph.add_node("init", _make_initial_messages)
