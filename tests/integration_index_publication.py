@@ -1217,3 +1217,68 @@ def test_a_retired_source_is_not_recalled_and_a_mixed_query_keeps_the_others(pg,
     asked.clear()
     search(client)
     assert set(asked) == {"synthetic-isolated-kb", "synthetic-legacy-kb"}
+
+
+def test_a_new_artifact_still_parsing_or_failed_never_replaces_the_old_entry(pg, monkeypatch):
+    """T-26（Codex 708）：同一 raw version 升级清洗处理器。新产物在 WeKnora 还在解析或解析失败时，旧条目照常服务
+    （handover），新条目不算可检索；新产物 ready 后旧条目才停用，旧条目的知识编号和回执保留，旧命中不再采用。"""
+    from processing import clean_text
+
+    version, journal = ready_job(pg)
+    old = job(pg)
+    body = fixed_text(pg, version)
+    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    profile()
+    new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
+    assert new["version_id"] == old["version_id"] == version and new["artifact_key"] != old["artifact_key"]
+
+    class Remote(SearchClient):
+        parse = "processing"  # what WeKnora says of the new artifact's entry
+
+        def publish(self, body):
+            super().publish(body)
+            return self.status(publication_id(body))
+
+        def status(self, pid):
+            got = super().status(pid)
+            if got is not None and pid == new["remote_id"] and self.parse != "completed":
+                failed = self.parse == "failed"
+                got.update(parse_status=self.parse, index_status="failed" if failed else "indexing",
+                           vector_status="failed" if failed else "pending", chunk_count=0, vector_count=0)
+            return got
+
+    client = Remote(pg)
+    client.journal.update(copy.deepcopy(journal.journal))
+    client.hit(old, body[:40])
+
+    def serving():
+        found = search(client)["results"]
+        return [(r["version_id"], r["artifact"]["artifact_key"], r["artifact"]["handover"]) for r in found]
+
+    seen = []
+    for parse in ("processing", "failed"):
+        client.parse = parse
+        due_job(pg, new["id"])
+        seen.append(index.process_once(client=client)["state"])
+        due_job(pg, old["id"])
+        index.process_once(client=client)  # the old entry: retiring, kept, no network
+        assert job_state(pg, old["id"]) == ("ready", "active") and job_state(pg, new["id"])[0] != "ready"
+        seen.append(job_state(pg, new["id"])[0])
+        assert serving() == [(version, old["artifact_key"], True)]  # still the old artifact, said so
+    assert "ready" not in seen and client.disable_count == 0
+    client.parse = "completed"
+    with pg.begin() as conn:  # WeKnora parsed it on a retry
+        conn.execute(text("UPDATE index_publications SET attempts=0 WHERE id=:i"), {"i": new["id"]})
+    due_job(pg, new["id"])
+    assert index.process_once(client=client)["state"] == "ready"
+    due_job(pg, old["id"])
+    assert index.process_once(client=client)["desired_state"] == "superseded"
+    kept = rows(pg, "SELECT state, knowledge_id, receipt FROM index_publications WHERE id=:i", {"i": old["id"]})[0]
+    assert kept["state"] == "disabled" and kept["knowledge_id"] == old["knowledge_id"] and kept["receipt"]
+    after = search(client)
+    assert after["results"] == [] and after["excluded"]["counts"] == {"changed_at_cutoff": 1}
+
+
+def job_state(pg, job_id):
+    got = rows(pg, "SELECT state, desired_state FROM index_publications WHERE id=:i", {"i": job_id})[0]
+    return got["state"], got["desired_state"]
