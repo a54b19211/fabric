@@ -15,16 +15,17 @@ import hashlib
 import json
 import re
 import time
-from uuid import uuid4
 
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
+from db.lease import LeaseQueue
 from processing import attachment_parse
 
 from collection.catalog import ATTACHMENT_SOURCES  # noqa: E402  有附件版本的来源：站点、PubMed 全文、本地导入
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 900
+CLAIMS = LeaseQueue("derived_text_claims", ("version_id", "processor_version"))
 
 
 def _pending(conn, sources, batch, retry_after_seconds):
@@ -56,20 +57,12 @@ def _pending(conn, sources, batch, retry_after_seconds):
 
 def claim(engine, version_id, lease_seconds=LEASE_SECONDS):
     """认领一个版本；返回租约令牌，别人持有且未过期时返回 None。"""
-    token = uuid4().hex
     with engine.begin() as conn:
-        got = conn.execute(
-            text("""
-              INSERT INTO derived_text_claims(version_id, processor_version, lease_token, lease_until)
-              VALUES (:v, :pv, :t, clock_timestamp() + make_interval(secs => :s))
-              ON CONFLICT (version_id, processor_version) DO UPDATE
-                SET lease_token=EXCLUDED.lease_token, lease_until=EXCLUDED.lease_until
-                WHERE derived_text_claims.lease_until <= clock_timestamp()
-              RETURNING lease_token
-            """),
-            {"v": version_id, "pv": attachment_parse.PROCESSOR_VERSION, "t": token, "s": lease_seconds},
-        ).scalar()
-    return token if got == token else None
+        return CLAIMS.claim_key(conn, _claim_key(version_id), lease_seconds)
+
+
+def _claim_key(version_id):
+    return {"version_id": version_id, "processor_version": attachment_parse.PROCESSOR_VERSION}
 
 
 def _reuse(engine, sha):
@@ -114,12 +107,8 @@ def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, t
             )
         body = result["text"]
         with engine.begin() as conn:
-            held = conn.execute(
-                text("SELECT lease_token FROM derived_text_claims WHERE version_id=:v AND processor_version=:pv "
-                     "FOR UPDATE"),
-                {"v": row["version_id"], "pv": attachment_parse.PROCESSOR_VERSION},
-            ).scalar()
-            if held != token:
+            claimed = {**_claim_key(row["version_id"]), "lease_token": token}
+            if not CLAIMS.holds(conn, claimed, unexpired=False, lock=True):
                 counts["lost_lease"] = counts.get("lost_lease", 0) + 1
                 continue
             attempt = conn.execute(
@@ -154,11 +143,7 @@ def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, t
                     "segments": json.dumps(result.get("segments") or [], ensure_ascii=False),
                 },
             )
-            conn.execute(
-                text("UPDATE derived_text_claims SET lease_until=clock_timestamp() WHERE version_id=:v "
-                     "AND processor_version=:pv AND lease_token=:t"),
-                {"v": row["version_id"], "pv": attachment_parse.PROCESSOR_VERSION, "t": token},
-            )
+            CLAIMS.update(conn, claimed, "lease_until=clock_timestamp()", unexpired=False)  # done: lease ends now
         counts[result["status"]] += 1
     return counts
 
