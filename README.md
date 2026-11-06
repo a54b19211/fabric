@@ -25,55 +25,30 @@
 
 ## 环境要求
 
-- Python **3.11.9**
+- CPython **3.10**（现役 Fabric 的解释器是 3.10.12；`requirements.lock` 按 3.10、x86_64-unknown-linux-gnu 解析）
+- uv **0.13.0**（在 PATH 上，例如 `~/.local/bin/uv`；或者 `make UV=<路径>`）
 
 ---
 
 ## 快速开始
 
-### 1. 创建虚拟环境
+### 开发环境与测试
+
+唯一的入口是 `Makefile`，依赖只从 `requirements.lock` 安装：
 
 ```bash
-python -m venv .venv
+make venv              # .venv：只按 requirements.lock 安装（含契约 wheel），每个包都校验 sha256
+make test              # 单元测试 tests/test_*.py（不连数据库）
+make test-integration  # tests/integration_*.py：临时 PostgreSQL（paradedb）和 Redis 容器，跑完按名字删除
+make check-install     # 一个用完即删的新环境：按锁文件安装，再逐个导入全部模块
+make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致（要访问包索引）
 ```
 
-激活虚拟环境：
-
-- Windows（CMD）：
-  ```cmd
-  .venv\Scripts\activate.bat
-  ```
-- Windows（PowerShell）：
-  ```powershell
-  .venv\Scripts\Activate.ps1
-  ```
-- macOS / Linux：
-  ```bash
-  source .venv/bin/activate
-  ```
-
-### 2. 安装依赖
-
-```bash
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-抽取一致性的共享契约 `extraction-contract`（BioCheck 协议的字段集合、严格回执校验、规范序列化）当前固定 **1.13.0**，与 BioRadar 相同；
-Fabric 用到的是 `CONTRACT`、`canonical`、`verdict`、`derived_status`，默认核对器 `biocheck.extraction_rules.v3` 在 1.0.0 到 1.13.0 之间没有变化。
-按 wheel 的 sha256 固定，单独安装：先在 extraction-contract 检出目录里执行 `bash scripts/build_and_verify.sh`
-（离线构建可复现的 wheel，并校验同一哈希），再执行：
-
-```bash
-pip install --no-index --find-links "${EXTRACTION_CONTRACT_WHEELS:-../extraction-contract/dist}" --require-hashes -r requirements-contract.txt
-```
-
-检查一份干净安装能导入全部模块（新建临时虚拟环境，按上面两份依赖安装，再逐个导入；用完删除）：
-
-```bash
-bash ops/check_clean_install.sh          # 已有环境里只做导入检查：python ops/check_imports.py
-```
-
-
+- 直接依赖写在 `requirements.txt` 和 `requirements-contract.txt`；`requirements.lock` 是由它们解析出的完整锁，每个包都带 sha256（锁文件头一行写着解析命令）。改了依赖后运行 `make lock`，再提交锁文件。国内镜像用 `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple make venv`，哈希照样校验。
+- 抽取一致性的共享契约 `extraction-contract`（BioCheck 协议的字段集合、严格回执校验、规范序列化）当前固定 **1.13.0**，与 BioRadar 相同；Fabric 用到的是 `CONTRACT`、`canonical`、`verdict`、`derived_status`，默认核对器 `biocheck.extraction_rules.v3` 在 1.0.0 到 1.13.0 之间没有变化。它不在包索引上：先在旁边的 extraction-contract 检出里执行 `bash scripts/build_and_verify.sh`（离线构建可复现的 wheel，并校验同一哈希），`make venv` 从 `../extraction-contract/dist`（或 `EXTRACTION_CONTRACT_WHEELS=<目录>`）取它，哈希和 `requirements-contract.txt`、`requirements.lock` 里的相同。
+- `make test-integration` 由 `ops/run_integration_tests.sh` 执行：容器名 `fabric-itest-<角色>-<随机>`（`ITEST_PREFIX` 可改），只绑定 127.0.0.1 上 19871 以上的空闲端口；要求固定端口（18436、18636、18736、18737）的几组测试在私有网络命名空间（`unshare -rn`）里跑，经 unix socket 转发到容器，不占用主机上的这些端口。真实 BioCheck 规则的测试用 `BIOCHECK_SRC`（默认 `../clean-biocheck`，先在那里 `make venv`）；找不到检出时这些测试显示为跳过。也可以只跑其中几个文件：`bash ops/run_integration_tests.sh tests/integration_lease.py`。
+- 已验证的组合：uv 0.13.0、CPython 3.10.12：单元 1356 个通过，集成 318 个通过（260 + 46 + 9 + 3）。
+- 已有环境里只做导入检查：`python ops/check_imports.py`。
 
 ## 运行
 
@@ -149,10 +124,10 @@ bash ops/check_clean_install.sh          # 已有环境里只做导入检查：p
 普通测试使用项目依赖，包含本次新增的 17 项运行保护检查：
 
 ```bash
-python -m pytest
+make test
 ```
 
-真实数据库/队列检查需要新建、用完可删除的本机 PostgreSQL 和 Redis。
+真实数据库/队列检查需要新建、用完可删除的本机 PostgreSQL 和 Redis（`make test-integration` 会自己起好再删掉，见「开发环境与测试」）。
 数据库名和用户均为 `datafabric_runtime_test`，使用无业务数据的专用测试环境；
 两个端口须指向这些测试服务。不要填写现役服务端口。
 
