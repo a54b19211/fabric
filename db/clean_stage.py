@@ -35,6 +35,7 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
+from db.lease import LeaseQueue
 from processing import attachment_parse, clean_text, identifiers, profile
 
 SKIP_SOURCES = ("reviewed_graph", "primekg_graph")
@@ -45,6 +46,7 @@ REGISTRY_SOURCES = {"clinicaltrials", "chictr", "cde_ctr"}
 
 CHUNK_SEQS = 1000
 LEASE_SECONDS = 600
+CHUNKS = LeaseQueue("derived_stage_chunks", ("stage_key", "source_id", "chunk_start"))
 MAX_CHUNK_ATTEMPTS = 3
 
 
@@ -175,18 +177,14 @@ def _claim(engine, key, chunk_seqs, lease_seconds):
                    updated_at=clock_timestamp()
             WHERE stage_key=:k AND state='leased' AND lease_until < clock_timestamp() AND attempts >= :max
         """), {"k": key, "max": MAX_CHUNK_ATTEMPTS})
-        again = conn.execute(text("""
-            UPDATE derived_stage_chunks SET state='leased', lease_token=:t, attempts=attempts+1,
-                   lease_until=clock_timestamp()+make_interval(secs => :s), updated_at=clock_timestamp()
-            WHERE (stage_key, source_id, chunk_start) = (
-              SELECT stage_key, source_id, chunk_start FROM derived_stage_chunks
-              WHERE stage_key=:k AND attempts < :max
-                AND ((state='leased' AND lease_until < clock_timestamp()) OR state='failed')
-              ORDER BY chunk_start LIMIT 1 FOR UPDATE SKIP LOCKED)
-            RETURNING source_id, chunk_start, chunk_end, lease_token
-        """), {"t": token, "s": lease_seconds, "k": key, "max": MAX_CHUNK_ATTEMPTS}).mappings().first()
+        again = CHUNKS.claim(
+            conn, lease_seconds=lease_seconds, alias="c", params={"k": key, "max": MAX_CHUNK_ATTEMPTS},
+            columns="c.stage_key,c.source_id,c.chunk_start,c.chunk_end", where="c.stage_key=:k AND c.attempts < :max",
+            # 过期的 leased 块和可重试的 failed 块可以接走
+            free="((c.state='leased' AND c.lease_until < clock_timestamp()) OR c.state='failed')",
+            order_by="c.chunk_start", also_set="state='leased',attempts=attempts+1,updated_at=clock_timestamp()")
         if again:
-            return dict(again)
+            return {k: again[k] for k in ("source_id", "chunk_start", "chunk_end", "lease_token")}
         sources = conn.execute(text("""
             SELECT s.source_id, s.published_seq,
                    COALESCE((SELECT max(chunk_end) FROM derived_stage_chunks c
@@ -389,11 +387,7 @@ def process(*, batch=None, time_budget_seconds=600, chunk_seqs=CHUNK_SEQS, lease
         try:
             with engine.begin() as conn:
                 conn.execute(text("SET LOCAL statement_timeout='120000ms'"))
-                held = conn.execute(text(
-                    "SELECT lease_token FROM derived_stage_chunks WHERE stage_key=:k AND source_id=:s "
-                    "AND chunk_start=:c FOR UPDATE"), {"k": key, "s": chunk["source_id"], "c": chunk["chunk_start"]}
-                ).scalar()
-                if held != chunk["lease_token"]:
+                if not CHUNKS.holds(conn, {**chunk, "stage_key": key}, unexpired=False, lock=True):
                     continue  # 租约已被别人接走：这块不写
                 rows = conn.execute(text(_CHUNK_SQL), {"source": chunk["source_id"], "start": chunk["chunk_start"],
                                                        "end": chunk["chunk_end"]}).mappings().all()
@@ -409,12 +403,10 @@ def process(*, batch=None, time_budget_seconds=600, chunk_seqs=CHUNK_SEQS, lease
         except Exception as exc:  # noqa: BLE001 -- 块失败进死信（state=failed，带原因），可重试有上限
             counts = {**before, "chunks": counts["chunks"], "failed_chunks": counts["failed_chunks"] + 1}
             with engine.begin() as conn:
-                conn.execute(text(
-                    "UPDATE derived_stage_chunks SET state='failed', error=CAST(:e AS jsonb), lease_until=NULL, "
-                    "updated_at=clock_timestamp() WHERE stage_key=:k AND source_id=:s AND chunk_start=:c "
-                    "AND lease_token=:t"),
-                    {"e": json.dumps({"type": type(exc).__name__, "message": str(exc)[:300]}), "k": key,
-                     "s": chunk["source_id"], "c": chunk["chunk_start"], "t": chunk["lease_token"]})
+                CHUNKS.update(conn, {**chunk, "stage_key": key},
+                              "state='failed', error=CAST(:e AS jsonb), lease_until=NULL, updated_at=clock_timestamp()",
+                              {"e": json.dumps({"type": type(exc).__name__, "message": str(exc)[:300]})},
+                              unexpired=False)
     return counts
 
 
