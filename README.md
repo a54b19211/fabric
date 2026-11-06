@@ -58,12 +58,19 @@ python -m venv .venv
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-抽取一致性的共享契约 `extraction-contract`（BioCheck 协议的字段集合、严格回执校验、规范序列化，与 BioRadar 共用同一版本）
+抽取一致性的共享契约 `extraction-contract`（BioCheck 协议的字段集合、严格回执校验、规范序列化）当前固定 **1.13.0**，与 BioRadar 相同；
+Fabric 用到的是 `CONTRACT`、`canonical`、`verdict`、`derived_status`，默认核对器 `biocheck.extraction_rules.v3` 在 1.0.0 到 1.13.0 之间没有变化。
 按 wheel 的 sha256 固定，单独安装：先在 extraction-contract 检出目录里执行 `bash scripts/build_and_verify.sh`
 （离线构建可复现的 wheel，并校验同一哈希），再执行：
 
 ```bash
 pip install --no-index --find-links "${EXTRACTION_CONTRACT_WHEELS:-../extraction-contract/dist}" --require-hashes -r requirements-contract.txt
+```
+
+检查一份干净安装能导入全部模块（新建临时虚拟环境，按上面两份依赖安装，再逐个导入；用完删除）：
+
+```bash
+bash ops/check_clean_install.sh          # 已有环境里只做导入检查：python ops/check_imports.py
 ```
 
 
