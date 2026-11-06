@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Literal
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ from biz_rules.history_models import (
     canonical,
     sha256,
 )
+from biz_rules.timestamps import parse_timestamp
 from collection.catalog import WATCHABLE, spec
 from collection.windows import cycle_request
 from db import history, publication
@@ -134,13 +135,13 @@ def refresh_once(engine=None):
             state = dict(row)
             if (
                 state.get("lease_until")
-                and datetime.fromisoformat(state["lease_until"]) > now
+                and parse_timestamp(state["lease_until"]) > now
             ):
                 continue
             if (
                 state.get("state") in {"failed", "blocked", "idle"}
                 and state.get("next_check_at")
-                and datetime.fromisoformat(state["next_check_at"]) > now
+                and parse_timestamp(state["next_check_at"]) > now
             ):
                 continue
             state.update(
@@ -410,14 +411,14 @@ def source_health(source_id, engine=None):
         )
     if runtime and runtime.get("last_heartbeat"):  # noqa: SIM102
         if (
-            observed - datetime.fromisoformat(runtime["last_heartbeat"])
+            observed - parse_timestamp(runtime["last_heartbeat"])
         ).total_seconds() > 120:
             runtime["state"] = "stale"
     for value in watch_states:
         last = value.get("last_check_at")
         value["stale"] = (
             last is None
-            or (observed - datetime.fromisoformat(last)).total_seconds()
+            or (observed - parse_timestamp(last)).total_seconds()
             > value["cadence_seconds"] + 180
         )
     return {

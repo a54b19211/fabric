@@ -31,6 +31,7 @@ from biz_rules.history_models import (
     canonical,
     sha256,
 )
+from biz_rules.timestamps import parse_timestamp
 from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
 from biz_rules.observations import OBSERVATION_PARSER
 from db import history
@@ -877,7 +878,7 @@ def _cursor(value):
     """续页标记是上一页最后一条的“更新时间|作业编号”；格式不对就拒绝，不猜。"""
     try:
         stamp, key = value.rsplit("|", 1)
-        moment = datetime.fromisoformat(stamp)
+        moment = parse_timestamp(stamp)
         if moment.tzinfo is None:
             raise ValueError()
         return moment, _job_id(key)

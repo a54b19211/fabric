@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from biz_rules.timestamps import parse_timestamp
 from collection.catalog import spec
 
 
@@ -18,7 +19,7 @@ def window_start(watch, state: dict, now: datetime) -> datetime:
     checkpoint = state.get("window_checkpoint")
     overlap = timedelta(days=spec(watch.request.source_id).incremental.overlap_days)
     if checkpoint:
-        return datetime.fromisoformat(checkpoint) - overlap
+        return parse_timestamp(checkpoint) - overlap
     return now - timedelta(days=watch.lookback_days)
 
 

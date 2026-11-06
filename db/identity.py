@@ -10,6 +10,7 @@ import re
 
 from sqlalchemy import DateTime, or_
 from sqlalchemy.dialects.postgresql import insert
+from biz_rules.timestamps import parse_timestamp
 from db.models import (EntityDict, ExtractedEntity, EntityRelation, EntityAlias,
                        EntitySourceEvidence, EntityIdentityMergeProposal,
                        EntityPrimeKGMappingProposal, EntityMergeLog, EntityMergeQueue, ReviewLog)
@@ -100,7 +101,7 @@ def parse_time(value):
     if isinstance(value, datetime):
         result = value
     else:
-        result = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        result = parse_timestamp(str(value).replace('Z', '+00:00'))
     if result.tzinfo is None:
         raise ValueError('Object times must include a timezone')
     return result
