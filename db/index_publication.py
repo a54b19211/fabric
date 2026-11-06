@@ -20,7 +20,6 @@ import re
 import threading
 import time
 from datetime import datetime
-from uuid import uuid4
 
 from pydantic import Field
 from sqlalchemy import text
@@ -35,6 +34,7 @@ from biz_rules.history_models import (
 from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
 from biz_rules.observations import OBSERVATION_PARSER
 from db import history
+from db.lease import LeaseQueue, backoff, vacant
 from processing import index_pieces
 
 FRESH_DAYS = 3
@@ -315,6 +315,10 @@ def scan_committed(*, batch_size=100):
 # 认领租约：长于最慢的一次桥接调用（停用最长 180 秒，加状态核对和余量）。租约短于调用就必然在结果落库前
 # 失效，结果写不进去。
 LEASE_SECONDS = 300
+JOBS = LeaseQueue("index_publications", ("id",))
+# Claiming also moves the next check past the lease (see _claim) and stamps the row.
+_CLAIM_ALSO = "next_check_at=clock_timestamp()+make_interval(secs=>:_lease_seconds),updated_at=clock_timestamp()"
+_CLAIM_ROW = {"alias": "p", "columns": "p.*,t.config,t.enabled", "also_set": _CLAIM_ALSO}
 
 
 def _claim(lane=None, sent=None):
@@ -328,23 +332,10 @@ def _claim(lane=None, sent=None):
     if sent is not None:
         where += " AND p.first_send_at IS NOT NULL" if sent else " AND p.first_send_at IS NULL"
     with history.history_engine().begin() as conn:
-        row = conn.execute(text("""
-            SELECT p.*,t.config,t.enabled FROM index_publications p
-            JOIN index_targets t ON t.id=p.target_id
-            WHERE p.next_check_at<=clock_timestamp()
-              AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp())""" + where + """
-            ORDER BY p.next_check_at,p.id FOR UPDATE OF p SKIP LOCKED LIMIT 1
-        """), {"lane": lane}).mappings().first()
-        if row is None:
-            return None
-        token = uuid4().hex
-        conn.execute(text("""
-            UPDATE index_publications SET lease_token=:token,
-              lease_until=clock_timestamp()+make_interval(secs => :lease),
-              next_check_at=clock_timestamp()+make_interval(secs => :lease),
-              updated_at=clock_timestamp() WHERE id=:id
-        """), {"id": row["id"], "token": token, "lease": LEASE_SECONDS})
-        return dict(row, lease_token=token)
+        return JOBS.claim(conn, lease_seconds=LEASE_SECONDS, **_CLAIM_ROW,
+                          joins="JOIN index_targets t ON t.id=p.target_id",
+                          where="p.next_check_at<=clock_timestamp()" + where, params={"lane": lane},
+                          order_by="p.next_check_at,p.id")
 
 
 # ---- T-30 scheduling ------------------------------------------------------------------------------------
@@ -502,12 +493,9 @@ def _reserve(row, content, receipt=None):
             _gate_closed(conn, kb, reason)
             return reason
         _gate_open(conn, kb)
-        changed = conn.execute(text("""
-            UPDATE index_publications SET first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',
-              sent_chars=:chars,sent_bytes=:size,attempt_floor=:floor,updated_at=clock_timestamp()
-            WHERE id=:id AND lease_token=:token AND lease_until>clock_timestamp()
-        """), {"id": row["id"], "token": row["lease_token"], "chars": chars, "size": size, "floor": floor})
-        if changed.rowcount != 1:
+        if JOBS.update(conn, row, "first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',"
+                       "sent_chars=:chars,sent_bytes=:size,attempt_floor=:floor,updated_at=clock_timestamp()",
+                       {"chars": chars, "size": size, "floor": floor}) != 1:
             raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
     return None
 
@@ -522,38 +510,26 @@ def _claim_class(klass):
             gated = _gated(conn, limits())
             waiting = [kb for (kb,) in conn.execute(text(
                 "SELECT DISTINCT p.manifest->>'knowledge_base_id' FROM index_publications p "
-                "WHERE p.next_check_at<=clock_timestamp() AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp()) "
-                "AND " + CLASS_SQL[klass]))]
+                "WHERE p.next_check_at<=clock_timestamp() AND " + vacant("p") + " AND " + CLASS_SQL[klass]))]
             for kb in waiting:
                 if kb in gated:
                     _gate_closed(conn, kb, gated[kb])
                 else:
                     _gate_open(conn, kb)
-        row = conn.execute(text("""
-            SELECT p.*,t.config,t.enabled FROM index_publications p
-            JOIN index_targets t ON t.id=p.target_id
-            LEFT JOIN index_claim_cursor c ON c.class=:k AND c.source_id=t.config->>'source_id'
-            WHERE p.next_check_at<=clock_timestamp()
-              AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp())
-              AND """ + CLASS_SQL[klass] + """
-              AND NOT (p.manifest->>'knowledge_base_id' = ANY(:gated))
-            ORDER BY c.last_claimed_at NULLS FIRST,p.next_check_at,p.id
-            FOR UPDATE OF p SKIP LOCKED LIMIT 1
-        """), {"k": klass, "gated": list(gated)}).mappings().first()
+        row = JOBS.claim(
+            conn, lease_seconds=LEASE_SECONDS, **_CLAIM_ROW, params={"k": klass, "gated": list(gated)},
+            joins="JOIN index_targets t ON t.id=p.target_id "
+                  "LEFT JOIN index_claim_cursor c ON c.class=:k AND c.source_id=t.config->>'source_id'",
+            where="p.next_check_at<=clock_timestamp() AND " + CLASS_SQL[klass]
+                  + " AND NOT (p.manifest->>'knowledge_base_id' = ANY(:gated))",
+            order_by="c.last_claimed_at NULLS FIRST,p.next_check_at,p.id")
         if row is None:
             return None
-        token = uuid4().hex
-        conn.execute(text("""
-            UPDATE index_publications SET lease_token=:token,
-              lease_until=clock_timestamp()+make_interval(secs => :lease),
-              next_check_at=clock_timestamp()+make_interval(secs => :lease),
-              updated_at=clock_timestamp() WHERE id=:id
-        """), {"id": row["id"], "token": token, "lease": LEASE_SECONDS})
         conn.execute(text("""
             INSERT INTO index_claim_cursor(class,source_id,last_claimed_at) VALUES (:k,:s,clock_timestamp())
             ON CONFLICT (class,source_id) DO UPDATE SET last_claimed_at=clock_timestamp()
         """), {"k": klass, "s": row["config"]["source_id"]})
-        return dict(row, lease_token=token, job_class=klass)
+        return dict(row, job_class=klass)
 
 
 def rotation_gaps():
@@ -675,12 +651,8 @@ def _current_state(row):
 
 def _sent(row):
     with history.history_engine().begin() as conn:
-        changed = conn.execute(text("""
-            UPDATE index_publications SET first_send_at=COALESCE(first_send_at,clock_timestamp()),
-              state='sending',updated_at=clock_timestamp()
-            WHERE id=:id AND lease_token=:token AND lease_until>clock_timestamp()
-        """), {"id": row["id"], "token": row["lease_token"]})
-        if changed.rowcount != 1:
+        if JOBS.update(conn, row, "first_send_at=COALESCE(first_send_at,clock_timestamp()),"
+                       "state='sending',updated_at=clock_timestamp()") != 1:
             raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
 
 
@@ -705,25 +677,21 @@ def _finish(row, state, desired, *, receipt=None, error=None, delay=30, final=Fa
     """final：重试也不会好（超出上传或分块核验预算）——直接受阻，记明原因和覆盖缺口，不进入无休止的 indexing。"""
     attempts = max(row["attempts"] + 1, 6 if final else 0) if error else 0
     if error:
-        delay = min(3600, 10 * 2 ** min(attempts, 8))
+        delay = backoff(attempts, base=10, cap=3600)
         if attempts >= 6:
             state = "blocked"
             if desired != "active":
                 delay = 3600  # 清理失败每小时核对一次；不再上传资料。
     with history.history_engine().begin() as conn:
-        result = conn.execute(text("""
-            UPDATE index_publications SET state=:state,desired_state=:desired,
+        released = JOBS.release(conn, row, """state=:state,desired_state=:desired,
               receipt=COALESCE(CAST(:receipt AS jsonb),receipt),
-              knowledge_id=COALESCE(:knowledge,knowledge_id),error=CAST(:error AS jsonb),
-              attempts=:attempts,lease_token=NULL,lease_until=NULL,
+              knowledge_id=COALESCE(:knowledge,knowledge_id),error=CAST(:error AS jsonb),attempts=:attempts,
               ready_at=CASE WHEN :state='ready' THEN COALESCE(ready_at,clock_timestamp()) ELSE ready_at END,
-              next_check_at=clock_timestamp()+make_interval(secs=>:delay),updated_at=clock_timestamp()
-            WHERE id=:id AND lease_token=:token AND lease_until>clock_timestamp()
-        """), {"id": row["id"], "token": row["lease_token"], "state": state,
-                "desired": desired, "receipt": canonical(receipt) if receipt is not None else None,
-                "knowledge": receipt.get("knowledge_id") if receipt else None,
-                "error": canonical(error) if error else None, "attempts": attempts, "delay": delay})
-        if result.rowcount != 1:
+              next_check_at=clock_timestamp()+make_interval(secs=>:delay),updated_at=clock_timestamp()""",
+            {"state": state, "desired": desired, "receipt": canonical(receipt) if receipt is not None else None,
+             "knowledge": receipt.get("knowledge_id") if receipt else None,
+             "error": canonical(error) if error else None, "attempts": attempts, "delay": delay})
+        if released != 1:
             raise HistoryError("index_lease_lost", "迟到索引回执未覆盖当前处理资格", 409)
         if state == "ready" and row["state"] != "ready":
             # 刚能检索：同一记录里等着交接的其他产物的条目马上复查（同一产物的其他片不用叫醒）
@@ -737,12 +705,8 @@ def _finish(row, state, desired, *, receipt=None, error=None, delay=30, final=Fa
 def _hold(row, seconds):
     """不联网、不改状态，过一会儿再看（受阻作业等权限/头版变化；改造前的待办等新产物 ready）。"""
     with history.history_engine().begin() as conn:
-        result = conn.execute(text("""
-            UPDATE index_publications SET lease_token=NULL,lease_until=NULL,
-              next_check_at=clock_timestamp()+make_interval(secs=>:seconds)
-            WHERE id=:id AND lease_token=:token AND lease_until>clock_timestamp()
-        """), {"id": row["id"], "token": row["lease_token"], "seconds": seconds})
-        if result.rowcount != 1:
+        if JOBS.release(conn, row, "next_check_at=clock_timestamp()+make_interval(secs=>:seconds)",
+                        {"seconds": seconds}) != 1:
             raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
     return {"id": row["id"], "state": row["state"], "desired_state": row["desired_state"]}
 
