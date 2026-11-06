@@ -638,234 +638,24 @@ def _publish(
     verified_mapping_ids=frozenset(),
     mapping_basis="",
 ):
+    """Adopt the prepared originals as versions of the run's source (one transaction) and close the run."""
     source = _source(conn, run["source_id"], lock=True)
     seq = source["published_seq"]
     version_ids, new_count = [], 0
     dependencies = set()
     for item, projected in prepared:
         dependencies.update(_validate_derived(conn, run, item, now, proof))
-        mapping_review = None
+        mapping_review, mapping_time = None, None
         if item.source_record_id in verified_mapping_ids:
-            facts = projected["facts"]
-            required = (
-                "program_id",
-                "lineage_id",
-                "indication",
-                "jurisdiction",
-                "mapping_available_at",
-            )
-            if not all(
-                isinstance(facts.get(key), str) and facts[key].strip()
-                for key in required
-            ):
-                raise HistoryError(
-                    "mapping_incomplete", "审核项目映射缺少五项有出处字段"
-                )
-            mapping_time = source_time(facts["mapping_available_at"])
-            if mapping_time is None or mapping_time.upper_bound() > now:
-                raise HistoryError(
-                    "invalid_mapping_time", "映射公开时间格式错误或晚于本次采用"
-                )
-            mapping_review = MappingReview(
-                reviewed_by="history-admin",
-                reviewed_at=now,
-                basis=mapping_basis,
-                available_at=proof.available_at,
-            )
+            mapping_review, mapping_time = _mapping_review(projected, proof, now, mapping_basis)
         if proof.kind == "reviewed_archive":
-            # 后续结局/新映射不能借旧原件证明倒灌到历史特征。
-            bounds = [
-                projected.get("source_published_at"),
-                projected.get("source_updated_at"),
-            ]
-            if projected["record_kind"] == "outcome":
-                facts = projected["facts"]
-                bounds += [
-                    source_time(facts.get(key))
-                    for key in ("event_at", "public_available_at", "observation_end")
-                ]
-            if mapping_review:
-                bounds.append(mapping_time)
-            for bound in bounds:
-                value = (
-                    TimeValue.model_validate(bound)
-                    if isinstance(bound, dict)
-                    else bound
-                )
-                if value and value.upper_bound() > proof.available_at.upper_bound():
-                    raise HistoryError(
-                        "archive_time_conflict",
-                        "原件新增事实、结局窗口或映射晚于归档可见证明",
-                    )
-        if proof.kind == "reviewed_archive":
-            prior_versions = conn.execute(
-                text("""
-                  SELECT payload FROM history_versions
-                  WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native
-                    AND proof_available_at IS NOT NULL
-                """),
-                {
-                    "source": run["source_id"],
-                    "demo": run["is_demo"],
-                    "native": item.source_record_id,
-                },
-            ).scalars()
-            updated = (
-                TimeValue.model_validate(projected["source_updated_at"])
-                if projected["source_updated_at"]
-                else None
-            )
-            for previous in prior_versions:
-                if previous["raw_sha256"] == sha256(item.raw_content):
-                    continue
-                old_proof = TimeValue.model_validate(
-                    previous["availability_proof"]["available_at"]
-                )
-                current_proof = proof.available_at
-                overlap = (
-                    current_proof.lower_bound() <= old_proof.upper_bound()
-                    and old_proof.lower_bound() <= current_proof.upper_bound()
-                )
-                if not overlap:
-                    continue
-                if current_proof.upper_bound() != old_proof.upper_bound():
-                    raise HistoryError(
-                        "ambiguous_history_version",
-                        "历史可见证明的时间精度重叠，不能确定修订先后；请补精确档案证明，旧版已保留",
-                    )
-                old_updated = (
-                    TimeValue.model_validate(previous["source_updated_at"])
-                    if previous.get("source_updated_at")
-                    else None
-                )
-                ordered = (
-                    updated is not None
-                    and old_updated is not None
-                    and (
-                        updated.upper_bound() < old_updated.lower_bound()
-                        or old_updated.upper_bound() < updated.lower_bound()
-                    )
-                )
-                if not ordered:
-                    raise HistoryError(
-                        "ambiguous_history_version",
-                        "同一历史时点的原件无法确定修订先后；请补可区分的来源修订时间或档案证明，旧版已保留",
-                    )
-        proof_data = proof.model_dump(mode="json")
-        # 本次审核/采用时钟不参与版本身份；重复提交同原件/同审核依据复用原版本。
-        identity_proof = {k: v for k, v in proof_data.items() if k != "verified_at"}
-        identity_mapping = (
-            mapping_review.model_dump(mode="json") if mapping_review else None
-        )
-        if identity_mapping:
-            identity_mapping.pop("reviewed_at")
-        identity = {
-            "source_id": run["source_id"],
-            "source_record_id": item.source_record_id,
-            "is_demo": run["is_demo"],
-            "raw_sha256": sha256(item.raw_content),
-            "raw_media_type": item.raw_media_type,
-            "parser_version": PARSER_VERSION,
-            **{key: value for key, value in projected.items() if key not in DERIVED_PAYLOAD_FIELDS},
-            "availability_proof": identity_proof,
-            "mapping_review": identity_mapping,
-        }
-        version_id = sha256(canonical(identity))
-        existing = conn.execute(
-            text("SELECT version_id FROM history_versions WHERE version_id=:id"),
-            {"id": version_id},
-        ).first()
-        current = _current_version(conn, run, item) if run["kind"] == "fetch" else None
-        stable = stable_raw(run["source_id"], item.raw_content) if current is not None else None
-        if (
-            existing is None
-            and stable is not None
-            and stable_raw(run["source_id"], current["payload"].get("raw_content")) == stable
-            and _same_identity(current["payload"], identity, ignore_raw=True)
-        ):
-            # 公开观察只差JSON序列化（键顺序、空白）或来源每次改写的数据日期（ClinicalTrials
-            # versionHolder）：仍是当前版本；原件、raw_sha256、first_seen 都保留首次所见。档案导入不走这里。
-            version_id, existing = current["version_id"], (current["version_id"],)
-        elif run["kind"] == "fetch" and existing is not None and current is not None:
-            # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。
-            # 档案导入仍按原件/证明去重，不把迟到的旧档案改成当前状态。
-            if _same_identity(current["payload"], identity):
-                # 恢复后的连续A复用A3，不能重新引用A1或再增加一个版本。
-                version_id = current["version_id"]
-            else:
-                # 首次出现的内容ID不变；再次采用旧内容时，以前一版区分这次变化。
-                version_id = sha256(canonical({
-                    "content_version_id": version_id,
-                    "previous_version_id": current["version_id"],
-                }))
-                existing = conn.execute(
-                    text("SELECT version_id FROM history_versions WHERE version_id=:id"),
-                    {"id": version_id},
-                ).first()
+            _check_archive_bounds(projected, proof, mapping_time if mapping_review else None)
+            _check_archive_order(conn, run, item, projected, proof)
+        identity = _version_identity(run, item, projected, proof, mapping_review)
+        version_id, existing, current = _adopted_version(conn, run, item, identity)
         if existing is None:
             seq += 1
-            payload = HistoryRecord(
-                source_id=run["source_id"],
-                source_record_id=item.source_record_id,
-                version_id=version_id,
-                is_demo=run["is_demo"],
-                raw_content=item.raw_content,
-                raw_media_type=item.raw_media_type,
-                raw_sha256=identity["raw_sha256"],
-                first_seen_at=now,
-                received_at=now,
-                availability_proof=proof,
-                mapping_review=mapping_review,
-                published_seq=seq,
-                **projected,
-            )
-            proof_at = (
-                proof.available_at.upper_bound()
-                if proof.kind == "reviewed_archive"
-                else None
-            )
-            conn.execute(
-                text("""
-                INSERT INTO history_versions
-                  (version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,
-                   proof_available_at,published_seq,payload)
-                VALUES (:id,:source,:demo,:native,:kind,:first,:received,:proof,:seq,CAST(:payload AS jsonb))
-            """),
-                {
-                    "id": version_id,
-                    "source": run["source_id"],
-                    "demo": run["is_demo"],
-                    "native": item.source_record_id,
-                    "kind": item.record_kind,
-                    "first": now,
-                    "received": now,
-                    "proof": proof_at,
-                    "seq": seq,
-                    "payload": payload.model_dump_json(),
-                },
-            )
-            conn.execute(
-                text(
-                    _DERIVE + " FROM history_versions h WHERE h.version_id=:id AND NOT EXISTS "
-                    "(SELECT 1 FROM history_version_rank r WHERE r.version_id=h.version_id)"
-                ),
-                {"id": version_id},
-            )
-            if run["kind"] == "fetch":
-                # 确定性加工和版本同一事务：版本可见时，它与上一版的登记差分也已就绪
-                registry_changes.record(
-                    conn,
-                    source_id=run["source_id"],
-                    is_demo=run["is_demo"],
-                    record_id=item.source_record_id,
-                    previous=current,
-                    to_version_id=version_id,
-                    facts=projected.get("facts"),
-                    locators=projected.get("field_locators"),
-                    pairing="current_at_adoption",
-                    summary=projected.get("clean_text"),
-                    raw=item.raw_content,
-                )
+            _insert_version(conn, run, item, projected, proof, mapping_review, version_id, seq, now, current)
             new_count += 1
         version_ids.append(version_id)
     _persist_dependencies(conn, source, dependencies)
@@ -874,6 +664,202 @@ def _publish(
         text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
         {"seq": seq, "id": run["source_id"]},
     )
+    _close_run(conn, run, prepared, version_ids, new_count, coverage, error, now)
+
+
+_MAPPING_FIELDS = ("program_id", "lineage_id", "indication", "jurisdiction", "mapping_available_at")
+
+
+def _mapping_review(projected, proof, now, basis):
+    """A reviewed program mapping needs its five sourced fields and a public time no later than this adoption."""
+    facts = projected["facts"]
+    if not all(isinstance(facts.get(key), str) and facts[key].strip() for key in _MAPPING_FIELDS):
+        raise HistoryError("mapping_incomplete", "审核项目映射缺少五项有出处字段")
+    mapping_time = source_time(facts["mapping_available_at"])
+    if mapping_time is None or mapping_time.upper_bound() > now:
+        raise HistoryError("invalid_mapping_time", "映射公开时间格式错误或晚于本次采用")
+    review = MappingReview(reviewed_by="history-admin", reviewed_at=now, basis=basis, available_at=proof.available_at)
+    return review, mapping_time
+
+
+def _check_archive_bounds(projected, proof, mapping_time):
+    """后续结局/新映射不能借旧原件证明倒灌到历史特征。"""
+    bounds = [projected.get("source_published_at"), projected.get("source_updated_at")]
+    if projected["record_kind"] == "outcome":
+        facts = projected["facts"]
+        bounds += [source_time(facts.get(key)) for key in ("event_at", "public_available_at", "observation_end")]
+    if mapping_time is not None:
+        bounds.append(mapping_time)
+    for bound in bounds:
+        value = TimeValue.model_validate(bound) if isinstance(bound, dict) else bound
+        if value and value.upper_bound() > proof.available_at.upper_bound():
+            raise HistoryError("archive_time_conflict", "原件新增事实、结局窗口或映射晚于归档可见证明")
+
+
+def _check_archive_order(conn, run, item, projected, proof):
+    """Another archived original of the same record whose proof window overlaps this one must be ordered by an
+    exact proof time and distinguishable source update times; otherwise the revision order is unknown."""
+    prior_versions = conn.execute(
+        text("""
+          SELECT payload FROM history_versions
+          WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native
+            AND proof_available_at IS NOT NULL
+        """),
+        {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
+    ).scalars()
+    updated = TimeValue.model_validate(projected["source_updated_at"]) if projected["source_updated_at"] else None
+    for previous in prior_versions:
+        if previous["raw_sha256"] == sha256(item.raw_content):
+            continue
+        old_proof = TimeValue.model_validate(previous["availability_proof"]["available_at"])
+        current_proof = proof.available_at
+        overlap = (
+            current_proof.lower_bound() <= old_proof.upper_bound()
+            and old_proof.lower_bound() <= current_proof.upper_bound()
+        )
+        if not overlap:
+            continue
+        if current_proof.upper_bound() != old_proof.upper_bound():
+            raise HistoryError(
+                "ambiguous_history_version",
+                "历史可见证明的时间精度重叠，不能确定修订先后；请补精确档案证明，旧版已保留",
+            )
+        old_updated = (
+            TimeValue.model_validate(previous["source_updated_at"]) if previous.get("source_updated_at") else None
+        )
+        ordered = (
+            updated is not None
+            and old_updated is not None
+            and (
+                updated.upper_bound() < old_updated.lower_bound()
+                or old_updated.upper_bound() < updated.lower_bound()
+            )
+        )
+        if not ordered:
+            raise HistoryError(
+                "ambiguous_history_version",
+                "同一历史时点的原件无法确定修订先后；请补可区分的来源修订时间或档案证明，旧版已保留",
+            )
+
+
+def _version_identity(run, item, projected, proof, mapping_review):
+    # 本次审核/采用时钟不参与版本身份；重复提交同原件/同审核依据复用原版本。
+    identity_proof = {k: v for k, v in proof.model_dump(mode="json").items() if k != "verified_at"}
+    identity_mapping = mapping_review.model_dump(mode="json") if mapping_review else None
+    if identity_mapping:
+        identity_mapping.pop("reviewed_at")
+    return {
+        "source_id": run["source_id"],
+        "source_record_id": item.source_record_id,
+        "is_demo": run["is_demo"],
+        "raw_sha256": sha256(item.raw_content),
+        "raw_media_type": item.raw_media_type,
+        "parser_version": PARSER_VERSION,
+        **{key: value for key, value in projected.items() if key not in DERIVED_PAYLOAD_FIELDS},
+        "availability_proof": identity_proof,
+        "mapping_review": identity_mapping,
+    }
+
+
+def _adopted_version(conn, run, item, identity):
+    """(version_id, existing row or None, current version of the record for a fetch or None)."""
+    version_id = sha256(canonical(identity))
+    existing = conn.execute(
+        text("SELECT version_id FROM history_versions WHERE version_id=:id"),
+        {"id": version_id},
+    ).first()
+    current = _current_version(conn, run, item) if run["kind"] == "fetch" else None
+    stable = stable_raw(run["source_id"], item.raw_content) if current is not None else None
+    if (
+        existing is None
+        and stable is not None
+        and stable_raw(run["source_id"], current["payload"].get("raw_content")) == stable
+        and _same_identity(current["payload"], identity, ignore_raw=True)
+    ):
+        # 公开观察只差JSON序列化（键顺序、空白）或来源每次改写的数据日期（ClinicalTrials
+        # versionHolder）：仍是当前版本；原件、raw_sha256、first_seen 都保留首次所见。档案导入不走这里。
+        version_id, existing = current["version_id"], (current["version_id"],)
+    elif run["kind"] == "fetch" and existing is not None and current is not None:
+        # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。
+        # 档案导入仍按原件/证明去重，不把迟到的旧档案改成当前状态。
+        if _same_identity(current["payload"], identity):
+            # 恢复后的连续A复用A3，不能重新引用A1或再增加一个版本。
+            version_id = current["version_id"]
+        else:
+            # 首次出现的内容ID不变；再次采用旧内容时，以前一版区分这次变化。
+            version_id = sha256(canonical({
+                "content_version_id": version_id,
+                "previous_version_id": current["version_id"],
+            }))
+            existing = conn.execute(
+                text("SELECT version_id FROM history_versions WHERE version_id=:id"),
+                {"id": version_id},
+            ).first()
+    return version_id, existing, current
+
+
+def _insert_version(conn, run, item, projected, proof, mapping_review, version_id, seq, now, current):
+    payload = HistoryRecord(
+        source_id=run["source_id"],
+        source_record_id=item.source_record_id,
+        version_id=version_id,
+        is_demo=run["is_demo"],
+        raw_content=item.raw_content,
+        raw_media_type=item.raw_media_type,
+        raw_sha256=sha256(item.raw_content),
+        first_seen_at=now,
+        received_at=now,
+        availability_proof=proof,
+        mapping_review=mapping_review,
+        published_seq=seq,
+        **projected,
+    )
+    proof_at = proof.available_at.upper_bound() if proof.kind == "reviewed_archive" else None
+    conn.execute(
+        text("""
+        INSERT INTO history_versions
+          (version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,
+           proof_available_at,published_seq,payload)
+        VALUES (:id,:source,:demo,:native,:kind,:first,:received,:proof,:seq,CAST(:payload AS jsonb))
+    """),
+        {
+            "id": version_id,
+            "source": run["source_id"],
+            "demo": run["is_demo"],
+            "native": item.source_record_id,
+            "kind": item.record_kind,
+            "first": now,
+            "received": now,
+            "proof": proof_at,
+            "seq": seq,
+            "payload": payload.model_dump_json(),
+        },
+    )
+    conn.execute(
+        text(
+            _DERIVE + " FROM history_versions h WHERE h.version_id=:id AND NOT EXISTS "
+            "(SELECT 1 FROM history_version_rank r WHERE r.version_id=h.version_id)"
+        ),
+        {"id": version_id},
+    )
+    if run["kind"] == "fetch":
+        # 确定性加工和版本同一事务：版本可见时，它与上一版的登记差分也已就绪
+        registry_changes.record(
+            conn,
+            source_id=run["source_id"],
+            is_demo=run["is_demo"],
+            record_id=item.source_record_id,
+            previous=current,
+            to_version_id=version_id,
+            facts=projected.get("facts"),
+            locators=projected.get("field_locators"),
+            pairing="current_at_adoption",
+            summary=projected.get("clean_text"),
+            raw=item.raw_content,
+        )
+
+
+def _close_run(conn, run, prepared, version_ids, new_count, coverage, error, now):
     state = "partial" if error and version_ids else "failed" if error else "completed"
     if (
         run["kind"] == "fetch"
