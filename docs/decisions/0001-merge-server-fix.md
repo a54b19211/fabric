@@ -1,6 +1,7 @@
 # 0001 合并 feat/server_fix 到重构线
 
-- 状态：待团队评审（LazyLazyFolivora、xvziwen、WWTang）；合并前不进 `main`、不部署
+- 状态：**待团队评审，功能边界见 [0003](0003-integration-open-items.md)**（LazyLazyFolivora、xvziwen、WWTang）。这不是被接受的版本，也不替代团队的主线；不进 `main`、不部署
+- 合并后**并非团队的全部功能都在运行**：药名与标识符对齐库保留但没有接入任何调用方，对齐不会触发；History 来源的记录不走团队的规则抽取，退回模型抽取。逐条见 0003
 - 日期：2026-11-06
 - 分支：`integration/rebuild-2026-11`，底为 `feat/t26-clean-v12`（c9ed485，已含 t29/t30），合入 `feat/server_fix`（d316aad）
 - `dev`（dccbc2a）已全部在 `feat/server_fix` 里（49c923f 合入），没有单独再合
@@ -21,7 +22,7 @@ git 报出 19 个文件内容冲突（diff3 下 36 处）和 14 个“一边删�
 1. 重构线已经删掉的链路不恢复（“一条路”是验收过的设计，也是审计的硬指标）。团队在这些被删文件里的改动，凡是新链路
    上有对应位置的，把意图移过去；没有对应位置的，不带过来，在“没有带过来的改动”一节逐条列出，由团队决定要不要在
    新链路上重做。
-2. 团队新增、能独立成立的模块都保留（含测试），即使暂时没有调用方（药名与标识符对齐库），不替团队删掉研究成果。
+2. 团队新增、能独立成立的模块都保留（含测试），不替团队删掉研究成果；没有调用方的（药名与标识符对齐库）保留但不运行，列在 0003 里，不算“功能已带过来”。
 3. 重构线已上线或已验收的行为不变：版本身份、读取闸门与预算、监看来源集合、迁移编号、索引请求体都保持原样；
    与之冲突的团队改动按这些接口改写，改写处都有测试。
 
@@ -85,9 +86,16 @@ git 报出 19 个文件内容冲突（diff3 下 36 处）和 14 个“一边删�
    `V020__doc_authority_resolution`、`V021__doc_authority_skipped`、`V023__identity_evidence`，与重构线的 V020–V023 撞号
    （迁移器按 `Vnnn` 记账，撞号的那一份会被当作已执行而跳过）。处理：重构线编号不动；团队三份改为
    `V033__doc_authority_resolution.sql`、`V034__doc_authority_skipped.sql`、`V035__identity_evidence.sql`，引用它们的测试同步改名。
-   三份都是 `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`，重复执行无害。**已经按团队编号迁移过的库**（如果有）：
-   `schema_migrations` 里的 V020–V023 记的是团队那几份，重构线的 V020–V023 会被跳过；需要人工核对后删掉这四条记录再跑
-   一次迁移（重构线 V020–V023 也都是 `IF NOT EXISTS` 写法）。
+   **已经按团队编号迁移过的库**不用人工处理：迁移器（`migration/migrate.py`）不再只按版本号认，而是按 `schema_migrations`
+   里存的（版本号, 描述, 校验和）去查 `migration/known_migrations.py`（由 `ops/known_migrations.py` 从仓库历史生成：任何
+   提交里出现过的每一份迁移文件）。团队的 V020/V021/V022/V023 记录被认作今天的 V033/V034/V020/V035，原记录不删不改，
+   对应关系另记在 `schema_migration_renumbered`；被团队记录占住编号的重构线 V021/V022/V023 照常执行，记在
+   `schema_migrations_shared_slot`。认不出的记录（没有任何提交出现过的版本/描述/校验和组合，或早已被替换的旧主线迁移）
+   直接报错，不执行、不写入任何内容。两种真实基线（c9ed485 和 d316aad 的迁移器各自迁好、带数据的库）升级后数据行和原记录
+   都在，库结构与全新安装相同：`tests/integration_migration_baselines.py`（比对 schema 里的全部列、约束、索引、触发器、
+   函数、规则、视图、序列）。另做过一次 `pg_dump --schema-only` 比对（3017 行），除 schema 名和 pg_dump 每次随机的
+   `
+estrict` 令牌外逐行一致。
 2. **`document_evidence` 不进版本身份。** 团队把它放进投影，而投影整体参与 `version_id` 计算；直接合并会让合并前见过的
    每条记录在下次刷新时都多一个版本（现役约 60 万个版本），并带动重清洗、重画像、重建索引。它完全由原件和投影算出，
    不能区分两个版本，所以照存进新版本的 payload，但不参与版本身份（`db/history.DERIVED_PAYLOAD_FIELDS`）。代价：合并前
@@ -121,7 +129,7 @@ git 报出 19 个文件内容冲突（diff3 下 36 处）和 14 个“一边删�
 
 1. **药名与标识符对齐的“通路”。** 对齐库本身（`core_engine/authority_client.py`、`authority_resolver.py`、
    `authority_store.py`、`biz_rules/drug_name_normalizer.py`、`db.repository.upsert_authority_resolutions`、表
-   `doc_authority_resolution`、`docker-compose.authority.yml`）和它们的单元测试都保留并通过；但调用它的是旧 ETL 的
+   `doc_authority_resolution`、`docker-compose.authority.yml`）和它们的单元测试都保留并通过；但它唯一的调用方是旧 ETL 的
    `transform_pipeline` / `storage_writer`，已删除，所以现在**没有任何代码会触发对齐**。新链路上自然的位置是加工层（按固定
    版本的清洗正文和投影字段做一个带 `PROCESSOR_VERSION` 的派生步骤，结果进派生表），需要团队按论文口径设计。随旧链路
    删除的测试：`test_drug_name_pipeline.py`、`test_identifier_alignment.py`、`test_identifier_pipeline.py`、
@@ -133,13 +141,13 @@ git 报出 19 个文件内容冲突（diff3 下 36 处）和 14 个“一边删�
    （`PMCpmc-id: PMC…;`）的问题。框架原生的 PubMed 投影不读 esummary，从 EFetch XML 的
    `ArticleId[@IdType='pmc']` 取 PMCID，全文路由（`collection/pubmed_fulltext.fulltext`）还按 `PMC\d+` 校验，所以新链路上
    没有这个问题，不需要移植。
-4. **history 主体的规则抽取**（见“语义冲突”5）：新采集的 ClinicalTrials 记录只在 History 里，目前仍由模型抽取。
+4. **history 主体的规则抽取**（见“语义冲突”5）：新采集的 ClinicalTrials/FDA 记录只在 History 里，不走团队的规则抽取，退回模型抽取。
 5. **ETL 入口兼容**（`test_engine_import_compatibility.py`、`main_etl.py` 转发）和 **`/api/weknora/sync-batch` 停用提示**
    （`test_weknora_batch_retirement.py`）：入口与接口已整体删除，相应用例随之删除。
 
 ## 验证
 
 - 单元：合并前（c9ed485）1002 通过；合并后 1356 通过（多出的是团队新增用例），无跳过、无失败。
-- 集成（自建一次性 PostgreSQL/Redis 容器）：合并前 245 通过；合并后 305 通过，无跳过、无失败。团队新增的集成用例
+- 集成（自建一次性 PostgreSQL/Redis 容器）：合并前 245 通过；合并后 305 通过，无跳过、无失败；之后的清理和迁移识别（含 tests/integration_migration_baselines.py 的两种真实基线）完成后 318 通过。团队新增的集成用例
   （`integration_demo_fetch*.py`、`integration_identity_review.py`、`integration_history.py` 和
   `integration_publication.py` 里新增的几条）都在其中。

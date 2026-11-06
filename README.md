@@ -4,7 +4,7 @@
 
 ## 版本使用
 
-`integration/rebuild-2026-11` 是重构线（`feat/t26-clean-v12`）与团队分支 `feat/server_fix`（已含 `dev`）的合并分支，尚未进入 `main`，也没有部署；现役目录 `/home/zk_test/zk_projects/ZK_Data-Fabric-test` 仍按原分支运行。每处合并冲突怎样处理、哪些团队改动没有带过来、迁移为什么改号，见 [docs/decisions/0001-merge-server-fix.md](docs/decisions/0001-merge-server-fix.md)。不能因为测试分支通过，就认为学生使用的服务已经更新。不要在现役目录复制环境文件、清队列或执行数据库迁移。
+`integration/rebuild-2026-11` 是重构线（`feat/t26-clean-v12`）与团队分支 `feat/server_fix`（已含 `dev`）的合并分支，**待团队评审、未被接受**，尚未进入 `main`，也没有部署，不替代团队主线；合并后并非团队全部功能都在运行（药名与标识符对齐库保留但未接入，History 来源记录的规则抽取退回模型抽取），功能边界和未完成项见 [docs/decisions/0003-integration-open-items.md](docs/decisions/0003-integration-open-items.md)；现役目录 `/home/zk_test/zk_projects/ZK_Data-Fabric-test` 仍按原分支运行。每处合并冲突怎样处理、哪些团队改动没有带过来、迁移为什么改号，见 [docs/decisions/0001-merge-server-fix.md](docs/decisions/0001-merge-server-fix.md)。不能因为测试分支通过，就认为学生使用的服务已经更新。不要在现役目录复制环境文件、清队列或执行数据库迁移。
 
 团队 10 月 31 日一轮改造（分支 `codex/fabric-opus-20261031`，基线 `82bad7b`）的重点是让“资料里写了什么”“系统猜它是谁”“人工确认了什么”分得清楚。主要变化：
 
@@ -608,7 +608,7 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 
 新来源 `gdelt_doc` 只返回标题、原网址及索引元数据，不提供新闻全文；其 `seendate` 是 GDELT 的观察时间，不是原帖发布时间，也不是本机的首次采集时间。接口无续页，到条数上限须缩小查询时间窗。实际探测曾返回 429，故不能声称当前服务器已经稳定采通。资料使用需注明 [GDELT 项目](https://www.gdeltproject.org/about.html#termsofuse)。ProMED 尚无所需许可；各级卫健委网页尚未逐站验证；实时社媒商用接口尚未选定。这些都不能写成已覆盖。
 
-新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
+新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
 
 历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。
 
