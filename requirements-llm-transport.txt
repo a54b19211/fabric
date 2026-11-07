@@ -1,0 +1,6 @@
+# The shared model transport (zk-llm-transport: one OpenAI-compatible chat call over HTTP, with a callback
+# before every request and after every outcome), pinned by the sha256 of its reproducible wheel; a file of
+# its own for the same reason as requirements-contract.txt. Build the wheel in the llm-transport checkout
+# (make build, which checks the same hash), then:
+#   pip install --no-index --find-links "${LLM_TRANSPORT_WHEELS:-../llm-transport/dist}" --require-hashes -r requirements-llm-transport.txt
+zk-llm-transport==0.1.1 --hash=sha256:7ef33b7230e99adfbc16e420e20a74d8d9114b4bdc04682f6cb8e115c1f05770

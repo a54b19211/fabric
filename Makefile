@@ -6,14 +6,16 @@ UV ?= uv
 PYTHON ?= 3.10
 # the shared contract wheel (built in the sibling extraction-contract checkout; hash in the lock)
 EXTRACTION_CONTRACT_WHEELS ?= ../extraction-contract/dist
+# the shared model transport wheel (built in the sibling llm-transport checkout; hash in the lock)
+LLM_TRANSPORT_WHEELS ?= ../llm-transport/dist
 # the real-checker integration tests run the BioCheck rules from a BioCheck checkout in its own venv
 BIOCHECK_SRC ?= ../clean-biocheck
 BIOCHECK_PYTHON ?= $(BIOCHECK_SRC)/.venv/bin/python
 VENV ?= .venv
 PY = $(VENV)/bin/python
-LOCK_INPUTS = requirements.txt requirements-contract.txt
+LOCK_INPUTS = requirements.txt requirements-contract.txt requirements-llm-transport.txt
 LOCK_FLAGS = --generate-hashes --python-version 3.10 --python-platform x86_64-unknown-linux-gnu \
-	--find-links $(EXTRACTION_CONTRACT_WHEELS)
+	--find-links $(EXTRACTION_CONTRACT_WHEELS) --find-links $(LLM_TRANSPORT_WHEELS)
 
 .PHONY: help venv test test-integration metrics check check-install check-lock lock
 help:
@@ -28,6 +30,7 @@ help:
 venv:
 	test -x $(PY) || $(UV) venv --quiet --python $(PYTHON) $(VENV)
 	$(UV) pip sync --quiet --python $(PY) --require-hashes --find-links $(EXTRACTION_CONTRACT_WHEELS) \
+	  --find-links $(LLM_TRANSPORT_WHEELS) \
 	  requirements.lock
 # pytest.ini already passes -q
 test: venv
@@ -39,7 +42,8 @@ metrics: venv
 	$(PY) ops/code_metrics.py --check
 check: test metrics test-integration check-lock
 check-install:
-	UV=$(UV) PYTHON=$(PYTHON) EXTRACTION_CONTRACT_WHEELS=$(EXTRACTION_CONTRACT_WHEELS) bash ops/check_clean_install.sh
+	UV=$(UV) PYTHON=$(PYTHON) EXTRACTION_CONTRACT_WHEELS=$(EXTRACTION_CONTRACT_WHEELS) \
+	  LLM_TRANSPORT_WHEELS=$(LLM_TRANSPORT_WHEELS) bash ops/check_clean_install.sh
 # the lock is re-resolved with itself as the preference: unchanged inputs give the same pins.
 # make reports Error 1: resolved, and the lock differs (stale); Error 2: the resolution itself failed (no
 # index or network, or inputs that do not resolve), so nothing was compared - that is no reason to re-lock
