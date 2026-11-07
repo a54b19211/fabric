@@ -1,9 +1,10 @@
 """Structure fingerprints: what a schema contains, as comparable facts.
 
-A fact is (key, definition): ("column", "documents", "title") -> "text|text|YES||", ("function", "f(a integer)") ->
-sha256 of its body, and so on. Only catalog reads (pg_catalog / information_schema) of the connection's current
-schema; no data table is read. A role's fingerprint of a prefix of its files is the set of facts for the keys that
-the role's files own (the keys whose fact differs between the empty base and the fully installed library).
+A fact is (key, definition): ("column", "documents.title") -> "text|text|YES|~|~", ("function", "f(a integer)") ->
+a digest of its body, and so on. Only catalog reads (pg_catalog / information_schema) of the connection's current
+schema; no data table is read; objects that belong to an extension (vector, pg_search ...) are not counted. A role's
+fingerprint of a prefix of its files is the set of facts for the keys that the role's files own (the keys whose fact
+differs between the empty base and the fully installed library).
 """
 
 from __future__ import annotations
@@ -18,25 +19,39 @@ from migration.manifests import VERSIONS_DIR, Manifest
 Facts = dict[tuple, str]
 Fingerprint = frozenset  # of (key, definition)
 
+_EXTENSION_OWNED = (
+    "EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '{0}'::regclass AND d.objid = {1}.oid AND d.deptype = 'e')"
+)
 _QUERIES = {
-    "table": "SELECT table_name, '' FROM information_schema.tables "
-             "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
-    "view": "SELECT viewname, definition FROM pg_views WHERE schemaname = current_schema()",
-    "column": "SELECT table_name || '.' || column_name, concat_ws('|', data_type, udt_name, is_nullable, "
-              "column_default, character_maximum_length) "
-              "FROM information_schema.columns WHERE table_schema = current_schema()",
-    "constraint": "SELECT c.conrelid::regclass::text || '.' || c.conname, pg_get_constraintdef(c.oid) "
-                  "FROM pg_constraint c WHERE c.connamespace = current_schema()::regnamespace",
-    "index": "SELECT tablename || '.' || indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema()",
+    "table": "SELECT c.relname, '' FROM pg_class c WHERE c.relnamespace = current_schema()::regnamespace "
+             "AND c.relkind IN ('r', 'p') AND NOT " + _EXTENSION_OWNED.format("pg_class", "c"),
+    "view": "SELECT v.viewname, v.definition FROM pg_views v JOIN pg_class c ON c.oid = "
+            "(quote_ident(v.schemaname) || '.' || quote_ident(v.viewname))::regclass "
+            "WHERE v.schemaname = current_schema() AND NOT " + _EXTENSION_OWNED.format("pg_class", "c"),
+    "column": "SELECT c.relname || '.' || a.attname, format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull::text "
+              "|| '|' || coalesce(pg_get_expr(d.adbin, d.adrelid), '~') FROM pg_attribute a "
+              "JOIN pg_class c ON c.oid = a.attrelid LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid "
+              "AND d.adnum = a.attnum WHERE c.relnamespace = current_schema()::regnamespace "
+              "AND c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped AND NOT "
+              + _EXTENSION_OWNED.format("pg_class", "c"),
+    "constraint": "SELECT r.relname || '.' || c.conname, pg_get_constraintdef(c.oid) FROM pg_constraint c "
+                  "JOIN pg_class r ON r.oid = c.conrelid WHERE c.connamespace = current_schema()::regnamespace "
+                  "AND NOT " + _EXTENSION_OWNED.format("pg_class", "r"),
+    "index": "SELECT i.tablename || '.' || i.indexname, i.indexdef FROM pg_indexes i JOIN pg_class r ON r.oid = "
+             "(quote_ident(i.schemaname) || '.' || quote_ident(i.tablename))::regclass "
+             "WHERE i.schemaname = current_schema() AND NOT " + _EXTENSION_OWNED.format("pg_class", "r"),
     "trigger": "SELECT c.relname || '.' || t.tgname, pg_get_triggerdef(t.oid) FROM pg_trigger t "
                "JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = current_schema()::regnamespace "
-               "AND NOT t.tgisinternal",
+               "AND NOT t.tgisinternal AND NOT " + _EXTENSION_OWNED.format("pg_class", "c"),
     "function": "SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', "
                 "md5(p.prosrc || pg_get_function_result(p.oid)) FROM pg_proc p "
-                "WHERE p.pronamespace = current_schema()::regnamespace",
+                "WHERE p.pronamespace = current_schema()::regnamespace AND NOT "
+                + _EXTENSION_OWNED.format("pg_proc", "p"),
     "sequence": "SELECT sequence_name, data_type FROM information_schema.sequences "
                 "WHERE sequence_schema = current_schema()",
-    "rule": "SELECT tablename || '.' || rulename, definition FROM pg_rules WHERE schemaname = current_schema()",
+    "rule": "SELECT r.tablename || '.' || r.rulename, r.definition FROM pg_rules r JOIN pg_class c ON c.oid = "
+            "(quote_ident(r.schemaname) || '.' || quote_ident(r.tablename))::regclass "
+            "WHERE r.schemaname = current_schema() AND NOT " + _EXTENSION_OWNED.format("pg_class", "c"),
 }
 
 
@@ -74,11 +89,8 @@ def prefix_fingerprints(manifest: Manifest, engine) -> tuple[list[Fingerprint], 
         with engine.begin() as conn:
             run_files(conn, [name])
             steps.append(read_facts(conn))
-    last = steps[-1] if steps else base
-    owned = frozenset(key for key, definition in last.items() if base.get(key) != definition)
     # a fact that only an intermediate state held (a function replaced later) belongs to the role too
-    for facts in steps:
-        owned |= frozenset(key for key, definition in facts.items() if base.get(key) != definition)
+    owned = frozenset(key for facts in steps for key, definition in facts.items() if base.get(key) != definition)
     return [project(base, owned), *[project(facts, owned) for facts in steps]], owned
 
 
