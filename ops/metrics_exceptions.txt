@@ -30,7 +30,6 @@ biz_rules/native_extraction.py:_index_json.walk  46/21  projection of source JSO
 biz_rules/native_extraction.py:_project  102/39  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 biz_rules/native_extraction.py:clinical_trial_attributes  30/23  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 biz_rules/native_graph.py:build_native_graph  86/31  field-binding and graph-build rules, one branch per rule kind; table-driven rewrite (audit 2.1)
-biz_rules/native_graph.py:validate_field_bindings  100/100  field-binding validator, one branch per binding rule (cc 100, worst in the repo); table-driven rewrite first
 biz_rules/object_evidence.py:validate_object_evidence  78/36  validator with one check per evidence rule; keep the rules in one place
 biz_rules/reviewed_graph.py:GraphBundle.consistent  39/27  reviewed-graph neighbourhood/bundle code with traversal and filters inline
 biz_rules/reviewed_graph.py:neighborhood  120/48  reviewed-graph neighbourhood/bundle code with traversal and filters inline
