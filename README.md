@@ -588,6 +588,10 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 
 新来源 `gdelt_doc` 只返回标题、原网址及索引元数据，不提供新闻全文；其 `seendate` 是 GDELT 的观察时间，不是原帖发布时间，也不是本机的首次采集时间。接口无续页：给定起止时间的读取按 UTC 整点切成 1 小时窗，窗口返回满额（达到请求的 `max_records`）就对半拆开再读，最细 15 分钟，每查询每小时最多 7 次请求；最细窗口仍满额的标 `possibly_truncated`。读取运行的 coverage 里 `window_coverage` 逐窗口写区间、返回条数、是否满额、请求数和未读完的原因，`truncated_intervals` 列出可能被截断的区间；少于上限只说明没碰到上限，不等于窗口读全。实际探测曾返回 429，故不能声称当前服务器已经稳定采通。资料使用需注明 [GDELT 项目](https://www.gdeltproject.org/about.html#termsofuse)。ProMED 尚无所需许可；各级卫健委网页尚未逐站验证；实时社媒商用接口尚未选定。这些都不能写成已覆盖。
 
+`gdelt_doc` 可以进固定刷新（`DATAFABRIC_HISTORY_WATCHES`，每个查询一条，`lookback_days` 设为 1：首轮没有检查点，按它回看）。每轮读 [检查点, 当前整点)，不读还没走完的这一小时，不回看重叠。读到最细窗口仍满额的区间只留在读取回执里（`truncated_intervals`），不重试，检查点照常前进；预算或出站额度用完时，检查点停在第一个没读到的窗口起点，下一轮从那里继续，这一轮不记 `last_success_at`。
+
+出站额度是本实例自己的硬限，不是与其他实例或现役系统共享的全局限：GDELT 间隔 5 秒，每个查询每小时 ≤7 次、每天 ≤900 次；who.int 间隔 30 秒，每天 ≤200 次（回填的请求也算在内）。额度写在 `collection/catalog.py` 的 `outbound_cap`，计数放在限速闸门的同一处（配置了 `DATAFABRIC_HISTORY_REDIS_URL` 用 Redis，否则是 `DATAFABRIC_RATE_DIR` 下的文件），跨读取、跨进程累计，按 UTC 小时和 UTC 日算。到限的请求不发出，读取停下，`stop_reason` 和未读窗口的回执写 `outbound_quota_hour` 或 `outbound_quota_day`。Redis 被清空或限速目录被删，计数从零开始。
+
 新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
 
 历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。

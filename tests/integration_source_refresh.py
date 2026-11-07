@@ -309,7 +309,7 @@ def watch_config(monkeypatch, source="who_don"):
     )
 
 
-def finish_active(source, records, continuation=None, exhausted=False, error=None):
+def finish_active(source, records, continuation=None, exhausted=False, error=None, **reported):
     control = rows(
         source,
         "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
@@ -329,6 +329,7 @@ def finish_active(source, records, continuation=None, exhausted=False, error=Non
             "bytes": 100,
             "source_total": None,
             "next_continuation": continuation,
+            **reported,
         },
     )
 
@@ -660,3 +661,41 @@ def test_clinical_watch_freezes_update_window_or_exact_ids(databases, monkeypatc
     saved = rows(source, "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'")[0]["snapshot"]
     assert saved["request"] == request and saved["active_run_id"] == state["active_run_id"]
     assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 1
+
+
+def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_the_unread_window(
+    databases, monkeypatch
+):
+    source, _ = databases
+    allow(monkeypatch, ["clinicaltrials"])
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(["gdelt_doc"]))
+    watch_config(monkeypatch, source="gdelt_doc")
+    import flows.history_fetch as fetch
+
+    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
+
+    def active(*args):
+        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
+
+    monkeypatch.setattr(fetch, "retry_inactive", active)
+    source_refresh.refresh_once()
+    watch = "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'"
+    first = rows(source, watch)[0]["snapshot"]
+    since, until = first["request"]["updated_since"], first["request"]["updated_until"]
+    assert since.endswith(":00:00+00:00") and until == first["window_ended_at"]  # whole UTC hours
+    middle = (datetime.fromisoformat(since) + timedelta(hours=1)).isoformat()
+    cut = {"start": since, "end": middle}
+    finish_active(
+        source, [], stop_reason="outbound_quota_hour", truncated_intervals=[cut],
+        window_coverage=[
+            {**cut, "status": "read", "possibly_truncated": True, "reason": "finest_window_full"},
+            {"start": middle, "end": until, "status": "not_read", "reason": "outbound_quota_hour"},
+        ],
+    )
+    source_refresh.refresh_once()
+    state = rows(source, watch)[0]["snapshot"]
+    assert state["state"] == "idle" and state["error"] is None and "request" not in state
+    assert state["window_checkpoint"] == middle and "last_success_at" not in state
+    assert state["last_coverage"]["truncated_intervals"] == [cut]  # the gap stays readable
+    assert state["last_coverage"]["stop_reason"] == "outbound_quota_hour"
+    assert source_refresh.refresh_once() == []  # next cycle waits for its cadence

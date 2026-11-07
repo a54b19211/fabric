@@ -10,6 +10,7 @@ from biz_rules.history_models import ArchiveRecord, FetchRequest
 from biz_rules.history_sources import project_record, read_public
 from biz_rules.observations import observation
 from biz_rules.who_don import project_who
+from collection import rate
 
 
 def metric():
@@ -92,10 +93,18 @@ def test_who_projection_is_notice_publication_not_outbreak_start_or_metric():
     assert value["field_locators"]["last_modified"] == {"json_pointer": "/LastModified"}
 
 
+REAL_CLIENT = httpx.Client
+
+
+@pytest.fixture(autouse=True)
+def open_gate(monkeypatch):
+    """The 30 s spacing of the who.int gate is not under test here."""
+    monkeypatch.setattr(rate, "wait_for_url", lambda url, **kw: None)
+
+
 def mocked_client(monkeypatch, handler):
-    real = httpx.Client
     monkeypatch.setattr(
-        httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+        httpx, "Client", lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(handler), **kw)
     )
 
 
@@ -125,7 +134,6 @@ def test_who_resumes_fixed_scope_and_http_failure_never_zero_success(monkeypatch
             {**second_request.model_dump(mode="json"), "query": "different scope"}
         )
     # HTTP 403 is not an exhausted empty query.
-    monkeypatch.undo()
     mocked_client(monkeypatch, lambda request: httpx.Response(403))
     failure = read_public(request)
     assert failure["error"] and not failure["upstream_pagination_exhausted"]

@@ -20,7 +20,7 @@ from biz_rules.history_models import (
 )
 from biz_rules.timestamps import parse_timestamp
 from collection.catalog import WATCHABLE, spec
-from collection.windows import cycle_request
+from collection.windows import cycle_request, first_unread
 from db import history, publication
 
 
@@ -105,6 +105,43 @@ def _save(engine, key, state):
             raise HistoryError(
                 "source_watch_lease_lost", "刷新处理资格已改变，当前持有者继续", 409
             )
+
+
+def _page_finished(watch, state, coverage, now):
+    """Record a read that ended without error: ask for the next page, or end the cycle.
+
+    A read that stopped short without a cursor is an error, except a windowed one (GDELT): its receipts show which
+    intervals may be cut short and which windows were not reached. The cycle ends with those gaps left in the
+    receipts, and the checkpoint moves to the first window not reached so that the next cycle reads from there."""
+    state["last_page_at"] = now.isoformat()
+    state["last_coverage"] = coverage
+    state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
+    if coverage.get("next_continuation"):
+        state["request"]["continuation"] = coverage["next_continuation"]
+        state["state"] = "paging"
+        state["next_check_at"] = now.isoformat()
+        return
+    checkpoint, finished = state.get("window_ended_at"), True
+    if coverage.get("upstream_pagination_exhausted") is not True:
+        if "window_coverage" not in coverage:
+            # 截断且无可靠续页位置不能称完成，更不能跳过未知页。
+            raise HistoryError(
+                "source_watch_no_cursor",
+                "来源截断但无可靠续页位置；保留本页等待处理",
+                503,
+            )
+        unread = first_unread(coverage)
+        checkpoint, finished = unread or checkpoint, unread is None
+    state["state"] = "idle"
+    if finished:
+        state["last_success_at"] = now.isoformat()
+        if watch.mode == "backfill":
+            state["backfill_completed_at"] = now.isoformat()
+    if checkpoint:
+        # 窗口已确认读到底，或读到第一个没读到的窗口为止：下一周期从这里（减重叠）续读
+        state["window_checkpoint"] = checkpoint
+    state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
+    state.pop("request", None)
 
 
 def refresh_once(engine=None):
@@ -204,33 +241,7 @@ def refresh_once(engine=None):
                         raise
                 state["state"] = "running"
             elif run.state in {"completed", "partial"} and not run.error:
-                state["last_page_at"] = now.isoformat()
-                state["last_coverage"] = run.coverage
-                state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
-                next_page = run.coverage.get("next_continuation")
-                if next_page:
-                    state["request"]["continuation"] = next_page
-                    state["state"] = "paging"
-                    state["next_check_at"] = now.isoformat()
-                elif run.coverage.get("upstream_pagination_exhausted") is True:
-                    state["state"] = "idle"
-                    state["last_success_at"] = now.isoformat()
-                    if state.get("window_ended_at"):
-                        # 本周期窗口已确认读到底：下一周期从这里（减重叠）续读
-                        state["window_checkpoint"] = state["window_ended_at"]
-                    if watch.mode == "backfill":
-                        state["backfill_completed_at"] = now.isoformat()
-                    state["next_check_at"] = (
-                        now + timedelta(seconds=watch.cadence_seconds)
-                    ).isoformat()
-                    state.pop("request", None)
-                else:
-                    # 截断且无可靠续页位置不能称完成，更不能跳过未知页。
-                    raise HistoryError(
-                        "source_watch_no_cursor",
-                        "来源截断但无可靠续页位置；保留本页等待处理",
-                        503,
-                    )
+                _page_finished(watch, state, run.coverage, now)
                 state.pop("active_run_id", None)
                 state.pop("request_key", None)
                 state["error"] = None

@@ -1,7 +1,7 @@
 """一次读取的唯一闸门和预算。
 
 所有读取插件（公开接口、站点插件、本地导入、PubMed 全文）共用这里的 Budget：请求数、字节数、版本数、截止时间，
-加上共享限速组（collection.rate，按每一跳的实际目标主机）。读取期间，这个线程（及复制了上下文的线程）里发出的
+加上共享限速组和出站计数（collection.rate，按每一跳的实际目标主机）。读取期间，这个线程（及复制了上下文的线程）里发出的
 每一次真实传输都在发出那一刻过闸：
 
 - httpx：Client._send_single_request，每一跳一次（自动跟随的重定向逐跳过闸）；
@@ -95,8 +95,11 @@ class Budget:
             self.stop("request_budget")
         try:
             rate.wait_for_url(url, deadline=self.deadline)
+            quota = rate.take_for_url(url)
         except TimeoutError:
             self.stop("deadline")
+        if quota:
+            self.stop(quota)  # this instance's outbound cap for the site: the request is not sent
         self.requests += 1
 
     def take_bytes(self, n):

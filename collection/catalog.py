@@ -42,6 +42,17 @@ class Incremental:
 
 
 @dataclass(frozen=True)
+class OutboundCap:
+    """This instance's own ceiling on requests to one site, counted across reads and processes (collection.rate).
+    It limits what this instance sends; it is not a limit shared with other instances or the live system.
+    per_day: requests per UTC day, every query of the source together.
+    per_hour_per_query: requests per UTC hour for each value of the request's `query` parameter."""
+
+    per_day: int
+    per_hour_per_query: int | None = None
+
+
+@dataclass(frozen=True)
 class CollectionSpec:
     source_id: str
     name: str
@@ -55,6 +66,7 @@ class CollectionSpec:
     incremental: Incremental
     rate_group: str
     min_interval_seconds: float
+    outbound_cap: OutboundCap | None = None
     # 元数据、摘要、全文各自覆盖到哪一层，如实写；键只能用 contracts.evidence_types.COVERAGE
     coverage: dict = field(default_factory=dict)
     # 支持不带时间窗的全量回填（续页标记可靠、按页可续）
@@ -135,7 +147,8 @@ SPECS: tuple[CollectionSpec, ...] = (
         decisions=("D", "E"),
         incremental=Incremental("modified_window", "LastModified", "公告最后修改时间；不是暴发开始时间"),
         rate_group="who.int",
-        min_interval_seconds=1.0,
+        min_interval_seconds=30.0,
+        outbound_cap=OutboundCap(per_day=200),  # a backfill's requests count inside the 200
         coverage={"metadata": "全部", "fulltext": "公告原文"},
     ),
     CollectionSpec(
@@ -351,13 +364,16 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="gdelt_doc",
         evidence_types=("media",),
         decisions=("D",),
-        # 支持显式起止时间窗（updated_since/until，按 seendate），但没有续页：一页满了就不知道窗口里还剩多少，
-        # 所以不能做持续增量（不进 WATCHABLE），只做宿主显式指定的有界读取
+        # No cursor: a full page hides the rest of its window. The watch therefore reads whole UTC hours, halves the
+        # full ones (biz_rules.gdelt_news) and records what stays cut short in the run's coverage. Each hour is read
+        # once (no overlap): a re-read would spend requests for the same hour.
         incremental=Incremental(
-            "none", "seendate", "GDELT 观察到这条新闻的时间；不是新闻发布时间，也不是本地首次见到的时间"
+            "source_updated_window", "seendate",
+            "GDELT 观察到这条新闻的时间；不是新闻发布时间，也不是本地首次见到的时间", overlap_days=0,
         ),
         rate_group="gdeltproject.org",
         min_interval_seconds=5.0,
+        outbound_cap=OutboundCap(per_day=900, per_hour_per_query=7),  # 5 queries x 24 hours x 7 = 840 at most
         coverage={"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
         notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条",
     ),

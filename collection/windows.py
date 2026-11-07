@@ -5,6 +5,10 @@
 没有检查点（首次运行或旧状态）时按 lookback_days 回看，与改造前行为一致。
 
 回填模式不加时间窗，按来源自己的续页标记读完整个范围；读到底后按周期重新对账。
+
+GDELT 没有续页，窗口读取按整点：一个周期读 [检查点, 当前整点)，不读还没走完的这一小时，也不回看重叠。
+读取没读完时（预算或出站额度用完）从第一个没读到的窗口起点继续（first_unread）；读到了但最细窗口仍满额的区间
+重读也只会得到同样被截断的结果，不重试，留在读取回执里（window_coverage、truncated_intervals）。
 """
 
 from __future__ import annotations
@@ -23,15 +27,43 @@ def window_start(watch, state: dict, now: datetime) -> datetime:
     return now - timedelta(days=watch.lookback_days)
 
 
+def _hour_mark(moment: datetime) -> datetime:
+    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _whole_hours(watch, state: dict, now: datetime) -> tuple[datetime, datetime]:
+    """[检查点, 当前整点)。没有检查点时从回看起点所在的整点读起。还没有新的整点时重读最近一个整点，
+    不产生空窗口或倒置的窗口。"""
+    end = _hour_mark(now)
+    start = window_start(watch, state, now)
+    if not state.get("window_checkpoint"):
+        start = _hour_mark(start)
+    return (start if start < end else end - timedelta(hours=1)), end
+
+
+def first_unread(coverage: dict) -> str | None:
+    """A windowed read's coverage -> the start of its earliest window that was not read (a stop or a failure left
+    it), or None when every window was read."""
+    starts = [
+        parse_timestamp(receipt["start"])
+        for receipt in coverage["window_coverage"]
+        if receipt["status"] in {"failed", "not_read"} and receipt["start"]
+    ]
+    return min(starts).isoformat() if starts else None
+
+
 def cycle_request(watch, state: dict, now: datetime) -> tuple[dict, datetime | None, datetime | None]:
     """返回 (请求体, 窗口起点, 窗口终点)。回填和明确清单没有窗口，起止为 None。"""
     request = watch.request.model_dump(mode="json")
     kind = spec(watch.request.source_id).incremental.kind
     if watch.mode == "backfill" or kind == "fixed_ids" or request.get("source_record_ids"):
         return request, None, None
-    start, end = window_start(watch, state, now), now
     source = watch.request.source_id
-    if kind == "modified_window":
+    if source == "gdelt_doc":
+        start, end = _whole_hours(watch, state, now)
+    else:
+        start, end = window_start(watch, state, now), now
+    if kind == "modified_window" or source == "gdelt_doc":
         request.update(updated_since=start.isoformat(), updated_until=end.isoformat())
     elif source == "europe_pmc":
         first = start.astimezone(timezone.utc).date().isoformat()

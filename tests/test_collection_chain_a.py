@@ -8,7 +8,7 @@ import pytest
 from biz_rules.history_models import FetchRequest, HistoryError
 from collection import catalog, rate
 from collection.windows import cycle_request
-from db.source_refresh import SourceWatch, _key, watches
+from db.source_refresh import SourceWatch, _key, _page_finished, watches
 from processing import registry_diff as rd
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
@@ -23,9 +23,9 @@ def ct_watch(**extra):
 # ——来源目录——
 
 
-def test_watchable_set_equals_previous_allowlist():
-    # 改造前写死的四个来源，现在由目录推出；没有多放也没有少放
-    assert catalog.WATCHABLE == {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts"}
+def test_watchable_set_is_the_four_earlier_sources_and_gdelt():
+    # 改造前写死的四个来源，加上按整点读取的 GDELT，现在由目录推出；没有多放也没有少放
+    assert catalog.WATCHABLE == {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts", "gdelt_doc"}
     assert {"pubmed", "fda_crl"} <= catalog.FETCHABLE
 
 
@@ -154,6 +154,47 @@ def test_europe_pmc_and_who_windows():
     who = SourceWatch.model_validate({"id": "w", "request": {"source_id": "who_don", "query": "*"}})
     request, start, end = cycle_request(who, {}, NOW)
     assert request["updated_since"] == start.isoformat() and request["updated_until"] == end.isoformat()
+
+
+def test_gdelt_cycle_reads_whole_utc_hours_from_the_checkpoint_without_overlap(monkeypatch):
+    values = [{"id": "g", "request": {"source_id": "gdelt_doc", "query": "outbreak"}}]
+    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(values))
+    [gdelt] = watches()  # GDELT is watchable now
+    now = datetime(2026, 11, 4, 12, 40, tzinfo=timezone.utc)
+    request, start, end = cycle_request(gdelt, {}, now)  # no checkpoint: the lookback, from the hour mark
+    assert start == datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+    assert request["updated_since"] == start.isoformat() and request["updated_until"] == end.isoformat()
+    _, start, end = cycle_request(gdelt, {"window_checkpoint": "2026-11-04T10:30:00+00:00"}, now)
+    assert (start.hour, start.minute, end.hour, end.minute) == (10, 30, 12, 0)  # exactly the checkpoint
+    _, start, end = cycle_request(gdelt, {"window_checkpoint": "2026-11-04T12:00:00+00:00"}, now)
+    assert (start.hour, end.hour) == (11, 12)  # no new full hour yet: never an empty window
+
+
+def test_page_finished_pages_on_ends_at_the_end_and_still_rejects_a_stop_short_without_receipts():
+    paging = {"request": {}, "window_ended_at": NOW.isoformat()}
+    _page_finished(ct_watch(), paging, {"next_continuation": {"cursor": "c"}}, NOW)
+    assert paging["state"] == "paging" and paging["request"]["continuation"] == {"cursor": "c"}
+    assert "window_checkpoint" not in paging
+    done = {"request": {}, "window_ended_at": NOW.isoformat(), "cycle_pages": 1}
+    _page_finished(ct_watch(), done, {"upstream_pagination_exhausted": True}, NOW)
+    assert done["state"] == "idle" and done["window_checkpoint"] == NOW.isoformat() and done["last_success_at"]
+    assert "request" not in done and done["cycle_pages"] == 2
+    stopped = {"request": {}, "window_ended_at": NOW.isoformat()}  # no cursor, no receipts: not a finished read
+    with pytest.raises(HistoryError) as exc:
+        _page_finished(ct_watch(), stopped, {"upstream_pagination_exhausted": False, "stop_reason": "page_budget"}, NOW)
+    assert exc.value.code == "source_watch_no_cursor"
+
+
+def test_outbound_caps_are_the_declared_ones_and_count_per_site(mid_hour_clock):
+    who, gdelt = catalog.spec("who_don"), catalog.spec("gdelt_doc")
+    assert (who.min_interval_seconds, who.outbound_cap) == (30, catalog.OutboundCap(per_day=200))
+    assert gdelt.min_interval_seconds == 5
+    assert gdelt.outbound_cap == catalog.OutboundCap(per_day=900, per_hour_per_query=7)
+    url = "https://www.who.int/api/hubs/diseaseoutbreaknews"
+    assert all(rate.take_for_url(url) is None for _ in range(200))
+    assert rate.take_for_url(url) == "outbound_quota_day"
+    assert rate.take_for_url("https://clinicaltrials.gov/api/v2/studies") is None  # no cap declared: not counted
 
 
 def _gate_worker(args):

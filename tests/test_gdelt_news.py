@@ -1,16 +1,20 @@
 """新闻索引故障注入，不下载新闻正文或假冒独立来源。"""
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
-from biz_rules.gdelt_news import article_id
+from biz_rules.gdelt_news import ENDPOINT, article_id
 from biz_rules.history_models import ArchiveRecord, FetchRequest
 from biz_rules.history_sources import project_record, read_public
 from collection import rate
+from collection.windows import cycle_request
 from config.settings import APP
+from db.source_refresh import SourceWatch, _page_finished
 
 HOUR = {"updated_since": "2026-10-30T00:00:00Z", "updated_until": "2026-10-30T01:00:00Z"}
+CYCLE_NOW = datetime(2026, 11, 4, 12, 30, tzinfo=timezone.utc)  # a watch cycle reads the whole hours before 12:00
 
 
 def article(**kw):
@@ -170,6 +174,7 @@ def test_failed_window_is_not_zero_news_and_the_rest_stays_unread(monkeypatch, o
 
 
 def test_request_budget_stop_reports_the_windows_not_reached(monkeypatch, open_gate):
+    monkeypatch.setattr(rate, "take_for_url", lambda url: None)  # the ceiling of 7 an hour is not under test here
     sent = stand_in(monkeypatch, lambda start, end: 3)
     result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, max_pages=1,
                                       updated_since="2026-10-30T00:00:00Z", updated_until="2026-10-30T02:00:00Z"))
@@ -178,3 +183,62 @@ def test_request_budget_stop_reports_the_windows_not_reached(monkeypatch, open_g
     unread = [w for w in result["window_coverage"] if w["status"] == "not_read"]
     assert [(w["start"][11:16], w["end"][11:16], w["reason"]) for w in unread] == [
         ("01:15", "01:30", "request_budget"), ("01:30", "02:00", "request_budget")]
+
+
+def test_hourly_ceiling_counts_across_reads_per_query_and_names_the_reason(monkeypatch, open_gate, mid_hour_clock):
+    stand_in(monkeypatch, lambda start, end: 3)  # every window full: one query-hour uses all 7 requests
+    first = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **HOUR))
+    assert first["requests"] == 7 and first["stop_reason"] == "bounded_index_response"
+    later = {"updated_since": "2026-10-30T01:00:00Z", "updated_until": "2026-10-30T02:00:00Z"}
+    second = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **later))
+    assert second["requests"] == 0 and second["stop_reason"] == "outbound_quota_hour"  # a later read, the same hour
+    assert second["window_coverage"][0]["reason"] == "outbound_quota_hour"
+    other = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia", max_records=3, **later))
+    assert other["requests"] == 7  # the count is per query
+
+
+def test_daily_ceiling_stops_the_read_before_its_first_request_and_names_the_reason(
+        monkeypatch, open_gate, mid_hour_clock):
+    sent = stand_in(monkeypatch, lambda start, end: 1)
+    for n in range(900):  # 900 requests of other queries already sent today
+        assert rate.take_for_url(f"{ENDPOINT}?query=other{n}") is None
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **HOUR))
+    assert result["stop_reason"] == "outbound_quota_day" and result["requests"] == 0 and sent == []
+    [receipt] = result["window_coverage"]
+    assert (receipt["status"], receipt["reason"]) == ("not_read", "outbound_quota_day")
+
+
+def watch_cycle(checkpoint):
+    """The state of a GDELT watch at its checkpoint, and the request its cycle sends: the whole hours up to 12:00."""
+    watch = SourceWatch.model_validate(
+        {"id": "g", "request": {"source_id": "gdelt_doc", "query": "outbreak", "max_records": 3}})
+    state = {"window_checkpoint": checkpoint}
+    request, _, end = cycle_request(watch, state, CYCLE_NOW)
+    state.update(window_ended_at=end.isoformat(), request=request)
+    return watch, state, FetchRequest.model_validate(request)
+
+
+def finish_cycle(watch, state, request):
+    batch = read_public(request)
+    _page_finished(watch, state, {key: value for key, value in batch.items() if key != "records"}, CYCLE_NOW)
+    return batch
+
+
+def test_cycle_with_windows_cut_short_ends_with_the_gaps_and_moves_the_checkpoint(monkeypatch, open_gate):
+    stand_in(monkeypatch, lambda start, end: 3)  # every window stays full down to 15 minutes
+    watch, state, request = watch_cycle("2026-11-04T11:00:00+00:00")
+    finish_cycle(watch, state, request)
+    assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
+    assert state["window_checkpoint"] == "2026-11-04T12:00:00+00:00"  # past the cut-short hour: it is not retried
+    assert len(state["last_coverage"]["truncated_intervals"]) == 4  # and the gaps stay in the receipt
+
+
+def test_cycle_stopped_by_a_ceiling_resumes_at_the_first_window_it_did_not_read(monkeypatch, open_gate, mid_hour_clock):
+    stand_in(monkeypatch, lambda start, end: 3)  # the first hour takes this query's 7 requests of the hour
+    watch, state, request = watch_cycle("2026-11-04T10:00:00+00:00")
+    batch = finish_cycle(watch, state, request)
+    assert batch["stop_reason"] == "outbound_quota_hour"
+    assert state["state"] == "idle" and "last_success_at" not in state  # not a finished cycle
+    assert state["window_checkpoint"] == "2026-11-04T11:00:00+00:00"
+    unread = [w for w in state["last_coverage"]["window_coverage"] if w["status"] == "not_read"]
+    assert [(w["start"][11:16], w["reason"]) for w in unread] == [("11:00", "outbound_quota_hour")]
