@@ -866,33 +866,27 @@ def test_the_feed_lets_a_consumer_link_in_either_arrival_order(db, fake):
 
 
 @real_checker
-def test_replay_between_a_checker_upgrade_and_the_recheck_shows_the_old_object_pending(db, fake, monkeypatch):
+def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", "biocheck.extraction_rules.v15")
     version = who_version()
     runs.plan(model=fake.model())
     read_all(fake)
     check_all(RealBioCheck(answer=as_checker("biocheck.extraction_rules.v15")))
     old = by_value(listing(version)["measurements"])["66"]
-    before_upgrade = NOW()
-    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")
-    assert checks.backfill_measures() == 1  # the deployment expects v16 from here on
-    between = NOW()
-    replay = listing(version, "operational_replay", between)
-    assert replay["measurements"] == []
-    assert replay["excluded"] == {"pending_recheck_by:biocheck.extraction_rules.v16": 3}
-    one = measurement_reads.read_one(old["measurement_id"], True, "operational_replay", between)
-    assert one["current"] is False and one["not_current_reason"] == "pending_recheck_by:biocheck.extraction_rules.v16"
-    assert one["state_at_cutoff"] == "ok"  # nothing happened to it: it was waiting for the new checker
-    assert len(listing(version, "operational_replay", before_upgrade)["measurements"]) == 3  # before: current
+    produced = NOW()
+    assert len(listing(version, "operational_replay", produced)["measurements"]) == 3  # the configured checker
+    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v16 is configured now; when it took over is not recorded
+    replay = listing(version, "operational_replay", produced)
+    assert replay["measurements"] == [] and replay["excluded"] == {"checker_history_unknown": 3}
+    one = measurement_reads.read_one(old["measurement_id"], True, "operational_replay", produced)
+    assert one["current"] is False and one["not_current_reason"] == "checker_history_unknown"
+    assert one["state_at_cutoff"] == "ok"  # its own events say nothing happened to it - but it is not current
+    assert checks.backfill_measures() == 1
     check_all(RealBioCheck())
-    # the past stays as it was: still pending at `between`; superseded by the re-check afterwards
-    assert listing(version, "operational_replay", between)["excluded"] == {
-        "pending_recheck_by:biocheck.extraction_rules.v16": 3}
     later = by_value(listing(version, "operational_replay", NOW())["measurements"])
     assert later["66"]["check"]["checker_version"] == "biocheck.extraction_rules.v16"
     assert measurement_reads.read_one(old["measurement_id"], True, "operational_replay", NOW())[
         "not_current_reason"] == "rechecked_by_checker"
-
 
 def unversioned_correction(key, *, relation="corrects", record="SYNTHETIC-unversioned", available="2026-11-02",
                            relations=True):
