@@ -516,7 +516,7 @@ def test_extra_write_failure_rolls_back_document_and_capture_in_same_source_tran
     def broken(*_args, **_kwargs):
         raise RuntimeError("SYNTHETIC extra insert failed after document flush")
 
-    monkeypatch.setattr(repository, "_upsert_doc_extra_in_session", broken)
+    monkeypatch.setattr(repository.documents, "_upsert_doc_extra_in_session", broken)
     envelope = MetadataEnvelope(
         uuid=value["uuid"],
         title=value["title"],
@@ -555,7 +555,7 @@ def test_dictionary_qualification_withdrawal_dirties_referencing_graph_only(data
     assert json.loads(first[-1]["raw_content"])["nodes"][0]["identity_status"] == "unresolved"
     # A real trusted review re-reads the actual immutable History original.
     monkeypatch.setenv("DATAFABRIC_REVIEW_TOKENS", json.dumps({"fixture-token": "synthetic-reviewer"}))
-    monkeypatch.setattr(repository, "_write_aliases_with_embedding", lambda *a, **k: 0)
+    monkeypatch.setattr(repository.aliases, "_write_aliases_with_embedding", lambda *a, **k: 0)
     record = history.read_version(original["document_version_ids"][0], "legacy_documents",
         "legacy:clinicaltrials:" + value["uuid"], True, "current", datetime.now(timezone.utc))
     quote = "SYNTHETIC company"
