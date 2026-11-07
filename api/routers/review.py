@@ -1,58 +1,77 @@
 # -*- coding: utf-8 -*-
 """审核操作接口"""
-from fastapi import APIRouter, HTTPException, Query, Depends
-from loguru import logger
-
-from api.schemas.request import (
-    ReviewActionRequest,
-    BatchApproveEntitiesRequest,
-    BatchRejectEntitiesRequest,
-    BatchApproveRelationsRequest,
-    BatchRejectRelationsRequest,
-    ResolveMergeRequest,
-    PatchEntityRequest,
-    PatchRelationRequest,
-    BatchResolveMergeRequest,
-    MergeEntitiesRequest,
-    RollbackMergeRequest,
-    IdentityProposalDecisionRequest, PrimeKGMappingRequest,
-)
-from api.schemas.response import (
-    EntityListResponse, EntityItem,
-    RelationListResponse, RelationItem,
-    ReviewActionResponse,
-    DisambigInfo, MergeQueueListResponse,
-    DictCandidateItem, DictCandidateListResponse,
-    GraphResponse, GraphNode, GraphEdge,
-    ReviewStatsResponse, StatusCounts,
-    SearchEntityItem,
-    CompareEntitiesResponse,
-    MergeEntitiesResponse,
-    RollbackMergeResponse,
-)
-from db.repository import (
-    approve_entity_with_alias_writeback,
-    reject_entity,
-    approve_relation, reject_relation,
-    batch_approve_entities, batch_reject_entities,
-    batch_approve_relations, batch_reject_relations,
-    get_pending_merges, resolve_merge, batch_resolve_merges,
-    find_candidate_dicts_for_review,
-    search_entity_dicts, compare_entities,
-    merge_entities, rollback_merge,
-    get_merge_logs,
-    get_identity_merge_proposals, resolve_identity_merge_proposal,
-    get_object_evidence, create_primekg_mapping_proposal,
-    get_primekg_mapping_proposals, resolve_primekg_mapping_proposal,
-)
-from api.review_auth import require_review_principal, optional_review_principal
-from biz_rules.history_models import HistoryError
-from db.identity import get_objects_evidence, get_current_review_evidence
-from db.session import get_session
-from db.models import ExtractedEntity, EntityRelation, EntityDict, EntitySourceEvidence
 from collections import deque
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from sqlalchemy import false, func, or_
 from sqlalchemy.orm import aliased
+
+from api.review_auth import optional_review_principal, require_review_principal
+from api.schemas.request import (
+    BatchApproveEntitiesRequest,
+    BatchApproveRelationsRequest,
+    BatchRejectEntitiesRequest,
+    BatchRejectRelationsRequest,
+    BatchResolveMergeRequest,
+    IdentityProposalDecisionRequest,
+    MergeEntitiesRequest,
+    PatchEntityRequest,
+    PatchRelationRequest,
+    PrimeKGMappingRequest,
+    ResolveMergeRequest,
+    ReviewActionRequest,
+    RollbackMergeRequest,
+)
+from api.schemas.response import (
+    CompareEntitiesResponse,
+    DictCandidateItem,
+    DictCandidateListResponse,
+    DisambigInfo,
+    EntityItem,
+    EntityListResponse,
+    GraphEdge,
+    GraphNode,
+    GraphResponse,
+    MergeEntitiesResponse,
+    MergeQueueListResponse,
+    RelationItem,
+    RelationListResponse,
+    ReviewActionResponse,
+    ReviewStatsResponse,
+    RollbackMergeResponse,
+    SearchEntityItem,
+    StatusCounts,
+)
+from biz_rules.history_models import HistoryError
+from db.identity import get_current_review_evidence, get_objects_evidence
+from db.models import EntityDict, EntityRelation, EntitySourceEvidence, ExtractedEntity
+from db.repository import (
+    approve_entity_with_alias_writeback,
+    approve_relation,
+    batch_approve_entities,
+    batch_approve_relations,
+    batch_reject_entities,
+    batch_reject_relations,
+    batch_resolve_merges,
+    compare_entities,
+    create_primekg_mapping_proposal,
+    find_candidate_dicts_for_review,
+    get_identity_merge_proposals,
+    get_merge_logs,
+    get_object_evidence,
+    get_pending_merges,
+    get_primekg_mapping_proposals,
+    merge_entities,
+    reject_entity,
+    reject_relation,
+    resolve_identity_merge_proposal,
+    resolve_merge,
+    resolve_primekg_mapping_proposal,
+    rollback_merge,
+    search_entity_dicts,
+)
+from db.session import get_session
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -159,7 +178,7 @@ def get_entity(entity_id: int):
                 ExtractedEntity.id == entity_id,
                 ExtractedEntity.is_deleted == false(),
             ).first()
-            
+
             if row is None:
                 logger.warning(f"[API] 实体不存在: id={entity_id}")
                 raise HTTPException(status_code=404, detail="实体不存在")
@@ -181,7 +200,7 @@ def get_entity(entity_id: int):
                 **_source_review_fields(row), **_mention_review_fields(row),
                 dict_context=_dictionary_context(session.get(EntityDict, row.dict_id) if row.dict_id else None),
             )
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -201,14 +220,14 @@ def batch_approve_entities_api(body: BatchApproveEntitiesRequest):
             note=body.note or "",
             min_confidence=body.min_confidence
         )
-        
+
         if not result.get("success", False):
             logger.warning(f"[API] 批量审核实体失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
-        
+
         logger.info(f"[API] 批量审核实体通过: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -227,14 +246,14 @@ def batch_reject_entities_api(body: BatchRejectEntitiesRequest):
             reviewer=body.reviewer,
             note=body.note or ""
         )
-        
+
         if not result.get("success", False):
             logger.warning(f"[API] 批量审核实体失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
-        
+
         logger.info(f"[API] 批量审核实体拒绝: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -410,10 +429,10 @@ def list_relations(
                 )
                 for r in rows
             ]
-            
+
             logger.info(f"[API] 关系列表查询: page={page}, total={total}")
             return RelationListResponse(total=total, items=items)
-            
+
         except Exception as e:
             logger.error(f"[API] 关系列表查询失败: {e}")
             raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
@@ -447,14 +466,14 @@ def batch_approve_relations_api(body: BatchApproveRelationsRequest, principal=De
             note=body.note or "",
             min_confidence=body.min_confidence
         )
-        
+
         if not result.get("success", False):
             logger.warning(f"[API] 批量审核关系失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
-        
+
         logger.info(f"[API] 批量审核关系通过: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -472,14 +491,14 @@ def batch_reject_relations_api(body: BatchRejectRelationsRequest):
             reviewer=body.reviewer,
             note=body.note or ""
         )
-        
+
         if not result.get("success", False):
             logger.warning(f"[API] 批量审核关系失败: {result.get('message', '未知错误')}")
             raise HTTPException(status_code=500, detail=result.get("message", "审核失败"))
-        
+
         logger.info(f"[API] 批量审核关系拒绝: count={result.get('count', 0)}")
         return ReviewActionResponse(success=True, message=result.get("message", ""))
-        
+
     except HTTPException:
         raise
     except Exception as e:

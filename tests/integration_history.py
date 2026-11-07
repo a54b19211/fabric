@@ -1,12 +1,12 @@
 """真实PostgreSQL隔离schema；不使用SQLite，不碰现役表或parent E2E记录。"""
 
-import legacy_bridge
 import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import legacy_bridge
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

@@ -4,7 +4,9 @@ import re
 import xml.etree.ElementTree as ET
 
 from biz_rules.history_models import (
-    DocumentEvidence, DocumentRelation, SourceIndependence,
+    DocumentEvidence,
+    DocumentRelation,
+    SourceIndependence,
 )
 
 

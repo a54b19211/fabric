@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pdf_fixture import make_pdf
 
 from api.routers import history as history_router
 from biz_rules.history_models import FetchRequest, HistoryError
@@ -20,7 +21,6 @@ from biz_rules.history_sources import PLUGINS, SOURCE_CATALOG, project_record, r
 from collection import catalog, local_files
 from core_engine import scrapling_client as client
 from db import history as store
-from pdf_fixture import make_pdf
 from processing import attachment_parse as ap
 
 ADMIN = "test-admin-only"

@@ -9,13 +9,14 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from api.main import app
-from api.routers import research
-from biz_rules.clinical_research import MAX_DOCUMENT_BYTES, project_clinical_trial
 from fastapi.testclient import TestClient
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Query, Session
+
+from api.main import app
+from api.routers import research
+from biz_rules.clinical_research import MAX_DOCUMENT_BYTES, project_clinical_trial
 
 DOCUMENT_ID = "00000000-0000-4000-8000-000000000001"
 

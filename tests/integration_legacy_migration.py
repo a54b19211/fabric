@@ -2,12 +2,13 @@
 their real sources with honest times, native versions never displaced, aliases on the old ids that respect the
 real source's permission and the real record's state, idempotent re-runs."""
 
-import legacy_bridge
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import legacy_bridge
 import pytest
+from integration_history import _fetch_study, pg, pg_engine  # noqa: F401  -- 隔离库夹具
 from sqlalchemy import text
 
 from biz_rules.collected_document import CollectedDocument
@@ -15,7 +16,6 @@ from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError,
 from biz_rules.reviewed_graph import document_native_id
 from collection.legacy_migration import CONVERTER, migrate, plan
 from db import history as store
-from integration_history import _fetch_study, pg, pg_engine  # noqa: F401  -- 隔离库夹具
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 SOURCES = ["legacy_documents", "clinicaltrials", "nmpa", "fda_api_drug_label", "cde_xxgk", "external_archive"]

@@ -19,17 +19,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core_engine import authority_resolver as ar
 from core_engine.authority_resolver import (
-    majority_vote,
-    evidence_weighted,
-    source_hierarchy,
-    structural_criterion,
-    resolve_conflict,
-    platt_scale,
-    platt_predict,
-    _query_uniprot,
-    _query_ols4,
     _query_gsrs,
     _query_icd11,
+    _query_ols4,
+    _query_uniprot,
+    evidence_weighted,
+    majority_vote,
+    platt_predict,
+    platt_scale,
+    resolve_conflict,
+    source_hierarchy,
+    structural_criterion,
 )
 
 

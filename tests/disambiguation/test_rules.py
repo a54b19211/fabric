@@ -1,8 +1,8 @@
 """Scoped identifier rules use mocked dictionary candidates."""
 from unittest.mock import patch
 
-from disambiguation.rules import STRONG_ID_FIELDS, match_strong_id, match_by_entity_rules
 from disambiguation.models import STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED
+from disambiguation.rules import STRONG_ID_FIELDS, match_by_entity_rules, match_strong_id
 
 
 class TestStrongIdFields:

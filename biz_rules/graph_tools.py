@@ -5,8 +5,13 @@ from typing import Literal
 
 from biz_rules.history_models import HistoryError, Model
 from biz_rules.reviewed_graph import (
-    GraphCoverage, GraphEdge, GraphIdentity, GraphNeighborhood, GraphNode,
-    GraphRef, identity_key,
+    GraphCoverage,
+    GraphEdge,
+    GraphIdentity,
+    GraphNeighborhood,
+    GraphNode,
+    GraphRef,
+    identity_key,
 )
 
 ReviewScope = Literal["reviewed", "with_candidates"]

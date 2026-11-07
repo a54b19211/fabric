@@ -1,8 +1,10 @@
+from typing import Dict, Iterator
+from urllib.parse import urljoin
+
 import requests
 from bs4 import BeautifulSoup
-from typing import Iterator, Dict
 from loguru import logger
-from urllib.parse import urljoin
+
 from config.sites.hkex_pharma_list_auto import PHARMA_COMPANIES  # 改用带 stock_id 的版本
 
 

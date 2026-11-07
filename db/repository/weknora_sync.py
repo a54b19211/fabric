@@ -1,7 +1,7 @@
 """WeKnora synchronisation flags and graph push bookkeeping for dictionary rows, entities, relations."""
 
-from sqlalchemy import false, true
 from loguru import logger
+from sqlalchemy import false, true
 
 from db.models import (
     EntityAlias,
@@ -9,7 +9,6 @@ from db.models import (
     EntityRelation,
     ExtractedEntity,
 )
-
 from db.repository.audit import _write_operation_log
 
 

@@ -13,7 +13,6 @@ from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError, 
 from db import history as store
 from flows import history_fetch as flow
 
-
 INSTANCE = "r5-isolated-demo"
 
 

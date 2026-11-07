@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from api.routers import history as history_router
 from biz_rules.history_models import HistoryError
-from db import history, index_publication as index
+from db import history
+from db import index_publication as index
 
 ADMIN = "synthetic-admin-token"
 JOB = "a" * 64

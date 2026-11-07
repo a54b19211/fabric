@@ -2,7 +2,6 @@
 
 from biz_rules.cleaners import normalize_whitespace
 
-
 # 字段名到内部 key 的映射（中文标签 → key）
 _FIELD_MAP = {
     "注册号":           "regno",

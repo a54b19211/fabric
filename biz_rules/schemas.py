@@ -13,7 +13,8 @@
 - 数据库层不做结构约束，约束在代码层
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 

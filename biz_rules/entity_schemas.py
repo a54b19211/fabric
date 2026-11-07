@@ -8,6 +8,7 @@
   3. 推送 Neo4j 时的数据规范
 """
 from typing import Optional
+
 from loguru import logger
 from pydantic import BaseModel, Field
 

@@ -12,10 +12,9 @@ from db.models import (
     EntityRelation,
     ExtractedEntity,
 )
-
+from db.repository import aliases
 from db.repository.aliases import lookup_external_id_candidates
 from db.repository.audit import _write_operation_log
-from db.repository import aliases
 
 
 def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
@@ -183,7 +182,7 @@ def _lock_document_and_native_identities(session, source_doc_uuid, source_site, 
     if any(native_identity_claim(rec) for rec in entities):
         source = session.query(Document).filter(Document.uuid == source_doc_uuid).with_for_update().first()
         if source is not None and not source.is_deleted and source.source_site == source_site:
-            from biz_rules.native_extraction import extract_native_entities, NativeExtractionError
+            from biz_rules.native_extraction import NativeExtractionError, extract_native_entities
             try:
                 native_projection = extract_native_entities(source.raw_content, source.source_site)['entities']
             except NativeExtractionError:
@@ -404,7 +403,7 @@ def _create_entity_dict_from_extraction(
     已存在同 entity_type + 同 canonical_name 则跳过（返回已有 id）。
     is_verified=False 用于首次抽取自动创建（未经人工审核）。
     """
-    from db.identity import digest, compatible_identity
+    from db.identity import compatible_identity, digest
     lock_key = int(digest([entity_type, entity_name.strip().casefold()])[:15], 16)
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
     if not force_create:

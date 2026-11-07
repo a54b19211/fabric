@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-from biz_rules.history_models import ArchiveRecord, FetchRequest
 from biz_rules import history_sources as sources
+from biz_rules.history_models import ArchiveRecord, FetchRequest
 from tests.test_history import trial_raw
 from tests.test_source_refresh import who_value
 
@@ -182,6 +182,7 @@ def test_ct_empty_page_with_token_stops_after_one_request(monkeypatch):
 @pytest.mark.parametrize("query", ["*", " * ", "lung cancer"])
 def test_clinical_native_ids_do_not_send_literal_wildcard(monkeypatch, query):
     import httpx
+
     from biz_rules.history_models import FetchRequest
     from biz_rules.history_sources import read_public
 

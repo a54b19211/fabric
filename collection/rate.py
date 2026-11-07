@@ -19,7 +19,6 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
-
 REDIS_FAILURE_RETRIES = 8
 
 

@@ -5,7 +5,6 @@
 from biz_rules.extractors.hkex_fetcher import fetch_hkex_announcements
 from config.sites.hkex_pharma_list_auto import PHARMA_COMPANIES
 
-
 SITE_KEY = "hkex"
 
 CONFIG = {

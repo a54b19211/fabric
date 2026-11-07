@@ -1,8 +1,8 @@
 """审核前核对固定原文；位置匹配不等于内容在专业上属实。"""
-from datetime import datetime, timezone
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 

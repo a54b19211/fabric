@@ -7,6 +7,7 @@ API 文档：https://docs.drugbank.com/v1/
 申请 Key：https://dev.drugbank.com/sign_up
 """
 import os
+
 from biz_rules.extractors.drugbank import iter_drugbank
 
 SITE_KEY = "drugbank"

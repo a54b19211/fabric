@@ -12,15 +12,15 @@ LLM 抽取 Worker 管理器
   manager.shutdown()                          # 优雅关闭
 """
 
-import threading
 import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
 from loguru import logger
 
 from config.settings import APP
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 数据结构
@@ -78,8 +78,8 @@ class MemoryWorker:
             self._queue.task_done()
 
     def _process(self, task: ExtractionTask) -> None:
-        from flows.extraction_flow import extract_single_document
         from db.repository import update_extraction_status
+        from flows.extraction_flow import extract_single_document
 
         logger.info(
             f"[Worker-{self.worker_id}] 开始处理: {task.uuid} "

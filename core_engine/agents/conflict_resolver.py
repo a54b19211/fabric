@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """Agent B: 属性冲突裁决 Graph — 多来源字段冲突时决定保留哪个值。"""
 
-from typing import TypedDict, Annotated
 import json
+from typing import Annotated, TypedDict
 
-from langgraph.graph import StateGraph, END
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_openai import ChatOpenAI
 
+from core_engine.agent_config import AgentConfig
 from core_engine.agent_tools import CONFLICT_RESOLUTION_TOOLS
 from core_engine.agent_tools.decision_tools import resolve_attribute_conflict
 from core_engine.agents.prompts import CONFLICT_RESOLUTION_SYSTEM
-from core_engine.agent_config import AgentConfig
 
 
 class ConflictResolutionState(TypedDict):

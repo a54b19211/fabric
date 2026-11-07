@@ -15,11 +15,11 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Protocol, Optional
+from typing import Optional, Protocol
+
 from loguru import logger
 
 from config.settings import APP
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 数据结构

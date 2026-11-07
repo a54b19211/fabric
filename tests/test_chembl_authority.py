@@ -24,12 +24,12 @@ import urllib.error
 import pytest
 
 from core_engine import authority_client
-from core_engine.authority_client import resolve_identifier
 
 # conftest 的 autouse fixture 会把 authority_client._fetch_chembl_molecule 换成
 # 「永远不命中」的桩（保证单测不触网）。要在本文件里直接验证这个函数本身，
 # 必须在 fixture 生效前就把真实引用绑好 —— 否则拿到的是桩。
 from core_engine.authority_client import _fetch_chembl_molecule as real_fetch_chembl
+from core_engine.authority_client import resolve_identifier
 
 # 真实 ChEMBL 响应片段（2026-10-27 预检 Nivolumab 返回的字段结构）
 CHEMBL_NIVOLUMAB = {

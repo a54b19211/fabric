@@ -19,10 +19,10 @@ import time
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
+from collection.catalog import ATTACHMENT_SOURCES  # noqa: E402  有附件版本的来源：站点、PubMed 全文、本地导入
 from db.lease import LeaseQueue
 from processing import attachment_parse
 
-from collection.catalog import ATTACHMENT_SOURCES  # noqa: E402  有附件版本的来源：站点、PubMed 全文、本地导入
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 900
 CLAIMS = LeaseQueue("derived_text_claims", ("version_id", "processor_version"))

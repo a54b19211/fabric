@@ -1,13 +1,13 @@
 """flows.chunking（文档分块）的单元测试。"""
 from flows.chunking import (
-    split_document,
+    _extract_table_header,
+    _is_table_heavy,
+    _normalize_table_row,
+    _split_by_headings,
+    build_memory_context,
     chunk_article,
     chunk_table,
-    build_memory_context,
-    _normalize_table_row,
-    _is_table_heavy,
-    _split_by_headings,
-    _extract_table_header,
+    split_document,
 )
 
 

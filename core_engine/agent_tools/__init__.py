@@ -4,20 +4,20 @@
 from core_engine.agent_tools.db_tools import (
     exact_search,
     fuzzy_search,
-    search_similar_entities,
     get_entity_detail,
+    search_similar_entities,
 )
-from core_engine.agent_tools.web_tools import web_search, web_fetch
-from core_engine.agent_tools.rule_tools import get_entity_type_rules
 from core_engine.agent_tools.decision_tools import (
     approve_entity,  # noqa: F401  re-exported tool
-    reject_entity,  # noqa: F401  re-exported tool
     approve_relation,  # noqa: F401  re-exported tool
+    reject_entity,  # noqa: F401  re-exported tool
     reject_relation,  # noqa: F401  re-exported tool
     resolve_attribute_conflict,
     submit_final_decision,
     submit_merge_decision,
 )
+from core_engine.agent_tools.rule_tools import get_entity_type_rules
+from core_engine.agent_tools.web_tools import web_fetch, web_search
 
 # Agent B — 属性冲突裁决 (ReAct 模式)
 CONFLICT_RESOLUTION_TOOLS = [

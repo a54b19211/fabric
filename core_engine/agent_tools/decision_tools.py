@@ -1,21 +1,27 @@
 # -*- coding: utf-8 -*-
 """Agent 决策工具 — 审批/拒绝/冲突裁决/提交最终判断。"""
 
-from sqlalchemy import false
 import json
 import math
 
 from langchain_core.tools import tool
 from loguru import logger
+from sqlalchemy import false
 
+from db.models import EntityRelation, ExtractedEntity
 from db.repository import (
     approve_entity_with_alias_writeback,
-    reject_entity as _reject_entity,
+)
+from db.repository import (
     approve_relation as _approve_relation,
+)
+from db.repository import (
+    reject_entity as _reject_entity,
+)
+from db.repository import (
     reject_relation as _reject_relation,
 )
 from db.session import get_session
-from db.models import ExtractedEntity, EntityRelation
 
 
 @tool

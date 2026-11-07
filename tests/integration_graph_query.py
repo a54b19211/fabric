@@ -15,15 +15,14 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from integration_history import pg, pg_engine  # noqa: F401 -- shared PG fixtures
 from sqlalchemy import text
 
-from integration_history import pg, pg_engine  # noqa: F401 -- shared PG fixtures
 from api.routers.history import router
 from biz_rules.history_models import sha256
 from biz_rules.reviewed_graph import PrimeKGQuery
 from db import history as store
 from flows import graph_publish, graph_query
-
 
 QUERY_TOKEN = "synthetic-primekg-query-only"
 READ_TOKEN = "test-reader-only"

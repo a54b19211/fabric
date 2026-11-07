@@ -1,10 +1,9 @@
 """Entity dictionary maintenance: soft deletes and candidate dictionary lookup for review."""
 
-from sqlalchemy import false
 from loguru import logger
+from sqlalchemy import false
 
 from db.models import EntityAlias, EntityDict
-
 from db.repository.audit import _write_operation_log
 
 

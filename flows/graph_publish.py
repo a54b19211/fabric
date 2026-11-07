@@ -21,7 +21,6 @@ from biz_rules.history_models import (
 )
 from biz_rules.reviewed_graph import (
     GraphBundle,
-    PrimeKGQuery,
     GraphEdge,
     GraphEvidence,
     GraphIdentity,
@@ -29,6 +28,7 @@ from biz_rules.reviewed_graph import (
     GraphNode,
     GraphRedirect,
     GraphReview,
+    PrimeKGQuery,
     identity_key,
     primekg_bundle,
 )

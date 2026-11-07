@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from biz_rules.history_models import AvailabilityProof, HistoryRecord, HistoryError, sha256
+from biz_rules.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
 from biz_rules.native_graph import build_native_graph, validate_field_bindings
 from biz_rules.reviewed_graph import GraphBundle
 

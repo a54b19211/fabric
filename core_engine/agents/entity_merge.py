@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """Agent D: 实体合并消歧 Graph — 给定一个 extracted_entity，ReAct 推理链接到 entity_dict。"""
 
-from typing import TypedDict, Annotated
 import re
+from typing import Annotated, TypedDict
 
-from langgraph.graph import StateGraph, END
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
-from langchain_openai import ChatOpenAI
 from loguru import logger
 
+from core_engine.agent_config import AgentConfig
 from core_engine.agent_tools import ENTITY_MERGE_TOOLS
 from core_engine.agents.prompts import ENTITY_MERGE_SYSTEM
-from core_engine.agent_config import AgentConfig
 
 
 class EntityMergeState(TypedDict):

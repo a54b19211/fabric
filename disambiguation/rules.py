@@ -4,10 +4,12 @@ import re
 
 from db.repository import lookup_external_id_candidates
 from disambiguation.models import (
-    DisambiguationResult, CandidateEntity,
-    STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED, STATUS_AMBIGUOUS,
+    STATUS_AMBIGUOUS,
+    STATUS_AUTO_MATCHED,
+    STATUS_CANDIDATE_MATCHED,
+    CandidateEntity,
+    DisambiguationResult,
 )
-
 
 # CAS identifies a compound, not a branded/dosed Drug. Gene symbols, approval
 # numbers (which can cover multiple events), ICD codes and placeholder IDs do

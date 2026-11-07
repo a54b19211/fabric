@@ -47,7 +47,7 @@ biz_rules/sec_xbrl.py:financial_rows  50/31  XBRL fact projection with one branc
 biz_rules/who_don.py:project_who  75/27  WHO disease-outbreak page reader/projection, one branch per page section
 biz_rules/who_don.py:read_who  120/32  WHO disease-outbreak page reader/projection, one branch per page section
 core_engine/agent_runner.py:AgentRunner.run_document_review  122/31  legacy graph agent runner (AgentRunner is a god class, audit 2.1); split with the legacy graph feature
-core_engine/agent_runner.py:AgentRunner.run_entity_merge_stream  190/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
+core_engine/agent_runner.py:AgentRunner.run_entity_merge_stream  191/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
 core_engine/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merge agent graph assembly
 core_engine/api_router.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
 core_engine/authority_client.py:resolve_identifier  102/21  authority-service identifier resolution with fallbacks inline
@@ -61,14 +61,14 @@ db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/revie
 db/identity.py:merge_dictionary_identities  64/40  identity merge/rollback/review SQL with one branch per case; split by operation
 db/identity.py:resolve_link_proposal  44/28  identity merge/rollback/review SQL with one branch per case; split by operation
 db/identity.py:rollback_identity_merge  57/39  identity merge/rollback/review SQL with one branch per case; split by operation
-db/publication.py:_graph_input  85/18  graph publication worker: lease, plan, write and mark in one pass; split per step
+db/publication.py:_graph_input  86/18  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_prepare  103/12  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_publish_graph  84/5  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:backfill_once  166/23  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:publish_once  101/21  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
 db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
-db/repository/review_relations.py:approve_relation  54/25  multi-step write/review function of the legacy graph repository; split per step
+db/repository/review_relations.py:approve_relation  64/25  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
 db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
 db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step

@@ -15,26 +15,31 @@
   - 被 API 触发：from flows.extraction_flow import run_extraction_for_uuids
 """
 import time
+
 from loguru import logger
 from sqlalchemy import false, text
 
-from biz_rules.extraction_prompts import get_extraction_prompt, VALID_RELATION_TYPES
-from biz_rules.entity_schemas import validate_entity_data, VALID_ENTITY_TYPES
+from biz_rules.entity_schemas import VALID_ENTITY_TYPES, validate_entity_data
+from biz_rules.extraction_prompts import VALID_RELATION_TYPES, get_extraction_prompt
 from biz_rules.native_extraction import NATIVE_SOURCES, RULE_VERSION, NativeExtractionError, extract_native_entities
-from disambiguation.models import (
-    CandidateEntity, DisambiguationResult, STATUS_AUTO_MATCHED,
-    STATUS_CANDIDATE_MATCHED, STATUS_AMBIGUOUS, STATUS_NEW_ENTITY,
-)
 from core_engine.cloud_api_client import qwen_extract_structured
-from flows.chunking import split_document, build_memory_context
+from db.models import Document
 from db.repository import (
-    update_extraction_status,
     insert_extraction_result,
     lookup_alias_candidates,
     lookup_external_id_candidates,
+    update_extraction_status,
 )
 from db.session import get_session
-from db.models import Document
+from disambiguation.models import (
+    STATUS_AMBIGUOUS,
+    STATUS_AUTO_MATCHED,
+    STATUS_CANDIDATE_MATCHED,
+    STATUS_NEW_ENTITY,
+    CandidateEntity,
+    DisambiguationResult,
+)
+from flows.chunking import build_memory_context, split_document
 
 ENTITY_EXTRACTION_SYSTEM_PROMPT = (
     "你是医药行业知识图谱构建专家。"

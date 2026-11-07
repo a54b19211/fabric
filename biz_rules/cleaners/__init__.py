@@ -5,7 +5,6 @@
 import re
 
 
-
 def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
     """
     规范化空白字符：处理 nbsp、全角空格、Tab、连续空白、多余换行。

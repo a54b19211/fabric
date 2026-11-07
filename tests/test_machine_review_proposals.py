@@ -143,6 +143,7 @@ def conflict_input():
 
 def test_conflict_tool_collects_a_proposal_without_resolving_or_claiming_human_identity():
     import json
+
     from core_engine.agent_tools import decision_tools
 
     with patch.object(decision_tools, "resolve_merge", create=True) as mutate:
@@ -182,8 +183,9 @@ def test_conflict_runner_saves_value_and_input_as_a_pending_agent_run(saved):
 @pytest.mark.parametrize("terminal", ["resolve_attribute_conflict", "submit_final_decision"])
 def test_actual_conflict_graph_keeps_the_structured_proposed_value_without_mutation(terminal):
     from langchain_core.messages import AIMessage
-    from core_engine.agents import conflict_resolver
+
     from core_engine.agent_tools import decision_tools
+    from core_engine.agents import conflict_resolver
 
     config = SimpleNamespace(model_name="mock", llm_api_key="fake", llm_api_base="https://example.invalid",
                              temperature=0.0, max_tokens=256)
@@ -207,6 +209,7 @@ def test_actual_conflict_graph_keeps_the_structured_proposed_value_without_mutat
 
 def test_conflict_graph_without_a_structured_proposal_escalates_instead_of_inventing_a_decision():
     from langchain_core.messages import AIMessage
+
     from core_engine.agents import conflict_resolver
 
     config = SimpleNamespace(model_name="mock", llm_api_key="fake", llm_api_base="https://example.invalid",

@@ -6,10 +6,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from biz_rules import sec_xbrl as sec
 from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
 from biz_rules.history_sources import _pointer, project_record, read_public
-from biz_rules import sec_xbrl as sec
-
 
 NATIVE = "CIK0001682852:us-gaap:NetIncomeLoss"
 

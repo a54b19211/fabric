@@ -32,7 +32,7 @@ from biz_rules.history_models import (
     source_time,
     utc,
 )
-from biz_rules.history_sources import stable_raw, project_record
+from biz_rules.history_sources import project_record, stable_raw
 from db import registry_changes
 
 

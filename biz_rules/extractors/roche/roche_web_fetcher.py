@@ -13,6 +13,7 @@ import re
 import time
 import uuid as _uuid
 from typing import Iterator, Set
+
 from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 

@@ -13,12 +13,12 @@
 LLM 实体抽取在后续阶段（flows/extraction_flow.py）单独处理。
 """
 
+import trafilatura
 from loguru import logger
 from prefect import task
-import trafilatura
 
+from biz_rules.cleaners import clean_title, remove_extra_whitespace
 from config.crawler_settings import SITE_PROFILES
-from biz_rules.cleaners import remove_extra_whitespace, clean_title
 
 
 def _identify_site(url: str) -> str:

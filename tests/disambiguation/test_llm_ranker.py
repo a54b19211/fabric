@@ -2,15 +2,15 @@
 from unittest.mock import patch
 
 from disambiguation.llm_ranker import (
-    rank_with_reranker,
     _build_rich_name,
     _build_rich_text,
+    rank_with_reranker,
 )
 from disambiguation.models import (
-    CandidateEntity,
+    STATUS_AMBIGUOUS,
     STATUS_CANDIDATE_MATCHED,
     STATUS_NEW_ENTITY,
-    STATUS_AMBIGUOUS,
+    CandidateEntity,
 )
 
 

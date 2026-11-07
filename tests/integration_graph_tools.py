@@ -1,12 +1,12 @@
 """真实隔离History库：登记字段绑定、固定版本与有界图查询。"""
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 
 import pytest
+from integration_history import pg, pg_engine  # noqa: F401
 from sqlalchemy import text
 
-from integration_history import pg, pg_engine  # noqa: F401
 from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError
 from biz_rules.reviewed_graph import GraphBundle, GraphRef
 from db import history as store

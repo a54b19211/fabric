@@ -7,9 +7,7 @@ from loguru import logger
 from sqlalchemy import false, func, text
 
 from db.models import EntityAlias, EntityDict
-
 from db.repository.audit import _write_operation_log
-
 
 # 制剂后缀：entity_name 以此结尾时，不写入 entity_name 的子串作为 alias
 _FORMULATION_SUFFIX = re.compile(

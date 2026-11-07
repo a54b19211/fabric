@@ -1,26 +1,31 @@
 # -*- coding: utf-8 -*-
 """Agent 自动审核 API — 触发 Agent 运行 + 查询运行记录。"""
 
-from sqlalchemy import false
 import asyncio
 import json
 import threading
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 from loguru import logger
+from pydantic import BaseModel, Field
+from sqlalchemy import false
 
+from api.schemas.response import EntityReviewStatsResponse, PipelineOverviewResponse, PipelineStage
 from core_engine.agent_runner import get_agent_runner
 from db.agent_run_repo import (
-    get_agent_run, list_agent_runs, list_runs_by_document,
-    get_agent_stats, get_runs_for_document, count_pending_entities,
+    count_pending_entities,
+    get_agent_run,
+    get_agent_stats,
+    get_runs_for_document,
+    list_agent_runs,
     list_documents_with_entities,
-    mark_document_reviewing, unmark_document_reviewing,
+    list_runs_by_document,
+    mark_document_reviewing,
+    unmark_document_reviewing,
 )
+from db.models import Document, EntityRelation, ExtractedEntity
 from db.session import get_session
-from db.models import ExtractedEntity, EntityRelation, Document
-from api.schemas.response import PipelineOverviewResponse, PipelineStage, EntityReviewStatsResponse
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -689,8 +694,9 @@ async def stream_entity_merge(entity_id: int):
 @router.post("/merge/batch", response_model=MergeQueueStatusResponse)
 def trigger_batch_merge(body: BatchMergeRequest):
     """批量消歧——从可消歧实体中取 N 个入队，后台消费。"""
-    from core_engine.merge_queue import get_merge_queue
     from sqlalchemy import text
+
+    from core_engine.merge_queue import get_merge_queue
 
     mq = get_merge_queue()
 

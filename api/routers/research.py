@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from uuid import UUID
 
+from fastapi import APIRouter, HTTPException, Query
+from loguru import logger
+from pydantic import BaseModel
+from sqlalchemy import case, func, text
+from sqlalchemy.exc import SQLAlchemyError
+
 from biz_rules.clinical_research import (
     MAX_DOCUMENT_BYTES,
     ClinicalTrialProjection,
@@ -12,11 +18,6 @@ from biz_rules.clinical_research import (
 )
 from db.models import Document
 from db.session import get_session
-from fastapi import APIRouter, HTTPException, Query
-from loguru import logger
-from pydantic import BaseModel
-from sqlalchemy import case, func, text
-from sqlalchemy.exc import SQLAlchemyError
 
 router = APIRouter(prefix="/api/research/documents", tags=["research"])
 SEARCH_LIMIT = 20

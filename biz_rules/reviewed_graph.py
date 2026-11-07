@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from processing.identifiers import NCT_ID
 from collections import deque
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -17,6 +16,7 @@ from biz_rules.history_models import (
     sha256,
     utc,
 )
+from processing.identifiers import NCT_ID
 
 GRAPH_SCHEMA = "datafabric.graph.bundle.v1"
 GRAPH_SOURCES = {"reviewed_graph", "primekg_graph"}

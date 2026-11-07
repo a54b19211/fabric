@@ -12,7 +12,6 @@
 import json
 import uuid as _uuid
 
-
 from biz_rules.cleaners.field.date_format import normalize_date
 
 

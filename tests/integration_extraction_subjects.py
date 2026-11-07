@@ -1,12 +1,12 @@
 """history-only 新材料进入唯一的抽取/待审链（T-28 ⑤，Codex 390/391）。真实两 schema PostgreSQL：
 documents 库（抽取/审核主体）+ history 库。LLM 和消歧用替身，其余是生产代码。"""
 
+from integration_history import _fetch_study
+from integration_publication import databases  # noqa: F401  -- 两 schema 隔离库夹具
 from sqlalchemy import text
 
 from db import clean_stage
 from db.models import ExtractedEntity
-from integration_history import _fetch_study
-from integration_publication import databases  # noqa: F401  -- 两 schema 隔离库夹具
 
 NCT = "NCT09997001"
 

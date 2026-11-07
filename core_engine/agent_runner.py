@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
 """AgentRunner — 统一执行入口：Pipeline 模式（实体/关系审核）+ ReAct 模式（冲突/匹配）。"""
 
-from sqlalchemy import false
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import false
 
 from core_engine.agent_config import AgentConfig
+from core_engine.agents.conflict_resolver import get_conflict_resolver_graph
+from core_engine.agents.entity_merge import get_entity_merge_graph
 from core_engine.agents.entity_review import run_entity_review_pipeline
 from core_engine.agents.relation_review import run_relation_review_pipeline
-from core_engine.agents.conflict_resolver import get_conflict_resolver_graph
 from core_engine.agents.semantic_matcher import get_semantic_matcher_graph
-from core_engine.agents.entity_merge import get_entity_merge_graph
+from db.agent_run_repo import save_agent_run, update_agent_run_batch
+from db.models import Document, EntityRelation, ExtractedEntity
 from db.repository import (
     create_identity_merge_proposal,
 )
 from db.session import get_session
-from db.models import ExtractedEntity, EntityRelation, Document
-from db.agent_run_repo import save_agent_run, update_agent_run_batch
 
 
 class AgentRunner:
@@ -419,9 +419,10 @@ class AgentRunner:
             {"type": "result", "decision": "linked", "dict_id": 42, "reason": "...", ...}
             {"type": "done", "run_id": "...", ...}
         """
-        from langchain_core.messages import AIMessage, ToolMessage, HumanMessage, SystemMessage
-        from core_engine.agents.prompts import ENTITY_MERGE_SYSTEM
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
         from core_engine.agents.entity_merge import _entity_merge_human_prompt
+        from core_engine.agents.prompts import ENTITY_MERGE_SYSTEM
 
         run_id = str(uuid.uuid4())[:12]
         step_no = 0

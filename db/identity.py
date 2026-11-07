@@ -2,18 +2,28 @@
 
 These helpers never infer human confirmation from a legacy boolean or a machine score.
 """
-from contextlib import contextmanager
-from datetime import datetime, timezone
 import hashlib
 import json
 import re
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, false, or_
 from sqlalchemy.dialects.postgresql import insert
+
 from biz_rules.timestamps import parse_timestamp
-from db.models import (EntityDict, ExtractedEntity, EntityRelation, EntityAlias,
-                       EntitySourceEvidence, EntityIdentityMergeProposal,
-                       EntityPrimeKGMappingProposal, EntityMergeLog, EntityMergeQueue, ReviewLog)
+from db.models import (
+    EntityAlias,
+    EntityDict,
+    EntityIdentityMergeProposal,
+    EntityMergeLog,
+    EntityMergeQueue,
+    EntityPrimeKGMappingProposal,
+    EntityRelation,
+    EntitySourceEvidence,
+    ExtractedEntity,
+    ReviewLog,
+)
 
 
 def digest(value):

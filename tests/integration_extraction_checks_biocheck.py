@@ -16,11 +16,11 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+from integration_extraction_checks import document, drain, env, pg, pg_engine, stored  # noqa: F401  (fixtures)
+from integration_index_publication import add_document, profile, rows
 from sqlalchemy import text
 
 from db import extraction_checks as checks
-from integration_extraction_checks import document, drain, env, pg, pg_engine, stored  # noqa: F401  (fixtures)
-from integration_index_publication import add_document, profile, rows
 
 SRC = os.environ.get("DATAFABRIC_TEST_BIOCHECK_SRC")
 PYTHON = os.environ.get("DATAFABRIC_TEST_BIOCHECK_PYTHON") or sys.executable

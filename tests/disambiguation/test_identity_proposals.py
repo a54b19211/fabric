@@ -7,7 +7,7 @@ import pytest
 from disambiguation.engine import disambiguate, disambiguate_entities
 from disambiguation.llm_ranker import rank_with_llm, rank_with_reranker
 from disambiguation.models import CandidateEntity, DisambiguationResult
-from disambiguation.rules import match_strong_id, match_by_entity_rules
+from disambiguation.rules import match_by_entity_rules, match_strong_id
 
 
 def _row(dict_id=7, **data):

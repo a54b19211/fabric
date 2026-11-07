@@ -1,6 +1,5 @@
 """Real PostgreSQL fault recovery and retrieval checks (v3 3.6) in an isolated schema; no upstream network."""
 
-import legacy_bridge
 import copy
 import json
 import os
@@ -10,15 +9,17 @@ from pathlib import Path
 from threading import Event, current_thread
 from uuid import uuid4
 
+import legacy_bridge
 import pytest
+from integration_history import archive, raw_record
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 
 from biz_rules.collected_document import collected_document
 from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError, canonical
 from core_engine.weknora_index_client import IndexServiceError, publication_id
-from db import clean_stage, history, index_publication as index, retrieval
-from integration_history import archive, raw_record
+from db import clean_stage, history, retrieval
+from db import index_publication as index
 from migration import history as history_migration
 from migration import index_publication as index_migration
 
@@ -537,7 +538,8 @@ def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
     assert counts["index_enqueued"] == 1
     saved = job(pg, version)
     meta = saved["manifest"]["metadata"]
-    from processing import clean_text, profile as profile_module
+    from processing import clean_text
+    from processing import profile as profile_module
     assert saved["lane"] == "new" and saved["created_at"] is not None
     assert saved["artifact_key"].startswith(clean_text.PROCESSOR_VERSION + ":")
     assert saved["manifest"]["content_sha256"] == meta["artifact_sha256"] == saved["artifact_key"].split(":")[1]
@@ -661,8 +663,9 @@ def test_worker_threads_take_lanes_until_everything_is_ready(pg, monkeypatch):
 
 def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg, monkeypatch, tmp_path):
     """v3 3.3a/3.6：附件正文在加工层；解析成功、清洗段画像后才进索引，发布的是派生正文，回指附件版本。"""
-    from db import derived_text
     from integration_history import _fetch_attachment
+
+    from db import derived_text
     from processing import attachment_parse as ap
 
     version, _ = _fetch_attachment(tmp_path, monkeypatch, "idx-att")
@@ -686,8 +689,9 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
 
 
 def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
-    from db import derived_text
     from integration_history import _fetch_attachment
+
+    from db import derived_text
     from processing import attachment_parse as ap
 
     _fetch_attachment(tmp_path, monkeypatch, "idx-att-fail")

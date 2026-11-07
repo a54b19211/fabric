@@ -13,8 +13,11 @@ from loguru import logger
 from config.settings import APP
 from core_engine.cloud_api_client import qwen_chat
 from disambiguation.models import (
-    DisambiguationResult, CandidateEntity,
-    STATUS_CANDIDATE_MATCHED, STATUS_NEW_ENTITY, STATUS_AMBIGUOUS,
+    STATUS_AMBIGUOUS,
+    STATUS_CANDIDATE_MATCHED,
+    STATUS_NEW_ENTITY,
+    CandidateEntity,
+    DisambiguationResult,
 )
 
 # Existing bands only prioritize uncalibrated review proposals. They are

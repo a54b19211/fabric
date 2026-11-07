@@ -1,10 +1,12 @@
 """新闻索引故障注入，不下载新闻正文或假冒独立来源。"""
 import json
+
 import httpx
 import pytest
+
+from biz_rules.gdelt_news import article_id
 from biz_rules.history_models import ArchiveRecord, FetchRequest
 from biz_rules.history_sources import project_record, read_public
-from biz_rules.gdelt_news import article_id
 from config.settings import APP
 
 

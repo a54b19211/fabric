@@ -31,9 +31,9 @@ from biz_rules.history_models import (
     canonical,
     sha256,
 )
+from biz_rules.observations import OBSERVATION_PARSER
 from biz_rules.timestamps import parse_timestamp
 from core_engine.weknora_index_client import WeKnoraIndexClient, publication_id
-from biz_rules.observations import OBSERVATION_PARSER
 from db import history
 from db.lease import LeaseQueue, backoff, vacant
 from processing import index_pieces

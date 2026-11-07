@@ -9,6 +9,7 @@
 """
 import re
 from dataclasses import dataclass
+
 from loguru import logger
 
 CHUNK_MAX_CHARS = 6000   # 单块最大字符数

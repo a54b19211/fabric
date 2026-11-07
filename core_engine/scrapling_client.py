@@ -3,29 +3,27 @@
 封装页面抓取、PDF 下载、本地文件扫描等功能。
 """
 
-import io
 import hashlib
+import io
 import os
-import tempfile
-import uuid
 import re
+import tempfile
 import time
+import uuid
 import zipfile
-from urllib.parse import urlparse, unquote
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import httpx
-
 from loguru import logger
 from prefect import task
 
 # 引入 Scrapling 的高级反爬抓取器
-from scrapling.fetchers import StealthyFetcher, Fetcher
+from scrapling.fetchers import Fetcher, StealthyFetcher
 
-from config.settings import APP
 from config.crawler_settings import DEFAULT_HEADERS
-
+from config.settings import APP
 
 # ---------------------------------------------------------------------------
 #  工具函数

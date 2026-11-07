@@ -1,9 +1,9 @@
 """Human review of extracted entities: approve, reject and their batch forms."""
 
-from sqlalchemy import false
 from datetime import datetime, timezone
 
 from loguru import logger
+from sqlalchemy import false
 
 from db.models import (
     EntityDict,
@@ -11,11 +11,10 @@ from db.models import (
     EntityRelation,
     ExtractedEntity,
 )
-
+from db.repository import aliases
 from db.repository.audit import _write_operation_log, _write_review_log
 from db.repository.canonical import process_entity_merge
 from db.repository.extraction_results import _create_entity_dict_from_extraction
-from db.repository import aliases
 
 
 def get_pending_review_entities(limit: int = 50) -> list[dict]:
@@ -122,8 +121,8 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
 
 def _authorized_reviewer(reviewer, confirm_identity, basis, review_context):
     """Identity confirmation needs a trusted review context and a stated basis; plain approval a human reviewer."""
-    from db.identity import require_human_reviewer
     from api.review_auth import require_trusted_review_context
+    from db.identity import require_human_reviewer
     if confirm_identity:
         reviewer = require_trusted_review_context(review_context)
     else:
@@ -135,7 +134,7 @@ def _authorized_reviewer(reviewer, confirm_identity, basis, review_context):
 
 def _approval_snapshots(session, entity_id, dict_id, force_new):
     """Fixed-version reads happen before source row locks; the locked stage rechecks these snapshots."""
-    from db.identity import use_session, get_object_evidence, snapshot
+    from db.identity import get_object_evidence, snapshot, use_session
     with use_session(session) as active:
         ent = active.get(ExtractedEntity, entity_id)
         if ent is None or ent.is_deleted:
@@ -231,8 +230,8 @@ def _approval_after_state(ent, target, target_id, confirm_identity, basis, valid
 
 def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=None, force_new=False,
                                         confirm_identity=False, basis='', evidence=None, session=None, review_context=None):
-    from db.identity import use_session, validate_evidence, link_entity
     from api.review_auth import require_trusted_review_context
+    from db.identity import link_entity, use_session, validate_evidence
     reviewer = _authorized_reviewer(reviewer, confirm_identity, basis, review_context)
     expected, expected_target_id, expected_target, recorded_evidence, allowed_sources = _approval_snapshots(
         session, entity_id, dict_id, force_new)
@@ -352,33 +351,33 @@ def batch_approve_entities(
     from db.identity import require_human_reviewer
     require_human_reviewer(reviewer)
     from db.session import get_session
-    
+
     with get_session() as session:
         if session is None:
             return {"success": False, "message": "数据库未连接", "count": 0}
-        
+
         # 构建查询条件
         q = session.query(ExtractedEntity).filter(
             ExtractedEntity.review_status == "pending",
             ExtractedEntity.is_deleted == false(),
             ExtractedEntity.confidence_score >= min_confidence
         )
-        
+
         if source_doc_uuid:
             q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
         if entity_type:
             q = q.filter(ExtractedEntity.entity_type == entity_type)
         if source_site:
             q = q.filter(ExtractedEntity.source_site == source_site)
-        
+
         # Unresolved links remain pending until the reviewer chooses an identity.
         from db.identity import has_candidates
         entities = [ent for ent in q.all() if ent.dict_id or not has_candidates({'entity_data': ent.entity_data})]
         count = len(entities)
-        
+
         if count == 0:
             return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
-        
+
         # 批量更新
         affected_dict_ids: set[int] = set()
         for ent in entities:
@@ -440,31 +439,31 @@ def batch_reject_entities(
 ) -> dict:
     """批量审核拒绝实体，支持按条件筛选。"""
     from db.session import get_session
-    
+
     with get_session() as session:
         if session is None:
             return {"success": False, "message": "数据库未连接", "count": 0}
-        
+
         # 构建查询条件
         q = session.query(ExtractedEntity).filter(
             ExtractedEntity.review_status == "pending",
             ExtractedEntity.is_deleted == false()
         )
-        
+
         if source_doc_uuid:
             q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
         if entity_type:
             q = q.filter(ExtractedEntity.entity_type == entity_type)
         if source_site:
             q = q.filter(ExtractedEntity.source_site == source_site)
-        
+
         # 获取所有符合条件的实体
         entities = q.all()
         count = len(entities)
-        
+
         if count == 0:
             return {"success": True, "message": "没有符合条件的待审核实体", "count": 0}
-        
+
         # 批量更新
         for ent in entities:
             before = ent.review_status
@@ -474,7 +473,7 @@ def batch_reject_entities(
             ent.reviewed_at = datetime.now(timezone.utc)
             _write_review_log(session, "entity", ent.id, "reject", reviewer, note,
                             {"review_status": before}, {"review_status": "rejected"})
-        
+
         session.commit()
         _write_operation_log(
             session, "update", "extracted_entities", None,

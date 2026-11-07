@@ -1,7 +1,7 @@
 """受限图查询的边界测试：合成小图和本地HTTP替身，不访问现役库。"""
 
-from contextlib import contextmanager
 import json
+from contextlib import contextmanager
 
 import httpx
 import pytest

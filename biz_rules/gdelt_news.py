@@ -1,6 +1,6 @@
 """GDELT DOC新闻索引小批读取；保留元数据，不追抓第三方新闻全文。"""
-from datetime import datetime, timezone
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import httpx
@@ -45,7 +45,7 @@ def project_gdelt(item, data):
 
 
 def read_gdelt(request):
-    from biz_rules.history_sources import parse_json, _raw_array_items
+    from biz_rules.history_sources import _raw_array_items, parse_json
     if request.source_record_ids:
         raise HistoryError("by_id_unsupported", "GDELT索引暂不支持原编号点查；已采用资料可读固定版本")
     params = {"query": request.query, "mode": "artlist", "format": "json",

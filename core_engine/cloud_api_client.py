@@ -12,9 +12,9 @@ from pathlib import Path
 
 import httpx
 import llm_transport as lt
+from loguru import logger
 from openai import OpenAI
 from prefect import task
-from loguru import logger
 
 from config.settings import APP
 

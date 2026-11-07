@@ -7,11 +7,15 @@ import stat
 from pathlib import Path
 
 import pytest
+from test_attachment_originals import (
+    URL,
+    A,
+    download,
+    http_source,  # noqa: F401  (fixture)
+)
 
-from core_engine import scrapling_client as client
 from collection import site_crawler
-from test_attachment_originals import A, URL, download
-from test_attachment_originals import http_source  # noqa: F401  (fixture)
+from core_engine import scrapling_client as client
 
 
 def prepare_path(tmp_path, monkeypatch, scenario):

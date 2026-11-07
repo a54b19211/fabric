@@ -9,9 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import text
-
-from db import index_publication as index
 from integration_index_publication import (  # noqa: F401  (fixtures)
     JournalClient,
     add_document,
@@ -22,6 +19,9 @@ from integration_index_publication import (  # noqa: F401  (fixtures)
     rows,
     scan,
 )
+from sqlalchemy import text
+
+from db import index_publication as index
 
 KB = "synthetic-isolated-kb"
 

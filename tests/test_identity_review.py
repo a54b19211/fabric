@@ -2,8 +2,9 @@
 from datetime import datetime, timezone
 
 import pytest
+
 from api.schemas.request import ReviewActionRequest
-from db.models import EntityDict, ExtractedEntity, EntityRelation
+from db.models import EntityDict, EntityRelation, ExtractedEntity
 
 
 def test_plain_approval_does_not_implicitly_confirm_identity():
@@ -63,7 +64,8 @@ def test_persistence_models_include_immutable_source_reference_and_unknown_dates
 
 def test_client_name_is_not_a_trusted_review_identity(monkeypatch):
     import json
-    from api.review_auth import principal_from_token, require_trusted_review_context, ReviewPrincipal
+
+    from api.review_auth import ReviewPrincipal, principal_from_token, require_trusted_review_context
     monkeypatch.setenv('DATAFABRIC_REVIEW_TOKENS', json.dumps({'fixture-token': 'server-owned-reviewer'}))
     with pytest.raises(ValueError, match='trusted'):
         require_trusted_review_context('human')
@@ -93,6 +95,7 @@ def test_unavailable_disambiguation_cannot_allocate_new_identity():
 def test_sensitive_api_rejects_client_claimed_human_without_review_token(path, payload, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from api.routers.review import router
     monkeypatch.delenv('DATAFABRIC_REVIEW_TOKENS', raising=False)
     app = FastAPI()
@@ -117,6 +120,7 @@ def test_native_rule_ids_and_source_locators_are_not_lost():
 
 def test_lookup_failure_is_not_a_valid_empty_candidate_set():
     from unittest.mock import MagicMock
+
     from db.repository import search_similar_entities
     session = MagicMock()
     session.query.side_effect = RuntimeError('fixture-private-connection-data')
@@ -129,6 +133,7 @@ def test_lookup_failure_is_not_a_valid_empty_candidate_set():
 def test_legacy_alias_lookup_requires_unique_identity():
     from types import SimpleNamespace
     from unittest.mock import MagicMock
+
     from db.repository import lookup_alias, lookup_alias_candidates
     session = MagicMock()
     session.query.return_value.join.return_value.filter.return_value.distinct.return_value.order_by.return_value.all.return_value = [
@@ -141,6 +146,7 @@ def test_legacy_alias_lookup_requires_unique_identity():
 def test_patch_changes_invalidate_existing_confirmation_and_relation_review(monkeypatch):
     from contextlib import contextmanager
     from unittest.mock import MagicMock
+
     from api.routers import review
     from api.schemas.request import PatchEntityRequest, PatchRelationRequest
     row = ExtractedEntity(entity_data={'id': 'old'}, review_status='approved',
@@ -163,7 +169,7 @@ def test_patch_changes_invalidate_existing_confirmation_and_relation_review(monk
 
 
 def test_two_known_ids_without_a_shared_namespace_cannot_merge_by_name():
-    from db.identity import compatible_identity, batch_identity_keys
+    from db.identity import batch_identity_keys, compatible_identity
     assert not compatible_identity({'external_ids': {'lei': 'AAAA'}},
                                    {'external_ids': {'stock.nyse': 'BBBB'}})
     # A recall event can contain several products; event_id is not their identity key.
@@ -174,6 +180,7 @@ def test_two_known_ids_without_a_shared_namespace_cannot_merge_by_name():
 
 def test_candidate_similarity_score_is_preserved_exactly(monkeypatch):
     from types import SimpleNamespace
+
     import db.identity as identity
     calls = []
     monkeypatch.setattr(identity, 'add_identity_proposal', lambda *args, **kwargs: calls.append(kwargs))
@@ -188,8 +195,9 @@ def test_candidate_similarity_score_is_preserved_exactly(monkeypatch):
 @pytest.mark.parametrize('cached', [False, True])
 def test_alias_writeback_can_explicitly_avoid_http_under_review_locks(monkeypatch, cached):
     from unittest.mock import MagicMock
-    from db.repository import _write_aliases_with_embedding
+
     from core_engine import cloud_api_client
+    from db.repository import _write_aliases_with_embedding
     generate = MagicMock(side_effect=AssertionError('Review transaction must not call the embedding service'))
     monkeypatch.setattr(cloud_api_client, 'generate_embedding', generate)
     session = MagicMock()

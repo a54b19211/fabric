@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from processing.identifiers import NCT_ID
 import json
 import math
 import os
@@ -25,6 +24,7 @@ from biz_rules.history_models import (
 )
 from biz_rules.source_licenses import source_catalog
 from collection import transport
+from processing.identifiers import NCT_ID
 
 # generated from the declarations in biz_rules.source_licenses, cross-validated against collection.catalog on import
 SOURCE_CATALOG = source_catalog()

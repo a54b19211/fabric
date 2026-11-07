@@ -59,6 +59,7 @@
 """
 
 import inspect
+
 from biz_rules.entity_schemas import ENTITY_SCHEMA_MAP, get_entity_schema_description
 
 _PROMPT_DELIMITERS = ["---", "###", "SYSTEM:", "ASSISTANT:", "USER:", "<|im_start|>", "<|im_end|>"]
@@ -975,38 +976,38 @@ _PROMPT_MAP: dict[str, callable] = {
     "cde":                      get_nmpa_extraction_prompt,
     "cde_zdyz":                 get_nmpa_extraction_prompt,
     "cde_xxgk":                 get_nmpa_extraction_prompt,
-    
+
     # FDA相关
     "fda_press":                lambda t: get_fda_extraction_prompt(t, ""),
     "fda_drug_safety":          lambda t: get_fda_extraction_prompt(t, "drug_safety"),
     "fda_api_drug_label":       lambda t: get_fda_extraction_prompt(t, "drug_label"),
     "fda_api_enforcement":      lambda t: get_fda_extraction_prompt(t, "enforcement"),
-    
+
     # 临床试验类
     "chictr":                   get_clinical_trial_extraction_prompt,
     "clinicaltrials":           get_clinical_trial_extraction_prompt,
-    
+
     # 临床指南
     "nccn":                     get_nccn_extraction_prompt,
-    
+
     # 学术文献
     "pubmed":                   get_pubmed_extraction_prompt,
-    
+
     # 金融公告
     "hkex":                     get_hkex_extraction_prompt,
-    
+
     # 行业新闻
     "fiercepharma":             get_fiercepharma_extraction_prompt,
-    
+
     # PHIRDA相关
     "phirda_rd":                get_phirda_rd_industry_prompt,
     "phirda_industry":          get_phirda_rd_industry_prompt,
     "phirda_policy":            get_policy_extraction_prompt,
     "phirda_healthcare_reform": get_policy_extraction_prompt,
-    
+
     # 药物数据库
     "drugbank":                 get_drugbank_extraction_prompt,
-    
+
     # 制药企业新闻
     "roche":                    get_pharma_company_news_prompt,
 }

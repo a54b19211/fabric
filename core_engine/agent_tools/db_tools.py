@@ -4,14 +4,16 @@
 from langchain_core.tools import tool
 from loguru import logger
 
+from core_engine.cloud_api_client import build_embedding_text, generate_embedding
+from db.models import EntityDict
 from db.repository import (
     find_candidate_dicts_for_review,
     lookup_alias,
+)
+from db.repository import (
     search_similar_entities as _search_similar_entities,
 )
-from core_engine.cloud_api_client import generate_embedding, build_embedding_text
 from db.session import get_session
-from db.models import EntityDict
 
 
 @tool

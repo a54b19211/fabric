@@ -8,14 +8,14 @@ from types import SimpleNamespace
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 from integration_history import pg, pg_engine  # noqa: F401 -- shared isolated PG fixtures
+from test_sec_xbrl import NATIVE, value
+
 from api.routers.history import router
 from biz_rules import sec_xbrl
 from biz_rules.history_models import FetchRequest
 from biz_rules.history_sources import read_public
 from db import history
-from test_sec_xbrl import NATIVE, value
 
 
 def test_sec_real_fetch_adoption_dedup_restore_and_fixed_row_locators(pg, monkeypatch):

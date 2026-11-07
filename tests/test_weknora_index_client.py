@@ -8,7 +8,6 @@ import pytest
 from biz_rules.history_models import canonical, sha256
 from core_engine import weknora_index_client as module
 
-
 PID = "a" * 64
 TOKEN = "synthetic-private-token"
 BASE = "http://weknora.invalid:8080"

@@ -5,16 +5,16 @@ Run explicitly with DATAFABRIC_PUBLICATION_DATABASE_URL pointing at the coordina
 The fixed-document validator below is an explicit fixture; History's real reader is
 covered separately by the object-evidence integration suite.
 """
-import legacy_bridge
 import json
 import os
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
-import sys
 
+import legacy_bridge
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -23,9 +23,16 @@ from sqlalchemy.orm import Session
 from api.review_auth import principal_from_token
 from db import repository as repo
 from db.identity import auditable_identity, get_object_evidence
-from db.models import (EntityDict, EntityAlias, ExtractedEntity, EntityRelation,
-                       EntityIdentityMergeProposal, EntityMergeLog, EntityMergeQueue,
-                       EntityPrimeKGMappingProposal)
+from db.models import (
+    EntityAlias,
+    EntityDict,
+    EntityIdentityMergeProposal,
+    EntityMergeLog,
+    EntityMergeQueue,
+    EntityPrimeKGMappingProposal,
+    EntityRelation,
+    ExtractedEntity,
+)
 
 
 @pytest.fixture(scope='module')
@@ -281,6 +288,7 @@ def real_history_engine():
         conn.exec_driver_sql('CREATE SCHEMA IF NOT EXISTS ' + schema)
     scoped = create_engine(url, connect_args={'options': '-csearch_path=' + schema})
     from unittest.mock import patch
+
     from migration import history as migration
     with patch.object(migration, 'history_engine', lambda: scoped):
         migration.migrate_history()
@@ -301,8 +309,8 @@ def real_history(real_history_engine, monkeypatch):
 
 def freeze_document(doc_uuid, raw, source_site='pubmed'):
     from biz_rules.collected_document import collected_document
-    from biz_rules.reviewed_graph import document_native_id
     from biz_rules.history_models import ArchiveImport, ArchiveRecord
+    from biz_rules.reviewed_graph import document_native_id
     from db import history
     document = collected_document({'uuid': doc_uuid, 'source_site': source_site, 'title': 'Explicit synthetic source',
                                    'raw_content': raw}, datetime.now(timezone.utc), 'insert')
@@ -318,8 +326,8 @@ def freeze_document(doc_uuid, raw, source_site='pubmed'):
 
 
 def test_real_history_validator_binds_source_sha_unicode_and_permission(real_history, monkeypatch):
-    from biz_rules.object_evidence import validate_object_evidence
     from biz_rules.history_models import HistoryError
+    from biz_rules.object_evidence import validate_object_evidence
     doc_uuid = 'identity-real-' + uuid4().hex
     evidence = freeze_document(doc_uuid, '甲公司🧪 has a registered sponsor relationship.')
     checked = validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
@@ -520,6 +528,7 @@ def test_existing_native_duplicate_ids_are_candidates_without_rewriting_legacy_r
 def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_context(engine, principal, real_history, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from api.routers import review
     doc_uuid = 'http-evidence-' + uuid4().hex
     raw = 'Synthetic Company A sponsors Synthetic Company B.'
@@ -566,6 +575,7 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
 
 def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_history_refs(session, principal, real_history):
     from test_native_extraction import trial_raw
+
     from biz_rules.native_extraction import extract_native_entities
     from biz_rules.object_evidence import validate_object_evidence
     raw = trial_raw(markdown=True)
@@ -593,9 +603,10 @@ def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_h
 @pytest.mark.parametrize('invalid', ['missing_document', 'source_mismatch', 'unsupported_rule',
                                      'namespace_mismatch', 'raw_value_mismatch', 'quote_mismatch'])
 def test_writer_rechecks_native_claim_against_stored_source(session, invalid):
-    from db.models import Document
-    from biz_rules.native_extraction import extract_native_entities
     from test_native_extraction import trial_raw
+
+    from biz_rules.native_extraction import extract_native_entities
+    from db.models import Document
     raw = trial_raw(markdown=True)
     record = next(item for item in extract_native_entities(raw, 'clinicaltrials')['entities']
                   if item['entity_type'] == 'ClinicalTrial')
@@ -856,8 +867,8 @@ def test_link_rollback_refreshes_cached_entity_after_independent_writer_commit(e
 
 @pytest.mark.parametrize('change', ['approved_hit', 'pending_then_approve', 'dictionary_revoke'])
 def test_recorded_second_source_enqueues_existing_graph_publication(engine, change):
-    from db.models import Document
     from db.identity import set_dictionary_identity_data
+    from db.models import Document
     schema = 'opus_identity_publication_' + uuid4().hex[:10]
     os.environ['DATAFABRIC_IDENTITY_PUBLICATION_SCHEMA_RESULT'] = schema
     with engine.begin() as conn:

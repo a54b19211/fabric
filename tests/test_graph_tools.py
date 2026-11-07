@@ -1,14 +1,14 @@
 """固定图查询/原生字段规则的纯计算反例；不连接任何服务。"""
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 
 import pytest
 
-from biz_rules.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
-from biz_rules.reviewed_graph import GraphIdentity, GraphRef, resolve
 from biz_rules.graph_tools import graph_identity, paths, subgraph
+from biz_rules.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
 from biz_rules.native_graph import build_native_graph, validate_field_bindings
+from biz_rules.reviewed_graph import GraphIdentity, GraphRef, resolve
 
 
 def record(nct="NCT00000001", *, condition="Condition A"):
@@ -142,7 +142,7 @@ def test_identity_is_never_guessed_from_malformed_input(value):
 
 @pytest.mark.parametrize("injection", ["empty_projection", "approved_node", "approved_edge", "redirect"])
 def test_native_origin_cannot_smuggle_approved_objects_or_edges_without_native_rules(injection):
-    from biz_rules.reviewed_graph import GraphBundle, GraphEdge, GraphNode, GraphReview, GraphRedirect
+    from biz_rules.reviewed_graph import GraphBundle, GraphEdge, GraphNode, GraphRedirect, GraphReview
 
     rec = record()
     graph = build_native_graph([rec])

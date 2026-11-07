@@ -2,16 +2,19 @@
 
 from loguru import logger
 
-from db.repository import lookup_alias_candidates, search_similar_entities
 from core_engine.cloud_api_client import generate_embedding
+from db.repository import lookup_alias_candidates, search_similar_entities
+from disambiguation.llm_ranker import SCORE_MID, rank_with_llm, rank_with_reranker
 from disambiguation.models import (
-    DisambiguationResult, CandidateEntity,
-    STATUS_AUTO_MATCHED, STATUS_CANDIDATE_MATCHED,
-    STATUS_NEW_ENTITY, STATUS_AMBIGUOUS,
+    STATUS_AMBIGUOUS,
+    STATUS_AUTO_MATCHED,
+    STATUS_CANDIDATE_MATCHED,
+    STATUS_NEW_ENTITY,
+    CandidateEntity,
+    DisambiguationResult,
 )
 from disambiguation.normalizer import generate_candidate_names, normalize_for_alignment
-from disambiguation.rules import match_strong_id, match_by_entity_rules
-from disambiguation.llm_ranker import rank_with_reranker, rank_with_llm, SCORE_MID
+from disambiguation.rules import match_by_entity_rules, match_strong_id
 
 
 def _exact_alias_result(candidate_names, entity_type, session):

@@ -1,6 +1,8 @@
 """索引演示标记随固定原件传递，不由KB名称或字符串scope猜测。"""
 from types import SimpleNamespace
+
 import pytest
+
 from biz_rules.history_models import HistoryError
 from db import index_publication as index
 

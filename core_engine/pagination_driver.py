@@ -9,20 +9,18 @@
 新增翻页方式：继承 BasePaginationDriver，在 make_driver() 里注册即可。
 """
 
+import concurrent.futures
 import json
 import time
-import concurrent.futures
-
-from collection.transport import in_context
 from abc import ABC, abstractmethod
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 
-from config.crawler_settings import SITE_PROFILES, DEFAULT_HEADERS
-from core_engine.scrapling_client import fetch_page, make_uuid
+from collection.transport import in_context
+from config.crawler_settings import DEFAULT_HEADERS, SITE_PROFILES
 from core_engine.excel_parser import _rows_to_markdown
-
+from core_engine.scrapling_client import fetch_page, make_uuid
 
 # ===================================================================
 #  基类

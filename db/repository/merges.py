@@ -13,14 +13,13 @@ from db.models import (
     EntityMergeQueue,
     ExtractedEntity,
 )
-
 from db.repository.audit import _write_operation_log
 from db.repository.canonical import _is_empty_value, _sync_canonical_to_extracted
 
 
 def create_identity_merge_proposal(source_entity_id, target_dict_id, agent_reason='', agent_confidence=0.0,
                                    agent_run_id='', session=None, **metadata):
-    from db.identity import use_session, add_identity_proposal
+    from db.identity import add_identity_proposal, use_session
     with use_session(session) as active:
         return add_identity_proposal(active, source_entity_id, target_dict_id, agent_reason,
                                      agent_confidence, agent_run_id, **metadata)
@@ -595,14 +594,14 @@ def compare_entities(dict_ids: list[int]) -> dict:
 
 
 def merge_entities(keeper_dict_id, absorbed_dict_ids, field_decisions, reviewer='', note='', session=None, review_context=None):
-    from db.identity import use_session, merge_dictionary_identities
+    from db.identity import merge_dictionary_identities, use_session
     with use_session(session) as active:
         return merge_dictionary_identities(active, keeper_dict_id, absorbed_dict_ids, field_decisions, reviewer, note, review_context=review_context)
 
 
 def rollback_merge(merge_log_id, reason='', session=None, review_context=None):
-    from db.identity import use_session, rollback_identity_merge
     from api.review_auth import require_trusted_review_context
+    from db.identity import rollback_identity_merge, use_session
     require_trusted_review_context(review_context)
     with use_session(session) as active:
         return rollback_identity_merge(active, merge_log_id, reason, review_context=review_context)
@@ -610,8 +609,9 @@ def rollback_merge(merge_log_id, reason='', session=None, review_context=None):
 
 def get_merge_logs(limit: int = 50, include_rolled_back: bool = True, dict_ids=None, session=None) -> list[dict]:
     """查询合并日志列表。"""
-    from db.identity import use_session
     from sqlalchemy import or_
+
+    from db.identity import use_session
 
     with use_session(session) as session:
 

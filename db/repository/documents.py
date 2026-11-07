@@ -9,11 +9,10 @@ from sqlalchemy import false, text
 
 from db.models import (
     Attachment,
+    DocAuthorityResolution,
     DocExtra,
     Document,
-    DocAuthorityResolution,
 )
-
 from db.repository.audit import _write_operation_log
 
 

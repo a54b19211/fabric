@@ -6,16 +6,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-from sqlalchemy.engine import make_url
-from sqlalchemy.exc import ArgumentError
-
 from redis import Redis
 from rq import Queue
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from biz_rules.history_models import (
-    MAX_IMPORT_BYTES, ArchiveRecord, HistoryError, canonical, sha256,
+    MAX_IMPORT_BYTES,
+    ArchiveRecord,
+    HistoryError,
+    canonical,
+    sha256,
 )
 from biz_rules.history_sources import parse_json, project_record, read_public, require_public_fetch_enabled
 from db.history import (

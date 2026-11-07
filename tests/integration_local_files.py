@@ -12,16 +12,16 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from integration_history import pg, pg_engine  # noqa: F401  同一隔离 schema 夹具
+from pdf_fixture import make_pdf
 from sqlalchemy import text
+from test_pubmed_fulltext import CC_BY, Web, jats
 
 from api.routers.history import router
 from biz_rules import history_sources
 from biz_rules.history_models import FetchRequest
 from core_engine import scrapling_client as client
 from db import history as store
-from integration_history import pg, pg_engine  # noqa: F401  同一隔离 schema 夹具
-from pdf_fixture import make_pdf
-from test_pubmed_fulltext import CC_BY, Web, jats
 
 ADMIN = "test-admin-only"
 

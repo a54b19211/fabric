@@ -15,8 +15,8 @@ Excel 解析器 —— 将 .xls / .xlsx 转换为 Markdown 表格。
 """
 
 from pathlib import Path
-from loguru import logger
 
+from loguru import logger
 
 # ── 内部工具 ──────────────────────────────────────────────────────────
 

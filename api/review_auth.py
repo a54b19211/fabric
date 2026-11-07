@@ -1,8 +1,8 @@
 """Minimal server-owned reviewer identities for consequential review actions."""
-from dataclasses import dataclass, field
 import hmac
 import json
 import os
+from dataclasses import dataclass, field
 from typing import Optional
 
 from fastapi import Header, HTTPException

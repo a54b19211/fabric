@@ -1,11 +1,12 @@
 """Project the stored ClinicalTrials protocol without rewriting historical data."""
 
-from processing.identifiers import NCT_ID
 import json
 import re
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from processing.identifiers import NCT_ID
 
 PROJECTION_VERSION = "clinicaltrials.protocol.v1"
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024

@@ -1,15 +1,13 @@
 """Canonical-data merge into entity dictionary rows and canonical-to-extracted synchronisation."""
 
-from sqlalchemy import false
 from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
+from sqlalchemy import false
 
 from db.models import EntityDict, EntityMergeQueue, ExtractedEntity
-
 from db.repository.audit import _write_operation_log
-
 
 # ── 来源优先级（canonical_data 合并用）──────────────────────────────────
 _SOURCE_PRIORITY: dict[str, int] = {

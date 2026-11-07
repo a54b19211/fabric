@@ -8,13 +8,13 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pdf_fixture import make_pdf
 
 from biz_rules import history_sources
 from biz_rules.history_models import FetchRequest
 from collection import pubmed_fulltext as pf
 from collection import rate
 from core_engine import scrapling_client as client
-from pdf_fixture import make_pdf
 from processing import attachment_parse as ap
 from processing import jats_text
 

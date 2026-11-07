@@ -5,11 +5,12 @@ from contextlib import contextmanager
 from uuid import UUID, uuid4
 
 import pytest
-from api.routers import research
-from db.models import Document
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
+
+from api.routers import research
+from db.models import Document
 
 
 @pytest.fixture

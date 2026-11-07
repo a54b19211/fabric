@@ -5,8 +5,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from core_engine import scrapling_client as client
 from collection import site_crawler, transport
+from core_engine import scrapling_client as client
 
 URL = "https://example.invalid/notice.pdf"
 A = b"%PDF-1.4\nSYNTHETIC evidence A\n%%EOF\n"

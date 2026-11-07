@@ -462,9 +462,8 @@ def _patch(owner, name, wrap):
 
 def install():
     """把闸门装到各传输层的实际发送处。幂等（已包过的带标记）；每次按当前的类检查。没装的库跳过。"""
-    from httpx._client import Client as HttpxClient
-
     from httpcore._backends.sync import SyncStream
+    from httpx._client import Client as HttpxClient
 
     _patch(HttpxClient, "_send_single_request", _httpx_hop)
     _patch(SyncStream, "read", _httpcore_read)

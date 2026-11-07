@@ -1,9 +1,9 @@
 """biz_rules.entity_schemas 的单元测试。"""
 from biz_rules.entity_schemas import (
-    validate_entity_data,
-    _sanitize_entity_data,
     ENTITY_SCHEMA_MAP,
     VALID_ENTITY_TYPES,
+    _sanitize_entity_data,
+    validate_entity_data,
 )
 
 

@@ -49,5 +49,5 @@ for _py_file in sorted(_sites_dir.rglob("*.py")):
 
 # ======================== 本地 PDF 扫描目录 ========================
 LOCAL_PDF_SCAN_DIRS = [
-    
+
 ]

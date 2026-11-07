@@ -7,7 +7,11 @@ import re
 from dataclasses import dataclass
 
 from biz_rules.clinical_research import (
-    ClinicalTrialFacts, FIELD_PATHS, MAX_DOCUMENT_BYTES, _value, project_clinical_trial,
+    FIELD_PATHS,
+    MAX_DOCUMENT_BYTES,
+    ClinicalTrialFacts,
+    _value,
+    project_clinical_trial,
 )
 from biz_rules.history_models import sha256
 from biz_rules.history_sources import DECODER, parse_json

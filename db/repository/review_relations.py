@@ -1,12 +1,11 @@
 """Human review of extracted relations: approve, reject and their batch forms."""
 
-from sqlalchemy import false
 from datetime import datetime, timezone
 
 from loguru import logger
+from sqlalchemy import false
 
 from db.models import EntityDict, EntityRelation, ExtractedEntity
-
 from db.repository.audit import _write_operation_log, _write_review_log
 
 
@@ -31,7 +30,17 @@ def get_pending_review_relations(limit: int = 50) -> list[dict]:
 
 def approve_relation(id, reviewer, note='', evidence=None, session=None, review_context=None):
     from api.review_auth import require_trusted_review_context
-    from db.identity import use_session, auditable_identity, auditable_entity_identity, validate_evidence, get_object_evidence, record_evidence, snapshot, review_object_binding, review_endpoint_binding
+    from db.identity import (
+        auditable_entity_identity,
+        auditable_identity,
+        get_object_evidence,
+        record_evidence,
+        review_endpoint_binding,
+        review_object_binding,
+        snapshot,
+        use_session,
+        validate_evidence,
+    )
     reviewer = require_trusted_review_context(review_context)
     with use_session(session) as active:
         relation = active.get(EntityRelation, id)
@@ -120,8 +129,8 @@ def batch_approve_relations(source_doc_uuid='', source_site='', reviewer='', not
                             min_confidence=0.0, review_context=None):
     """Apply the same fixed-evidence and endpoint checks to every selected relation."""
     from api.review_auth import require_trusted_review_context
-    from db.identity import use_session
     from biz_rules.history_models import HistoryError
+    from db.identity import use_session
     reviewer = require_trusted_review_context(review_context)
     with use_session() as session:
         query = session.query(EntityRelation).filter(EntityRelation.review_status == 'pending',
@@ -150,29 +159,29 @@ def batch_reject_relations(
 ) -> dict:
     """批量审核拒绝关系，支持按条件筛选。"""
     from db.session import get_session
-    
+
     with get_session() as session:
         if session is None:
             return {"success": False, "message": "数据库未连接", "count": 0}
-        
+
         # 构建查询条件
         q = session.query(EntityRelation).filter(
             EntityRelation.review_status == "pending",
             EntityRelation.is_deleted == false()
         )
-        
+
         if source_doc_uuid:
             q = q.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
         if source_site:
             q = q.filter(EntityRelation.source_site == source_site)
-        
+
         # 获取所有符合条件的实体
         relations = q.all()
         count = len(relations)
-        
+
         if count == 0:
             return {"success": True, "message": "没有符合条件的待审核关系", "count": 0}
-        
+
         # 批量更新
         for rel in relations:
             before = rel.review_status
@@ -182,7 +191,7 @@ def batch_reject_relations(
             rel.reviewed_at = datetime.now(timezone.utc)
             _write_review_log(session, "relation", rel.id, "reject", reviewer, note,
                             {"review_status": before}, {"review_status": "rejected"})
-        
+
         session.commit()
         _write_operation_log(
             session, "update", "entity_relations", None,

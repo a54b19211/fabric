@@ -3,15 +3,19 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
+from sqlalchemy import false
+from sqlalchemy import func as sqlfunc
 
 from api.schemas.response import (
-    DocumentListResponse, DocumentDetailResponse,
-    DocumentItem, AttachmentItem, )
+    AttachmentItem,
+    DocumentDetailResponse,
+    DocumentItem,
+    DocumentListResponse,
+)
 from biz_rules.history_models import HistoryError
 from db.extraction_subjects import listed, subject_text
+from db.models import Attachment, DocExtra, Document
 from db.session import get_session
-from db.models import Document, DocExtra, Attachment
-from sqlalchemy import false, func as sqlfunc
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -109,10 +113,10 @@ def list_documents(
                 )
                 for r in rows
             ]
-            
+
             logger.info(f"[API] 文档列表查询: page={page}, page_size={page_size}, total={total}")
             return DocumentListResponse(total=total, page=page, page_size=page_size, items=items)
-            
+
         except Exception as e:
             logger.error(f"[API] 文档列表查询失败: {e}")
             raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
@@ -129,10 +133,10 @@ def get_document(uuid: str):
         try:
             # 查询主文档
             doc = session.query(Document).filter(
-                Document.uuid == uuid, 
+                Document.uuid == uuid,
                 Document.is_deleted == false()
             ).first()
-            
+
             if doc is None:
                 logger.warning(f"[API] 文档不存在: {uuid}")
                 raise HTTPException(status_code=404, detail="文档不存在")
@@ -143,7 +147,7 @@ def get_document(uuid: str):
 
             # 查询附件
             att_rows = session.query(Attachment).filter(
-                Attachment.parent_uuid == uuid, 
+                Attachment.parent_uuid == uuid,
                 Attachment.is_deleted == false()
             ).all()
             attachments = [
@@ -183,10 +187,10 @@ def get_document(uuid: str):
                 extraction_error=doc.extraction_error or "",
                 extracted_at=doc.extracted_at.isoformat() if doc.extracted_at else None,
             )
-            
+
             logger.info(f"[API] 文档详情查询: {uuid}")
             return response
-            
+
         except HTTPException:
             raise
         except Exception as e:

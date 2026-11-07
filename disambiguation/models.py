@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 
-
 RULE_VERSION = "fabric-disambiguation-20261031-v1"
 
 

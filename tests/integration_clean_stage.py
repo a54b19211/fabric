@@ -6,12 +6,6 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import text
-
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
-from contracts import data_objects as do
-from processing import clean_text
-from db import history as store
 from integration_history import (  # noqa: F401  -- 复用隔离库夹具和发布入口
     _fetch_attachment,
     _fetch_europe_pmc_raw,
@@ -19,6 +13,12 @@ from integration_history import (  # noqa: F401  -- 复用隔离库夹具和发�
     pg,
     pg_engine,
 )
+from sqlalchemy import text
+
+from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
+from contracts import data_objects as do
+from db import history as store
+from processing import clean_text
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 

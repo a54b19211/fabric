@@ -23,6 +23,7 @@ from pathlib import Path
 from loguru import logger
 
 from db.session import get_engine
+from migration import runner
 from migration.app_ledger import (  # noqa: F401 - the names tests and operators use from this module
     MIGRATION_TABLE,
     RENUMBERED_TABLE,
@@ -35,7 +36,6 @@ from migration.app_ledger import (  # noqa: F401 - the names tests and operators
     _parse_filename,
     read_state,
 )
-from migration import runner
 from migration.sqltext import split_sql
 
 VERSIONS_DIR = Path(__file__).parent / "versions"

@@ -1,6 +1,8 @@
 """文档交接保留全文、来源关系和未知状态；不把声明当核实。"""
 import json
+
 import pytest
+
 from biz_rules.history_models import ArchiveRecord, HistoryError
 from biz_rules.history_sources import project_record
 
@@ -126,8 +128,9 @@ def test_partial_bibliographic_ids_still_have_shared_origin_constraint():
     assert "doi:10.1234/example" in result["document_evidence"]["source_independence"]["shared_identifiers"]
 
 def test_information_event_detection_time_is_not_guessed_and_requires_timezone():
-    from biz_rules.history_models import InformationEnvironmentEvent
     from pydantic import ValidationError
+
+    from biz_rules.history_models import InformationEnvironmentEvent
     value = {"event_type": "reported_deletion", "description": "final label only",
              "basis_locator": {"json_pointer": "/censorship_type"}}
     assert InformationEnvironmentEvent.model_validate(value).detected_at is None

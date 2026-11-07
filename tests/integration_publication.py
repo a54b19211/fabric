@@ -1,12 +1,12 @@
 """真实两schema PostgreSQL：实际原库写入触发待办再自动发表，不用SQLite或HTTP假写库。"""
 
-import legacy_bridge
 import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import legacy_bridge
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -914,6 +914,7 @@ def test_reconcile_against_a_fixed_high_watermark(databases):
 
 def test_secondary_source_evidence_reaches_a_real_published_graph(databases):
     from pathlib import Path
+
     from db.identity import record_evidence
     source, target = databases
     with source.begin() as conn:

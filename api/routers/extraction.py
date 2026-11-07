@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """LLM 抽取触发接口"""
-from db.extraction_subjects import listed
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from loguru import logger
+from pydantic import BaseModel
+from sqlalchemy import and_, false, func, or_
 
+from api.routers.history import require_admin
 from api.schemas.request import ExtractionTriggerRequest, PendingExtractRequest
 from api.schemas.response import (
-    ExtractionTriggerResponse, ExtractionStatusResponse, ExtractionStatsResponse,
-    WorkerStatsResponse, WorkerItem, ReExtractResponse,
+    ExtractionStatsResponse,
+    ExtractionStatusResponse,
+    ExtractionTriggerResponse,
+    ReExtractResponse,
+    WorkerItem,
+    WorkerStatsResponse,
 )
-from api.routers.history import require_admin
-from db.session import get_session
+from db.extraction_subjects import listed
 from db.models import Document
-from sqlalchemy import and_, false, func, or_
+from db.session import get_session
 
 router = APIRouter(prefix="/api/extraction", tags=["extraction"])
 
@@ -211,24 +215,24 @@ def get_worker_stats():
     try:
         from flows.extraction_worker import get_extraction_manager
         manager = get_extraction_manager()
-        
+
         # 获取 Worker 状态
         stats = manager.stats()
         workers = [
             WorkerItem(worker_id=w["worker_id"], queue_size=w["queue_size"])
             for w in stats
         ]
-        
+
         response = WorkerStatsResponse(
             num_workers=manager.num_workers,
             total_pending=manager.total_pending(),
             paused=manager.is_paused(),
             workers=workers,
         )
-        
+
         logger.info(f"[API] Worker 状态查询: workers={response.num_workers}, pending={response.total_pending}")
         return response
-        
+
     except ImportError:
         logger.error("[API] WorkerManager 依赖未就绪")
         raise HTTPException(status_code=503, detail="任务队列依赖未就绪，请联系维护人") from None
@@ -284,6 +288,7 @@ def get_db_pool_status():
     使用原生 psycopg2 连接，绕过 SQLAlchemy 连接池，池满时也能访问。
     """
     import psycopg2
+
     from config.settings import APP
 
     try:
@@ -387,7 +392,7 @@ def get_extraction_status(uuid: str):
     # UUID 格式校验
     if not uuid or not uuid.strip():
         raise HTTPException(status_code=400, detail="uuid 不能为空")
-    
+
     with get_session() as session:
         if session is None:
             logger.error("[API] 数据库连接失败")
@@ -404,7 +409,7 @@ def get_extraction_status(uuid: str):
                 Document.is_deleted == false()
             ).first()
         )
-        
+
         if doc is None:
             logger.warning(f"[API] 文档不存在: {uuid}")
             raise HTTPException(status_code=404, detail="文档不存在")
@@ -416,10 +421,10 @@ def get_extraction_status(uuid: str):
             extracted_at=doc.extracted_at.isoformat() if doc.extracted_at else None,
             extraction_error=doc.extraction_error or "",
         )
-        
+
         logger.info(f"[API] 抽取状态查询: {uuid} status={response.extraction_status}")
         return response
-        
+
     except HTTPException:
         raise
     except Exception as e:

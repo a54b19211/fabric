@@ -1,8 +1,8 @@
 """disambiguation.normalizer（Step 0 名称规范化）的单元测试。"""
 from disambiguation.normalizer import (
-    normalize_name,
-    generate_candidate_names,
     _remove_company_suffix,
+    generate_candidate_names,
+    normalize_name,
 )
 
 

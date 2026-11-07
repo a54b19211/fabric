@@ -1,15 +1,21 @@
 """明确来源字段的图投影；不从名称推断真实身份或机制关系。"""
 
-from processing.identifiers import NCT_ID
 import re
 
 from biz_rules.history_models import HistoryError, HistoryRecord, canonical, sha256
 from biz_rules.history_sources import parse_json
 from biz_rules.native_extraction import TRIAL_ATTRIBUTE_PATHS, clinical_trial_attributes, field_value
 from biz_rules.reviewed_graph import (
-    GraphBundle, GraphDocumentRef, GraphEdge, GraphFieldEvidence, GraphIdentity,
-    GraphIdentityRule, GraphNode, GraphReview,
+    GraphBundle,
+    GraphDocumentRef,
+    GraphEdge,
+    GraphFieldEvidence,
+    GraphIdentity,
+    GraphIdentityRule,
+    GraphNode,
+    GraphReview,
 )
+from processing.identifiers import NCT_ID
 
 METHOD = "clinicaltrials.fields.v2"
 LEGACY_METHOD = "clinicaltrials.fields.v1"

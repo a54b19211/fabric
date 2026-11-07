@@ -428,7 +428,8 @@ def _graph_input(conn, uuid, fallback=None):
     } for row in dictionaries}
     verified = [str(row["id"]) for row in dictionaries if row.get("is_verified") is True]
     from sqlalchemy.orm import Session
-    from db.identity import get_objects_evidence, get_current_review_evidence
+
+    from db.identity import get_current_review_evidence, get_objects_evidence
     # 复用审核读取逻辑，以免原始字符位置和已核对的容器位置走成两套。
     with Session(bind=conn) as session:
         for kind, items in (("entity", entities), ("relation", relations)):
