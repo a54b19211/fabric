@@ -180,6 +180,97 @@ _VALID_FIELDS_BY_TYPE: dict[str, frozenset] = {
 }
 
 
+def _decide_field_merge(key, existing_val, new_val, new_priority, current_priority):
+    """How one incoming field meets the canonical value: ("set", value), ("queue", None) or None (keep as is)."""
+    # 1) entity_dict 无此字段 → 直接补充
+    if existing_val is None:
+        return "set", new_val
+    # 2) 数组字段：追加去重
+    if key in _ARRAY_FIELDS:
+        if isinstance(existing_val, list) and isinstance(new_val, list):
+            merged = list(dict.fromkeys(existing_val + new_val))
+            if merged != existing_val:
+                return "set", merged
+        return None
+    # 3) 快照字段：时间新的覆盖旧的
+    if key in _SNAPSHOT_FIELDS:
+        if (
+            isinstance(new_val, dict)
+            and isinstance(existing_val, dict)
+            and new_val.get("timestamp", 0) > existing_val.get("timestamp", 0)
+        ):
+            return "set", new_val
+        return None
+    # 4) 一侧语义为空 → 有值侧胜出；都为空 → 无冲突
+    existing_empty = _is_empty_value(existing_val)
+    new_empty = _is_empty_value(new_val)
+    if existing_empty and not new_empty:
+        return "set", new_val
+    if existing_empty or new_empty:
+        return None
+    # 5) 值相同 → 跳过
+    if existing_val == new_val:
+        return None
+    # 6) 新来源优先级严格高于当前来源 → auto merge
+    if new_priority > current_priority:
+        return "set", new_val
+    # 7) 同优先级不同源 → 人工审核；8) 低优来源 → 跳过，不覆盖
+    return ("queue", None) if new_priority == current_priority else None
+
+
+def _queue_value(value):
+    return value if isinstance(value, (dict, list)) else {"_val": value}
+
+
+def _queue_field_conflict(session, dict_id, key, existing_val, new_val, source_entity_id, source_site,
+                          existing_source_entity_id, existing_source_doc_uuid) -> bool:
+    """Queue a same-priority conflict for review, or refresh the field's open one. True when a row was added."""
+    existing_record = session.query(EntityMergeQueue).filter(
+        EntityMergeQueue.target_dict_id == dict_id,
+        EntityMergeQueue.field_name == key,
+        EntityMergeQueue.resolution == "pending",
+    ).first()
+    if existing_record is None:
+        session.add(EntityMergeQueue(
+            source_entity_id=source_entity_id,
+            target_dict_id=dict_id,
+            field_name=key,
+            existing_value=_queue_value(existing_val),
+            new_value=_queue_value(new_val),
+            source_site=source_site,
+            existing_source_entity_id=existing_source_entity_id,
+            existing_source_doc_uuid=existing_source_doc_uuid,
+            resolution="pending",
+        ))
+        return True
+    # 同字段已有 pending 冲突 → 刷新值，保留最新
+    existing_record.existing_value = _queue_value(existing_val)
+    existing_record.new_value = _queue_value(new_val)
+    existing_record.source_entity_id = source_entity_id
+    existing_record.source_site = source_site
+    existing_record.existing_source_entity_id = existing_source_entity_id
+    existing_record.existing_source_doc_uuid = existing_source_doc_uuid
+    logger.debug(
+        f"[DB] process_entity_merge: 刷新 pending 冲突 "
+        f"dict_id={dict_id} field={key}"
+    )
+    return False
+
+
+def _existing_source_ref(session, dict_id, source_entity_id):
+    """查找现有值的来源实体（用于冲突记录时标记双方来源文档）：(entity id | None, doc uuid | "")"""
+    existing_source = (
+        session.query(ExtractedEntity)
+        .filter(
+            ExtractedEntity.dict_id == dict_id,
+            ExtractedEntity.id != source_entity_id,
+        )
+        .order_by(ExtractedEntity.id.desc())
+        .first()
+    )
+    return (existing_source.id, existing_source.source_doc_uuid) if existing_source else (None, "")
+
+
 def process_entity_merge(
     session,
     dict_id: int,
@@ -191,7 +282,7 @@ def process_entity_merge(
     将 entity_data 合并到 entity_dict.canonical_data。
     返回 (auto_merged_count, conflict_count)。
 
-    合并策略：
+    合并策略（见 _decide_field_merge）：
       - entity_dict 字段为空，新值不为空 → auto merge
       - 数组字段 → 追加去重（auto merge）
       - 快照字段 → 时间新的胜出（auto merge）
@@ -210,18 +301,7 @@ def process_entity_merge(
     new_priority = _SOURCE_PRIORITY.get(source_site, 1)
     valid_fields = _VALID_FIELDS_BY_TYPE.get(entity.entity_type)  # None = 不限制
 
-    # 查找现有值的来源实体（用于冲突记录时标记双方来源文档）
-    existing_source = (
-        session.query(ExtractedEntity)
-        .filter(
-            ExtractedEntity.dict_id == dict_id,
-            ExtractedEntity.id != source_entity_id,
-        )
-        .order_by(ExtractedEntity.id.desc())
-        .first()
-    )
-    existing_source_entity_id: int | None = existing_source.id if existing_source else None
-    existing_source_doc_uuid: str = existing_source.source_doc_uuid if existing_source else ""
+    existing_source_entity_id, existing_source_doc_uuid = _existing_source_ref(session, dict_id, source_entity_id)
 
     auto_count = 0
     conflict_count = 0
@@ -232,93 +312,17 @@ def process_entity_merge(
             continue
         if valid_fields is not None and key not in valid_fields:
             continue
-
         existing_val = current.get(key)
-
-        # 1) entity_dict 无此字段 → 直接补充
-        if existing_val is None:
-            current[key] = new_val
+        decision = _decide_field_merge(key, existing_val, new_val, new_priority, current_priority)
+        if decision is None:
+            continue
+        action, value = decision
+        if action == "set":
+            current[key] = value
             auto_count += 1
-            continue
-
-        # 2) 数组字段：追加去重
-        if key in _ARRAY_FIELDS:
-            if isinstance(existing_val, list) and isinstance(new_val, list):
-                merged = list(dict.fromkeys(existing_val + new_val))
-                if merged != existing_val:
-                    current[key] = merged
-                    auto_count += 1
-            continue
-
-        # 3) 快照字段：时间新的覆盖旧的
-        if key in _SNAPSHOT_FIELDS:
-            if (
-                isinstance(new_val, dict)
-                and isinstance(existing_val, dict)
-                and new_val.get("timestamp", 0) > existing_val.get("timestamp", 0)
-            ):
-                current[key] = new_val
-                auto_count += 1
-            continue
-
-        # 4) 一侧语义为空 → 有值侧胜出
-        existing_empty = _is_empty_value(existing_val)
-        new_empty = _is_empty_value(new_val)
-        if existing_empty and not new_empty:
-            current[key] = new_val
-            auto_count += 1
-            continue
-        if new_empty and not existing_empty:
-            continue  # 保留现有值，新值为空
-        if existing_empty and new_empty:
-            continue  # 都为空，无冲突
-
-        # 5) 值相同 → 跳过
-        if existing_val == new_val:
-            continue
-
-        # 6) 新来源优先级严格高于当前来源 → auto merge
-        if new_priority > current_priority:
-            current[key] = new_val
-            auto_count += 1
-            continue
-
-        # 7) 同优先级不同源 → 人工审核
-        if new_priority == current_priority:
-            existing_record = session.query(EntityMergeQueue).filter(
-                EntityMergeQueue.target_dict_id == dict_id,
-                EntityMergeQueue.field_name == key,
-                EntityMergeQueue.resolution == "pending",
-            ).first()
-            if existing_record is None:
-                session.add(EntityMergeQueue(
-                    source_entity_id=source_entity_id,
-                    target_dict_id=dict_id,
-                    field_name=key,
-                    existing_value=existing_val if isinstance(existing_val, (dict, list)) else {"_val": existing_val},
-                    new_value=new_val if isinstance(new_val, (dict, list)) else {"_val": new_val},
-                    source_site=source_site,
-                    existing_source_entity_id=existing_source_entity_id,
-                    existing_source_doc_uuid=existing_source_doc_uuid,
-                    resolution="pending",
-                ))
-                conflict_count += 1
-            else:
-                # 同字段已有 pending 冲突 → 刷新值，保留最新
-                existing_record.existing_value = existing_val if isinstance(existing_val, (dict, list)) else {"_val": existing_val}
-                existing_record.new_value = new_val if isinstance(new_val, (dict, list)) else {"_val": new_val}
-                existing_record.source_entity_id = source_entity_id
-                existing_record.source_site = source_site
-                existing_record.existing_source_entity_id = existing_source_entity_id
-                existing_record.existing_source_doc_uuid = existing_source_doc_uuid
-                logger.debug(
-                    f"[DB] process_entity_merge: 刷新 pending 冲突 "
-                    f"dict_id={dict_id} field={key}"
-                )
-            continue
-
-        # 8) 低优来源 → 跳过，不覆盖
-        pass
+        elif _queue_field_conflict(session, dict_id, key, existing_val, new_val, source_entity_id, source_site,
+                                   existing_source_entity_id, existing_source_doc_uuid):
+            conflict_count += 1
 
     if auto_count > 0:
         from db.identity import set_dictionary_identity_data
