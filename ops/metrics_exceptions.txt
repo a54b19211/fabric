@@ -76,7 +76,6 @@ db/publication.py:publish_once  101/21  graph publication worker: lease, plan, w
 db/registry_changes.py:for_versions  84/13  registry-change detection over versions, one branch per change kind
 db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
 db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
-db/repository/review_entities.py:approve_entity_with_alias_writeback  92/51  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_relations.py:approve_relation  52/25  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
 db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step

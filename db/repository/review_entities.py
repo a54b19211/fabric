@@ -119,10 +119,9 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
     return len(duplicates)
 
 
-def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=None, force_new=False,
-                                        confirm_identity=False, basis='', evidence=None, session=None, review_context=None):
-    from db.identity import (use_session, require_human_reviewer, validate_evidence, get_object_evidence,
-                             record_evidence, link_entity, has_candidates, snapshot, review_object_binding, refresh_link_dependencies)
+def _authorized_reviewer(reviewer, confirm_identity, basis, review_context):
+    """Identity confirmation needs a trusted review context and a stated basis; plain approval a human reviewer."""
+    from db.identity import require_human_reviewer
     from api.review_auth import require_trusted_review_context
     if confirm_identity:
         reviewer = require_trusted_review_context(review_context)
@@ -130,7 +129,12 @@ def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=No
         reviewer = require_human_reviewer(reviewer)
     if confirm_identity and not basis.strip():
         raise ValueError('Identity confirmation requires an explicit basis')
-    # Fixed-version reads happen before source row locks. Recheck the source snapshot below.
+    return reviewer
+
+
+def _approval_snapshots(session, entity_id, dict_id, force_new):
+    """Fixed-version reads happen before source row locks; the locked stage rechecks these snapshots."""
+    from db.identity import use_session, get_object_evidence, snapshot
     with use_session(session) as active:
         ent = active.get(ExtractedEntity, entity_id)
         if ent is None or ent.is_deleted:
@@ -142,37 +146,103 @@ def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=No
         recorded_evidence = get_object_evidence('entity', entity_id, session=active)
         allowed_sources = {(ent.source_doc_uuid, ent.source_site)} | {
             (item['source_doc_uuid'], item['source_site']) for item in recorded_evidence}
-        stored_evidence = evidence or recorded_evidence
+    return expected, expected_target_id, expected_target, recorded_evidence, allowed_sources
+
+
+def _lock_unchanged_entity(active, entity_id, expected):
+    from db.identity import snapshot
+    ent = active.query(ExtractedEntity).filter(ExtractedEntity.id == entity_id).populate_existing().with_for_update().first()
+    if ent is None or ent.is_deleted or snapshot(ent) != expected:
+        raise ValueError('Entity changed during evidence validation')
+    return ent
+
+
+def _approve_without_identity(active, ent, entity_id, reviewer, note):
+    """Plain approval of an entity that has no dictionary entry and asks for none."""
+    before_status = ent.review_status
+    ent.review_status = 'approved'; ent.reviewer_note = note
+    ent.reviewed_by = reviewer; ent.reviewed_at = datetime.now(timezone.utc)
+    _write_review_log(active, 'entity', entity_id, 'approve', reviewer, note,
+                      {'review_status': before_status, 'dict_id': None},
+                      {'review_status': 'approved', 'dict_id': None, 'confirm_identity': False})
+    from db.review_lifecycle import recalc_document_state
+    recalc_document_state(active, ent.source_doc_uuid)
+    return {'success': True, 'entity_id': entity_id, 'dict_id': None, 'identity_confirmed': False}
+
+
+def _new_dictionary_for_approval(active, ent, force_new):
+    from db.identity import has_candidates
+    if has_candidates({'entity_data': ent.entity_data}) and not force_new:
+        raise ValueError('Resolve the candidate link or explicitly choose a new identity first')
+    return _create_entity_dict_from_extraction(active, ent.entity_name, ent.entity_type,
+        dict(ent.entity_data or {}), source_site=ent.source_site or '', is_verified=False,
+        source_doc_uuid=ent.source_doc_uuid or '', force_create=force_new)
+
+
+def _lock_approval_target(active, ent, target_id, expected_target_id, expected_target):
+    from db.identity import snapshot
+    target = active.query(EntityDict).filter(EntityDict.id == target_id).populate_existing().with_for_update().first()
+    if target is None or target.is_deleted or target.entity_type != ent.entity_type:
+        raise ValueError('Invalid identity dictionary')
+    if expected_target_id and snapshot(target) != expected_target:
+        raise ValueError('Dictionary identity changed during evidence validation')
+    return target
+
+
+def _confirm_identity(active, ent, target, reviewer, now, basis, validated, confirm_identity):
+    from db.identity import record_evidence
+    if not confirm_identity:
+        return
+    target.is_verified = True; target.verified_by = reviewer; target.verified_at = now
+    target.verification_basis = basis.strip()
+    ent.identity_confirmed_by = reviewer; ent.identity_confirmed_at = now
+    ent.identity_confirmation_basis = basis.strip()
+    record_evidence(active, 'entity', ent, {'entity_type': ent.entity_type,
+        'entity_name': ent.entity_name, 'entity_data': ent.entity_data, 'evidence': validated}, ent.source_doc_uuid, ent.source_site)
+
+
+def _record_link_snapshot(active, identity_link_log_id, ent):
+    """Approval and optional confirmation belong to this reversible single-mention change."""
+    from db.identity import refresh_link_dependencies, snapshot
+    if identity_link_log_id is None:
+        return
+    identity_link_log = active.get(EntityMergeLog, identity_link_log_id)
+    identity_link_log.after_snapshot = {**identity_link_log.after_snapshot, 'entities': [snapshot(ent)]}
+    refresh_link_dependencies(active, identity_link_log)
+
+
+def _approval_after_state(ent, target, target_id, confirm_identity, basis, validated):
+    from db.identity import review_object_binding
+    return {'review_status': 'approved', 'dict_id': target_id, 'confirm_identity': confirm_identity,
+            'is_verified': target.is_verified, 'verified_by': target.verified_by,
+            'verified_at': target.verified_at.isoformat() if target.verified_at else None,
+            'basis': basis if confirm_identity else '', 'evidence': validated,
+            'review_audit_schema': 'trusted_human_identity_confirmation.v1' if confirm_identity else None,
+            'identity_confirmed_by': ent.identity_confirmed_by if confirm_identity else None,
+            'identity_confirmed_at': ent.identity_confirmed_at.isoformat() if confirm_identity else None,
+            'object_binding_hash': review_object_binding(ent) if confirm_identity else None}
+
+
+def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=None, force_new=False,
+                                        confirm_identity=False, basis='', evidence=None, session=None, review_context=None):
+    from db.identity import use_session, validate_evidence, link_entity
+    from api.review_auth import require_trusted_review_context
+    reviewer = _authorized_reviewer(reviewer, confirm_identity, basis, review_context)
+    expected, expected_target_id, expected_target, recorded_evidence, allowed_sources = _approval_snapshots(
+        session, entity_id, dict_id, force_new)
+    stored_evidence = evidence or recorded_evidence
     validated = validate_evidence(stored_evidence, expected['source_doc_uuid'], expected['source_site'],
                                   allowed_sources=allowed_sources) if confirm_identity else []
     with use_session(session) as active:
-        ent = active.query(ExtractedEntity).filter(ExtractedEntity.id == entity_id).populate_existing().with_for_update().first()
-        if ent is None or ent.is_deleted or snapshot(ent) != expected:
-            raise ValueError('Entity changed during evidence validation')
+        ent = _lock_unchanged_entity(active, entity_id, expected)
         target_id = None if force_new else (dict_id if dict_id is not None else ent.dict_id)
         if ent.review_status == 'approved' and ent.dict_id and (force_new or target_id != ent.dict_id):
             raise ValueError('Use a reversible identity proposal to change an approved identity')
         if not target_id and not confirm_identity and not force_new:
-            before_status = ent.review_status
-            ent.review_status = 'approved'; ent.reviewer_note = note
-            ent.reviewed_by = reviewer; ent.reviewed_at = datetime.now(timezone.utc)
-            _write_review_log(active, 'entity', entity_id, 'approve', reviewer, note,
-                              {'review_status': before_status, 'dict_id': None},
-                              {'review_status': 'approved', 'dict_id': None, 'confirm_identity': False})
-            from db.review_lifecycle import recalc_document_state
-            recalc_document_state(active, ent.source_doc_uuid)
-            return {'success': True, 'entity_id': entity_id, 'dict_id': None, 'identity_confirmed': False}
+            return _approve_without_identity(active, ent, entity_id, reviewer, note)
         if not target_id:
-            if has_candidates({'entity_data': ent.entity_data}) and not force_new:
-                raise ValueError('Resolve the candidate link or explicitly choose a new identity first')
-            target_id = _create_entity_dict_from_extraction(active, ent.entity_name, ent.entity_type,
-                dict(ent.entity_data or {}), source_site=ent.source_site or '', is_verified=False,
-                source_doc_uuid=ent.source_doc_uuid or '', force_create=force_new)
-        target = active.query(EntityDict).filter(EntityDict.id == target_id).populate_existing().with_for_update().first()
-        if target is None or target.is_deleted or target.entity_type != ent.entity_type:
-            raise ValueError('Invalid identity dictionary')
-        if expected_target_id and snapshot(target) != expected_target:
-            raise ValueError('Dictionary identity changed during evidence validation')
+            target_id = _new_dictionary_for_approval(active, ent, force_new)
+        target = _lock_approval_target(active, ent, target_id, expected_target_id, expected_target)
         identity_link_log_id = None
         if ent.dict_id != target_id:
             reviewer = require_trusted_review_context(review_context)
@@ -186,28 +256,11 @@ def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=No
         aliases._write_aliases_with_embedding(active, target_id, ent.entity_type, ent.entity_name,
                                        dict(ent.entity_data or {}), source_doc_uuid=ent.source_doc_uuid or '',
                                        allow_embedding_generation=False)
-        if confirm_identity:
-            target.is_verified = True; target.verified_by = reviewer; target.verified_at = now
-            target.verification_basis = basis.strip()
-            ent.identity_confirmed_by = reviewer; ent.identity_confirmed_at = now
-            ent.identity_confirmation_basis = basis.strip()
-            record_evidence(active, 'entity', ent, {'entity_type': ent.entity_type,
-                'entity_name': ent.entity_name, 'entity_data': ent.entity_data, 'evidence': validated}, ent.source_doc_uuid, ent.source_site)
+        _confirm_identity(active, ent, target, reviewer, now, basis, validated, confirm_identity)
         _write_review_log(active, 'entity', entity_id, 'confirm_identity' if confirm_identity else 'approve',
                           reviewer, basis if confirm_identity else note, before,
-                          {'review_status': 'approved', 'dict_id': target_id, 'confirm_identity': confirm_identity,
-                           'is_verified': target.is_verified, 'verified_by': target.verified_by,
-                           'verified_at': target.verified_at.isoformat() if target.verified_at else None,
-                           'basis': basis if confirm_identity else '', 'evidence': validated,
-                           'review_audit_schema': 'trusted_human_identity_confirmation.v1' if confirm_identity else None,
-                           'identity_confirmed_by': ent.identity_confirmed_by if confirm_identity else None,
-                           'identity_confirmed_at': ent.identity_confirmed_at.isoformat() if confirm_identity else None,
-                           'object_binding_hash': review_object_binding(ent) if confirm_identity else None})
-        if identity_link_log_id is not None:
-            # Approval and optional confirmation belong to this reversible single-mention change.
-            identity_link_log = active.get(EntityMergeLog, identity_link_log_id)
-            identity_link_log.after_snapshot = {**identity_link_log.after_snapshot, 'entities': [snapshot(ent)]}
-            refresh_link_dependencies(active, identity_link_log)
+                          _approval_after_state(ent, target, target_id, confirm_identity, basis, validated))
+        _record_link_snapshot(active, identity_link_log_id, ent)
         from db.review_lifecycle import recalc_document_state
         recalc_document_state(active, ent.source_doc_uuid)
         return {'success': True, 'entity_id': entity_id, 'dict_id': target_id, 'identity_confirmed': confirm_identity}
