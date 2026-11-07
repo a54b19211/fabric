@@ -83,7 +83,7 @@ def session(engine, monkeypatch):
         with Session(engine) as active, active.begin():
             yield active
     monkeypatch.setattr('db.session.get_session', sessions)
-    monkeypatch.setattr(repo, '_write_aliases_with_embedding', lambda *a, **k: 0)
+    monkeypatch.setattr(repo.aliases, '_write_aliases_with_embedding', lambda *a, **k: 0)
     with Session(engine) as active, active.begin():
         yield active
 
@@ -416,7 +416,7 @@ def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, pri
         with Session(engine) as active, active.begin():
             yield active
     monkeypatch.setattr('db.session.get_session', sessions)
-    monkeypatch.setattr(repo, '_write_aliases_with_embedding', lambda *a, **k: 0)
+    monkeypatch.setattr(repo.aliases, '_write_aliases_with_embedding', lambda *a, **k: 0)
     original = validator.validate_object_evidence
     def concurrent_edit(evidence, **kwargs):
         checked = original(evidence, **kwargs)
@@ -528,7 +528,7 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
             yield active
     monkeypatch.setattr('db.session.get_session', sessions)
     monkeypatch.setattr(review, 'get_session', sessions)
-    monkeypatch.setattr(repo, '_write_aliases_with_embedding', lambda *a, **k: 0)
+    monkeypatch.setattr(repo.aliases, '_write_aliases_with_embedding', lambda *a, **k: 0)
     for entity_id in ids:
         repo.approve_entity_with_alias_writeback(entity_id, '', confirm_identity=True, basis='Source checked for HTTP export',
                                                  review_context=principal)
@@ -933,3 +933,83 @@ def test_single_link_rollback_blocks_added_native_evidence_without_row_change(se
     with pytest.raises(ValueError, match='dependencies changed'):
         repo.rollback_merge(log_id, 'Cannot attach new target evidence to original identity', session=session, review_context=principal)
     assert source.dict_id == target.id and not session.get(EntityMergeLog, log_id).is_rolled_back
+
+
+def test_pending_merges_auto_resolve_stale_rows_and_group_the_open_conflicts(engine, session, monkeypatch):
+    @contextmanager
+    def committing_session():  # like db.session.get_session: the function itself commits mid-way
+        with Session(engine) as active:
+            yield active
+            active.commit()
+    monkeypatch.setattr('db.session.get_session', committing_session)
+    tag = uuid4().hex[:8]
+    with Session(engine) as work, work.begin():
+        live = EntityDict(entity_type='Company', is_verified=False, canonical_data={
+            'name': 'D' + tag, 'empty_cur': '', 'same': 'v', 'keep': 'k', 'conf': 'old'})
+        gone = EntityDict(entity_type='Company', is_verified=False, canonical_data={'name': 'G' + tag}, is_deleted=True)
+        work.add_all([live, gone]); work.flush()
+        live_id, gone_id = live.id, gone.id
+
+        def source(doc, data=None, **extra):
+            row = ExtractedEntity(source_doc_uuid=doc, source_site='site-' + doc, entity_type='Company', entity_name='n',
+                                  dict_id=live_id, review_status='pending', entity_data=data or {}, **extra)
+            work.add(row); work.flush()
+            return row
+
+        main = source('dS' + tag, {'conf': 'new'})
+        deleted_source = source('dX' + tag, is_deleted=True)
+        source('d1' + tag, {'conf': 'old'})
+        source('d1' + tag, {'conf': 'old'})
+        source('d2' + tag, {'conf': 'new'})
+
+        def queue(target, src, field, existing, new):
+            row = EntityMergeQueue(source_entity_id=src.id, target_dict_id=target, field_name=field,
+                                   existing_value=existing, new_value=new, source_site='q-site',
+                                   existing_source_doc_uuid='ex-doc', resolution='pending')
+            work.add(row); work.flush()
+            return row.id
+
+        ids = {
+            'dict_deleted': queue(gone_id, main, 'f', {'_val': 'a'}, {'_val': 'b'}),
+            'source_deleted': queue(live_id, deleted_source, 'conf', {'_val': 'old'}, {'_val': 'new'}),
+            'both_empty': queue(live_id, main, 'nothing', {'_val': ''}, {'_val': ''}),
+            'accept_new': queue(live_id, main, 'empty_cur', {'_val': ''}, {'_val': 'N'}),
+            'keep_existing': queue(live_id, main, 'keep', {'_val': 'k'}, {'_val': None}),
+            'already_merged': queue(live_id, main, 'same', {'_val': 'x'}, {'_val': 'v'}),
+            'conflict': queue(live_id, main, 'conf', {'_val': 'stale'}, {'_val': 'new'}),
+        }
+        main_doc = main.source_doc_uuid
+        main_id = main.id
+
+    result = repo.get_pending_merges(limit=100000)
+    mine = [group for group in result['groups'] if group['dict_id'] == live_id]
+    assert len(mine) == 1 and result['total_groups'] == len(result['groups'])
+    assert [group['dict_id'] for group in result['groups']] == sorted(
+        (group['dict_id'] for group in result['groups']), reverse=True)
+    group = mine[0]
+    assert group['entity_type'] == 'Company' and group['entity_name'] == 'D' + tag and group['canonical_source'] == ''
+    assert len(group['conflicts']) == 1
+    conflict = group['conflicts'][0]
+    sources = {key: sorted((item['source_doc_uuid'], item['source_site']) for item in conflict.pop(key))
+               for key in ('existing_sources', 'new_sources')}
+    assert conflict == {'merge_id': ids['conflict'], 'field_name': 'conf', 'existing_value': 'old', 'new_value': 'new',
+                        'source_entity_id': main_id, 'source_site': 'q-site', 'source_doc_uuid': main_doc,
+                        'existing_source_doc_uuid': 'ex-doc'}
+    assert sources['existing_sources'] == [('d1' + tag, 'site-d1' + tag)]
+    assert sources['new_sources'] == [('d2' + tag, 'site-d2' + tag), (main_doc, 'site-' + main_doc)]
+    with Session(engine) as check:
+        state = {name: check.get(EntityMergeQueue, row_id) for name, row_id in ids.items()}
+        assert {name: row.resolution for name, row in state.items()} == {
+            'dict_deleted': 'resolved_dict_deleted', 'source_deleted': 'resolved_source_deleted',
+            'both_empty': 'resolved_both_empty', 'accept_new': 'accept_new', 'keep_existing': 'keep_existing',
+            'already_merged': 'resolved_already_merged', 'conflict': 'pending'}
+        assert all(state[name].reviewed_at is not None for name in state if name != 'conflict')
+        assert state['conflict'].existing_value == {'_val': 'old'}
+        assert check.get(EntityDict, live_id).canonical_data['empty_cur'] == {'_val': 'N'}
+        logged = check.execute(text(
+            "SELECT target_id, details->>'reason' FROM operation_log WHERE target_table='entity_merge_queue' "
+            "AND business_action='auto_resolve' AND target_id = ANY(:ids) ORDER BY target_id"),
+            {'ids': [ids['dict_deleted'], ids['source_deleted'], ids['already_merged'], ids['both_empty']]}).all()
+        assert [tuple(row) for row in logged] == sorted([
+            (ids['dict_deleted'], 'dict_deleted'), (ids['source_deleted'], 'source_deleted'),
+            (ids['already_merged'], 'already_merged')])
