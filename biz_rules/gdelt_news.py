@@ -7,14 +7,13 @@ only says that this system's cap was not hit, never that the window is whole. Ev
 run's coverage; the ones still full at the finest size are marked possibly_truncated.
 """
 import time
-from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
 import httpx
 
-from biz_rules.history_models import ArchiveRecord, HistoryError, sha256, source_time
+from biz_rules.history_models import ArchiveRecord, HistoryError, WindowReceipt, sha256, source_time
 from collection import transport
 
 ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -70,31 +69,12 @@ class Window(NamedTuple):
         return Window(self.start, middle), Window(middle, self.end)
 
 
-@dataclass
-class WindowReceipt:
-    """One window of one query: what came back, or why nothing did.
-
-    status: read (a response below the cap, or a full one that cannot be cut), split (a full response, its halves
-    follow), failed (the request failed: no count, not zero), not_read (the read stopped before this window).
-    full: the response reached max_records. possibly_truncated: a full response that cannot be cut any further."""
-
-    start: str | None
-    end: str | None
-    status: str
-    returned: int | None = None
-    distinct_urls: int | None = None
-    full: bool = False
-    possibly_truncated: bool = False
-    requests: int = 0
-    reason: str | None = None
-
-
 def _iso(value):
     return value.isoformat() if value else None
 
 
 def _receipt(window, status, **fields):
-    return WindowReceipt(_iso(window.start), _iso(window.end), status, **fields)
+    return WindowReceipt(start=_iso(window.start), end=_iso(window.end), status=status, **fields)
 
 
 def _sent() -> int:
@@ -227,7 +207,7 @@ class _Read:
             "stop_reason": "source_failed" if error else stop or "bounded_index_response",
             "error": error, "requests": sum(receipt.requests for receipt in self.receipts), "bytes": self.bytes,
             "source_total": None, "next_continuation": None,
-            "window_coverage": [asdict(receipt) for receipt in self.receipts],
+            "window_coverage": [receipt.model_dump() for receipt in self.receipts],
             "truncated_intervals": [{"start": receipt.start, "end": receipt.end} for receipt in truncated],
         }
 

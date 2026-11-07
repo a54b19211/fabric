@@ -33,6 +33,7 @@ from biz_rules.history_models import (
     utc,
 )
 from biz_rules.history_sources import project_record, stable_raw
+from biz_rules.window_coverage import MAX_RUNS, effective_receipts
 from db import registry_changes
 
 
@@ -1428,23 +1429,73 @@ LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥已退役（v3 6.3）：�
                   "旧版本按旧编号仍可读")
 
 
-def _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit):
+def _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit, window):
     """Cursor binding: a cursor is only valid for the exact read it was issued for."""
-    return sha256(
-        canonical(
-            {
-                "source": source_id,
-                "demo": is_demo,
-                "mode": mode,
-                "cutoff": _cutoff(cutoff).isoformat(),
-                "run": run_id,
-                "ids": sorted(set(source_record_ids)),
-                "terms": sorted(set(terms)),
-                "kind": record_kind,
-                "limit": limit,
-            }
-        )
-    )
+    binding = {
+        "source": source_id,
+        "demo": is_demo,
+        "mode": mode,
+        "cutoff": _cutoff(cutoff).isoformat(),
+        "run": run_id,
+        "ids": sorted(set(source_record_ids)),
+        "terms": sorted(set(terms)),
+        "kind": record_kind,
+        "limit": limit,
+    }
+    if window:  # a read without a window keeps the binding it always had
+        binding["window"] = [moment.isoformat() for moment in window]
+    return sha256(canonical(binding))
+
+
+# A lead listing reads a source's records by the time its source_updated_at holds. For GDELT that is the time GDELT
+# first observed the article (meaning gdelt_first_observed), the very field its read windows are cut by.
+LEAD_WINDOW_SOURCES = ("gdelt_doc",)
+WINDOW_LIMITATION = ["窗口回执只记本系统对该窗口的读取：条数少于上限只说明没碰到上限，不是来源在该窗口的全量；"
+                     "possibly_truncated、failed、not_read 的区间可能漏了线索"]
+
+
+def _lead_window(source_id, window):
+    """The (start, end) UTC range of a lead listing, or None when no window is asked for."""
+    if window == (None, None):
+        return None
+    try:
+        bounds = (utc(window[0]), utc(window[1]))
+    except (ValueError, AttributeError):
+        bounds = None
+    if source_id not in LEAD_WINDOW_SOURCES or bounds is None or bounds[0] >= bounds[1]:
+        raise HistoryError("invalid_window", "线索窗口须给出含时区的起止时间（起点早于终点），且只适用于 GDELT 新闻索引", 422)
+    return bounds
+
+
+def _in_window(where, params, window):
+    """`where` narrowed to the versions whose source_updated_at lies in [start, end)."""
+    if window is None:
+        return where
+    params.update(window_start=window[0], window_end=window[1])
+    return where + " AND " + _SOURCE_UPDATED_ORDER + ">=:window_start AND " + _SOURCE_UPDATED_ORDER + "<:window_end"
+
+
+def _window_receipts(conn, source_id, is_demo, run, cutoff, window):
+    """(receipts, truncated intervals) a listing carries: those of the named run, or - for a window without a run -
+    those of the source's finished fetch runs that ended by the cutoff and read a range that meets the window."""
+    if run is not None:
+        runs = [(run["request_payload"].get("query"), run["coverage"])]
+    elif window is None:
+        return [], []
+    else:
+        rows = conn.execute(text(
+            "SELECT request_payload->>'query' AS query,coverage FROM history_runs "
+            "WHERE source_id=:source AND is_demo=:demo AND kind='fetch' AND state IN ('completed','partial','failed') "
+            "AND completed_at<=:cutoff AND jsonb_typeof(coverage->'window_coverage')='array' "
+            "AND COALESCE((request_payload->>'updated_until')::timestamptz,completed_at)>:start "
+            "AND COALESCE((request_payload->>'updated_since')::timestamptz,completed_at-interval '24 hours')<:end "
+            "ORDER BY completed_at,id LIMIT :limit"
+        ), {"source": source_id, "demo": is_demo, "cutoff": _cutoff(cutoff), "start": window[0], "end": window[1],
+            "limit": MAX_RUNS + 1}).mappings().all()
+        if len(rows) > MAX_RUNS:
+            raise HistoryError("window_too_wide", "窗口内的读取运行超过 %d 次，请缩小窗口" % MAX_RUNS, 422)
+        runs = [(row["query"], row["coverage"]) for row in rows]
+    return effective_receipts(runs, window)
 
 
 def _take_page(conn, rows, limit, mode, cutoff):
@@ -1466,7 +1517,7 @@ def _take_page(conn, rows, limit, mode, cutoff):
     return items, more
 
 
-def _list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered):
+def _list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered, windows):
     """What the page does and does not prove about the source; `filtered` = ids/terms/kind narrowed the read."""
     run_coverage = run["coverage"] if run else {}
     declared_count = len(set(params.get("declared_ids", []))) if run else None
@@ -1501,7 +1552,10 @@ def _list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered)
         + [
             "一页结束不证明来源全量；候选词/ID筛选不构成完整同期队列",
             "截止资格先筛后选latest；补录和身份补充不倒填首次可见时间",
-        ],
+        ]
+        + (WINDOW_LIMITATION if windows[0] else []),
+        "window_coverage": windows[0],
+        "truncated_intervals": windows[1],
     }
 
 
@@ -1565,13 +1619,15 @@ def list_records(
     record_kind=None,
     limit=25,
     cursor=None,
+    window=(None, None),
 ):
     if source_id == "legacy_documents" and legacy_retired() and not source_record_ids:
         raise HistoryError(*LEGACY_RETIRED, 410)  # 按旧编号（source_record_ids）的读取不受影响
     _derived_mode(source_id, mode)
     if not 1 <= limit <= 100:
         raise HistoryError("query_budget", "每页条数须为1至100")
-    binding = _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit)
+    window = _lead_window(source_id, window)
+    binding = _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit, window)
     position = _decode_cursor(cursor, binding) if cursor else None
     with history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
@@ -1589,6 +1645,7 @@ def list_records(
             terms,
             record_kind,
         )
+        where = _in_window(where, params, window)
         membership_hash = sha256(canonical(params.get("declared_ids", [])))
         if position and position.get("membership_hash") != membership_hash:
             raise HistoryError(
@@ -1620,12 +1677,13 @@ def list_records(
             else None
         )
         eligible_count = _count_eligible_records(conn, base, eligible, params)
-        filtered = bool(source_record_ids or terms or record_kind)
+        filtered = bool(source_record_ids or terms or record_kind or window)
+        windows = _window_receipts(conn, source_id, is_demo, run, cutoff, window)
         return RecordCollection(
             items=items,
             next_cursor=next_cursor,
             excluded_counts={"ineligible_version_count": excluded},
-            coverage=_list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered),
+            coverage=_list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered, windows),
         )
 
 

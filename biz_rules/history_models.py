@@ -406,6 +406,30 @@ class FetchRequest(Model):
         return self
 
 
+class WindowReceipt(Model):
+    """One window of one windowed read: what came back, or why nothing did. biz_rules.gdelt_news writes them into the
+    run's coverage; db.history lists them with the records of a window.
+
+    status: read (a response below the cap, or a full one that cannot be cut), split (a full response, its halves
+    follow), failed (the request failed: no count, not zero), not_read (the read stopped before this window).
+    full: the response reached max_records. possibly_truncated: a full response that cannot be cut any further."""
+
+    start: str | None
+    end: str | None
+    status: Literal["read", "split", "failed", "not_read"]
+    returned: int | None = None
+    distinct_urls: int | None = None
+    full: bool = False
+    possibly_truncated: bool = False
+    requests: int = 0
+    reason: str | None = None
+
+
+class Interval(Model):
+    start: str | None
+    end: str | None
+
+
 class Coverage(Model):
     mode: Literal["declared_manifest", "bounded_public_query", "bounded_demo_query", "adopted_records"]
     scope_description: str
@@ -421,6 +445,9 @@ class Coverage(Model):
     adopted_count: int
     stop_reason: str
     limitations: list[str] = Field(default_factory=list)
+    # Windowed reads (GDELT): the receipts of the windows the listing speaks about, and those of them that may be cut short
+    window_coverage: list[WindowReceipt] = Field(default_factory=list)
+    truncated_intervals: list[Interval] = Field(default_factory=list)
 
 
 class RecordCollection(Model):

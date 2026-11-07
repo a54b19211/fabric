@@ -5,12 +5,15 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
+from biz_rules import window_coverage
 from biz_rules.gdelt_news import ENDPOINT, article_id
-from biz_rules.history_models import ArchiveRecord, FetchRequest
+from biz_rules.history_models import ArchiveRecord, Coverage, FetchRequest, HistoryError
 from biz_rules.history_sources import project_record, read_public
+from biz_rules.window_coverage import effective_receipts
 from collection import rate
 from collection.windows import cycle_request
 from config.settings import APP
+from db.history import _lead_window, _list_coverage
 from db.source_refresh import SourceWatch, _page_finished
 
 HOUR = {"updated_since": "2026-10-30T00:00:00Z", "updated_until": "2026-10-30T01:00:00Z"}
@@ -242,3 +245,70 @@ def test_cycle_stopped_by_a_ceiling_resumes_at_the_first_window_it_did_not_read(
     assert state["window_checkpoint"] == "2026-11-04T11:00:00+00:00"
     unread = [w for w in state["last_coverage"]["window_coverage"] if w["status"] == "not_read"]
     assert [(w["start"][11:16], w["reason"]) for w in unread] == [("11:00", "outbound_quota_hour")]
+
+
+# ---- the lead channel: the receipts a listing of a window carries ----
+def utc(clock):
+    return datetime.fromisoformat("2026-10-30T" + clock + ":00+00:00")
+
+
+def hour_with_a_full_first_half(monkeypatch):
+    """One read of 00:00-01:00 whose first half is full at every size, down to its two 15-minute windows, and whose
+    second half comes back below the cap. Returns the run as the (query, coverage) pair a listing reads."""
+    stand_in(monkeypatch, lambda start, end: 3 if start < "20261030003000" else 1)
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **HOUR))
+    return "outbreak", result
+
+
+def test_receipts_of_a_window_name_the_windows_that_may_be_cut_short(monkeypatch, open_gate):
+    run = hour_with_a_full_first_half(monkeypatch)
+    receipts, truncated = effective_receipts([run], (utc("00:00"), utc("01:00")))
+    assert [(r.start[11:16], r.end[11:16], r.status, r.possibly_truncated) for r in receipts] == [
+        ("00:00", "01:00", "split", False), ("00:00", "00:30", "split", False),
+        ("00:00", "00:15", "read", True), ("00:15", "00:30", "read", True), ("00:30", "01:00", "read", False)]
+    assert [(i.start[11:16], i.end[11:16]) for i in truncated] == [("00:00", "00:15"), ("00:15", "00:30")]
+    receipts, truncated = effective_receipts([run], (utc("00:30"), utc("01:00")))  # the clean half: no truncation to report
+    assert [(r.start[11:16], r.end[11:16]) for r in receipts] == [("00:00", "01:00"), ("00:30", "01:00")]
+    assert truncated == []
+    assert effective_receipts([run], (utc("02:00"), utc("03:00"))) == ([], [])
+
+
+def test_a_later_run_replaces_the_receipt_of_a_window_an_earlier_one_did_not_reach():
+    def receipt(start, end, status, **fields):
+        return {"start": "2026-10-30T" + start + ":00+00:00", "end": "2026-10-30T" + end + ":00+00:00",
+                "status": status, **fields}
+    early = {"window_coverage": [receipt("00:00", "00:30", "read", returned=1),
+                                 receipt("00:30", "01:00", "not_read", reason="outbound_quota_hour")]}
+    late = {"window_coverage": [receipt("00:30", "01:00", "read", returned=2)]}
+    other_query = {"window_coverage": [receipt("00:30", "01:00", "failed", reason="source_rate_limited")]}
+    receipts, _ = effective_receipts([("a", early), ("a", late), ("b", other_query)])
+    assert [(r.start[11:16], r.status) for r in receipts] == [("00:00", "read"), ("00:30", "read"), ("00:30", "failed")]
+
+
+def test_a_window_with_too_many_receipts_is_refused_not_cut(monkeypatch, open_gate):
+    run = hour_with_a_full_first_half(monkeypatch)
+    monkeypatch.setattr(window_coverage, "MAX_RECEIPTS", 4)
+    with pytest.raises(HistoryError) as refused:
+        effective_receipts([run])
+    assert refused.value.code == "window_too_wide"
+
+
+def test_the_listing_coverage_carries_the_receipts_and_never_claims_the_whole_source(monkeypatch, open_gate):
+    receipts = effective_receipts([hour_with_a_full_first_half(monkeypatch)], (utc("00:00"), utc("01:00")))
+    coverage = Coverage(**_list_coverage(None, {}, 9, 12, datetime.now(timezone.utc), False, True, receipts))
+    assert [i.start[11:16] for i in coverage.truncated_intervals] == ["00:00", "00:15"]
+    assert sum(r.possibly_truncated for r in coverage.window_coverage) == 2
+    assert coverage.complete is False and "possibly_truncated" in " ".join(coverage.limitations)
+    plain = Coverage(**_list_coverage(None, {}, 9, 12, datetime.now(timezone.utc), False, False, ([], [])))
+    assert plain.window_coverage == [] and plain.truncated_intervals == []
+
+
+def test_a_lead_window_needs_both_bounds_with_a_time_zone_and_a_source_that_has_windows():
+    assert _lead_window("gdelt_doc", (None, None)) is None
+    assert _lead_window("gdelt_doc", (utc("00:00"), utc("01:00"))) == (utc("00:00"), utc("01:00"))
+    for source, window in (("gdelt_doc", (utc("00:00"), None)), ("gdelt_doc", (utc("01:00"), utc("00:00"))),
+                           ("gdelt_doc", (datetime(2026, 10, 30), utc("01:00"))),
+                           ("clinicaltrials", (utc("00:00"), utc("01:00")))):
+        with pytest.raises(HistoryError) as refused:
+            _lead_window(source, window)
+        assert refused.value.code == "invalid_window"

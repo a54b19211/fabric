@@ -251,7 +251,11 @@ def records(
     record_kind: RecordKind | None = None,
     limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ):
+    """window_start / window_end (both, with a time zone; GDELT only) list the leads observed in [start, end) and
+    put the receipts of that window into coverage.window_coverage and coverage.truncated_intervals."""
     return _call(
         store.list_records,
         source_id,
@@ -264,6 +268,7 @@ def records(
         record_kind=record_kind,
         limit=limit,
         cursor=cursor,
+        window=(window_start, window_end),
     )
 
 

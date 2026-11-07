@@ -591,6 +591,8 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 
 `gdelt_doc` 可以进固定刷新（`DATAFABRIC_HISTORY_WATCHES`，每个查询一条，`lookback_days` 设为 1：首轮没有检查点，按它回看）。每轮读 [检查点, 当前整点)，不读还没走完的这一小时，不回看重叠。读到最细窗口仍满额的区间只留在读取回执里（`truncated_intervals`），不重试，检查点照常前进；预算或出站额度用完时，检查点停在第一个没读到的窗口起点，下一轮从那里继续，这一轮不记 `last_success_at`。
 
+GDELT 线索通道（线索不进 WeKnora）：`GET /api/history/records` 对 `gdelt_doc` 可加 `window_start`、`window_end`（含时区，半开区间 [起, 止)），按 `source_updated_at`（含义 `gdelt_first_observed`，GDELT 的观察时间）列出落在窗口里的线索；每条是固定版本，带 `title`、`source_url`、`facts.domain`。同一响应的 `coverage.window_coverage` 和 `coverage.truncated_intervals` 是这个窗口的读取回执：没给 `run_id` 时取截止时间前已结束、读取范围与窗口相交的该来源读取运行的回执（同一查询的同一区间以最后一次运行为准），给了 `run_id` 只取那一次运行的。一条线索所属的窗口是 `status=read` 且 [start, end) 含它观察时间的那条回执；`possibly_truncated` 的区间里可能还有读不到的线索，`failed`、`not_read` 的区间没有读到。窗口里的回执超过 2000 条或读取运行超过 200 次时拒绝（`window_too_wide`），请缩小窗口。
+
 出站额度是本实例自己的硬限，不是与其他实例或现役系统共享的全局限：GDELT 间隔 5 秒，每个查询每小时 ≤7 次、每天 ≤900 次；who.int 间隔 30 秒，每天 ≤200 次（回填的请求也算在内）。额度写在 `collection/catalog.py` 的 `outbound_cap`，计数放在限速闸门的同一处（配置了 `DATAFABRIC_HISTORY_REDIS_URL` 用 Redis，否则是 `DATAFABRIC_RATE_DIR` 下的文件），跨读取、跨进程累计，按 UTC 小时和 UTC 日算。到限的请求不发出，读取停下，`stop_reason` 和未读窗口的回执写 `outbound_quota_hour` 或 `outbound_quota_day`。Redis 被清空或限速目录被删，计数从零开始。
 
 WHO 的固定刷新每 15 分钟一轮：目录给 who_don 声明的刷新间隔下限是 900 秒（其他来源仍是 3600 秒），窗口重叠 2 天、检查点照旧。一轮至少一次请求，每天 96 次起，在 who.int 每天 200 次之内。读取碰到出站额度时，这一轮带着原因结束，不算失败：`last_coverage.stop_reason` 写 `outbound_quota_day`，状态回到 idle，已读的页保留，检查点不动，也不记 `last_success_at`；下一轮（`cadence_seconds` 之后）从续页位置接着读，一页都没读到时按同一检查点重新规划窗口。其他没有续页的提前停止仍是 `source_watch_no_cursor`。

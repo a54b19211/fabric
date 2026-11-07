@@ -1676,6 +1676,72 @@ def test_public_fetch_same_call_key_creates_one_durable_run(pg):
         store.create_fetch(FetchRequest(source_id="clinicaltrials", query="other"),
                            "stable-topic-fetch-call")
 
+def test_gdelt_leads_are_listed_by_window_with_the_receipts_of_the_windows(pg, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
+    import httpx
+
+    from biz_rules.history_sources import read_public
+    from collection import rate
+    monkeypatch.setattr(rate, "wait_for_url", lambda url, **kw: None)  # the 5 s spacing is not under test
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["gdelt_doc"]')
+
+    def response(request):
+        # max_records is 2: everything before 00:30 comes back full at every size, the second half does not
+        start, end = request.url.params["startdatetime"], request.url.params["enddatetime"]
+        return httpx.Response(200, json={"articles": [
+            {"url": "https://example.org/" + start + "/" + end + "/" + str(n), "domain": "example.org",
+             "title": "SYNTHETIC lead " + start + " " + str(n), "seendate": start[:8] + "T" + start[8:] + "Z"}
+            for n in range(2 if start < "20261030003000" else 1)]})
+    original_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original_client(transport=httpx.MockTransport(response), **kw))
+    request = FetchRequest(source_id="gdelt_doc", query="synthetic", max_records=2,
+                           updated_since=date("2026-10-30T00:00:00Z"), updated_until=date("2026-10-30T01:00:00Z"))
+    run, _ = store.create_fetch(request, "gdelt-leads-window")
+    store.job_input(run.id, run.attempt)
+    run = store.finish_fetch(run.id, run.attempt, read_public(request))
+    now = datetime.now().astimezone()
+
+    def leads(start, end, **kw):
+        return store.list_records("gdelt_doc", False, "operational_replay", now,
+                                  window=(date("2026-10-30T" + start + ":00Z"), date("2026-10-30T" + end + ":00Z")), **kw)
+    whole = leads("00:00", "01:00")
+    assert len(whole.items) == 9  # the nine distinct urls of the five requests
+    lead = whole.items[0]
+    assert lead.source_url.startswith("https://example.org/") and lead.facts["domain"] == "example.org"
+    assert lead.source_updated_at.meaning == "gdelt_first_observed" and lead.title.startswith("SYNTHETIC lead")
+    assert [(r.start[11:16], r.status, r.possibly_truncated) for r in whole.coverage.window_coverage] == [
+        ("00:00", "split", False), ("00:00", "split", False), ("00:00", "read", True), ("00:15", "read", True),
+        ("00:30", "read", False)]
+    assert [i.start[11:16] for i in whole.coverage.truncated_intervals] == ["00:00", "00:15"]
+    assert whole.coverage.complete is False
+    tail = leads("00:30", "01:00")  # the clean half: its leads, and no truncation to report
+    assert [i.title for i in tail.items] == ["SYNTHETIC lead 20261030003000 0"]
+    assert tail.coverage.truncated_intervals == [] and tail.coverage.window_coverage[-1].returned == 1
+    named = leads("00:00", "01:00", run_id=run.id)  # the receipts of the named run alone
+    assert len(named.coverage.window_coverage) == 5 and named.coverage.run_id == run.id
+    assert leads("02:00", "03:00").items == [] and leads("02:00", "03:00").coverage.window_coverage == []
+    first = leads("00:00", "01:00", limit=4)  # a page cursor belongs to its window
+    second = leads("00:00", "01:00", limit=4, cursor=first.next_cursor)
+    assert len(second.items) == 4 and not {i.version_id for i in first.items} & {i.version_id for i in second.items}
+    with pytest.raises(HistoryError) as moved:
+        leads("00:00", "00:30", limit=4, cursor=first.next_cursor)
+    assert moved.value.code == "invalid_cursor"
+    unwindowed = store.list_records("gdelt_doc", False, "operational_replay", now)  # no window: all leads, no receipts
+    assert len(unwindowed.items) == 9 and unwindowed.coverage.window_coverage == []
+    with pytest.raises(HistoryError) as refused:
+        store.list_records("gdelt_doc", False, "operational_replay", now, window=(date("2026-10-30T00:00:00Z"), None))
+    assert refused.value.code == "invalid_window"
+    app = FastAPI()
+    app.include_router(router)
+    over_http = TestClient(app).get("/api/history/records", headers={"Authorization": "Bearer test-reader-only"}, params={
+        "source_id": "gdelt_doc", "is_demo": "false", "mode": "operational_replay", "cutoff": now.isoformat(),
+        "window_start": "2026-10-30T00:00:00Z", "window_end": "2026-10-30T00:30:00Z"})
+    body = over_http.json()
+    assert over_http.status_code == 200 and len(body["items"]) == 8
+    assert [i["start"][11:16] for i in body["coverage"]["truncated_intervals"]] == ["00:00", "00:15"]
+    assert body["coverage"]["window_coverage"][-1]["possibly_truncated"] is True
+
+
 def test_gdelt_index_changes_keep_old_original_and_public_material_type(pg, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
     import httpx
