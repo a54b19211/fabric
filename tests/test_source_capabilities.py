@@ -98,7 +98,7 @@ def test_measurements_are_a_capability_of_the_declared_original_sources_only(mon
     from processing import registry
 
     who = flags("who_don")["measurements"]
-    assert who == {"processor": "datafabric.measure_extract.v3", "contract": "datafabric.data_objects.v2",
+    assert who == {"processor": "datafabric.measure_extract.v4", "contract": "datafabric.data_objects.v2",
                    "checker": "biocheck.extraction_rules.v17", "check_contract": "extraction_consistency.v3",
                    "history_modes": ["current", "operational_replay", "public_history_reconstruction"]}
     assert flags("who_don", readable=False)["measurements"] is None  # the permission first

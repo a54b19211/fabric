@@ -62,6 +62,14 @@ def test_the_prompt_carries_the_schema_and_a_skeleton_the_parser_accepts():
     assert mx.parse_output(mx.EMPTY) == ([], [], None)
 
 
+def test_the_prompt_carries_the_reader_notes_and_its_examples_stay_one_compact_line():
+    for note in ("单行紧凑 JSON", "最先出现的前 3 条明确计数", "紧跟在数值后面的计量词", "不要猜", "取自这条 quote 自己写出的词",
+                 "准确写明取自哪一处", "不要写进来"):
+        assert note in mx.PROMPT
+    assert mx.MAX_MEASURES == 3  # the parser still keeps no more than the first three
+    assert not any(c in mx.SKELETON + mx.EMPTY for c in "\n ")
+
+
 def test_an_answer_outside_the_schema_is_refused_and_not_repaired():
     assert mx.parse_output(json.dumps(FIRST_ANSWER)) == (None, [], "output_not_the_schema")
     rewrapped = {"items": [{"index": 1, "measures": FIRST_ANSWER["measures"]}]}  # still empty enums, sources a list
@@ -78,7 +86,7 @@ def test_another_model_configuration_is_another_producer():
     assert mx.ModelConfig(**CONFIG.__dict__).sha256() == CONFIG.sha256()  # stable
     assert "base_url" not in CONFIG.__dict__ and "api_key" not in CONFIG.__dict__  # where and the key are not identity
     identity = mx.producer_identity(CONFIG.sha256())
-    assert identity.startswith("datafabric.measure_extract.v3+") and len(identity) <= 80  # the contract's length
+    assert identity.startswith("datafabric.measure_extract.v4+") and len(identity) <= 80  # the contract's length
     assert mx.run_id(**{k: v for k, v in keys().items()}) != mx.run_id(**keys(other))
 
 

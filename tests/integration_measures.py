@@ -299,7 +299,7 @@ def test_who_case_counts_become_checked_objects_with_their_receipts(db, fake):
     assert cases["check"]["contract_version"] == "extraction_consistency.v3" and cases["check"]["status"] == "consistent"
     assert cases["inputs"][0]["version_id"] == version and cases["permission_sources"] == ["who_don"]
     assert cases["state_at_cutoff"] == "ok" and cases["current"] is True and cases["reconstruction"] is False
-    assert cases["versions"]["producer"].startswith("datafabric.measure_extract.v3+")
+    assert cases["versions"]["producer"].startswith("datafabric.measure_extract.v4+")
     assert cases["identity"]["state"] == "provisional" and cases["identity"]["key"].startswith("literal:who_don|")
     (clean,) = rows(db, "SELECT text,text_sha256 FROM derived_clean_text WHERE version_id=:v", v=version)
     loc = cases["locators"][0]

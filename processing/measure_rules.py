@@ -1,4 +1,4 @@
-"""The measure rules of the extraction processor datafabric.measure_extract.v3: how a cleaned artifact is cut into
+"""The measure rules of the extraction processor datafabric.measure_extract.v4: how a cleaned artifact is cut into
 reading windows, what context goes along with a window, and how one measure a model wrote for a window becomes a
 strict BioCheck contract-v3 request item - every literal located at its real offset in the artifact, or not built.
 

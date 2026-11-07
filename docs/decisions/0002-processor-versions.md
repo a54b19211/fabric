@@ -26,7 +26,7 @@
 - v4：监管机构公告/通知的大类按内容判（写明监管动作的才是监管决定，其余是官方通报）；v3 把这类公告整体算作决定。
 - v5：加入 v3 6.2 的可复用注释（实验类型候选、可取得的材料层级）。
 
-## processing/measure_extract（当前 `datafabric.measure_extract.v3`）
+## processing/measure_extract（当前 `datafabric.measure_extract.v4`）
 
 - v2：提示词带上输出模型的 JSON Schema 和一个最小骨架。v1 只用 `response_format=json_object` 要求“是 JSON”，D1 首批测量
   的 24 个窗口全部返回了顶层 `measures`、空串枚举值和列表形式的 `sources`，按产品的输出形状被拒（`output_not_the_schema`）。
@@ -37,3 +37,9 @@
   （`2012-09/`），数据对象的 `PeriodV2` 同样允许缺省终点。周写成周一到周日的日期区间，月到日的混合写法写成日区间（首月从 1 日起），
   年到年写成月区间，某一天写成 interval 的日值。这里只补表示能力，期间的意思仍由 BioCheck 核对。提示词和构建规则都变了，所以
   升版本：v2 的运行和读数原样保留，同一窗口在 v3 下重新阅读。
+- v4：只改提示词里对读者（模型）的说明，输出形状、解析器和每窗口最多 3 条不变。v3 在 D1 代表窗口 017813bd/0 上输出结构对了，
+  但写了 8 条以上、缩进排版，写到 2000 token 处被截断（`output_not_json`）；截断前的 7 条里 `unit_text` 留空、没写累计却填
+  `cumulative`、把前一句的期间或国名写进没写这些内容的句子。v4 要求：单行紧凑 JSON；只取窗口里最先出现的前 3 条明确计数；
+  `unit_text` 取数值后紧跟的计量词；期间、对象、范围只取自这条引句自己或允许的上下文（`heading` / `table_header` /
+  `table_title`，并在 `sources` 里准确标出），不从别的句子继承；累计和新增按原文语义区分（As of 加 total、since 这类明确说法
+  可以是累计，不要求出现某个关键词）。解析器不放宽，被截断的答案不拼接、不修复。提示词变了，所以升版本：v3 的运行和读数原样保留。
