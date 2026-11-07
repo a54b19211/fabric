@@ -2,4 +2,4 @@
 # hashes for every line of a file once one has one, so it has a file of its own). Build the wheel from the
 # extraction-contract checkout (scripts/build_and_verify.sh, which checks the same hash), then:
 #   pip install --no-index --find-links "${EXTRACTION_CONTRACT_WHEELS:-../extraction-contract/dist}" --require-hashes -r requirements-contract.txt
-extraction-contract==1.13.0 --hash=sha256:e0876f9efd4da0cd10c75d5f1f8578a01afa7740a66439e46833e5dff77d0000
+extraction-contract==1.13.1 --hash=sha256:e8a1e14bfd9687920187324cf0e6f1c9b634d17d29fafbdc81d5b1859a75b7cf
