@@ -1,0 +1,27 @@
+{
+ "contract": "datafabric.measurement_changes.v1 + datafabric.measurements.v1",
+ "for": "BioRadar series_sync (measurement_inbox, link_version) - the Radar batch after the hardening branch merges",
+ "feed": {
+  "route": "GET /api/history/measurements/changes?is_demo=&after_seq=&limit=",
+  "item_keys": ["measurement_id", "version_id", "source_id", "kind", "seq", "produced_at", "effective_at",
+                "material_visible_at", "versions"],
+  "version_keys": ["data_objects", "producer", "checker", "contract", "text_processor"],
+  "kinds": ["created", "superseded_by_processor", "superseded_by_producer", "rechecked_by_checker", "corrected",
+            "retracted", "correction_withdrawn"],
+  "ordering": "seq strictly increasing in commit order for one is_demo; gaps are allowed; an event is never changed",
+  "cursor": "next_after is the last seq examined, withheld events included: advance the consumer cursor to it only after every item of the page is stored (inbox written)",
+  "withheld": "per source, events whose source or cause source is not readable now; after a re-grant re-read those versions with GET /measurements?version_ids= (the feed does not replay them)"
+ },
+ "pull": {
+  "route": "GET /api/history/measurements?source_id=&is_demo=&mode=&cutoff=&version_ids=",
+  "receipt_keys": ["measurement_id", "reading_id", "contract_version", "inputs", "status", "identity", "dims",
+                   "check", "state_at_cutoff", "current", "versions"],
+  "use": "link_version(v) after triage puts v into a topic: pull v's current objects, write them to the inbox (idempotent by workspace, is_demo, measurement_id), link"
+ },
+ "linkage_expectation": {
+  "orders": ["measurement_before_topic", "topic_before_measurement"],
+  "rule": "both orders end with the same (topic, measurement_id) links, each once; replaying the feed from 0 or pulling again adds nothing",
+  "series_key": "(topic, family, dims_key, object_key): object_key is identity.key only when identity.state is confirmed or rule_confirmed; a provisional key is record-local and never merges two records",
+  "who_marburg_fixture": {"objects": 3, "links": 3, "created_events": 3}
+ }
+}
