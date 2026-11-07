@@ -500,6 +500,9 @@ def coverage(source_id, is_demo, version_ids, mode, cutoff):
         windows = conn.execute(text(
             "SELECT run_id, window_index, start_char, end_char, state, attempts, reason FROM derived_measure_windows "
             "WHERE run_id=ANY(:r) ORDER BY run_id, window_index"), {"r": [r["run_id"] for r in runs]}).mappings().all()
+        from db.measurement_reads import Readable, unresolved_at
+
+        claims = unresolved_at(conn, runs, mode, cutoff, Readable(conn))
     out = {v.strip(): {"state": "not_planned"} for v in visible}
     for run in runs:
         mine = [w for w in windows if w["run_id"] == run["run_id"]]
@@ -510,7 +513,8 @@ def coverage(source_id, is_demo, version_ids, mode, cutoff):
                       "state": w["state"], "attempts": w["attempts"], "reason": w["reason"]}
                      for w in mine if w["state"] in OWED],
             "producer_version": mx.PROCESSOR_VERSION, "producer_identity": run["producer_identity"],
-            "text_processor_version": run["text_processor_version"], "text_sha256": run["text_sha256"]}
+            "text_processor_version": run["text_processor_version"], "text_sha256": run["text_sha256"],
+            "unresolved_corrections": claims.get((run["source_id"], run["source_record_id"], run["is_demo"]), [])}
     return {"schema": "datafabric.measure_coverage.v1", "source_id": source_id, "is_demo": is_demo, "mode": mode,
             "note": "partial: the measurements of the windows read stand; an owed window is a coverage gap, "
                     "not a sign that it holds no number",

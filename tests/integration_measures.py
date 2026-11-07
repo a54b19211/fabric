@@ -177,7 +177,8 @@ def as_checker(version):
 
 # ---- fixtures and helpers -------------------------------------------------------------------------------------
 
-MEASURE_TABLES = ("derived_measure_correction_links,derived_measure_correction_cursor,derived_measurement_identities,"
+MEASURE_TABLES = ("derived_measure_correction_resolutions,derived_measure_correction_claims,"
+                  "derived_measure_correction_links,derived_measure_correction_cursor,derived_measurement_identities,"
                   "derived_measurement_events,derived_measurement_feed,derived_measurements,derived_measure_relocations,"
                   "derived_measure_readings,derived_measure_requests,derived_measure_window_attempts,"
                   "derived_measure_windows,derived_measure_runs,derived_extraction_checks,derived_extraction_check_tasks")
@@ -892,3 +893,64 @@ def test_replay_between_a_checker_upgrade_and_the_recheck_shows_the_old_object_p
     assert measurement_reads.read_one(old["measurement_id"], True, "operational_replay", NOW())[
         "not_current_reason"] == "rechecked_by_checker"
 
+
+def unversioned_correction(key, *, relation="corrects", record="SYNTHETIC-unversioned", available="2026-11-02",
+                           relations=True):
+    raw = {"record_kind": "document", "title": "更正通报", "full_text": "前述通报中的病例数有误，以后续通报为准。",
+           "material_kind": "official_notice"}
+    if relations:
+        raw["document_relations"] = [{"relation_type": relation, "target_source_id": "who_don",
+                                      "target_source_record_id": WHO_ID}]
+    records = [ArchiveRecord(source_record_id=record, record_kind="document", raw_content=json.dumps(raw, ensure_ascii=False))]
+    proof = {"available_at": {"value": available, "precision": "day"}, "uri": "fixture://unversioned",
+             "sha256": archive_manifest_hash(records), "reviewed": True, "review_note": "synthetic correction"}
+    return store.import_archive(ArchiveImport(source_id="external_archive", is_demo=True, scope_description="corr",
+                                              declared_count=1, records=records, proof=proof), key).version_ids[0]
+
+
+@real_checker
+def test_a_correction_without_a_target_version_leaves_the_record_unknown_until_it_is_resolved(db, fake):
+    version, items = chain(fake)
+    cases = by_value(items)["66"]
+    before = NOW()
+    corr = unversioned_correction("unversioned-1")
+    scan()
+    # no version known: every object of the corrected record is unknown, not current, out of the default list
+    got = listing(version)
+    assert got["measurements"] == [] and got["excluded"] == {"correction_target_version_unknown": 3}
+    one = measurement_reads.read_one(cases["measurement_id"], True, "current", NOW())
+    assert one["status"] == {"state": "unknown", "reason": "correction_target_version_unknown"}
+    assert one["current"] is False and one["not_current_reason"] == "correction_target_version_unknown"
+    assert one["unresolved_corrections"][0]["by"]["version_id"] == corr
+    cov = runs.coverage("who_don", True, [version], "current", NOW())["versions"][version]
+    assert [c["relation"] for c in cov["unresolved_corrections"]] == ["corrects"]
+    # replay before the correction was seen: as it was
+    assert measurement_reads.read_one(cases["measurement_id"], True, "operational_replay", before)["current"] is True
+    # an explicit re-scan records nothing twice
+    with store.history_engine().begin() as conn:
+        measurements.rescan_corrections(conn, "external_archive")
+    scan()
+    (claim,) = rows(db, "SELECT id FROM derived_measure_correction_claims WHERE kind='asserted'")
+    # resolved to a version: the normal events apply, and the record is no longer unknown
+    measurements.resolve_correction(claim["id"], version, actor="tang.weiwen", basis="通报正文所指的版本")
+    after = measurement_reads.read_one(cases["measurement_id"], True, "current", NOW())
+    assert after["state_at_cutoff"] == "corrected" and after["current"] is True
+    assert events_of(db, cases["measurement_id"]) == ["created", "corrected"]
+    assert runs.coverage("who_don", True, [version], "current", NOW())["versions"][version][
+        "unresolved_corrections"] == []
+    with pytest.raises(HistoryError) as error:  # only a version of the record the correction names
+        measurements.resolve_correction(claim["id"], "f" * 64, actor="tang.weiwen", basis="x")
+    assert error.value.status in (404, 409)
+
+
+@real_checker
+def test_an_unresolved_correction_that_its_record_withdraws_no_longer_holds(db, fake):
+    version, items = chain(fake)
+    unversioned_correction("unversioned-a")
+    scan()
+    assert listing(version)["measurements"] == []
+    unversioned_correction("unversioned-b", relations=False, available="2026-11-04")
+    scan()
+    assert len(listing(version)["measurements"]) == 3
+    assert {r["kind"] for r in rows(db, "SELECT kind FROM derived_measure_correction_claims")} == {
+        "asserted", "withdrawn"}

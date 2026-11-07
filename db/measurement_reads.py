@@ -32,6 +32,7 @@ SCHEMA = "datafabric.measurements.v1"
 CHANGES_SCHEMA = "datafabric.measurement_changes.v1"
 MAX_OBJECTS, MAX_CHANGES = 2000, 200
 RECONSTRUCTION = "public_history_reconstruction"
+UNKNOWN_TARGET = "correction_target_version_unknown"
 
 
 def expected_checker():
@@ -110,9 +111,45 @@ def _version_visible(obj, mode, cutoff):
     return obj["first_seen_at"] <= cutoff and (mode != "operational_replay" or obj["produced_at"] <= cutoff)
 
 
+def _claim_visible(c, mode, cutoff, when):
+    if mode == "current":
+        return True
+    if mode == "operational_replay":
+        return c["first_seen_at"] <= cutoff and when <= cutoff
+    return c["proof_available_at"] is not None and c["proof_available_at"] <= cutoff
+
+
+def unresolved_at(conn, records, mode, cutoff, readable):
+    """(source, record, is_demo) -> the record-level corrections asserted, not withdrawn and not resolved to a
+    version at the cutoff, whose correcting source is readable now."""
+    keys = {(r["source_id"], r["source_record_id"], r["is_demo"]) for r in records}
+    if not keys:
+        return {}
+    rows = [dict(r) for r in conn.execute(text("""
+        SELECT c.*, res.resolved_at FROM derived_measure_correction_claims c
+          LEFT JOIN derived_measure_correction_resolutions res ON res.claim_id = c.id
+         WHERE c.target_source_id = ANY(:s) AND c.target_record_id = ANY(:r) ORDER BY c.id"""),
+        {"s": sorted({k[0] for k in keys}), "r": sorted({k[1] for k in keys})}).mappings()]
+    seen = [c for c in rows if readable(c["source_id"]) and _claim_visible(c, mode, cutoff, c["recorded_at"])]
+    withdrawn = {(c["target_source_id"], c["target_record_id"], c["relation"], c["origin_version_id"])
+                 for c in seen if c["kind"] == "withdrawn"}
+    out = {}
+    for c in seen:
+        key = (c["target_source_id"], c["target_record_id"], c["is_demo"])
+        resolved = c["resolved_at"] is not None and (mode != "operational_replay" or c["resolved_at"] <= cutoff)
+        if (key in keys and c["kind"] == "asserted" and not resolved
+                and (key[0], key[1], c["relation"], c["origin_version_id"]) not in withdrawn):
+            out.setdefault(key, []).append({"claim_id": c["id"], "relation": c["relation"],
+                                            "by": {"source_id": c["source_id"], "record_id": c["source_record_id"],
+                                                   "version_id": c["event_version_id"].strip()}})
+    return out
+
+
 def _not_current(obj, status, mode, checker, pending=None):
     if status["state"] == "superseded":
         return status["reason"]
+    if status.get("reason") == UNKNOWN_TARGET:
+        return UNKNOWN_TARGET
     if mode != "operational_replay" and obj["checker_version"] != checker:
         return "checker_not_current"  # history until the current checker re-checked its reading
     if mode == "operational_replay" and pending and pending != obj["checker_version"]:
@@ -137,10 +174,12 @@ def expected_at(conn, objs, cutoff):
             for o in objs}
 
 
-def receipt(conn, obj, events, mode, cutoff, readable, checker, pending=None):
+def receipt(conn, obj, events, mode, cutoff, readable, checker, pending=None, unresolved=()):
     """One object as the reader may see it: the MeasurementV2 body with its folded status and identity, and how the
-    state at the cutoff came about."""
+    state at the cutoff came about. A correction of its record that names no version leaves it unknown."""
     status, applied, after, withheld = fold(events, mode, cutoff, readable)
+    if unresolved and status["state"] in ("ok", "corrected"):
+        status = {"state": "unknown", "reason": UNKNOWN_TARGET}
     body = dict(obj["body"], status=status, identity=identity.of(conn, obj, mode, cutoff, readable))
     do.MeasurementV2.model_validate(body)  # what is served is the contract, never a looser shape
     why = _not_current(obj, status, mode, checker, pending)
@@ -148,6 +187,7 @@ def receipt(conn, obj, events, mode, cutoff, readable, checker, pending=None):
             "mode": mode, "cutoff": cutoff.isoformat(), "state_at_cutoff": status["state"],
             "events_applied": applied, "events_after_cutoff": after, "events_withheld": withheld,
             "reconstruction": mode == RECONSTRUCTION, "current": why is None, "not_current_reason": why,
+            "unresolved_corrections": list(unresolved),
             "versions": {"data_objects": do.CONTRACT_VERSION_V2, "producer": obj["producer_identity"],
                          "checker": obj["checker_version"], "contract": obj["contract_version"],
                          "text_processor": obj["text_processor_version"]}}
@@ -188,10 +228,12 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, *, include_histo
         objs = [o for o in objs if _version_visible(o, mode, cutoff)]
         events, readable, checker = _events(conn, [o["measurement_id"] for o in objs]), Readable(conn), expected_checker()
         pending = expected_at(conn, objs, cutoff) if mode == "operational_replay" else {}
+        claims = unresolved_at(conn, objs, mode, cutoff, readable)
         items, excluded = [], {}
         for obj in objs:
             r = receipt(conn, obj, events.get(obj["measurement_id"], []), mode, cutoff, readable, checker,
-                        pending.get(obj["measurement_id"]))
+                        pending.get(obj["measurement_id"]),
+                        claims.get((obj["source_id"], obj["source_record_id"], obj["is_demo"]), ()))
             if r["current"] or include_history:
                 items.append(r)
             else:
@@ -219,8 +261,11 @@ def read_one(measurement_id, is_demo, mode, cutoff):
         if not _version_visible(obj, mode, cutoff):
             raise HistoryError("version_not_found", "该测量对象在此截止时间不可见", 404)
         pending = expected_at(conn, [obj], cutoff).get(measurement_id) if mode == "operational_replay" else None
+        readable = Readable(conn)
+        claims = unresolved_at(conn, [obj], mode, cutoff, readable)
         return receipt(conn, obj, _events(conn, [measurement_id]).get(obj["measurement_id"], []), mode, cutoff,
-                       Readable(conn), expected_checker(), pending)
+                       readable, expected_checker(), pending,
+                       claims.get((obj["source_id"], obj["source_record_id"], obj["is_demo"]), ()))
 
 
 def changes(is_demo, *, after_seq=0, limit=50):

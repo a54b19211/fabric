@@ -12,7 +12,10 @@
   owed (several places, or literals no longer located) or gone (quote not in the new text); the old object stays.
 - scan_corrections(): bounded scans of every source's versions in published order record the corrections and
   retractions they state (and the withdrawals a later version of the correcting record makes); every object of the
-  target version gets the event, with the correcting version's visibility as material and effective time.
+  target version gets the event, with the correcting version's visibility as material and effective time. A
+  relation that names the target record but no version is kept as a claim on the record (the record's objects read
+  as unknown until resolve_correction() names the version); rescan_corrections() sets a source's cursor back so that
+  improved rules see old versions again (the scan records nothing twice).
 Events carry three times: material_visible_at (the material that caused it), produced_at (Fabric's result) and
 effective_at (corrections: when the material became visible; Fabric's own supersessions: when produced).
 """
@@ -304,6 +307,81 @@ def _relations(payload):
             if r.get("relation_type") in CORRECTION_EVENT and r.get("target_version_id")}
 
 
+def _record_relations(payload):
+    """(target source, target record, relation) of the corrections that name no target version."""
+    rels = ((payload or {}).get("document_evidence") or {}).get("document_relations") or []
+    return {(r["target_source_id"], r["target_source_record_id"], r["relation_type"]) for r in rels
+            if r.get("relation_type") in CORRECTION_EVENT and not r.get("target_version_id")}
+
+
+def _claim(conn, row, key, kind, origin):
+    conn.execute(text("""
+        INSERT INTO derived_measure_correction_claims(event_version_id,target_source_id,target_record_id,relation,kind,
+          origin_version_id,source_id,source_record_id,is_demo,first_seen_at,proof_available_at)
+        VALUES (:e,:ts,:tr,:rel,:k,:o,:s,:rec,:d,:seen,:proof) ON CONFLICT DO NOTHING"""),
+        {"e": row["version_id"], "ts": key[0], "tr": key[1], "rel": key[2], "k": kind, "o": origin,
+         "s": row["source_id"], "rec": row["source_record_id"], "d": row["is_demo"], "seen": row["first_seen_at"],
+         "proof": row["proof_available_at"]})
+
+
+def _scan_claims(conn, row):
+    """The record-level claims one version states and the withdrawals of earlier ones; returns the (target, relation)
+    pairs that resolutions of claims it still states made, so that their links are not taken as withdrawn."""
+    stated = _record_relations(row["payload"])
+    for key in stated:
+        _claim(conn, row, key, "asserted", row["version_id"])
+    earlier = conn.execute(text("""
+        SELECT DISTINCT c.target_source_id, c.target_record_id, c.relation, c.event_version_id, r.target_version_id
+          FROM derived_measure_correction_claims c
+          LEFT JOIN derived_measure_correction_resolutions r ON r.claim_id = c.id
+         WHERE c.source_id=:s AND c.source_record_id=:rec AND c.is_demo=:d AND c.kind='asserted'
+           AND c.first_seen_at<:seen"""),
+        {"s": row["source_id"], "rec": row["source_record_id"], "d": row["is_demo"],
+         "seen": row["first_seen_at"]}).all()
+    kept = set()
+    for ts, tr, relation, origin, resolved in earlier:
+        if (ts, tr, relation) in stated:
+            if resolved:
+                kept.add((resolved, relation))
+        else:
+            _claim(conn, row, (ts, tr, relation), "withdrawn", origin)
+    return kept
+
+
+def rescan_corrections(conn, source_id, after_seq=0):
+    """Explicitly scan a source again from after_seq (for example after the relation rules improved)."""
+    return conn.execute(text("UPDATE derived_measure_correction_cursor SET last_seq=:a,updated_at=clock_timestamp() "
+                             "WHERE source_id=:s"), {"s": source_id, "a": after_seq}).rowcount
+
+
+def resolve_correction(claim_id, target_version_id, *, actor, basis):
+    """Name the version a record-level correction meant (who and on what basis); from then its link and the normal
+    corrected / retracted events apply, and its record is no longer unknown."""
+    from biz_rules.history_models import HistoryError
+    from db import history
+
+    with history.history_engine().begin() as conn:
+        claim = conn.execute(text("SELECT * FROM derived_measure_correction_claims WHERE id=:id AND kind='asserted'"),
+                             {"id": claim_id}).mappings().first()
+        if claim is None:
+            raise HistoryError("correction_claim_not_found", "没有这条未落到版本的更正", 404)
+        if conn.execute(text("SELECT 1 FROM history_versions WHERE version_id=:v AND source_id=:s AND "
+                             "source_record_id=:r AND is_demo=:d"),
+                        {"v": target_version_id, "s": claim["target_source_id"], "r": claim["target_record_id"],
+                         "d": claim["is_demo"]}).first() is None:
+            raise HistoryError("correction_target_not_of_record", "所给版本不属于更正所指的记录", 409)
+        made = conn.execute(text("INSERT INTO derived_measure_correction_resolutions(claim_id,target_version_id,actor,"
+                                 "basis) VALUES (:c,:t,:a,:b) ON CONFLICT DO NOTHING"),
+                            {"c": claim_id, "t": target_version_id, "a": actor, "b": basis}).rowcount
+        if not made:
+            raise HistoryError("correction_claim_resolved", "这条更正已落到版本", 409)
+        asserting = {"version_id": claim["event_version_id"], "source_id": claim["source_id"],
+                     "source_record_id": claim["source_record_id"], "is_demo": claim["is_demo"],
+                     "first_seen_at": claim["first_seen_at"], "proof_available_at": claim["proof_available_at"]}
+        _link(conn, asserting, target_version_id, claim["relation"], "asserted", claim["origin_version_id"])
+        return correct_version(conn, target_version_id)
+
+
 def _link(conn, row, target, relation, kind, origin):
     conn.execute(text("""
         INSERT INTO derived_measure_correction_links(event_version_id,target_version_id,relation,kind,
@@ -320,6 +398,7 @@ def _scan_version(conn, row):
     stated = _relations(row["payload"])
     for target, relation in stated:
         _link(conn, row, target, relation, "asserted", row["version_id"])
+    stated |= _scan_claims(conn, row)
     earlier = conn.execute(text("""
         SELECT DISTINCT target_version_id, relation, event_version_id FROM derived_measure_correction_links
          WHERE source_id=:s AND source_record_id=:rec AND is_demo=:d AND kind='asserted' AND first_seen_at<:seen"""),
