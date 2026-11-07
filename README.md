@@ -674,3 +674,26 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 
 本次没有数据库迁移。部署或回退时，API 与 Worker 使用同一版本；先停收新的模拟任务，
 已接受任务应由相应版本处理完或保留待恢复。不要用清队列、覆盖数据库来回退代码。
+
+
+## 迁移执行器与来源能力（r2）
+
+迁移统一走 `python -m migration.runner --db {app|history|publication}`；旧命令（`migration.migrate`、`migration.history`、
+`migration.index_publication`、`migration.publication`）是它的包装，输出和退出码语义不变。
+
+```
+python -m migration.runner --db history --plan              # 只读：已记录什么、待执行什么、为什么拒绝；不建任何表
+python -m migration.runner --db history --apply             # 执行待办（整文件、每文件一个事务、同事务写账本）
+python -m migration.runner --db history --adopt-baseline    # 没有账本的旧库：先证明结构，再建账（observed_baseline）
+python -m migration.runner --db history --revoke-baseline V020 --reason ...   # 追加一条更正事件
+python -m migration.runner --db publication --online site-index [--drop]     # CONCURRENTLY 操作
+python -m migration.source_lifecycle effective legacy_documents --actor NAME  # 退役在本次部署生效（写部署时刻）
+```
+
+现役库第一次：先 `--plan`（会提示“库在账本之前已迁移”），再 `--adopt-baseline`（会在一次性容器里取各前缀的结构指纹，
+按记录的容器 ID 拆除），结构不等于任何前缀就只出差异报告，不写任何东西；没有 `--accept-diff`。设计和限制见
+`docs/decisions/0004-migration-runner.md`。
+
+`GET /api/history/sources` 另外给出 `capabilities_version`、`definition_sha256`、`receipt_sha256`、`retired_sources`、
+`unavailable_sources`，每个来源带 `capabilities`；说明见 `docs/decisions/0005-source-catalog-and-retirement.md`。
+`publication/status` 的 `source_id` 必填。

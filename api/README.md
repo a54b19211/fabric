@@ -176,7 +176,7 @@ retry 返回 `{"scheduled": true, "state": "waiting"}` 表示已放回队列，�
 
 图查询须给 `source_id`、`source_record_id`、`is_demo`、`mode`、`cutoff`，对象为 `namespace|id`。新路径和子图接口默认 `review_scope=reviewed`；`with_candidates` 才含待审或未绑定候选，仍保留原状态。原邻居和解析接口增加同名可选参数，旧调用兼容，新业务应显式选择范围。
 
-索引目标按来源实例、来源编号、演示标志、知识库和业务范围固定。四源示例只代表明确配置的四个来源；既有 `legacy_documents` 应按实际授权和业务范围配置，不能把不同用途资料悄悄混装。配置删除后仍继续清理旧绑定，停止进程不等于清理完成。
+索引目标按来源实例、来源编号、演示标志、知识库和业务范围固定。四源示例只代表明确配置的四个来源；`legacy_documents` 已退役，不能作索引目标（配置了它，服务和索引 worker 启动时拒绝：`index_target_retired_source`）；不能把不同用途资料悄悄混装。配置删除后仍继续清理旧绑定，停止进程不等于清理完成。
 
 原文读取仍走 `/versions/{version_id}` 与 `/versions/{version_id}/raw`。固定版本与当下许可必须同时满足，索引命中不能代替原件权限检查。
 
