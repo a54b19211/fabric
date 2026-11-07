@@ -1085,6 +1085,19 @@ def test_a_list_that_names_windows_leaves_the_others_out_of_scope_and_reports_wh
     assert covered["out_of_scope"] == covered["windows_total"] - 1 and covered["selection"]["windows"] == [1]
 
 
+def test_a_list_claims_only_the_windows_it_names_of_a_run_the_standing_queue_already_planned(db, fake):
+    version = who_version()
+    assert runs.plan(model=fake.model()) == 1  # the standing queue plans every window of the version
+    scope = runs.Scope.parse({"versions": [{"version_id": version, "windows": [0]}]})
+    receipt = runs.plan_scope(scope, model=fake.model())["routes"]["model"]
+    assert receipt["planned"] == {} and receipt["already_planned"] == [version]
+    read_routes(fake, scope)
+    states = {r["window_index"]: r["state"] for r in rows(db, "SELECT window_index, state FROM derived_measure_windows")}
+    assert len(fake.requests) == 1 and {i for i, s in states.items() if s == "pending"} == {1}
+    read_routes(fake)  # the standing queue still reads the rest
+    assert len(fake.requests) == len(states)
+
+
 @real_checker
 def test_the_rules_route_alone_gives_a_checked_object_that_names_its_route(db):
     version = who_version(en_raw(WHO_ID), "who-rules")

@@ -352,8 +352,11 @@ def _plan_one(conn, row, route, selection=None) -> str | None:
 
 def _claim(scope=None, *, models=True, with_rules=False):
     """The next due window of a route this process serves (models: the model route, with_rules: the rules route),
-    and, when a scope is given, of its listed versions only."""
+    and, when a scope is given, of its listed versions only and, where it names windows, only of those windows -
+    also in a run the standing queue planned before."""
     is_rules = _is_rules("r")
+    whole = [v for v, windows in scope.versions.items() if windows is None] if scope else None
+    named = [f"{v}:{i}" for v, windows in scope.versions.items() for i in windows or ()] if scope else None
     with history.history_engine().begin() as conn:
         return WINDOWS.claim(
             conn, lease_seconds=LEASE_SECONDS, alias="w",
@@ -363,8 +366,9 @@ def _claim(scope=None, *, models=True, with_rules=False):
             where="r.state = 'reading' AND w.state IN ('pending','failed','budget_spent') "
                   "AND w.next_at <= clock_timestamp() "
                   f"AND (CAST(:models AS boolean) OR {is_rules}) AND (CAST(:rules AS boolean) OR NOT {is_rules}) "
-                  "AND (CAST(:ids AS text[]) IS NULL OR r.version_id = ANY(CAST(:ids AS text[])))",
-            params={"models": models, "rules": with_rules, "ids": list(scope.versions) if scope else None},
+                  "AND (CAST(:whole AS text[]) IS NULL OR r.version_id = ANY(CAST(:whole AS text[])) "
+                  "OR r.version_id || ':' || w.window_index = ANY(CAST(:named AS text[])))",
+            params={"models": models, "rules": with_rules, "whole": whole, "named": named},
             order_by="w.next_at, w.run_id, w.window_index", also_set="updated_at=clock_timestamp()")
 
 
@@ -616,7 +620,8 @@ def _after_call(w, record, attempt, blocked, call_id):
 def process_once(*, model: Model | None = None, client: httpx.Client | None = None,
                  budget: RequestBudget | None = None, scope: Scope | None = None, with_rules=False) -> dict:
     """One due window of a route this process serves - the model route when a model is configured, the rules route
-    when with_rules - and, with a scope, of the listed versions only. The request budget is the model's alone."""
+    when with_rules - and, with a scope, of the listed versions and windows only. The request budget is the model's
+    alone."""
     model = model or model_from_env()
     if model is None and not with_rules:
         return {"state": "disabled"}
