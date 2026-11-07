@@ -117,109 +117,151 @@ def _locate_in(full, chunk, piece):
     return None
 
 
+class _Excluded:
+    """The excluded candidates: a count per reason, and the first MAX_EXCLUDED_ITEMS of the readable ones."""
+
+    def __init__(self):
+        self.counts, self.items = Counter(), []
+
+    def add(self, hit, reason, readable=True):
+        self.counts[reason] += 1
+        if readable and len(self.items) < MAX_EXCLUDED_ITEMS:
+            ident = hit["identity"]
+            self.items.append({"source_id": ident["source_id"], "source_record_id": ident["source_record_id"],
+                               "indexed_version_id": ident["version_id"], "reason": reason})
+
+
+def _by_source(candidates):
+    """(source, is_demo) -> its candidates, in candidate order."""
+    groups = {}
+    for hit in candidates:
+        groups.setdefault((hit["identity"]["source_id"], bool(hit.get("is_demo"))), []).append(hit)
+    return groups
+
+
+def _visible_records(source_id, is_demo, mode, cutoff, hits, excluded):
+    """record -> its version visible in this mode at the cutoff; None when the whole group is excluded (the source
+    is not readable now, or the mode is not supported for it)."""
+    records = sorted({h["identity"]["source_record_id"] for h in hits})
+    try:
+        visible = {}
+        for i in range(0, len(records), 200):
+            visible.update(history.visible_versions(source_id, is_demo, mode, cutoff, records[i:i + 200]))
+    except HistoryError as exc:
+        if exc.status == 403:  # 来源当前不可读：只计数，不回标题、正文、定位
+            for hit in hits:
+                excluded.add(hit, "not_readable", readable=False)
+            return None
+        if exc.code == "graph_history_unsupported":
+            for hit in hits:
+                excluded.add(hit, "mode_unsupported_for_source")
+            return None
+        raise
+    return visible
+
+
+def _needed_artifacts(conn, source_id, is_demo, hits, visible, current, target_ids):
+    """(the (version, processor, digest) artifacts the hits are read from, the (version, key) hits served by an
+    older processor's entry during a handover)."""
+    needed, serving = set(), set()
+    for hit in hits:
+        record_id = hit["identity"]["source_record_id"]
+        vid, key = visible.get(record_id), hit["identity"].get("artifact_key")
+        if not (vid and key and vid in current):
+            continue
+        current_key = index.artifact_key(current[vid])
+        hit_piece = index_pieces.key(hit["identity"].get("piece"))
+        if key == current_key or (target_ids.get((source_id, is_demo)) and _serving_old(
+                conn, target_ids[(source_id, is_demo)], record_id, current[vid], key, hit_piece)):
+            # 旧条目只有在它的正文也是这个可见版本自己产出的（同一版本、旧处理器）时才认；
+            # 读取的正文取那一份产物本身，确认不了就剔除
+            needed.add((vid, *key.rsplit(":", 1)))
+            if key != current_key:
+                serving.add((vid, key))
+    return needed, serving
+
+
+def _group_state(source_id, is_demo, hits, visible, target_ids):
+    """One transaction: the visible versions' facts, their current artifacts, and the artifacts the hits name."""
+    with history.history_engine().begin() as conn:
+        facts = _versions(conn, set(visible.values()))
+        current = index.current_artifacts(conn, set(visible.values()))
+        needed, serving = _needed_artifacts(conn, source_id, is_demo, hits, visible, current, target_ids)
+        artifacts = _artifact_rows(conn, needed)
+    return facts, current, artifacts, serving
+
+
+def _verify_hit(hit, visible, state, doc_categories, evidence_types):
+    """The reason the hit is excluded, or (version, fact, key, artifact, fixed text row, span)."""
+    facts, current, artifacts, _ = state
+    ident = hit["identity"]
+    vid = visible.get(ident["source_record_id"])
+    if vid is None:
+        return "not_visible_at_cutoff"
+    fact = facts[vid]
+    if fact["publication_state"] in _WITHDRAWN:
+        return "withdrawn"
+    key = ident.get("artifact_key")
+    art = current.get(vid)
+    fixed = artifacts.get((vid, *key.rsplit(":", 1))) if key else None
+    if art is None or fixed is None:
+        # 此刻可见的版本，正文已不是被索引的这一份（更正后的版本，或改造前的投影待办）
+        return "changed_at_cutoff"
+    if doc_categories and art["doc_category"] not in doc_categories:
+        return "filtered_doc_category"
+    if evidence_types and not set(art["evidence_types"] or []) & set(evidence_types):
+        return "filtered_evidence_type"
+    span = _locate_in(fixed["text"], hit.get("content"), ident.get("piece"))
+    if span is None:
+        return "chunk_not_in_fixed_text"
+    return vid, fact, key, art, fixed, span
+
+
+def _verified_item(hit, source_id, is_demo, mode, checked, serving):
+    vid, fact, key, art, fixed, (start, end) = checked
+    ident = hit["identity"]
+    processor, digest = key.rsplit(":", 1)
+    available = fact["proof_available_at"] if mode == "public_history_reconstruction" else fact["first_seen_at"]
+    return {
+        "source_id": source_id, "is_demo": is_demo, "source_record_id": ident["source_record_id"],
+        "version_id": vid, "raw_sha256": fact["raw_sha256"], "title": fact["title"],
+        "first_seen_at": fact["first_seen_at"].isoformat(),
+        "proof_available_at": fact["proof_available_at"].isoformat() if fact["proof_available_at"] else None,
+        "published_at": fact["published_at"],
+        "available_at": available.isoformat() if available else None,
+        "proof": fact["proof"] if mode == "public_history_reconstruction" else None,
+        # 复现引用（v3 6.1）：可见版本、加工产物（处理器版本 + 正文摘要）、读到的片段、偏移与定位、片段摘要
+        "text": fixed["text"][start:end], "start": start, "end": end,
+        "text_sha256": hashlib.sha256(fixed["text"][start:end].encode()).hexdigest(),
+        "locator_kind": fixed["locator_kind"], "locators": _overlapping(fixed["segments"], start, end),
+        "artifact": {"artifact_key": key, "processor_version": processor, "text_sha256": digest,
+                     # 处理器交接期：新产物的条目还没 ready，读的是这个版本在旧处理器下的产物
+                     "handover": (vid, key) in serving},
+        "profile": {"doc_type": art["doc_type"], "doc_category": art["doc_category"],
+                    "evidence_types": list(art["evidence_types"] or [])},
+        "indexed_as": {"publication_id": hit.get("publication_id"), "version_id": ident["version_id"],
+                       "artifact_key": key, "piece": ident.get("piece"), "chunk_id": hit.get("chunk_id")},
+        "retrieval_modes": hit.get("retrieval_modes") or [], "recall_score": hit.get("score"),
+    }
+
+
 def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), target_ids=None):
     """逐条校验候选 → (通过的条目, 剔除计数, 可读来源里剔除的条目)。target_ids：(来源, is_demo) → 索引目标，
     处理器交接期判断旧条目是否仍在服务要用。"""
     target_ids = target_ids or {}
-    verified, counts, items = [], Counter(), []
-
-    def exclude(hit, reason, readable=True):
-        counts[reason] += 1
-        if readable and len(items) < MAX_EXCLUDED_ITEMS:
-            ident = hit["identity"]
-            items.append({"source_id": ident["source_id"], "source_record_id": ident["source_record_id"],
-                          "indexed_version_id": ident["version_id"], "reason": reason})
-
-    groups = {}
-    for hit in candidates:
-        groups.setdefault((hit["identity"]["source_id"], bool(hit.get("is_demo"))), []).append(hit)
-    for (source_id, is_demo), hits in groups.items():
-        records = sorted({h["identity"]["source_record_id"] for h in hits})
-        try:
-            visible = {}
-            for i in range(0, len(records), 200):
-                visible.update(history.visible_versions(source_id, is_demo, mode, cutoff, records[i:i + 200]))
-        except HistoryError as exc:
-            if exc.status == 403:  # 来源当前不可读：只计数，不回标题、正文、定位
-                for hit in hits:
-                    exclude(hit, "not_readable", readable=False)
-                continue
-            if exc.code == "graph_history_unsupported":
-                for hit in hits:
-                    exclude(hit, "mode_unsupported_for_source")
-                continue
-            raise
-        with history.history_engine().begin() as conn:
-            facts = _versions(conn, set(visible.values()))
-            current = index.current_artifacts(conn, set(visible.values()))
-            needed, serving = set(), set()
-            for hit in hits:
-                record_id = hit["identity"]["source_record_id"]
-                vid, key = visible.get(record_id), hit["identity"].get("artifact_key")
-                if not (vid and key and vid in current):
-                    continue
-                current_key = index.artifact_key(current[vid])
-                hit_piece = index_pieces.key(hit["identity"].get("piece"))
-                if key == current_key or (target_ids.get((source_id, is_demo)) and _serving_old(
-                        conn, target_ids[(source_id, is_demo)], record_id, current[vid], key, hit_piece)):
-                    # 旧条目只有在它的正文也是这个可见版本自己产出的（同一版本、旧处理器）时才认；
-                    # 读取的正文取那一份产物本身，确认不了就剔除
-                    needed.add((vid, *key.rsplit(":", 1)))
-                    if key != current_key:
-                        serving.add((vid, key))
-            artifacts = _artifact_rows(conn, needed)
+    verified, excluded = [], _Excluded()
+    for (source_id, is_demo), hits in _by_source(candidates).items():
+        visible = _visible_records(source_id, is_demo, mode, cutoff, hits, excluded)
+        if visible is None:
+            continue
+        state = _group_state(source_id, is_demo, hits, visible, target_ids)
         for hit in hits:
-            ident = hit["identity"]
-            vid = visible.get(ident["source_record_id"])
-            if vid is None:
-                exclude(hit, "not_visible_at_cutoff")
+            checked = _verify_hit(hit, visible, state, doc_categories, evidence_types)
+            if isinstance(checked, str):
+                excluded.add(hit, checked)
                 continue
-            fact = facts[vid]
-            if fact["publication_state"] in _WITHDRAWN:
-                exclude(hit, "withdrawn")
-                continue
-            key = ident.get("artifact_key")
-            art = current.get(vid)
-            fixed = artifacts.get((vid, *key.rsplit(":", 1))) if key else None
-            if art is None or fixed is None:
-                # 此刻可见的版本，正文已不是被索引的这一份（更正后的版本，或改造前的投影待办）
-                exclude(hit, "changed_at_cutoff")
-                continue
-            processor, digest = key.rsplit(":", 1)
-            if doc_categories and art["doc_category"] not in doc_categories:
-                exclude(hit, "filtered_doc_category")
-                continue
-            if evidence_types and not set(art["evidence_types"] or []) & set(evidence_types):
-                exclude(hit, "filtered_evidence_type")
-                continue
-            span = _locate_in(fixed["text"], hit.get("content"), ident.get("piece"))
-            if span is None:
-                exclude(hit, "chunk_not_in_fixed_text")
-                continue
-            start, end = span
-            available = fact["proof_available_at"] if mode == "public_history_reconstruction" else fact["first_seen_at"]
-            verified.append({
-                "source_id": source_id, "is_demo": is_demo, "source_record_id": ident["source_record_id"],
-                "version_id": vid, "raw_sha256": fact["raw_sha256"], "title": fact["title"],
-                "first_seen_at": fact["first_seen_at"].isoformat(),
-                "proof_available_at": fact["proof_available_at"].isoformat() if fact["proof_available_at"] else None,
-                "published_at": fact["published_at"],
-                "available_at": available.isoformat() if available else None,
-                "proof": fact["proof"] if mode == "public_history_reconstruction" else None,
-                # 复现引用（v3 6.1）：可见版本、加工产物（处理器版本 + 正文摘要）、读到的片段、偏移与定位、片段摘要
-                "text": fixed["text"][start:end], "start": start, "end": end,
-                "text_sha256": hashlib.sha256(fixed["text"][start:end].encode()).hexdigest(),
-                "locator_kind": fixed["locator_kind"], "locators": _overlapping(fixed["segments"], start, end),
-                "artifact": {"artifact_key": key, "processor_version": processor, "text_sha256": digest,
-                             # 处理器交接期：新产物的条目还没 ready，读的是这个版本在旧处理器下的产物
-                             "handover": (vid, key) in serving},
-                "profile": {"doc_type": art["doc_type"], "doc_category": art["doc_category"],
-                            "evidence_types": list(art["evidence_types"] or [])},
-                "indexed_as": {"publication_id": hit.get("publication_id"), "version_id": ident["version_id"],
-                               "artifact_key": key, "piece": ident.get("piece"), "chunk_id": hit.get("chunk_id")},
-                "retrieval_modes": hit.get("retrieval_modes") or [], "recall_score": hit.get("score"),
-            })
-    return verified, counts, items
+            verified.append(_verified_item(hit, source_id, is_demo, mode, checked, state[3]))
+    return verified, excluded.counts, excluded.items
 
 
 def _coverage(source_ids):
@@ -283,6 +325,79 @@ def _without_retired(sources):
     return tuple(s for s in sources if s not in RETIRED), excluded
 
 
+def _configured_targets(sources, scopes, is_demo):
+    """The enabled index targets the search selects by source, business scope and demo flag."""
+    configured = [t for t in index.targets() if (not sources or t.source_id in sources)
+                  and (not scopes or t.source_scope in scopes) and (is_demo is None or t.is_demo == is_demo)]
+    if not configured:
+        raise HistoryError("search_scope_empty", "所选来源没有配置索引目标", 422)
+    return configured
+
+
+def _knowledge_bases(configured):
+    """(knowledge base, is_demo) -> its allowed (source instance, source) pairs, and -> its business scopes."""
+    groups, scopes_of = {}, {}
+    for target in configured:
+        groups.setdefault((target.knowledge_base_id, target.is_demo), set()).add(
+            (target.source_instance, target.source_id))
+        scopes_of.setdefault((target.knowledge_base_id, target.is_demo), set()).add(target.source_scope)
+    return groups, scopes_of
+
+
+def _recall(client, query, groups, scopes_of):
+    """(the candidates of the selected sources, the recall receipt per knowledge base)."""
+    candidates, recall = [], []
+    # 每个知识库一次召回，几个知识库之间并行发出
+    with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
+        answers = list(pool.map(lambda group: client.search({
+            "knowledge_base_id": group[0], "source_scopes": sorted(scopes_of[group]), "is_demo": group[1],
+            "query_text": query, "top_k": CANDIDATES}), list(groups)))
+    for ((kb, is_demo), allowed), answer in zip(groups.items(), answers):
+        recall.append({"knowledge_base_id": kb, "source_scopes": sorted(scopes_of[(kb, is_demo)]),
+                       "is_demo": is_demo, "returned": len(answer.get("results") or []),
+                       "execution": answer.get("execution")})
+        for hit in answer.get("results") or []:
+            ident = hit.get("identity") or {}
+            if (ident.get("source_instance"), ident.get("source_id")) in allowed:
+                candidates.append(hit)
+    return candidates, recall
+
+
+def _best_per_passage(verified):
+    """去重：同一可见版本的同一段只留召回分数最高的一条"""
+    best = {}
+    for item in verified:
+        key = (item["version_id"], item["start"], item["end"])
+        if key not in best or (item["recall_score"] or 0) > (best[key]["recall_score"] or 0):
+            best[key] = item
+    return list(best.values())
+
+
+def _rerank(client, query, configured, verified):
+    """Rerank the verified passages per knowledge base and scope and sort them in place (by recall score when
+    the rerank fails); returns the rerank receipt."""
+    if not verified:
+        return {"state": "not_run"}
+    by_group = {}
+    for item in verified:
+        target = next(t for t in configured if t.source_id == item["source_id"] and t.is_demo == item["is_demo"])
+        by_group.setdefault((target.knowledge_base_id, target.source_scope, target.is_demo), []).append(item)
+    try:
+        usage = []
+        for (kb, scope, is_demo), items_ in by_group.items():
+            answer = client.rerank({"knowledge_base_id": kb, "source_scope": scope, "is_demo": is_demo,
+                                    "query_text": query, "documents": [i["text"][:8000] for i in items_]})
+            for score in answer["scores"]:
+                items_[score["index"]]["rerank_score"] = score["relevance_score"]
+            usage.append({"rerank_model": answer.get("rerank_model"), "usage": answer.get("usage"),
+                          "usage_status": answer.get("usage_status")})
+        verified.sort(key=lambda i: (-i["rerank_score"], i["version_id"], i["start"]))
+        return {"state": "succeeded", "calls": usage}
+    except HistoryError as exc:
+        verified.sort(key=lambda i: (-(i["recall_score"] or 0), i["version_id"], i["start"]))
+        return {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion"}
+
+
 def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_categories=(), evidence_types=(),
            top_k=10, client=None):
     """sources / scopes / is_demo 选择检索哪些索引目标（来源、业务范围、演示与否）；其余见模块说明。"""
@@ -291,63 +406,18 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
     if not 1 <= top_k <= 20 or not 1 <= len(query) <= 2000:
         raise HistoryError("query_budget", "检索词须为1至2000字符，top_k须为1至20", 422)
     sources, excluded = _without_retired(sources)
-    configured = [t for t in index.targets() if (not sources or t.source_id in sources)
-                  and (not scopes or t.source_scope in scopes) and (is_demo is None or t.is_demo == is_demo)]
-    if not configured:
-        raise HistoryError("search_scope_empty", "所选来源没有配置索引目标", 422)
+    configured = _configured_targets(sources, scopes, is_demo)
     # 一个知识库一次召回，覆盖它在本次检索里的所有业务范围（同库的范围不互相挤占候选）
-    groups, scopes_of = {}, {}
-    for target in configured:
-        groups.setdefault((target.knowledge_base_id, target.is_demo), set()).add(
-            (target.source_instance, target.source_id))
-        scopes_of.setdefault((target.knowledge_base_id, target.is_demo), set()).add(target.source_scope)
+    groups, scopes_of = _knowledge_bases(configured)
     owned = client is None
     client = client or index.WeKnoraIndexClient()
     try:
-        candidates, recall = [], []
-        # 每个知识库一次召回，几个知识库之间并行发出
-        with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
-            answers = list(pool.map(lambda group: client.search({
-                "knowledge_base_id": group[0], "source_scopes": sorted(scopes_of[group]), "is_demo": group[1],
-                "query_text": query, "top_k": CANDIDATES}), list(groups)))
-        for ((kb, is_demo), allowed), answer in zip(groups.items(), answers):
-            recall.append({"knowledge_base_id": kb, "source_scopes": sorted(scopes_of[(kb, is_demo)]),
-                           "is_demo": is_demo, "returned": len(answer.get("results") or []),
-                           "execution": answer.get("execution")})
-            for hit in answer.get("results") or []:
-                ident = hit.get("identity") or {}
-                if (ident.get("source_instance"), ident.get("source_id")) in allowed:
-                    candidates.append(hit)
+        candidates, recall = _recall(client, query, groups, scopes_of)
         verified, counts, items = verify(candidates, mode, cutoff, doc_categories=doc_categories,
                                          evidence_types=evidence_types,
                                          target_ids={(t.source_id, t.is_demo): t.key() for t in configured})
-        # 去重：同一可见版本的同一段只留召回分数最高的一条
-        best = {}
-        for item in verified:
-            key = (item["version_id"], item["start"], item["end"])
-            if key not in best or (item["recall_score"] or 0) > (best[key]["recall_score"] or 0):
-                best[key] = item
-        verified = list(best.values())
-        rerank = {"state": "not_run"}
-        if verified:
-            by_group = {}
-            for item in verified:
-                target = next(t for t in configured if t.source_id == item["source_id"] and t.is_demo == item["is_demo"])
-                by_group.setdefault((target.knowledge_base_id, target.source_scope, target.is_demo), []).append(item)
-            try:
-                usage = []
-                for (kb, scope, is_demo), items_ in by_group.items():
-                    answer = client.rerank({"knowledge_base_id": kb, "source_scope": scope, "is_demo": is_demo,
-                                            "query_text": query, "documents": [i["text"][:8000] for i in items_]})
-                    for score in answer["scores"]:
-                        items_[score["index"]]["rerank_score"] = score["relevance_score"]
-                    usage.append({"rerank_model": answer.get("rerank_model"), "usage": answer.get("usage"),
-                                  "usage_status": answer.get("usage_status")})
-                verified.sort(key=lambda i: (-i["rerank_score"], i["version_id"], i["start"]))
-                rerank = {"state": "succeeded", "calls": usage}
-            except HistoryError as exc:
-                verified.sort(key=lambda i: (-(i["recall_score"] or 0), i["version_id"], i["start"]))
-                rerank = {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion"}
+        verified = _best_per_passage(verified)
+        rerank = _rerank(client, query, configured, verified)
         results = verified[:top_k]
     finally:
         if owned:
