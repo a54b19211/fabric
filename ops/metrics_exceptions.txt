@@ -13,11 +13,6 @@
 # came in from feat/server_fix). Code in this section is split, not frozen: the section is to be empty.
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
 processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
-processing/clean_text.py:_apply_templates  34/22  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:_readable  22/23  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:_who_blocks  72/30  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:_who_blocks.walk  55/29  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:clean_markdown  88/31  text cleaners, one branch per markup pattern; table-driven rewrite
 processing/identifiers.py:_doi_hits  39/24  identifier scanners, one branch per identifier form
 processing/identifiers.py:_scan  53/22  identifier scanners, one branch per identifier form
 processing/index_pieces.py:plan  38/24  index piece planner with the split rules inline
