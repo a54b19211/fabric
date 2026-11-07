@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 
 from loguru import logger
-from sqlalchemy import func, text
+from sqlalchemy import false, func, text
 
 from db.models import AgentRun
 from db.session import get_session
@@ -243,7 +243,7 @@ def count_pending_entities(document_uuid: str) -> int:
                 .filter(
                     ExtractedEntity.source_doc_uuid == document_uuid,
                     ExtractedEntity.review_status == "pending",
-                    ExtractedEntity.is_deleted == False,
+                    ExtractedEntity.is_deleted == false(),
                 )
                 .count()
             )

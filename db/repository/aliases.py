@@ -4,7 +4,7 @@ import re
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import func, text
+from sqlalchemy import false, func, text
 
 from db.models import EntityAlias, EntityDict
 
@@ -26,8 +26,8 @@ def lookup_alias_candidates(name: str, entity_type: str, session=None) -> list[d
         rows = active.query(EntityDict.id, EntityDict.canonical_data, EntityDict.external_ids).join(
             EntityAlias, EntityAlias.dict_id == EntityDict.id).filter(
                 func.lower(EntityAlias.name) == name.strip().lower(),
-                EntityDict.entity_type == entity_type, EntityDict.is_deleted == False,
-                EntityAlias.is_deleted == False).distinct().order_by(EntityDict.id).all()
+                EntityDict.entity_type == entity_type, EntityDict.is_deleted == false(),
+                EntityAlias.is_deleted == false()).distinct().order_by(EntityDict.id).all()
         return [{'dict_id': row.id, 'name': name, 'canonical_name': (row.canonical_data or {}).get('name', ''),
                  'canonical_data': row.canonical_data or {}, 'external_ids': row.external_ids or {}} for row in rows]
 
@@ -64,8 +64,8 @@ def search_similar_entities(
                 )
                 .join(EntityDict, EntityAlias.dict_id == EntityDict.id)
                 .filter(
-                    EntityAlias.is_deleted == False,
-                    EntityDict.is_deleted == False,
+                    EntityAlias.is_deleted == false(),
+                    EntityDict.is_deleted == false(),
                     EntityDict.entity_type == entity_type,
                     EntityAlias.name_embedding.isnot(None),
                 )
@@ -78,7 +78,7 @@ def search_similar_entities(
                 sess.query(EntityAlias.dict_id, EntityAlias.name)
                 .filter(
                     EntityAlias.dict_id.in_(all_dict_ids),
-                    EntityAlias.is_deleted == False,
+                    EntityAlias.is_deleted == false(),
                 )
                 .all()
             )
@@ -129,7 +129,7 @@ def add_aliases(dict_id: int, entity_type: str, aliases: list[tuple[str, str, bo
             exists = (
                 session.query(EntityAlias)
                 .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name,
-                        EntityAlias.is_deleted == False)
+                        EntityAlias.is_deleted == false())
                 .first()
             )
             if exists is None:
@@ -169,7 +169,7 @@ def lookup_external_id(
             EntityDict.canonical_data,
         ).filter(
             EntityDict.entity_type == entity_type,
-            EntityDict.is_deleted == False,
+            EntityDict.is_deleted == false(),
             text("entity_dict.external_ids ->> :key = :val"),
         ).params(key=external_key, val=str(external_value).strip()).first()
         if row:
@@ -195,13 +195,13 @@ def get_entity_with_aliases(dict_id: int) -> dict | None:
         if session is None:
             return None
         entity = session.query(EntityDict).filter(
-            EntityDict.id == dict_id, EntityDict.is_deleted == False
+            EntityDict.id == dict_id, EntityDict.is_deleted == false()
         ).first()
         if not entity:
             return None
         aliases = session.query(EntityAlias.name).filter(
             EntityAlias.dict_id == dict_id,
-            EntityAlias.is_deleted == False,
+            EntityAlias.is_deleted == false(),
         ).all()
         return {
             "dict_id": entity.id,
@@ -230,7 +230,7 @@ def add_alias_with_embedding(
             return
         exists = session.query(EntityAlias).filter(
             EntityAlias.dict_id == dict_id, EntityAlias.name == name,
-            EntityAlias.is_deleted == False,
+            EntityAlias.is_deleted == false(),
         ).first()
         if exists is not None:
             return
@@ -299,7 +299,7 @@ def _write_aliases_with_embedding(
         exists = (
             session.query(EntityAlias)
             .filter(EntityAlias.dict_id == dict_id, EntityAlias.name == name,
-                    EntityAlias.is_deleted == False)
+                    EntityAlias.is_deleted == false())
             .first()
         )
         if exists is not None:
@@ -311,7 +311,7 @@ def _write_aliases_with_embedding(
             EntityAlias.dict_id != dict_id,
             EntityAlias.name == name,
             EntityAlias.entity_type == entity_type,
-            EntityAlias.is_deleted == False,
+            EntityAlias.is_deleted == false(),
         ).first()
         if conflict is not None:
             logger.info(
@@ -367,7 +367,7 @@ def lookup_external_id_candidates(entity_type, external_key, external_value, ses
     from db.identity import use_session
     with use_session(session) as active:
         rows = active.query(EntityDict).filter(EntityDict.entity_type == entity_type,
-            EntityDict.is_deleted == False,
+            EntityDict.is_deleted == false(),
             EntityDict.external_ids[external_key].astext == str(external_value).strip()).order_by(EntityDict.id).all()
         return [{'dict_id': row.id, 'canonical_name': (row.canonical_data or {}).get('name', ''),
                  'entity_type': row.entity_type, 'canonical_data': row.canonical_data or {},

@@ -2,14 +2,12 @@
 """Agent C: 语义实体匹配 Graph — 判断两个 entity_dict 是否为同一实体，建议合并。"""
 
 from typing import TypedDict, Annotated
-import json
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
-from loguru import logger
 
 from core_engine.agent_tools import SEMANTIC_MATCH_TOOLS
 from core_engine.agents.prompts import SEMANTIC_MATCH_SYSTEM

@@ -1,5 +1,6 @@
 """WeKnora synchronisation flags and graph push bookkeeping for dictionary rows, entities, relations."""
 
+from sqlalchemy import false, true
 from loguru import logger
 
 from db.models import (
@@ -27,8 +28,8 @@ def get_entity_dict_for_weknora(limit: int = 500, offset: int = 0) -> list[dict]
             session.query(EntityDict)
             .filter(
                 EntityDict.weknora_sync_status == "pending",
-                EntityDict.is_deleted == False,
-                EntityDict.is_verified == True,
+                EntityDict.is_deleted == false(),
+                EntityDict.is_verified == true(),
             )
         )
         if limit:
@@ -125,7 +126,7 @@ def get_entities_for_weknora_graph(limit: int = 500, offset: int = 0) -> list[di
             .filter(
                 ExtractedEntity.review_status.in_(["approved", "auto_approved"]),
                 ExtractedEntity.weknora_graph_status == "pending",
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             )
         )
         if limit > 0:
@@ -142,7 +143,7 @@ def get_entities_for_weknora_graph(limit: int = 500, offset: int = 0) -> list[di
                 session.query(EntityAlias)
                 .filter(
                     EntityAlias.dict_id.in_(dict_ids),
-                    EntityAlias.is_deleted == False,
+                    EntityAlias.is_deleted == false(),
                 )
                 .all()
             )
@@ -253,9 +254,9 @@ def get_relations_for_weknora_graph(limit: int = 500, offset: int = 0) -> list[d
             .filter(
                 EntityRelation.review_status.in_(["approved", "auto_approved"]),
                 EntityRelation.weknora_graph_status == "pending",
-                EntityRelation.is_deleted == False,
-                FromEntity.is_deleted == False,
-                ToEntity.is_deleted == False,
+                EntityRelation.is_deleted == false(),
+                FromEntity.is_deleted == false(),
+                ToEntity.is_deleted == false(),
             )
         )
         if limit > 0:
@@ -348,7 +349,7 @@ def get_weknora_graph_stats() -> dict:
         def _count(model, field: str, val: str) -> int:
             return session.query(model).filter(
                 getattr(model, field) == val,
-                model.is_deleted == False,
+                model.is_deleted == false(),
             ).count()
 
         return {

@@ -23,7 +23,7 @@ def _extract_summary(body_text: str, max_len: int = 200) -> str:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", stripped):
             continue
         content_lines.append(stripped)
-        if sum(len(l) for l in content_lines) >= max_len:
+        if sum(len(ln) for ln in content_lines) >= max_len:
             break
     summary = " ".join(content_lines)
     return summary[:max_len]

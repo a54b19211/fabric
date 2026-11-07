@@ -1,11 +1,9 @@
-from typing import Literal
-
 """有独立许可的历史资料接口；旧documents/research接口行为不变。"""
 
 import hmac
 import os
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response

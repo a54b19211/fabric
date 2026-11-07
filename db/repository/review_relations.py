@@ -1,5 +1,6 @@
 """Human review of extracted relations: approve, reject and their batch forms."""
 
+from sqlalchemy import false
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -20,7 +21,7 @@ def get_pending_review_relations(limit: int = 50) -> list[dict]:
             session.query(EntityRelation)
             .filter(
                 EntityRelation.review_status == "pending",
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
             )
             .limit(limit)
             .all()
@@ -66,8 +67,10 @@ def approve_relation(id, reviewer, note='', evidence=None, session=None, review_
             if not auditable_entity_identity(entity) or not auditable_identity(dictionary):
                 raise ValueError('Both relation endpoints require auditable human identity confirmation')
         before = relation.review_status
-        relation.review_status = 'approved'; relation.reviewer_note = note
-        relation.reviewed_by = reviewer; relation.reviewed_at = datetime.now(timezone.utc)
+        relation.review_status = 'approved'
+        relation.reviewer_note = note
+        relation.reviewed_by = reviewer
+        relation.reviewed_at = datetime.now(timezone.utc)
         record_evidence(active, 'relation', relation, {'relation_type': relation.relation_type,
             'from_entity_id': relation.from_entity_id, 'to_entity_id': relation.to_entity_id,
             'evidence': validated}, relation.source_doc_uuid, relation.source_site)
@@ -122,7 +125,7 @@ def batch_approve_relations(source_doc_uuid='', source_site='', reviewer='', not
     reviewer = require_trusted_review_context(review_context)
     with use_session() as session:
         query = session.query(EntityRelation).filter(EntityRelation.review_status == 'pending',
-            EntityRelation.is_deleted == False, EntityRelation.confidence_score >= min_confidence)
+            EntityRelation.is_deleted == false(), EntityRelation.confidence_score >= min_confidence)
         if source_doc_uuid:
             query = query.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
         if source_site:
@@ -155,7 +158,7 @@ def batch_reject_relations(
         # 构建查询条件
         q = session.query(EntityRelation).filter(
             EntityRelation.review_status == "pending",
-            EntityRelation.is_deleted == False
+            EntityRelation.is_deleted == false()
         )
         
         if source_doc_uuid:

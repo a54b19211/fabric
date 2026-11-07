@@ -11,6 +11,8 @@ from openai import OpenAI
 from prefect import task
 from loguru import logger
 
+from config.settings import APP
+
 
 def _format_json_error(raw: str, exc: json.JSONDecodeError) -> str:
     """生成 JSON 解析错误的详细诊断信息，定位到出错位置附近。"""
@@ -29,11 +31,11 @@ def _format_json_error(raw: str, exc: json.JSONDecodeError) -> str:
     lines = [
         f"JSON 解析失败: {exc.msg}",
         f"位置: 第 {line_num} 行, 第 {col_num} 列 (char {pos})",
-        f"上下文:",
-        f"```json",
+        "上下文:",
+        "```json",
         f"{snippet}",
         f"{pointer}",
-        f"```",
+        "```",
     ]
     return "\n".join(lines)
 
@@ -48,8 +50,6 @@ def _strip_json_fence(raw: str) -> str:
     if s.endswith("```"):
         s = s[:-3]
     return s.strip()
-
-from config.settings import APP
 
 
 # ===================================================================
@@ -216,7 +216,6 @@ def _stream_extract(client: OpenAI, model_name: str, messages: list) -> dict:
     流式调用，token 实时打印到终端，完成后解析完整 JSON 返回。
     适合命令行调试时观察 LLM 实时输出。
     """
-    import sys
     print(f"\n[LLM 流式输出] 模型={model_name}", flush=True)
     print("-" * 60, flush=True)
 

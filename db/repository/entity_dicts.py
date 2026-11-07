@@ -1,5 +1,6 @@
 """Entity dictionary maintenance: soft deletes and candidate dictionary lookup for review."""
 
+from sqlalchemy import false
 from loguru import logger
 
 from db.models import EntityAlias, EntityDict
@@ -30,7 +31,7 @@ def soft_delete_entity_dict(dict_id: int, operator: str = "") -> None:
         ent.is_deleted = True
         session.query(EntityAlias).filter(
             EntityAlias.dict_id == dict_id,
-            EntityAlias.is_deleted == False,
+            EntityAlias.is_deleted == false(),
         ).update({"is_deleted": True}, synchronize_session=False)
 
         _write_operation_log(
@@ -133,7 +134,7 @@ def find_candidate_dicts_for_review(
             session.query(EntityAlias.dict_id, EntityAlias.name)
             .filter(
                 EntityAlias.name == entity_name.strip(),
-                EntityAlias.is_deleted == False,
+                EntityAlias.is_deleted == false(),
             )
             .all()
         )
@@ -153,8 +154,8 @@ def find_candidate_dicts_for_review(
                     session.query(EntityAlias.dict_id, EntityAlias.name)
                     .join(EntityDict, EntityAlias.dict_id == EntityDict.id)
                     .filter(
-                        EntityAlias.is_deleted == False,
-                        EntityDict.is_deleted == False,
+                        EntityAlias.is_deleted == false(),
+                        EntityDict.is_deleted == false(),
                         EntityDict.entity_type == entity_type,
                         EntityAlias.name_embedding.isnot(None),
                     )
@@ -188,7 +189,7 @@ def find_candidate_dicts_for_review(
             session.query(EntityAlias.dict_id, EntityAlias.name)
             .filter(
                 EntityAlias.dict_id.in_(all_dict_ids),
-                EntityAlias.is_deleted == False,
+                EntityAlias.is_deleted == false(),
             )
             .all()
         )

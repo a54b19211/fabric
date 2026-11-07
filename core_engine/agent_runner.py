@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """AgentRunner — 统一执行入口：Pipeline 模式（实体/关系审核）+ ReAct 模式（冲突/匹配）。"""
 
+from sqlalchemy import false
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -620,7 +620,7 @@ class AgentRunner:
                 .outerjoin(Document, ExtractedEntity.source_doc_uuid == Document.uuid)
                 .filter(
                     ExtractedEntity.id == entity_id,
-                    ExtractedEntity.is_deleted == False,
+                    ExtractedEntity.is_deleted == false(),
                 )
                 .first()
             )
@@ -645,7 +645,7 @@ class AgentRunner:
         with get_session() as session:
             row = session.query(EntityRelation).filter(
                 EntityRelation.id == relation_id,
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
             ).first()
             if row is None:
                 return None
@@ -686,7 +686,7 @@ class AgentRunner:
                 .outerjoin(Document, ExtractedEntity.source_doc_uuid == Document.uuid)
                 .filter(
                     ExtractedEntity.review_status == "pending",
-                    ExtractedEntity.is_deleted == False,
+                    ExtractedEntity.is_deleted == false(),
                 )
             )
             if entity_type:
@@ -719,7 +719,7 @@ class AgentRunner:
                 .filter(
                     ExtractedEntity.source_doc_uuid == document_uuid,
                     ExtractedEntity.review_status == "pending",
-                    ExtractedEntity.is_deleted == False,
+                    ExtractedEntity.is_deleted == false(),
                 )
                 .order_by(ExtractedEntity.confidence_score.desc())
                 .all()
@@ -749,7 +749,7 @@ class AgentRunner:
                 .filter(
                     EntityRelation.source_doc_uuid == document_uuid,
                     EntityRelation.review_status == "pending",
-                    EntityRelation.is_deleted == False,
+                    EntityRelation.is_deleted == false(),
                 )
                 .order_by(EntityRelation.confidence_score.desc())
                 .all()

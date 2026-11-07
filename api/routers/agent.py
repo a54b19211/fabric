@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Agent 自动审核 API — 触发 Agent 运行 + 查询运行记录。"""
 
+from sqlalchemy import false
 import asyncio
 import json
 import threading
@@ -207,7 +208,7 @@ def trigger_entity_review(entity_id: int):
     with get_session() as session:
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")
@@ -255,7 +256,7 @@ def trigger_batch_async(body: BatchReviewRequest):
     with get_session() as session:
         entities = session.query(ExtractedEntity).filter(
             ExtractedEntity.review_status == "pending",
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         )
         if body.entity_type:
             entities = entities.filter(ExtractedEntity.entity_type == body.entity_type)
@@ -291,7 +292,7 @@ def trigger_document_review(document_uuid: str):
     with get_session() as session:
         doc = session.query(Document).filter(
             Document.uuid == document_uuid,
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
         ).first()
         if doc is None:
             raise HTTPException(status_code=404, detail="文档不存在")
@@ -311,7 +312,7 @@ def trigger_document_review_async(document_uuid: str):
     with get_session() as session:
         doc = session.query(Document).filter(
             Document.uuid == document_uuid,
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
         ).first()
         if doc is None:
             raise HTTPException(status_code=404, detail="文档不存在")
@@ -346,7 +347,7 @@ def get_document_preview(document_uuid: str):
     with get_session() as session:
         doc = session.query(Document).filter(
             Document.uuid == document_uuid,
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
         ).first()
         if doc is None:
             raise HTTPException(status_code=404, detail="文档不存在")
@@ -365,7 +366,7 @@ def get_document_runs(document_uuid: str):
     with get_session() as session:
         doc = session.query(Document).filter(
             Document.uuid == document_uuid,
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
         ).first()
 
     pending = count_pending_entities(document_uuid)
@@ -387,7 +388,7 @@ def trigger_relation_review(relation_id: int):
     with get_session() as session:
         row = session.query(EntityRelation).filter(
             EntityRelation.id == relation_id,
-            EntityRelation.is_deleted == False,
+            EntityRelation.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="关系不存在")
@@ -624,7 +625,7 @@ def trigger_entity_merge(entity_id: int):
     with get_session() as session:
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")
@@ -652,7 +653,7 @@ async def stream_entity_merge(entity_id: int):
     with get_session() as session:
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")

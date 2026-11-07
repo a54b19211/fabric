@@ -3,7 +3,6 @@
 FDA recall_number identifies a recalled product; event_id identifies the event:
 https://www.fda.gov/safety/enforcement-reports/enforcement-report-information-and-definitions
 """
-import json
 import re
 from dataclasses import dataclass
 

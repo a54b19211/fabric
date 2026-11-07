@@ -58,7 +58,6 @@
   CONTAINS              Drug → Drug             {content_pct}  -- 药物制剂含有活性成分（双向关系：反向遍历即"是XX的活性成分"）
 """
 
-import json
 import inspect
 from biz_rules.entity_schemas import ENTITY_SCHEMA_MAP, get_entity_schema_description
 

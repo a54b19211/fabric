@@ -1,5 +1,4 @@
 """中国临床试验注册中心（ChiCTR）详情页特解"""
-import re
 
 from biz_rules.cleaners import normalize_whitespace
 

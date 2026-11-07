@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 
-from sqlalchemy import DateTime, or_
+from sqlalchemy import DateTime, false, or_
 from sqlalchemy.dialects.postgresql import insert
 from biz_rules.timestamps import parse_timestamp
 from db.models import (EntityDict, ExtractedEntity, EntityRelation, EntityAlias,
@@ -127,7 +127,8 @@ def namespaced_ids(data):
     native = data.get('_native') or {}
     if native.get('identity_namespace') and native.get('identity_value'):
         result[str(native['identity_namespace']).casefold()] = str(native['identity_value']).strip().casefold()
-    stock = data.get('stock_code'); exchange = data.get('exchange') or data.get('stock_exchange')
+    stock = data.get('stock_code')
+    exchange = data.get('exchange') or data.get('stock_exchange')
     if stock and exchange:
         result['stock.' + str(exchange).strip().casefold()] = str(stock).strip().casefold()
     identifier = str(data.get('id') or '').strip()
@@ -300,7 +301,7 @@ def get_objects_evidence(object_type, object_ids, session=None):
         audit_rows = active.query(ReviewLog).filter(
             ReviewLog.object_type == object_type, ReviewLog.object_id.in_(identities),
             ReviewLog.action.in_(['confirm_identity'] if object_type == 'entity' else ['approve']),
-            ReviewLog.is_deleted == False).order_by(ReviewLog.id).all()
+            ReviewLog.is_deleted == false()).order_by(ReviewLog.id).all()
         material_fields = ('source_doc_uuid', 'source_site', 'version_id', 'quote', 'char_start', 'char_end')
         normalized = {}
         for audit in audit_rows:
@@ -357,7 +358,7 @@ def get_current_review_evidence(object_type, object_ids, session=None):
             endpoint_ids = {value for row in objects.values() for value in (row.from_entity_id, row.to_entity_id)}
             endpoints = {row.id: row for row in active.query(ExtractedEntity).filter(ExtractedEntity.id.in_(endpoint_ids)).all()} if endpoint_ids else {}
         audits = active.query(ReviewLog).filter(ReviewLog.object_type == object_type,
-            ReviewLog.object_id.in_(identities), ReviewLog.is_deleted == False,
+            ReviewLog.object_id.in_(identities), ReviewLog.is_deleted == false(),
             ReviewLog.action == ('confirm_identity' if object_type == 'entity' else 'approve')).order_by(ReviewLog.id.desc()).all()
         for audit in audits:
             row = objects.get(audit.object_id)
@@ -566,7 +567,8 @@ def merge_dictionary_identities(session, keeper_dict_id, absorbed_dict_ids, fiel
             migrated_aliases += 1
     for queue in rows['queue']:
         if queue.target_dict_id in absorbed_dict_ids and queue.resolution == 'pending':
-            queue.resolution = 'resolved_merged'; queue.reviewed_by = reviewer
+            queue.resolution = 'resolved_merged'
+            queue.reviewed_by = reviewer
             queue.reviewed_at = datetime.now(timezone.utc)
     for mapping in rows['mappings']:
         if mapping.dict_id in absorbed_dict_ids:
@@ -576,7 +578,8 @@ def merge_dictionary_identities(session, keeper_dict_id, absorbed_dict_ids, fiel
     log = EntityMergeLog(keeper_dict_id=keeper_dict_id, absorbed_dict_ids=absorbed_dict_ids,
                          before_snapshot=before, after_snapshot=after, field_decisions=field_decisions,
                          merge_type='identity', reviewer=reviewer, note=note)
-    session.add(log); session.flush()
+    session.add(log)
+    session.flush()
     return {'success': True, 'merge_log_id': log.id, 'keeper_dict_id': keeper_dict_id,
             'merged_count': len(absorbed_dict_ids), 'migrated_extractions': migrated_entities,
             'migrated_aliases': migrated_aliases, 'migrated_relations': 0}
@@ -598,7 +601,8 @@ def link_entity(session, entity, target_dict_id, reviewer, note='', review_conte
                         before_snapshot=before, after_snapshot={'entities': [snapshot(entity)],
                                         'dictionary_dependencies': [snapshot(row) for row in dictionaries]},
                         field_decisions={}, merge_type='identity_link', reviewer=reviewer, note=note)
-    session.add(log); session.flush()
+    session.add(log)
+    session.flush()
     refresh_link_dependencies(session, log)
     return log.id
 
@@ -650,10 +654,13 @@ def rollback_identity_merge(session, merge_log_id, reason='', review_context=Non
     for key, values_list in before.items():
         for values in values_list:
             restore(restored[(key, values['id'])], values)
-    log.is_rolled_back = True; log.rolled_back_at = datetime.now(timezone.utc); log.rollback_reason = reason
+    log.is_rolled_back = True
+    log.rolled_back_at = datetime.now(timezone.utc)
+    log.rollback_reason = reason
     log.rolled_back_by = reviewer
     for proposal in session.query(EntityIdentityMergeProposal).filter(EntityIdentityMergeProposal.merge_log_id == log.id).all():
-        proposal.status = 'withdrawn'; proposal.review_note = reason
+        proposal.status = 'withdrawn'
+        proposal.review_note = reason
     return {'success': True, 'merge_log_id': log.id, 'restored_dict_ids': log.absorbed_dict_ids,
             'restored_extractions': len(before.get('entities', [])),
             'restored_aliases': len(before.get('aliases', [])), 'restored_relations': 0}
@@ -695,7 +702,9 @@ def resolve_link_proposal(proposal_id, status, reviewer, note='', session=None, 
                         or any(current_target.get(key) != value for key, value in target_snapshot.items())):
                     raise ValueError('Proposal target identity has changed; refresh the proposal')
                 proposal.merge_log_id = link_entity(active, entity, proposal.target_dict_id, reviewer, note, review_context=review_context)
-        proposal.status = status; proposal.reviewer = reviewer; proposal.review_note = note
+        proposal.status = status
+        proposal.reviewer = reviewer
+        proposal.review_note = note
         proposal.reviewed_at = datetime.now(timezone.utc)
         if status == 'approved':
             active.flush()
@@ -765,6 +774,8 @@ def resolve_primekg_mapping_proposal(proposal_id, status, reviewer, note='', ses
                 raise ValueError('Dictionary identity has no auditable human confirmation')
         if validated:
             proposal.evidence = validated[0]
-        proposal.status = status; proposal.reviewer = reviewer; proposal.review_note = note
+        proposal.status = status
+        proposal.reviewer = reviewer
+        proposal.review_note = note
         proposal.reviewed_at = datetime.now(timezone.utc)
         return True

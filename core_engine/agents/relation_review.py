@@ -3,7 +3,6 @@
 
 import json
 import time
-from typing import Any
 
 from langchain_openai import ChatOpenAI
 from loguru import logger
@@ -212,7 +211,7 @@ def run_relation_review_pipeline(
     if s3["status"] == "failed":
         reason_parts.append(f"原文无依据: {s3['output'].get('reason', '')}")
         return _build_result("rejected", reason_parts, s3["output"].get("confidence", 0.8), steps)
-    reason_parts.append(f"原文有依据")
+    reason_parts.append("原文有依据")
     s3_conf = s3["output"].get("confidence", 1.0)
 
     # ── 全部通过 ──

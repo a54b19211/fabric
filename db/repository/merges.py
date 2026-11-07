@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 from loguru import logger
-from sqlalchemy import func
+from sqlalchemy import false, func
 
 from db.models import (
     EntityAlias,
@@ -265,14 +265,14 @@ def get_pending_merges(limit: int = 50) -> dict:
             e.id: e
             for e in session.query(EntityDict).filter(
                 EntityDict.id.in_(entity_ids),
-                EntityDict.is_deleted == False,
+                EntityDict.is_deleted == false(),
             ).all()
         }
         source_ent_map = {
             se.id: se
             for se in session.query(ExtractedEntity).filter(
                 ExtractedEntity.id.in_(source_ent_ids),
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             ).all()
         }
 
@@ -395,7 +395,7 @@ def batch_resolve_merges(
             if resolution == "accept_new":
                 entity = session.query(EntityDict).filter(
                     EntityDict.id == merge.target_dict_id,
-                    EntityDict.is_deleted == False,
+                    EntityDict.is_deleted == false(),
                 ).first()
                 if entity:
                     canonical = dict(entity.canonical_data or {})
@@ -411,7 +411,7 @@ def batch_resolve_merges(
                 merge.resolved_value = resolved_value
                 entity = session.query(EntityDict).filter(
                     EntityDict.id == merge.target_dict_id,
-                    EntityDict.is_deleted == False,
+                    EntityDict.is_deleted == false(),
                 ).first()
                 if entity:
                     canonical = dict(entity.canonical_data or {})
@@ -457,7 +457,7 @@ def search_entity_dicts(q: str, limit: int = 20) -> list[dict]:
         alias_rows = (
             session.query(EntityAlias.dict_id, EntityAlias.name)
             .filter(
-                EntityAlias.is_deleted == False,
+                EntityAlias.is_deleted == false(),
                 func.lower(EntityAlias.name).like(func.lower(pattern)),
             )
             .limit(limit)
@@ -468,7 +468,7 @@ def search_entity_dicts(q: str, limit: int = 20) -> list[dict]:
                 continue
             entity = session.query(EntityDict).filter(
                 EntityDict.id == dict_id,
-                EntityDict.is_deleted == False,
+                EntityDict.is_deleted == false(),
             ).first()
             if entity is None:
                 continue
@@ -481,7 +481,7 @@ def search_entity_dicts(q: str, limit: int = 20) -> list[dict]:
             name_rows = (
                 session.query(EntityDict)
                 .filter(
-                    EntityDict.is_deleted == False,
+                    EntityDict.is_deleted == false(),
                     func.lower(func.jsonb_extract_path_text(
                         EntityDict.canonical_data, "name"
                     )).like(func.lower(pattern)),
@@ -503,12 +503,12 @@ def _build_search_result(session, entity: EntityDict) -> dict:
     aliases = [
         a.name for a in session.query(EntityAlias.name).filter(
             EntityAlias.dict_id == entity.id,
-            EntityAlias.is_deleted == False,
+            EntityAlias.is_deleted == false(),
         ).all()
     ]
     count = session.query(ExtractedEntity).filter(
         ExtractedEntity.dict_id == entity.id,
-        ExtractedEntity.is_deleted == False,
+        ExtractedEntity.is_deleted == false(),
     ).count()
 
     cd = entity.canonical_data or {}
@@ -532,7 +532,7 @@ def compare_entities(dict_ids: list[int]) -> dict:
 
         entities_raw = (
             session.query(EntityDict)
-            .filter(EntityDict.id.in_(dict_ids), EntityDict.is_deleted == False)
+            .filter(EntityDict.id.in_(dict_ids), EntityDict.is_deleted == false())
             .all()
         )
         if not entities_raw:
@@ -549,12 +549,12 @@ def compare_entities(dict_ids: list[int]) -> dict:
             aliases = [
                 a.name for a in session.query(EntityAlias.name).filter(
                     EntityAlias.dict_id == ent.id,
-                    EntityAlias.is_deleted == False,
+                    EntityAlias.is_deleted == false(),
                 ).all()
             ]
             count = session.query(ExtractedEntity).filter(
                 ExtractedEntity.dict_id == ent.id,
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             ).count()
 
             entities_info.append({
@@ -623,7 +623,7 @@ def get_merge_logs(limit: int = 50, include_rolled_back: bool = True, dict_ids=N
             q = q.filter(or_(EntityMergeLog.keeper_dict_id.in_(selected_ids),
                              EntityMergeLog.absorbed_dict_ids.overlap(selected_ids)))
         if not include_rolled_back:
-            q = q.filter(EntityMergeLog.is_rolled_back == False)
+            q = q.filter(EntityMergeLog.is_rolled_back == false())
         rows = q.limit(limit).all()
 
         return [

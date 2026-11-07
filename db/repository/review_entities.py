@@ -1,5 +1,6 @@
 """Human review of extracted entities: approve, reject and their batch forms."""
 
+from sqlalchemy import false
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -32,7 +33,7 @@ def get_pending_review_entities(limit: int = 50) -> list[dict]:
             session.query(ExtractedEntity)
             .filter(
                 ExtractedEntity.review_status == "pending",
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             )
             .limit(limit)
             .all()
@@ -56,7 +57,7 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
         .filter(
             ExtractedEntity.dict_id == dict_id,
             ExtractedEntity.id != keeper_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         )
         .all()
     )
@@ -75,7 +76,7 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
         affected_rels = (
             session.query(EntityRelation)
             .filter(
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
                 (EntityRelation.from_entity_id == dup.id) | (EntityRelation.to_entity_id == dup.id),
             )
             .all()
@@ -160,8 +161,10 @@ def _lock_unchanged_entity(active, entity_id, expected):
 def _approve_without_identity(active, ent, entity_id, reviewer, note):
     """Plain approval of an entity that has no dictionary entry and asks for none."""
     before_status = ent.review_status
-    ent.review_status = 'approved'; ent.reviewer_note = note
-    ent.reviewed_by = reviewer; ent.reviewed_at = datetime.now(timezone.utc)
+    ent.review_status = 'approved'
+    ent.reviewer_note = note
+    ent.reviewed_by = reviewer
+    ent.reviewed_at = datetime.now(timezone.utc)
     _write_review_log(active, 'entity', entity_id, 'approve', reviewer, note,
                       {'review_status': before_status, 'dict_id': None},
                       {'review_status': 'approved', 'dict_id': None, 'confirm_identity': False})
@@ -193,9 +196,12 @@ def _confirm_identity(active, ent, target, reviewer, now, basis, validated, conf
     from db.identity import record_evidence
     if not confirm_identity:
         return
-    target.is_verified = True; target.verified_by = reviewer; target.verified_at = now
+    target.is_verified = True
+    target.verified_by = reviewer
+    target.verified_at = now
     target.verification_basis = basis.strip()
-    ent.identity_confirmed_by = reviewer; ent.identity_confirmed_at = now
+    ent.identity_confirmed_by = reviewer
+    ent.identity_confirmed_at = now
     ent.identity_confirmation_basis = basis.strip()
     record_evidence(active, 'entity', ent, {'entity_type': ent.entity_type,
         'entity_name': ent.entity_name, 'entity_data': ent.entity_data, 'evidence': validated}, ent.source_doc_uuid, ent.source_site)
@@ -250,7 +256,10 @@ def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=No
         before = {'review_status': ent.review_status, 'dict_id': ent.dict_id,
                   'is_verified': target.is_verified, 'verified_by': target.verified_by}
         now = datetime.now(timezone.utc)
-        ent.review_status = 'approved'; ent.reviewer_note = note; ent.reviewed_by = reviewer; ent.reviewed_at = now
+        ent.review_status = 'approved'
+        ent.reviewer_note = note
+        ent.reviewed_by = reviewer
+        ent.reviewed_at = now
         # Human-approved content may update canonical fields, but does not confer identity confirmation.
         process_entity_merge(active, target_id, ent.id, dict(ent.entity_data or {}), ent.source_site or '')
         aliases._write_aliases_with_embedding(active, target_id, ent.entity_type, ent.entity_name,
@@ -303,7 +312,7 @@ def reject_entity(id: int, reviewer: str, note: str = "") -> None:
             session.query(EntityRelation)
             .filter(
                 EntityRelation.review_status == "pending",
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
                 (EntityRelation.from_entity_id == id) | (EntityRelation.to_entity_id == id),
             )
             .all()
@@ -351,7 +360,7 @@ def batch_approve_entities(
         # 构建查询条件
         q = session.query(ExtractedEntity).filter(
             ExtractedEntity.review_status == "pending",
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
             ExtractedEntity.confidence_score >= min_confidence
         )
         
@@ -439,7 +448,7 @@ def batch_reject_entities(
         # 构建查询条件
         q = session.query(ExtractedEntity).filter(
             ExtractedEntity.review_status == "pending",
-            ExtractedEntity.is_deleted == False
+            ExtractedEntity.is_deleted == false()
         )
         
         if source_doc_uuid:

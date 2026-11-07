@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 from loguru import logger
-from sqlalchemy import func, text
+from sqlalchemy import false, func, text
 
 from db.models import (
     Document,
@@ -29,7 +29,7 @@ def _find_existing_entity_by_dict_id(session, dict_id: int, entity_type: str):
         .filter(
             ExtractedEntity.dict_id == dict_id,
             ExtractedEntity.entity_type == entity_type,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         )
         .order_by(ExtractedEntity.id.asc())
         .first()
@@ -71,7 +71,7 @@ def _cascade_recompute_stale_entities(session, dict_id: int) -> int:
     """
     target = (
         session.query(EntityDict)
-        .filter(EntityDict.id == dict_id, EntityDict.is_deleted == False)
+        .filter(EntityDict.id == dict_id, EntityDict.is_deleted == false())
         .first()
     )
     if target is None:
@@ -80,7 +80,7 @@ def _cascade_recompute_stale_entities(session, dict_id: int) -> int:
     alias_names = [
         row[0]
         for row in session.query(EntityAlias.name)
-        .filter(EntityAlias.dict_id == dict_id, EntityAlias.is_deleted == False)
+        .filter(EntityAlias.dict_id == dict_id, EntityAlias.is_deleted == false())
         .all()
     ]
     lower_names = {n.lower() for n in alias_names if n and n.strip()}
@@ -90,7 +90,7 @@ def _cascade_recompute_stale_entities(session, dict_id: int) -> int:
     candidates = (
         session.query(ExtractedEntity)
         .filter(
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
             ExtractedEntity.review_status == "pending",
             ExtractedEntity.entity_type == target.entity_type,
             func.lower(ExtractedEntity.entity_name).in_(lower_names),
@@ -292,7 +292,8 @@ def _new_unreviewed_entity(session, rec, dict_id, candidate, native_identifier, 
         confidence_score=rec.get('confidence_score', 0.0),
         confidence_reason=rec.get('confidence_reason', ''), review_status='pending',
         **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
-    session.add(entity); session.flush()
+    session.add(entity)
+    session.flush()
     _write_operation_log(session, 'insert', 'extracted_entities', entity.id,
                          business_action='extract', description='New unreviewed entity observation',
                          details={'source_doc_uuid': source_doc_uuid, 'dict_id': dict_id},
@@ -313,7 +314,7 @@ def _insert_relations(session, relations, final_ids, source_doc_uuid, source_sit
         row = session.query(EntityRelation).filter(
             EntityRelation.source_doc_uuid == source_doc_uuid,
             EntityRelation.from_entity_id == from_id, EntityRelation.to_entity_id == to_id,
-            EntityRelation.relation_type == rel['relation_type'], EntityRelation.is_deleted == False).first()
+            EntityRelation.relation_type == rel['relation_type'], EntityRelation.is_deleted == false()).first()
         if row is None:
             base_evidence = {**rel, **((rel.get('evidence') or [{}])[0])}
             row = EntityRelation(source_doc_uuid=source_doc_uuid, source_site=source_site,
@@ -321,7 +322,8 @@ def _insert_relations(session, relations, final_ids, source_doc_uuid, source_sit
                 relation_props=rel.get('relation_props') or {}, source_text=rel.get('source_text', ''),
                 confidence_score=rel.get('confidence_score', 0.0), confidence_reason=rel.get('confidence_reason', ''),
                 review_status='pending', **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
-            session.add(row); session.flush()
+            session.add(row)
+            session.flush()
         record_evidence(session, 'relation', row, rel, source_doc_uuid, source_site)
 
 
@@ -353,7 +355,8 @@ def _do_insert_extraction_result(session, source_doc_uuid, source_site, entities
     _insert_relations(session, relations, final_ids, source_doc_uuid, source_site)
     doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
     if doc:
-        doc.extraction_status = 'done'; doc.extracted_at = datetime.now(timezone.utc)
+        doc.extraction_status = 'done'
+        doc.extracted_at = datetime.now(timezone.utc)
     from db.review_lifecycle import recalc_document_state
     recalc_document_state(session, source_doc_uuid)
     return final_ids
@@ -408,7 +411,7 @@ def _create_entity_dict_from_extraction(
         names = {str(value).strip().casefold() for value in (entity_name, entity_data.get('name_en')) if value}
         candidates = session.query(EntityDict).join(EntityAlias, EntityAlias.dict_id == EntityDict.id).filter(
             func.lower(EntityAlias.name).in_(names), EntityDict.entity_type == entity_type,
-            EntityDict.is_deleted == False, EntityAlias.is_deleted == False).all()
+            EntityDict.is_deleted == false(), EntityAlias.is_deleted == false()).all()
         compatible = [row for row in candidates if compatible_identity(entity_data,
                       {**(row.canonical_data or {}), 'external_ids': row.external_ids or {}})]
         if len({row.id for row in compatible}) == 1:

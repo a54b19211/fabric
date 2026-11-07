@@ -37,10 +37,10 @@ class Chunk:
 # ── 文档类型判断 ────────────────────────────────────────────────────────
 
 def _is_table_heavy(text: str) -> bool:
-    lines = [l for l in text.splitlines() if l.strip()]
+    lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         return False
-    table_lines = sum(1 for l in lines if l.strip().startswith("|") or " | " in l)
+    table_lines = sum(1 for ln in lines if ln.strip().startswith("|") or " | " in ln)
     return table_lines / len(lines) > 0.4
 
 
@@ -109,14 +109,14 @@ def chunk_article(text: str) -> list[str]:
 
 def _extract_table_header(text: str) -> tuple[str, list[str]]:
     lines = text.splitlines()
-    table_lines = [l for l in lines if l.strip().startswith("|") or " | " in l]
+    table_lines = [ln for ln in lines if ln.strip().startswith("|") or " | " in ln]
 
     if not table_lines:
         return "", lines
 
     header = _normalize_table_row(table_lines[0])
     # 跳过分隔符行（如 |---|---|）
-    data_lines = [_normalize_table_row(l) for l in table_lines[1:] if not _TABLE_SEPARATOR.match(l.strip())]
+    data_lines = [_normalize_table_row(ln) for ln in table_lines[1:] if not _TABLE_SEPARATOR.match(ln.strip())]
     return header, data_lines
 
 
@@ -148,7 +148,7 @@ def chunk_table(text: str) -> list[tuple[str, str]]:
     logger.info(
         f"[Chunking] 表格分块: {len(data_lines)}行 → {len(batches)}块 "
         f"({avg_rows:.0f}行/块), 表头{len(header)}字符, "
-        f"数据行均长{sum(len(l) for l in data_lines[:100]) / min(100, len(data_lines)):.0f}字符"
+        f"数据行均长{sum(len(ln) for ln in data_lines[:100]) / min(100, len(data_lines)):.0f}字符"
     )
     return batches
 

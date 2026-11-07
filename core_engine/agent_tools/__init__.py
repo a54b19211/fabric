@@ -10,10 +10,10 @@ from core_engine.agent_tools.db_tools import (
 from core_engine.agent_tools.web_tools import web_search, web_fetch
 from core_engine.agent_tools.rule_tools import get_entity_type_rules
 from core_engine.agent_tools.decision_tools import (
-    approve_entity,
-    reject_entity,
-    approve_relation,
-    reject_relation,
+    approve_entity,  # noqa: F401  re-exported tool
+    reject_entity,  # noqa: F401  re-exported tool
+    approve_relation,  # noqa: F401  re-exported tool
+    reject_relation,  # noqa: F401  re-exported tool
     resolve_attribute_conflict,
     submit_final_decision,
     submit_merge_decision,

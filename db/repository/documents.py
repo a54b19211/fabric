@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import false, text
 
 from db.models import (
     Attachment,
@@ -339,7 +339,7 @@ def get_document_by_uuid(uuid: str) -> Optional[Document]:
             return None
         return (
             session.query(Document)
-            .filter(Document.uuid == uuid, Document.is_deleted == False)
+            .filter(Document.uuid == uuid, Document.is_deleted == false())
             .first()
         )
 
@@ -397,7 +397,7 @@ def reset_stale_extractions(max_age_minutes: int = 0) -> int:
             return 0
         q = session.query(Document).filter(
             Document.extraction_status.in_(["queued", "processing"]),
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
         )
         if max_age_minutes > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
@@ -432,7 +432,7 @@ def get_pending_extraction(limit: int = 100) -> list[dict]:
             )
             .filter(
                 Document.extraction_status == "pending",
-                Document.is_deleted == False,
+                Document.is_deleted == false(),
             )
             .limit(limit)
             .all()
@@ -460,7 +460,7 @@ def get_attachments(parent_uuid: str) -> list[Attachment]:
             session.query(Attachment)
             .filter(
                 Attachment.parent_uuid == parent_uuid,
-                Attachment.is_deleted == False,
+                Attachment.is_deleted == false(),
             )
             .all()
         )

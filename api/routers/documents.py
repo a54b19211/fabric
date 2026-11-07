@@ -11,7 +11,7 @@ from biz_rules.history_models import HistoryError
 from db.extraction_subjects import listed, subject_text
 from db.session import get_session
 from db.models import Document, DocExtra, Attachment
-from sqlalchemy import func as sqlfunc
+from sqlalchemy import false, func as sqlfunc
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -24,7 +24,7 @@ def get_source_sites():
             return {"sites": []}
         rows = (
             session.query(Document.source_site)
-            .filter(Document.is_deleted == False, Document.source_site != "")
+            .filter(Document.is_deleted == false(), Document.source_site != "")
             .distinct()
             .order_by(Document.source_site)
             .all()
@@ -60,7 +60,7 @@ def list_documents(
             )
             q = (
                 session.query(*cols)
-                .filter(Document.is_deleted == False, listed(Document))
+                .filter(Document.is_deleted == false(), listed(Document))
             )
 
             # 动态筛选条件
@@ -77,7 +77,7 @@ def list_documents(
 
             # 获取总数（用轻量 count，不走子查询）
             total = session.query(sqlfunc.count(Document.id)).filter(
-                Document.is_deleted == False,
+                Document.is_deleted == false(),
                 *([Document.source_site == source_site] if source_site else []),
                 *([Document.doc_status == doc_status] if doc_status else []),
                 *([Document.extraction_status == extraction_status] if extraction_status else []),
@@ -130,7 +130,7 @@ def get_document(uuid: str):
             # 查询主文档
             doc = session.query(Document).filter(
                 Document.uuid == uuid, 
-                Document.is_deleted == False
+                Document.is_deleted == false()
             ).first()
             
             if doc is None:
@@ -144,7 +144,7 @@ def get_document(uuid: str):
             # 查询附件
             att_rows = session.query(Attachment).filter(
                 Attachment.parent_uuid == uuid, 
-                Attachment.is_deleted == False
+                Attachment.is_deleted == false()
             ).all()
             attachments = [
                 AttachmentItem(

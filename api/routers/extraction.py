@@ -13,7 +13,7 @@ from api.schemas.response import (
 from api.routers.history import require_admin
 from db.session import get_session
 from db.models import Document
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, false, func, or_
 
 router = APIRouter(prefix="/api/extraction", tags=["extraction"])
 
@@ -45,7 +45,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                     session.query(Document.uuid)
                     .filter(
                         Document.uuid.in_(body.uuids),
-                        Document.is_deleted == False,
+                        Document.is_deleted == false(),
                     )
                     .all()
                 )
@@ -58,7 +58,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                     # 批量更新状态，不逐行加载
                     session.query(Document).filter(
                         Document.uuid.in_(valid_uuids),
-                        Document.is_deleted == False,
+                        Document.is_deleted == false(),
                     ).update(
                         {"extraction_status": "queued", "extraction_error": ""},
                         synchronize_session=False,
@@ -68,7 +68,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                 # 按来源/类型筛选 pending 文档
                 filters = [
                     Document.extraction_status == "pending",
-                    Document.is_deleted == False,
+                    Document.is_deleted == false(),
                     # documents 库存要有正文；history 固定版本的正文在 history 里
                     or_(and_(Document.raw_content != "", Document.raw_content.isnot(None)),
                         Document.history_version_id.isnot(None)),
@@ -132,7 +132,7 @@ def trigger_pending_extraction(body: PendingExtractRequest):
 
         filters = [
             Document.extraction_status == status,
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
             Document.raw_content != "",
             Document.raw_content.isnot(None),
         ]
@@ -182,7 +182,7 @@ def get_extraction_stats():
             def _count(status: str) -> int:
                 return session.query(func.count(Document.id)).filter(
                     Document.extraction_status == status,
-                    Document.is_deleted == False,
+                    Document.is_deleted == false(),
                 ).scalar()
 
             stats = ExtractionStatsResponse(
@@ -349,7 +349,7 @@ def re_extract_document(uuid: str):
 
         doc = session.query(Document).filter(
             Document.uuid == uuid,
-            Document.is_deleted == False,
+            Document.is_deleted == false(),
         ).first()
 
         if doc is None:
@@ -401,7 +401,7 @@ def get_extraction_status(uuid: str):
             )
             .filter(
                 Document.uuid == uuid,
-                Document.is_deleted == False
+                Document.is_deleted == false()
             ).first()
         )
         

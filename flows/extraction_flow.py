@@ -16,7 +16,7 @@
 """
 import time
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import false, text
 
 from biz_rules.extraction_prompts import get_extraction_prompt, VALID_RELATION_TYPES
 from biz_rules.entity_schemas import validate_entity_data, VALID_ENTITY_TYPES
@@ -35,7 +35,6 @@ from db.repository import (
 )
 from db.session import get_session
 from db.models import Document
-from config.settings import APP
 
 ENTITY_EXTRACTION_SYSTEM_PROMPT = (
     "你是医药行业知识图谱构建专家。"
@@ -579,7 +578,7 @@ def run_extraction_for_uuids(uuids: list[str]) -> dict:
             r.uuid
             for r in session.query(Document.uuid).filter(
                 Document.uuid.in_(uuids),
-                Document.is_deleted == False,
+                Document.is_deleted == false(),
             ).all()
         }
 
@@ -620,7 +619,7 @@ def run_extraction_batch(limit: int = 10) -> dict:
             session.query(Document.uuid)
             .filter(
                 Document.extraction_status == "queued",
-                Document.is_deleted == False,
+                Document.is_deleted == false(),
             )
             .limit(limit)
             .all()

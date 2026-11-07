@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Agent 决策工具 — 审批/拒绝/冲突裁决/提交最终判断。"""
 
+from sqlalchemy import false
 import json
 import math
 
@@ -34,7 +35,7 @@ def approve_entity(entity_id: int, reviewer: str = "auto", note: str = "", dict_
         with get_session() as session:
             row = session.query(ExtractedEntity).filter(
                 ExtractedEntity.id == entity_id,
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             ).first()
             if row is None:
                 return f"错误: 实体 id={entity_id} 不存在"
@@ -68,7 +69,7 @@ def reject_entity(entity_id: int, reviewer: str = "auto", note: str = "") -> str
         with get_session() as session:
             row = session.query(ExtractedEntity).filter(
                 ExtractedEntity.id == entity_id,
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             ).first()
             if row is None:
                 return f"错误: 实体 id={entity_id} 不存在"
@@ -99,7 +100,7 @@ def approve_relation(relation_id: int, reviewer: str = "auto", note: str = "") -
         with get_session() as session:
             row = session.query(EntityRelation).filter(
                 EntityRelation.id == relation_id,
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
             ).first()
             if row is None:
                 return f"错误: 关系 id={relation_id} 不存在"
@@ -130,7 +131,7 @@ def reject_relation(relation_id: int, reviewer: str = "auto", note: str = "") ->
         with get_session() as session:
             row = session.query(EntityRelation).filter(
                 EntityRelation.id == relation_id,
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
             ).first()
             if row is None:
                 return f"错误: 关系 id={relation_id} 不存在"

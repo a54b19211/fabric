@@ -3,7 +3,6 @@
 
 import json
 import time
-from typing import Any
 
 from langchain_openai import ChatOpenAI
 from loguru import logger
@@ -188,7 +187,7 @@ def run_entity_review_pipeline(
         reason_parts.append(f"有效性不通过: {s1['output'].get('reason', '')}")
         return _build_result("rejected", reason_parts, s1["output"].get("confidence", 0.8), steps)
 
-    reason_parts.append(f"有效性通过")
+    reason_parts.append("有效性通过")
     s1_conf = s1["output"].get("confidence", 1.0)
 
     # ── Step 2: 类型正确性 ──
@@ -213,7 +212,7 @@ def run_entity_review_pipeline(
         reason_parts.append(f"原文依据部分通过: {s3['output'].get('reason', '')}")
         s3_conf = 0.7
     else:
-        reason_parts.append(f"原文依据全部通过")
+        reason_parts.append("原文依据全部通过")
         s3_conf = s3["output"].get("confidence", 1.0)
 
     # ── 全部通过 ──

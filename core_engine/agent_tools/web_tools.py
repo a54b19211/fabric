@@ -33,7 +33,7 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
         return [{"title": "错误", "snippet": "联网搜索功能未安装依赖，请执行: pip install ddgs", "url": ""}]
     except Exception as e:
         logger.error(f"[AgentTool] web_search 失败: {e}")
-        return [{"title": "搜索不可用", "snippet": f"联网搜索暂时不可用（网络受限或超时）", "url": ""}]
+        return [{"title": "搜索不可用", "snippet": "联网搜索暂时不可用（网络受限或超时）", "url": ""}]
 
 
 @tool

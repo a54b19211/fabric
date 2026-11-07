@@ -1,5 +1,6 @@
 """Canonical-data merge into entity dictionary rows and canonical-to-extracted synchronisation."""
 
+from sqlalchemy import false
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -104,7 +105,7 @@ def get_entity_dict_by_id(dict_id: int) -> Optional[EntityDict]:
             return None
         return (
             session.query(EntityDict)
-            .filter(EntityDict.id == dict_id, EntityDict.is_deleted == False)
+            .filter(EntityDict.id == dict_id, EntityDict.is_deleted == false())
             .first()
         )
 
@@ -358,7 +359,7 @@ def _sync_canonical_to_extracted(session, dict_id: int) -> int:
         .filter(
             ExtractedEntity.dict_id == dict_id,
             ExtractedEntity.review_status.in_(["approved", "auto_approved"]),
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         )
         .all()
     )

@@ -21,8 +21,7 @@ from api.schemas.response import (
     EntityListResponse, EntityItem,
     RelationListResponse, RelationItem,
     ReviewActionResponse,
-    DisambigInfo, DisambigCandidate,
-    MergeQueueGroup, MergeQueueListResponse,
+    DisambigInfo, MergeQueueListResponse,
     DictCandidateItem, DictCandidateListResponse,
     GraphResponse, GraphNode, GraphEdge,
     ReviewStatsResponse, StatusCounts,
@@ -30,17 +29,13 @@ from api.schemas.response import (
     CompareEntitiesResponse,
     MergeEntitiesResponse,
     RollbackMergeResponse,
-    MergeLogItem, MergeLogListResponse,
-    IdentityMergeProposalItem, IdentityMergeProposalListResponse,
-    IdentityMergeProposalResolveRequest,
 )
 from db.repository import (
     approve_entity_with_alias_writeback,
-    approve_entity, reject_entity,
+    reject_entity,
     approve_relation, reject_relation,
     batch_approve_entities, batch_reject_entities,
     batch_approve_relations, batch_reject_relations,
-    log_review_action,
     get_pending_merges, resolve_merge, batch_resolve_merges,
     find_candidate_dicts_for_review,
     search_entity_dicts, compare_entities,
@@ -56,7 +51,7 @@ from db.identity import get_objects_evidence, get_current_review_evidence
 from db.session import get_session
 from db.models import ExtractedEntity, EntityRelation, EntityDict, EntitySourceEvidence
 from collections import deque
-from sqlalchemy import func, or_
+from sqlalchemy import false, func, or_
 from sqlalchemy.orm import aliased
 
 router = APIRouter(prefix="/api/review", tags=["review"])
@@ -109,7 +104,7 @@ def list_entities(
 
         q = session.query(ExtractedEntity).filter(
             ExtractedEntity.review_status == review_status,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         )
         if entity_type:
             q = q.filter(ExtractedEntity.entity_type == entity_type)
@@ -162,7 +157,7 @@ def get_entity(entity_id: int):
         try:
             row = session.query(ExtractedEntity).filter(
                 ExtractedEntity.id == entity_id,
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             ).first()
             
             if row is None:
@@ -257,7 +252,7 @@ def approve_entity_api(entity_id: int, body: ReviewActionRequest, principal=Depe
             raise HTTPException(status_code=503, detail="数据库未连接")
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")
@@ -291,7 +286,7 @@ def reject_entity_api(entity_id: int, body: ReviewActionRequest):
             raise HTTPException(status_code=503, detail="数据库未连接")
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")
@@ -322,7 +317,7 @@ def get_entity_candidates(
             raise HTTPException(status_code=503, detail="数据库未连接")
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")
@@ -378,7 +373,7 @@ def list_relations(
                 .outerjoin(ToEnt, EntityRelation.to_entity_id == ToEnt.id)
                 .filter(
                     EntityRelation.review_status == review_status,
-                    EntityRelation.is_deleted == False,
+                    EntityRelation.is_deleted == false(),
                 )
             )
 
@@ -500,7 +495,7 @@ def approve_relation_api(relation_id: int, body: ReviewActionRequest, principal=
             raise HTTPException(status_code=503, detail="数据库未连接")
         row = session.query(EntityRelation).filter(
             EntityRelation.id == relation_id,
-            EntityRelation.is_deleted == False,
+            EntityRelation.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="关系不存在")
@@ -528,7 +523,7 @@ def reject_relation_api(relation_id: int, body: ReviewActionRequest):
             raise HTTPException(status_code=503, detail="数据库未连接")
         row = session.query(EntityRelation).filter(
             EntityRelation.id == relation_id,
-            EntityRelation.is_deleted == False,
+            EntityRelation.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="关系不存在")
@@ -618,7 +613,7 @@ def get_review_graph(
                 )
                 .filter(
                     EntityRelation.review_status.in_(statuses),
-                    EntityRelation.is_deleted == False,
+                    EntityRelation.is_deleted == false(),
                 )
                 .group_by(EntityRelation.from_entity_id)
             )
@@ -629,7 +624,7 @@ def get_review_graph(
                 )
                 .filter(
                     EntityRelation.review_status.in_(statuses),
-                    EntityRelation.is_deleted == False,
+                    EntityRelation.is_deleted == false(),
                 )
                 .group_by(EntityRelation.to_entity_id)
             )
@@ -649,7 +644,7 @@ def get_review_graph(
         def _entity_filter(q):
             q = q.filter(
                 ExtractedEntity.review_status.in_(statuses),
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             )
             if type_list:
                 q = q.filter(ExtractedEntity.entity_type.in_(type_list))
@@ -731,7 +726,7 @@ def get_review_graph(
                 EntityRelation.reviewed_by, EntityRelation.reviewed_at, EntityRelation.reviewer_note,
             ).filter(
                 EntityRelation.review_status.in_(statuses),
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
                 EntityRelation.from_entity_id.in_(node_ids),
                 EntityRelation.to_entity_id.in_(node_ids),
             )
@@ -777,10 +772,6 @@ def get_review_graph(
             if not all_entities:
                 return GraphResponse(nodes=[], edges=[], entity_types=[], source_sites=[])
 
-            # Step 2: 种子节点 — top 20 按度数降序
-            seeds = sorted(all_entities.items(), key=lambda x: x[1], reverse=True)[:20]
-            seed_ids = {s[0] for s in seeds}
-
             # Step 3: 构建邻接表（仅查匹配实体之间的边）
             all_ids = set(all_entities.keys())
             adj: dict[int, list[int]] = {eid: [] for eid in all_ids}
@@ -789,7 +780,7 @@ def get_review_graph(
                 EntityRelation.to_entity_id,
             ).filter(
                 EntityRelation.review_status.in_(statuses),
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
                 EntityRelation.from_entity_id.in_(all_ids),
                 EntityRelation.to_entity_id.in_(all_ids),
             ).all()
@@ -847,13 +838,13 @@ def get_review_graph(
         edges=edges,
         entity_types=sorted(
             t[0] for t in session.query(ExtractedEntity.entity_type.distinct())
-            .filter(ExtractedEntity.is_deleted == False, ExtractedEntity.entity_type.isnot(None))
+            .filter(ExtractedEntity.is_deleted == false(), ExtractedEntity.entity_type.isnot(None))
             .all()
             if t[0]
         ),
         source_sites=sorted(
             s[0] for s in session.query(ExtractedEntity.source_site.distinct())
-            .filter(ExtractedEntity.is_deleted == False, ExtractedEntity.source_site.isnot(None))
+            .filter(ExtractedEntity.is_deleted == false(), ExtractedEntity.source_site.isnot(None))
             .all()
             if s[0]
         ),
@@ -876,7 +867,7 @@ def get_review_stats():
                 func.count(ExtractedEntity.id),
             )
             .filter(
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             )
             .group_by(ExtractedEntity.review_status)
             .all()
@@ -889,7 +880,7 @@ def get_review_stats():
                 func.count(EntityRelation.id),
             )
             .filter(
-                EntityRelation.is_deleted == False,
+                EntityRelation.is_deleted == false(),
             )
             .group_by(EntityRelation.review_status)
             .all()
@@ -906,7 +897,7 @@ def get_review_stats():
                 func.count(ExtractedEntity.id),
             )
             .filter(
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             )
             .group_by(ExtractedEntity.entity_type, ExtractedEntity.review_status)
             .all()
@@ -930,7 +921,7 @@ def get_review_stats():
                 func.count(ExtractedEntity.id),
             )
             .filter(
-                ExtractedEntity.is_deleted == False,
+                ExtractedEntity.is_deleted == false(),
             )
             .group_by(ExtractedEntity.source_site, ExtractedEntity.review_status)
             .all()
@@ -974,7 +965,7 @@ def patch_entity(entity_id: int, body: PatchEntityRequest):
 
         row = session.query(ExtractedEntity).filter(
             ExtractedEntity.id == entity_id,
-            ExtractedEntity.is_deleted == False,
+            ExtractedEntity.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="实体不存在")
@@ -1005,7 +996,7 @@ def patch_relation(relation_id: int, body: PatchRelationRequest):
 
         row = session.query(EntityRelation).filter(
             EntityRelation.id == relation_id,
-            EntityRelation.is_deleted == False,
+            EntityRelation.is_deleted == false(),
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="关系不存在")
