@@ -950,6 +950,41 @@ def test_an_unresolved_correction_that_its_record_withdraws_no_longer_holds(db, 
         "asserted", "withdrawn"}
 
 
+def two_relations(key, relations, record):
+    raw = {"record_kind": "document", "title": "更正与撤回", "full_text": "前述通报的数字更正，并撤回其中一处。",
+           "material_kind": "official_notice", "document_relations": relations}
+    records = [ArchiveRecord(source_record_id=record, record_kind="document", raw_content=json.dumps(raw, ensure_ascii=False))]
+    proof = {"available_at": {"value": "2026-11-02", "precision": "day"}, "uri": "fixture://both",
+             "sha256": archive_manifest_hash(records), "reviewed": True, "review_note": "synthetic"}
+    return store.import_archive(ArchiveImport(source_id="external_archive", is_demo=True, scope_description="both",
+                                              declared_count=1, records=records, proof=proof), key).version_ids[0]
+
+
+@real_checker
+def test_a_correction_and_a_retraction_seen_at_the_same_moment_end_retracted_in_either_order(db, fake):
+    version, items = chain(fake)
+    cases = by_value(items)["66"]
+    rel = {"target_source_id": "who_don", "target_source_record_id": WHO_ID, "target_version_id": version}
+    # one correcting version states both: the same first-seen time for both events
+    two_relations("both-1", [dict(rel, relation_type="corrects"), dict(rel, relation_type="retracts")], "SYNTHETIC-both")
+    scan()
+    got = measurement_reads.read_one(cases["measurement_id"], True, "current", NOW())
+    assert got["state_at_cutoff"] == "retracted"
+    assert sorted(events_of(db, cases["measurement_id"])[1:]) == ["corrected", "retracted"]
+    seen = rows(db, "SELECT DISTINCT material_visible_at FROM derived_measurement_events WHERE kind IN "
+                    "('corrected','retracted') AND measurement_id=:m", m=cases["measurement_id"])
+    assert len(seen) == 1
+    # stated the other way round in another version: the same state (a retraction is never undone by a correction)
+    other = who_version(who_raw(uid=OTHER_ID), "who-b")
+    _, later = chain(fake, other)
+    rel_b = dict(rel, target_source_record_id=OTHER_ID, target_version_id=other)
+    two_relations("both-2", [dict(rel_b, relation_type="retracts"), dict(rel_b, relation_type="corrects")],
+                  "SYNTHETIC-both-b")
+    scan()
+    assert measurement_reads.read_one(by_value(later)["66"]["measurement_id"], True, "current", NOW())[
+        "state_at_cutoff"] == "retracted"
+
+
 @real_checker
 def test_a_reread_never_merges_two_full_candidates_into_one_successor(db, fake):
     version, items = chain(fake)
