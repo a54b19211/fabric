@@ -77,7 +77,6 @@ db/source_refresh.py:source_health  174/34  source refresh/health worker: schedu
 disambiguation/llm_ranker.py:rank_with_llm  101/21  LLM/reranker call with prompt, parse and fallback inline
 disambiguation/llm_ranker.py:rank_with_reranker  69/26  LLM/reranker call with prompt, parse and fallback inline
 flows/graph_publish.py:_read_primekg  82/24  graph publication flow: capture and bundle build in long functions; split per step
-flows/graph_publish.py:build_document_bundle  197/71  graph publication flow: capture and bundle build in long functions; split per step
 flows/graph_publish.py:capture_primekg  137/31  graph publication flow: capture and bundle build in long functions; split per step
 flows/graph_publish.py:main  94/8  graph publication flow: capture and bundle build in long functions; split per step
 flows/history_fetch.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place

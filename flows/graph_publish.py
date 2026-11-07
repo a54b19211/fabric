@@ -319,7 +319,8 @@ def _item_evidence(item, original, ref):
     return _evidence(original, ref, item.get("source_text")), False
 
 
-def build_document_bundle(observation, documents, document_refs):
+def _bundle_scope(observation, documents, document_refs):
+    """The observation's namespace and the selected originals and adoption refs, keyed by document UUID."""
     if observation.get("schema_version") != "datafabric.legacy.graph.observation.v1":
         raise HistoryError("legacy_observation_schema", "不支持的旧图观测格式")
     namespace = observation["namespace"]
@@ -335,91 +336,147 @@ def build_document_bundle(observation, documents, document_refs):
         raise HistoryError(
             "legacy_document_scope_mismatch", "本批所选UUID与原件/采用清单不一致"
         )
+    return namespace, doc_map, ref_map, selected
+
+
+def _item_scope(item, doc_map, message):
+    """The document UUID and review status of an observed entity or relation inside the selected scope."""
+    uuid, status = item.get("observation_source_doc_uuid") or item["source_doc_uuid"], item["review_status"]
+    if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
+        raise HistoryError("legacy_review_scope_mismatch", message)
+    return uuid, status
+
+
+def _identity_confirmed(item, status, dict_id, fixed_proof, context):
+    """A mention is a confirmed dictionary identity only with object, dictionary and fixed-text review."""
+    return (
+        status == "approved" and dict_id is not None and fixed_proof
+        and context.get("id") == dict_id and context.get("is_verified") is True
+        and _auditor(context.get("verified_by"), context.get("verified_at"))
+        and bool(context.get("verification_basis"))
+        and _auditor(item.get("identity_confirmed_by"), item.get("identity_confirmed_at"))
+        and bool(item.get("identity_confirmation_basis"))
+    )
+
+
+def _new_entity_node(identity, item, confirmed, dict_id, review):
+    return GraphNode(
+        **identity.model_dump(),
+        entity_type=item["entity_type"],
+        name=item["entity_name"],
+        aliases=[],
+        external_ids={},
+        identity_status="confirmed" if confirmed else "unresolved",
+        identity_review_basis=(
+            item["identity_confirmation_basis"]
+            if confirmed
+            else "source_proposed_dict_id:" + str(dict_id) + ";unverified"
+            if dict_id is not None
+            else None
+        ),
+        review=review,
+        properties={key: item[key] for key in ("first_seen_at", "valid_from", "valid_to") if item.get(key) is not None},
+        mention_ids=[],
+        evidence=[],
+    )
+
+
+def _merge_entity_mention(node, item, namespace, confirmed, review, evidence):
+    """Fold one more mention into its node: the confirmation, the alias, the mention ID and the evidence."""
+    if node.entity_type != item["entity_type"]:
+        raise HistoryError(
+            "ambiguous_legacy_type", "同一字典身份的实体类型矛盾，不能按名称合并"
+        )
+    if confirmed:
+        node.identity_status = "confirmed"
+        node.identity_review_basis = item["identity_confirmation_basis"]
+        node.review = review
+    if item["entity_name"] != node.name and item["entity_name"] not in node.aliases:
+        node.aliases.append(item["entity_name"])
+    mention_id = namespace + ".extracted_entity:" + str(item["id"])
+    if mention_id not in node.mention_ids:
+        node.mention_ids.append(mention_id)
+    if evidence is not None and evidence not in node.evidence:
+        node.evidence.append(evidence)
+
+
+def _add_entity(item, namespace, doc_map, ref_map, dictionary_context, mentions, nodes):
+    """Record one observed entity as a mention and fold it into its node; False when the node cap cut it off."""
+    uuid, status = _item_scope(item, doc_map, "实体不在所选文档或审核范围")
+    mention_key = (uuid, item["id"])
+    if mention_key in mentions:
+        raise HistoryError(
+            "duplicate_legacy_mention",
+            "源实体ID重复或读取期间状态漂移，请重新捕获本批",
+        )
+    dict_id = item.get("dict_id")
+    evidence, fixed_proof = _item_evidence(item, doc_map[uuid], ref_map[uuid])
+    context = item.get("dict_context") or dictionary_context.get(str(dict_id)) or {}
+    confirmed = _identity_confirmed(item, status, dict_id, fixed_proof, context)
+    review = GraphReview(
+        status=status,
+        reviewed_by=item.get("identity_confirmed_by") if confirmed else item.get("reviewed_by") or None,
+        reviewed_at=item.get("identity_confirmed_at") if confirmed else item.get("reviewed_at"),
+    )
+    # 自动提议的dict_id不是已确认映射，不能污染人工已确认节点的别名/证据。
+    node_namespace = namespace + (
+        ".entity_dict" if confirmed else ".extracted_entity"
+    )
+    node_id = str(dict_id if confirmed else item["id"])
+    identity = GraphIdentity(namespace=node_namespace, id=node_id)
+    mentions[mention_key] = identity
+    key = identity_key(identity)
+    if key not in nodes and len(nodes) >= 100:
+        return False
+    node = nodes.get(key)
+    if node is None:
+        node = _new_entity_node(identity, item, confirmed, dict_id, review)
+        nodes[key] = node
+    _merge_entity_mention(node, item, namespace, confirmed, review, evidence)
+    return True
+
+
+def _bundle_nodes(observation, namespace, doc_map, ref_map):
+    """Mentions by (document UUID, entity ID), nodes by identity key, and whether the node cap cut any off."""
     dictionary_context = observation.get("dictionary_context") or {}
-    mentions, nodes, edges = {}, {}, []
-    truncated = observation.get("selection_truncated") is True
+    mentions, nodes = {}, {}
+    truncated = False
     for item in sorted(observation["entities"], key=lambda item: int(item["id"])):
-        uuid, status = item.get("observation_source_doc_uuid") or item["source_doc_uuid"], item["review_status"]
-        if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
-            raise HistoryError(
-                "legacy_review_scope_mismatch", "实体不在所选文档或审核范围"
-            )
-        mention_key = (uuid, item["id"])
-        if mention_key in mentions:
-            raise HistoryError(
-                "duplicate_legacy_mention",
-                "源实体ID重复或读取期间状态漂移，请重新捕获本批",
-            )
-        dict_id = item.get("dict_id")
-        evidence, fixed_proof = _item_evidence(item, doc_map[uuid], ref_map[uuid])
-        context = item.get("dict_context") or dictionary_context.get(str(dict_id)) or {}
-        confirmed = (
-            status == "approved" and dict_id is not None and fixed_proof
-            and context.get("id") == dict_id and context.get("is_verified") is True
-            and _auditor(context.get("verified_by"), context.get("verified_at"))
-            and bool(context.get("verification_basis"))
-            and _auditor(item.get("identity_confirmed_by"), item.get("identity_confirmed_at"))
-            and bool(item.get("identity_confirmation_basis"))
-        )
-        review = GraphReview(
-            status=status,
-            reviewed_by=item.get("identity_confirmed_by") if confirmed else item.get("reviewed_by") or None,
-            reviewed_at=item.get("identity_confirmed_at") if confirmed else item.get("reviewed_at"),
-        )
-        # 自动提议的dict_id不是已确认映射，不能污染人工已确认节点的别名/证据。
-        node_namespace = namespace + (
-            ".entity_dict" if confirmed else ".extracted_entity"
-        )
-        node_id = str(dict_id if confirmed else item["id"])
-        identity = GraphIdentity(namespace=node_namespace, id=node_id)
-        mentions[mention_key] = identity
-        key = identity_key(identity)
-        if key not in nodes and len(nodes) >= 100:
+        if not _add_entity(item, namespace, doc_map, ref_map, dictionary_context, mentions, nodes):
             truncated = True
-            continue
-        node = nodes.get(key)
-        if node is None:
-            node = GraphNode(
-                **identity.model_dump(),
-                entity_type=item["entity_type"],
-                name=item["entity_name"],
-                aliases=[],
-                external_ids={},
-                identity_status="confirmed" if confirmed else "unresolved",
-                identity_review_basis=(
-                    item["identity_confirmation_basis"]
-                    if confirmed
-                    else "source_proposed_dict_id:" + str(dict_id) + ";unverified"
-                    if dict_id is not None
-                    else None
-                ),
-                review=review,
-                properties={key: item[key] for key in ("first_seen_at", "valid_from", "valid_to") if item.get(key) is not None},
-                mention_ids=[],
-                evidence=[],
-            )
-            nodes[key] = node
-        if node.entity_type != item["entity_type"]:
-            raise HistoryError(
-                "ambiguous_legacy_type", "同一字典身份的实体类型矛盾，不能按名称合并"
-            )
-        if confirmed:
-            node.identity_status = "confirmed"
-            node.identity_review_basis = item["identity_confirmation_basis"]
-            node.review = review
-        if item["entity_name"] != node.name and item["entity_name"] not in node.aliases:
-            node.aliases.append(item["entity_name"])
-        mention_id = namespace + ".extracted_entity:" + str(item["id"])
-        if mention_id not in node.mention_ids:
-            node.mention_ids.append(mention_id)
-        if evidence is not None and evidence not in node.evidence:
-            node.evidence.append(evidence)
+    return mentions, nodes, truncated
+
+
+def _relation_edge(item, namespace, uuid, status, source, target, doc_map, ref_map):
+    props = item.get("relation_props") or {}
+    evidence, fixed_proof = _item_evidence(item, doc_map[uuid], ref_map[uuid])
+    relation_reviewed = fixed_proof and _auditor(item.get("reviewed_by"), item.get("reviewed_at"))
+    return GraphEdge(
+        id=namespace + ".relation:" + str(item["id"]) + ":" + sha256(uuid)[:16],
+        source=source,
+        target=target,
+        relation_type=item["relation_type"],
+        relation_props=props,
+        valid_from=source_time(
+            item.get("valid_from") or props.get("start_date"), "source_relation_start"
+        ),
+        valid_to=source_time(item.get("valid_to") or props.get("end_date"), "source_relation_end"),
+        review=GraphReview(status=status, reviewed_by=item.get("reviewed_by") if relation_reviewed else None,
+                           reviewed_at=item.get("reviewed_at") if relation_reviewed else None),
+        source_doc_uuid=uuid,
+        binding_status="bound" if evidence is not None else "unbound",
+        evidence=[evidence] if evidence is not None else [],
+        unbound_reason=None
+        if evidence is not None
+        else "旧source_text不能在本次冻结原文逐字定位",
+    )
+
+
+def _bundle_edges(observation, namespace, doc_map, ref_map, mentions, nodes):
+    """The edges between kept nodes (at most 200), and whether any relation was left out."""
+    edges, truncated = [], False
     for item in sorted(observation["relations"], key=lambda item: int(item["id"])):
-        uuid, status = item.get("observation_source_doc_uuid") or item["source_doc_uuid"], item["review_status"]
-        if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
-            raise HistoryError(
-                "legacy_review_scope_mismatch", "关系不在所选文档或审核范围"
-            )
+        uuid, status = _item_scope(item, doc_map, "关系不在所选文档或审核范围")
         source, target = (
             mentions.get((uuid, item.get("from_entity_id"))),
             mentions.get((uuid, item.get("to_entity_id"))),
@@ -435,30 +492,11 @@ def build_document_bundle(observation, documents, document_refs):
         if len(edges) >= 200:
             truncated = True
             break
-        props = item.get("relation_props") or {}
-        evidence, fixed_proof = _item_evidence(item, doc_map[uuid], ref_map[uuid])
-        relation_reviewed = fixed_proof and _auditor(item.get("reviewed_by"), item.get("reviewed_at"))
-        edges.append(
-            GraphEdge(
-                id=namespace + ".relation:" + str(item["id"]) + ":" + sha256(uuid)[:16],
-                source=source,
-                target=target,
-                relation_type=item["relation_type"],
-                relation_props=props,
-                valid_from=source_time(
-                    item.get("valid_from") or props.get("start_date"), "source_relation_start"
-                ),
-                valid_to=source_time(item.get("valid_to") or props.get("end_date"), "source_relation_end"),
-                review=GraphReview(status=status, reviewed_by=item.get("reviewed_by") if relation_reviewed else None,
-                                   reviewed_at=item.get("reviewed_at") if relation_reviewed else None),
-                source_doc_uuid=uuid,
-                binding_status="bound" if evidence is not None else "unbound",
-                evidence=[evidence] if evidence is not None else [],
-                unbound_reason=None
-                if evidence is not None
-                else "旧source_text不能在本次冻结原文逐字定位",
-            )
-        )
+        edges.append(_relation_edge(item, namespace, uuid, status, source, target, doc_map, ref_map))
+    return edges, truncated
+
+
+def _bundle_redirects(observation, namespace, nodes):
     # 只接纳导出中明确给出的未回滚日志；默认HTTP捕获不读取全字典别名或全量合并历史。
     redirects = []
     for item in observation.get("merge_logs", []):
@@ -480,6 +518,16 @@ def build_document_bundle(observation, documents, document_refs):
                     merged_at=item.get("created_at"),
                 )
             )
+    return redirects
+
+
+def build_document_bundle(observation, documents, document_refs):
+    namespace, doc_map, ref_map, selected = _bundle_scope(observation, documents, document_refs)
+    truncated = observation.get("selection_truncated") is True
+    mentions, nodes, nodes_cut = _bundle_nodes(observation, namespace, doc_map, ref_map)
+    edges, edges_cut = _bundle_edges(observation, namespace, doc_map, ref_map, mentions, nodes)
+    truncated = truncated or nodes_cut or edges_cut
+    redirects = _bundle_redirects(observation, namespace, nodes)
     return GraphBundle(
         graph_kind="reviewed",
         namespace=namespace,
