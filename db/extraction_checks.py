@@ -304,21 +304,27 @@ def _requests(subject, full, items):
             unbuildable.append({**i, "reason": why})
     left = {i["id"] for i in unbuildable}
     usable = sorted((i for i in items if i["id"] not in left), key=lambda i: (i["start"], i["end"]))
+    return [_request(subject, full, group) for group in _batches(usable, full)], unbuildable
+
+
+def _windows(group, full):
+    """The merged windows [start-WINDOW, end+WINDOW) of a group's items over the artifact, as [a, b] lists."""
+    spans = []
+    for i in group:
+        a, b = max(0, i["start"] - WINDOW), min(len(full), i["end"] + WINDOW)
+        if spans and a <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    return spans
+
+
+def _batches(usable, full):
+    """Items in order, grouped greedily so that no group exceeds the item, passage or character bound."""
     batches, current = [], []
-
-    def windows(group):
-        spans = []
-        for i in group:
-            a, b = max(0, i["start"] - WINDOW), min(len(full), i["end"] + WINDOW)
-            if spans and a <= spans[-1][1]:
-                spans[-1][1] = max(spans[-1][1], b)
-            else:
-                spans.append([a, b])
-        return spans
-
     for item in usable:
         trial = current + [item]
-        spans = windows(trial)
+        spans = _windows(trial, full)
         if current and (len(trial) > MAX_ITEMS or len(spans) > MAX_PASSAGES or sum(b - a for a, b in spans) > MAX_CHARS):
             batches.append(current)
             current = [item]
@@ -326,25 +332,23 @@ def _requests(subject, full, items):
             current = trial
     if current:
         batches.append(current)
-    out = []
-    for group in batches:
-        spans = windows(group)
-        passages = [{"id": f"p{n}", "role": "primary", "start": a, "end": b, "text": full[a:b]}
-                    for n, (a, b) in enumerate(spans, 1)]
+    return batches
 
-        def holder(i, passages=passages):
-            return next(p["id"] for p in passages if p["start"] <= i["start"] and i["end"] <= p["end"])
 
-        body_items = []
-        for i in group:
-            span = {"passage": holder(i), "start": i["start"], "end": i["end"]}
-            fields = json.loads(json.dumps(i["fields"]))
-            if i["kind"] == "identifier":
-                fields["identifier"]["span"] = span
-            body_items.append({"id": i["id"], "kind": i["kind"], "producer": i["producer"], "locator": span,
-                               "quote": i["quote"], "fields": fields})
-        out.append({"subject": subject, "passages": passages, "items": body_items})
-    return out, unbuildable
+def _request(subject, full, group):
+    """One request body: the group's passages and its items, each located in the passage that holds it."""
+    passages = [{"id": f"p{n}", "role": "primary", "start": a, "end": b, "text": full[a:b]}
+                for n, (a, b) in enumerate(_windows(group, full), 1)]
+    body_items = []
+    for i in group:
+        holder = next(p["id"] for p in passages if p["start"] <= i["start"] and i["end"] <= p["end"])
+        span = {"passage": holder, "start": i["start"], "end": i["end"]}
+        fields = json.loads(json.dumps(i["fields"]))
+        if i["kind"] == "identifier":
+            fields["identifier"]["span"] = span
+        body_items.append({"id": i["id"], "kind": i["kind"], "producer": i["producer"], "locator": span,
+                           "quote": i["quote"], "fields": fields})
+    return {"subject": subject, "passages": passages, "items": body_items}
 
 
 def _measure_requests(subject, readings):
@@ -601,51 +605,73 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
         cutoff = history._cutoff(cutoff)
         if cutoff > history._now(conn):
             raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
-        visible = [r[0] for r in conn.execute(text(
-            "SELECT v.version_id FROM history_versions v WHERE v.source_id=:s AND v.is_demo=:d AND v.version_id=ANY(:ids) "
-            "AND " + eligible), {"s": source_id, "d": is_demo, "ids": list(version_ids), "cutoff": cutoff})]
-        rows = [dict(r) for r in conn.execute(text(
-            "SELECT version_id,producer,producer_version,text_processor_version,text_sha256,checker_version,status,"
-            "error_code,items,counts,run_id,run_batches,batch_index,created_at FROM derived_extraction_checks "
-            "WHERE version_id=ANY(:ids) AND is_demo=:d ORDER BY id"), {"ids": visible, "d": is_demo}).mappings()]
-        tasks = [dict(r) for r in conn.execute(text(
-            "SELECT version_id,producer,state FROM derived_extraction_check_tasks WHERE version_id=ANY(:ids) "
-            "AND checker_version=:c"), {"ids": visible, "c": checker}).mappings()]
+        visible, rows, tasks = _read_checks(conn, source_id, is_demo, version_ids, eligible, cutoff, checker)
     out = {}
     for v in visible:
-        producers = {}
-        for p in PRODUCERS:
-            mine = [r for r in rows if r["version_id"] == v and r["producer"] == p]
-            runs = {}
-            for r in mine:
-                runs.setdefault(r["run_id"], []).append(r)
-            current = [rs for rs in runs.values() if any(r["checker_version"] == checker for r in rs)
-                       or all(r["checker_version"] is None for r in rs)
-                       or any(r["error_code"] == "checker_mismatch" for r in rs)]
-            latest = max(current, key=lambda rs: max(r["created_at"] for r in rs)) if current else None
-            batches = [r for r in latest or [] if r["batch_index"] >= 0]
-            complete = bool(latest) and all(r["status"] == "completed" and r["checker_version"] == checker
-                                            for r in batches) and len({r["batch_index"] for r in batches}) == (
-                latest[0]["run_batches"] if latest else -1)
-            items = [i for r in sorted(latest or [], key=lambda r: r["batch_index"]) for i in r["items"]]
-            counts = {}
-            for i in items:
-                counts[i.get("status", "unchecked")] = counts.get(i.get("status", "unchecked"), 0) + 1
-            state = "checked" if complete and latest[0]["run_batches"] > 0 else "unchecked"
-            reason = None
-            if state != "checked":
-                bad = next((r for r in reversed(latest or []) if r["status"] != "completed"), None)
-                pending = any(t["version_id"] == v and t["producer"] == p and t["state"] in ("queued", "waiting")
-                              for t in tasks)
-                reason = (bad["error_code"] if bad else "no_items" if latest and latest[0]["run_batches"] == 0
-                          else "pending_for_current_checker" if pending or not latest else "incomplete_run")
-            producers[p] = {"state": state, "reason": reason, "checker_version": checker if state == "checked" else None,
-                            "binding": ({k: latest[0][k] for k in ("producer_version", "text_processor_version",
-                                                                    "text_sha256", "run_id", "run_batches")} if latest else None),
-                            "counts": counts if latest else None, "items": items if state == "checked" else []}
-        out[v.strip()] = producers
+        out[v.strip()] = {p: _producer_checks(v, p, rows, tasks, checker) for p in PRODUCERS}
     return {"source_id": source_id, "is_demo": is_demo, "contract_version": CONTRACT, "checker_version": checker,
             "versions": out}
+
+
+def _read_checks(conn, source_id, is_demo, version_ids, eligible, cutoff, checker):
+    """(visible version ids, their check rows in id order, their tasks for the current checker)."""
+    visible = [r[0] for r in conn.execute(text(
+        "SELECT v.version_id FROM history_versions v WHERE v.source_id=:s AND v.is_demo=:d AND v.version_id=ANY(:ids) "
+        "AND " + eligible), {"s": source_id, "d": is_demo, "ids": list(version_ids), "cutoff": cutoff})]
+    rows = [dict(r) for r in conn.execute(text(
+        "SELECT version_id,producer,producer_version,text_processor_version,text_sha256,checker_version,status,"
+        "error_code,items,counts,run_id,run_batches,batch_index,created_at FROM derived_extraction_checks "
+        "WHERE version_id=ANY(:ids) AND is_demo=:d ORDER BY id"), {"ids": visible, "d": is_demo}).mappings()]
+    tasks = [dict(r) for r in conn.execute(text(
+        "SELECT version_id,producer,state FROM derived_extraction_check_tasks WHERE version_id=ANY(:ids) "
+        "AND checker_version=:c"), {"ids": visible, "c": checker}).mappings()]
+    return visible, rows, tasks
+
+
+def _latest_run(v, p, rows, checker):
+    """The rows of the producer's latest run that counts for the current checker, or None."""
+    mine = [r for r in rows if r["version_id"] == v and r["producer"] == p]
+    runs = {}
+    for r in mine:
+        runs.setdefault(r["run_id"], []).append(r)
+    current = [rs for rs in runs.values() if any(r["checker_version"] == checker for r in rs)
+               or all(r["checker_version"] is None for r in rs)
+               or any(r["error_code"] == "checker_mismatch" for r in rs)]
+    return max(current, key=lambda rs: max(r["created_at"] for r in rs)) if current else None
+
+
+def _run_complete(latest, checker):
+    """Every batch of the run completed under the current checker, and every batch is there."""
+    batches = [r for r in latest or [] if r["batch_index"] >= 0]
+    return bool(latest) and all(r["status"] == "completed" and r["checker_version"] == checker
+                                for r in batches) and len({r["batch_index"] for r in batches}) == (
+        latest[0]["run_batches"] if latest else -1)
+
+
+def _unchecked_reason(v, p, latest, tasks):
+    bad = next((r for r in reversed(latest or []) if r["status"] != "completed"), None)
+    pending = any(t["version_id"] == v and t["producer"] == p and t["state"] in ("queued", "waiting")
+                  for t in tasks)
+    return (bad["error_code"] if bad else "no_items" if latest and latest[0]["run_batches"] == 0
+            else "pending_for_current_checker" if pending or not latest else "incomplete_run")
+
+
+def _producer_checks(v, p, rows, tasks, checker):
+    """One producer's check state of one version (see for_versions)."""
+    latest = _latest_run(v, p, rows, checker)
+    complete = _run_complete(latest, checker)
+    items = [i for r in sorted(latest or [], key=lambda r: r["batch_index"]) for i in r["items"]]
+    counts = {}
+    for i in items:
+        counts[i.get("status", "unchecked")] = counts.get(i.get("status", "unchecked"), 0) + 1
+    state = "checked" if complete and latest[0]["run_batches"] > 0 else "unchecked"
+    reason = None
+    if state != "checked":
+        reason = _unchecked_reason(v, p, latest, tasks)
+    return {"state": state, "reason": reason, "checker_version": checker if state == "checked" else None,
+            "binding": ({k: latest[0][k] for k in ("producer_version", "text_processor_version",
+                                                    "text_sha256", "run_id", "run_batches")} if latest else None),
+            "counts": counts if latest else None, "items": items if state == "checked" else []}
 
 
 def run_worker(*, stop, idle_seconds=5.0, backfill_every=60.0, rounds=None):
