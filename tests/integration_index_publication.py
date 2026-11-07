@@ -5,6 +5,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Event, current_thread
 from uuid import uuid4
 
@@ -1092,6 +1093,13 @@ def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypa
                                           old[0]["artifact_key"], old[0]["piece_key"])
 
 
+def rerun_file(engine, name):
+    """Run one migration file on a store that was built before it (a file is idempotent; the runner runs it once, on
+    a ledger that has not recorded it, and this is that run)."""
+    with engine.begin() as conn:
+        conn.exec_driver_sql((Path(index_migration.__file__).parent / "versions" / name).read_text(encoding="utf-8"))
+
+
 def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, monkeypatch):
     """Codex r83：piece_key 之前的分片库（按分片序号的两个唯一键、没有 piece_key 列）跑索引迁移：从已有 piece
     回填完整身份键，去掉旧唯一键、建新唯一键；id、remote_id、清单、回执都不变；再跑一次什么也不变。"""
@@ -1115,7 +1123,7 @@ def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, 
         conn.execute(text("CREATE UNIQUE INDEX index_publications_record_artifact_piece ON index_publications "
                           "(target_id, source_record_id, artifact_key, piece_index) WHERE artifact_key <> ''"))
     for _ in range(2):
-        index_migration.migrate_index()
+        rerun_file(pg, "V028__index_worker.sql")  # an older store has no record of V028: its file runs on it
         assert rows(pg, query) == before
         names = {r["indexname"] for r in rows(pg, "SELECT indexname FROM pg_indexes WHERE "
                                                   "schemaname=current_schema() AND tablename='index_publications'")}

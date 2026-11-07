@@ -1,6 +1,6 @@
 """索引表的显式迁移，和独立的索引 worker（v3 3.6：执行不挂在发表循环上）。必须使用独立 History 连接。
 
-    python -m migration.index_publication                 # 迁移
+    python -m migration.index_publication                 # 迁移（= python -m migration.runner --db history --apply）
     python -m migration.index_publication worker -c 4     # 跑 worker（4 个线程），Ctrl-C 停
 """
 
@@ -8,26 +8,14 @@ import argparse
 import json
 import signal
 import threading
-from pathlib import Path
-
-from sqlalchemy import text
 
 from db.history import history_engine
-
-VERSIONS = ("V020__weknora_index.sql", "V024__index_artifact.sql", "V027__index_publications_recent.sql",
-            "V028__index_worker.sql", "V031__index_scheduling.sql")
+from migration import runner
 
 
 def migrate_index():
-    sql = "\n".join((Path(__file__).parent / "versions" / name).read_text() for name in VERSIONS)
-    with history_engine().begin() as conn:
-        # 现役有读写时不无限等锁：等不到就整笔回滚，稍后再跑
-        conn.exec_driver_sql("SET LOCAL lock_timeout='3s'")
-        conn.exec_driver_sql("SET LOCAL statement_timeout='60s'")
-        for statement in sql.split(";"):
-            statement = "\n".join(s for s in statement.splitlines() if not s.lstrip().startswith("--")).strip()
-            if statement:
-                conn.execute(text(statement))
+    # the index tables are files of the History role; the common runner installs what is missing
+    return runner.apply("history", history_engine())
 
 
 def main():

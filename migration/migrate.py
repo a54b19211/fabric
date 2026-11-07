@@ -36,6 +36,7 @@ from migration.app_ledger import (  # noqa: F401 - the names tests and operators
     _parse_filename,
     read_state,
 )
+from migration import runner
 from migration.sqltext import split_sql
 
 VERSIONS_DIR = Path(__file__).parent / "versions"
@@ -55,58 +56,7 @@ def run_migrations():
     if engine is None:
         logger.error("[Migration] DB 未配置，无法执行迁移")
         return
-
-    migrations = _collect_migrations()
-    if not migrations:
-        logger.info("[Migration] 未找到迁移文件")
-        return
-
-    from sqlalchemy import text
-
-    with engine.connect() as conn:
-        state = read_state(conn, migrations)
-        conn.rollback()
-        _ensure_runner_tables(conn)
-        for (version, description, checksum), target in state.renumbered:
-            conn.execute(text(f"""
-                INSERT INTO {RENUMBERED_TABLE} (recorded_version, recorded_description, recorded_checksum, current_file)
-                VALUES (:v, :d, :c, :f) ON CONFLICT DO NOTHING
-            """), {"v": version, "d": description, "c": checksum, "f": target})
-            logger.info(f"[Migration] 识别为改号: {version} {description} = {target}")
-        conn.commit()
-
-        pending = [m for m in migrations if m.name not in state.applied]
-        if not pending:
-            logger.info("[Migration] 所有迁移已是最新")
-            return
-
-        for path in pending:
-            version, description = _parse_filename(path)
-            sql = path.read_text(encoding="utf-8")
-            checksum = _checksum(sql)
-
-            logger.info(f"[Migration] 执行: {path.name}")
-            try:
-                # Let PostgreSQL parse the entire migration, including dollar quotes and comments.
-                # Driver SQL does not reinterpret colons in SQL literals as bound parameters.
-                conn.exec_driver_sql(sql)
-                if version in state.held_slots:
-                    conn.execute(text(f"""
-                        INSERT INTO {SHARED_SLOT_TABLE} (version, description, checksum, slot_held_by, applied_at)
-                        VALUES (:v, :d, :c, :h, :t)
-                    """), {"v": version, "d": description, "c": checksum, "h": state.held_slots[version],
-                           "t": datetime.now(timezone.utc)})
-                else:
-                    conn.execute(text(f"""
-                        INSERT INTO {MIGRATION_TABLE} (version, description, checksum, applied_at)
-                        VALUES (:v, :d, :c, :t)
-                    """), {"v": version, "d": description, "c": checksum, "t": datetime.now(timezone.utc)})
-                conn.commit()
-                logger.info(f"[Migration] 完成: {version} — {description}")
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"[Migration] 失败: {path.name} | {e}")
-                raise
+    return runner.apply("app", engine)
 
 
 def list_migrations():

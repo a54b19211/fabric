@@ -106,7 +106,7 @@ def pg(pg_engine, monkeypatch):
         conn.execute(text(
             "TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,"
             "derived_registry_diff_runs,history_versions,history_runs,"
-            "history_version_rank"
+            "history_version_rank CASCADE"  # the index tables belong to the History role and reference the versions
         ))
         conn.execute(
             text("UPDATE history_sources SET published_seq=0,read_enabled=true")

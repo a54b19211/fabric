@@ -6,6 +6,7 @@ import copy
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -349,7 +350,9 @@ def test_migration_recovers_the_size_of_earlier_uploads(pg):
         text_row = conn.execute(text("SELECT length(text),octet_length(text) FROM derived_clean_text WHERE version_id=:v "
                                      "AND processor_version||':'||text_sha256=:k"),
                                 {"v": base["version_id"], "k": base["artifact_key"]}).first()
-    index_migration.migrate_index()
+    with pg.begin() as conn:  # a store from before V031 has no record of it: its file runs on it
+        conn.exec_driver_sql((Path(index_migration.__file__).parent / "versions" / "V031__index_scheduling.sql")
+                             .read_text(encoding="utf-8"))
     got = {r["id"]: (r["sent_chars"], r["sent_bytes"]) for r in rows(pg, "SELECT id,sent_chars,sent_bytes FROM index_publications")}
     assert got[piece] == (123, 456)
     assert got[base["id"]] == tuple(text_row)
