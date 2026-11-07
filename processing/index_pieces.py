@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 
@@ -87,32 +88,42 @@ def plan(text, segments=(), *, max_chars=None, max_bytes=None):
     max_chars = MAX_CHARS if max_chars is None else max_chars
     max_bytes = MAX_BYTES if max_bytes is None else max_bytes
     n = len(text)
-    prefix = _byte_prefix(text)
-
-    def fits(ctx, start, end):
-        return (len(ctx) + end - start + UPLOAD_OVERHEAD <= max_chars
-                and len(ctx.encode()) + prefix[end] - prefix[start] + UPLOAD_OVERHEAD <= max_bytes)
-
-    if fits("", 0, n):
+    fits_range = functools.partial(_range_fits, prefix=_byte_prefix(text), max_chars=max_chars,
+                                   max_bytes=max_bytes)
+    if fits_range("", 0, n):
         return []
     paragraph = sorted({s.get("start", 0) for s in segments or [] if 0 < s.get("start", 0) < n} | {n})
     lines = sorted({i + 1 for i, ch in enumerate(text) if ch == "\n" and i + 1 < n} | {n})
     step = max(1, (max_chars - UPLOAD_OVERHEAD) // 4)
     ranges, start = [], 0
     while start < n:
-        ctx = context(text, start)
-        end = None
-        for tier in (paragraph, lines):  # 先按段落，段落放不下按行
-            fitting = [b for b in tier if b > start and fits(ctx, start, b)]
-            if fitting:
-                end = fitting[-1]
-                break
-        if end is None:  # 一行放不下：在这一行里按字符有界切
-            line_end = next(b for b in lines if b > start)
-            fitting = [c for c in _hard_cuts(text, start, line_end, step) if fits(ctx, start, c)]
-            end = fitting[-1] if fitting else min(line_end, start + step)
+        end = _range_end(text, start, (paragraph, lines), step, fits_range)
         ranges.append((start, end))
         start = end
+    return _pieces(text, ranges)
+
+
+def _range_fits(ctx, start, end, *, prefix, max_chars, max_bytes):
+    """The context prefix plus text[start:end] fit one upload (characters and UTF-8 bytes)."""
+    return (len(ctx) + end - start + UPLOAD_OVERHEAD <= max_chars
+            and len(ctx.encode()) + prefix[end] - prefix[start] + UPLOAD_OVERHEAD <= max_bytes)
+
+
+def _range_end(text, start, tiers, step, fits_range):
+    """Where the piece starting at `start` ends: the last fitting paragraph boundary, else the last fitting line
+    boundary, else a bounded cut inside the line."""
+    ctx = context(text, start)
+    for tier in tiers:  # 先按段落，段落放不下按行
+        fitting = [b for b in tier if b > start and fits_range(ctx, start, b)]
+        if fitting:
+            return fitting[-1]
+    # 一行放不下：在这一行里按字符有界切
+    line_end = next(b for b in tiers[-1] if b > start)
+    fitting = [c for c in _hard_cuts(text, start, line_end, step) if fits_range(ctx, start, c)]
+    return fitting[-1] if fitting else min(line_end, start + step)
+
+
+def _pieces(text, ranges):
     pieces = []
     for index, (start, end) in enumerate(ranges, 1):
         content = context(text, start) + text[start:end]
