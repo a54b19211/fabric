@@ -150,15 +150,23 @@ def _time(value):
     return value.value if value is not None else None
 
 
+def _meaning(value):
+    return value.meaning if value is not None else None
+
+
 def metadata(record, proof_available_at, artifact, identifiers):
     """检索元数据（桥接服务写进 WeKnora，命中原样带回）。值都是字符串或字符串列表；没有的不写。
-    时间：published_at / source_updated_at 是来源报告的（精度见值本身：年、年-月、日期或时刻），
+    时间：published_at / source_updated_at 是来源报告的（精度见值本身：年、年-月、日期或时刻），各带 *_meaning
+    说明它是什么时间（例如 GDELT 的 source_updated_at 是 gdelt_first_observed，GDELT 的观察时间，不是来源修改时间）；
     first_seen_at 是 Fabric 首次见到，proof_available_at 是有证明的可得时间（只有审核过的档案才有）。"""
     proof = record.availability_proof
     values = {
         "source_id": record.source_id, "source_record_id": record.source_record_id,
         "version_id": record.version_id,
-        "published_at": _time(record.source_published_at), "source_updated_at": _time(record.source_updated_at),
+        "published_at": _time(record.source_published_at),
+        "published_at_meaning": _meaning(record.source_published_at),
+        "source_updated_at": _time(record.source_updated_at),
+        "source_updated_at_meaning": _meaning(record.source_updated_at),
         "first_seen_at": record.first_seen_at.isoformat(),
         "proof_available_at": proof_available_at.isoformat() if proof_available_at else None,
         "proof_kind": proof.kind, "proof_uri": proof.uri if proof.kind == "reviewed_archive" else None,
