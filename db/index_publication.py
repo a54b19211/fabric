@@ -433,6 +433,25 @@ def _inflight(conn, kb, exclude=None):
     ), {"kb": kb, "id": exclude, **_unknown_size()}).one()
 
 
+def _uploaded(conn, kb):
+    """What the physical uploads of a knowledge base carried so far, counted and never limited by the count. An
+    entry is sent again when the bridge proved the first upload rejected before anything was created; the bridge
+    numbers every attempt and attempt_floor is the number of earlier ones known when this upload was reserved, so an
+    entry was sent attempt_floor + 1 times, each time with the same body (sent_chars). An entry sent without a
+    recorded size is counted apart, not guessed. WeKnora batches and retries its embedding requests itself and
+    reports neither."""
+    row = conn.execute(text(
+        "SELECT count(*) FILTER (WHERE sent_chars IS NOT NULL) AS entries,"
+        "COALESCE(sum(COALESCE(attempt_floor,0)) FILTER (WHERE sent_chars IS NOT NULL),0) AS retried_uploads,"
+        "COALESCE(sum(sent_chars),0) AS first_chars,COALESCE(sum(sent_chars*COALESCE(attempt_floor,0)),0) AS retried_chars,"
+        "count(*) FILTER (WHERE sent_chars IS NULL) AS unsized_entries "
+        "FROM index_publications WHERE manifest->>'knowledge_base_id'=:kb AND first_send_at IS NOT NULL"
+    ), {"kb": kb}).mappings().one()
+    return {"uploads": int(row["entries"] + row["retried_uploads"]), "chars": int(row["first_chars"] + row["retried_chars"]),
+            "retried_uploads": int(row["retried_uploads"]), "retried_chars": int(row["retried_chars"]),
+            "unsized_entries": row["unsized_entries"], "embedding_requests": "unknown"}
+
+
 def _gated(conn, lim):
     """{knowledge base: reason} where no new upload may start now: in-flight entries or size full, or no token."""
     out = {}
@@ -563,8 +582,8 @@ def rotation_gaps():
 
 def scheduler_status():
     """Observable progress per class x source (due, leased, oldest due wait, last claim) and per knowledge base
-    (in flight against its budget, send tokens, gate denials and blocked time), plus the last hour's first
-    sends, ready and failures."""
+    (in flight against its budget, send tokens, gate denials and blocked time, characters uploaded), plus the last
+    hour's first sends, ready and failures."""
     lim = limits()
     with history.history_engine().begin() as conn:
         classes = [dict(r) for r in conn.execute(text(
@@ -596,7 +615,8 @@ def scheduler_status():
                      ), {"kb": kb}).mappings()}
             budget.append({"knowledge_base_id": kb, "inflight": {"entries": n, "chars": int(c), "bytes": int(b),
                                                                  "unknown_size_entries": unknown},
-                           "send_tokens": None if tokens is None else round(float(tokens), 2), "gate": gates})
+                           "send_tokens": None if tokens is None else round(float(tokens), 2), "gate": gates,
+                           "uploaded": _uploaded(conn, kb)})
         hour = conn.execute(text(
             "SELECT count(*) FILTER (WHERE first_send_at>clock_timestamp()-interval '1 hour') AS first_sends,"
             "count(*) FILTER (WHERE ready_at>clock_timestamp()-interval '1 hour') AS ready,"

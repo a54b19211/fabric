@@ -370,3 +370,21 @@ def test_an_upload_of_unknown_size_blocks_new_uploads_until_known(pg, monkeypatc
     with pg.begin() as conn:
         conn.execute(text("UPDATE index_publications SET sent_chars=10,sent_bytes=10 WHERE id=:id"), {"id": legacy})
     assert index._reserve(candidate, "x") is None
+
+
+def test_uploaded_characters_are_counted_with_the_re_sends_and_entries_without_a_size_are_named(pg):
+    base = base_job(pg)
+
+    def uploaded():
+        (kb,) = [k for k in index.scheduler_status()["knowledge_bases"] if k["knowledge_base_id"] == KB]
+        return kb["uploaded"]
+    once = uploaded()  # the real upload that made the base job ready
+    assert (once["uploads"], once["chars"], once["retried_uploads"]) == (1, base["sent_chars"], 0)
+    clone(pg, base, state="'ready'", desired_state="'active'", sent_chars="1000", sent_bytes="1000", attempt_floor="0", **SENT)
+    clone(pg, base, state="'ready'", desired_state="'active'", sent_chars="400", sent_bytes="400", attempt_floor="2", **SENT)
+    clone(pg, base, state="'indexing'", desired_state="'active'", receipt="'{}'::jsonb", sent_chars="NULL", sent_bytes="NULL", **SENT)
+    clone(pg, base, state="'queued'", desired_state="'active'", lane="'new'", **UNSENT)  # never sent: not an upload
+    assert uploaded() == {
+        "uploads": 1 + 1 + 3,  # the base job, one upload, one entry sent a third time
+        "chars": once["chars"] + 1000 + 3 * 400, "retried_uploads": 2, "retried_chars": 800,
+        "unsized_entries": 1, "embedding_requests": "unknown"}

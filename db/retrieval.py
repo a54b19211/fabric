@@ -29,6 +29,7 @@ from processing import index_pieces
 SCHEMA = "datafabric.retrieval.v1"
 MODES = ("current", "operational_replay", "public_history_reconstruction")
 CANDIDATES = 60  # 每个知识库一次召回的候选上限（桥接服务的上限）
+RERANK_PASSAGE_CHARS = 8000  # one passage is cut to this many characters before it is sent to the rerank model
 MAX_EXCLUDED_ITEMS = 50
 _FIXED_LINE = re.compile(r"\A\s*<!-- Fabric fixed version [0-9a-f]{64} -->\s*")
 _WITHDRAWN = {"withdrawn", "deleted", "retracted"}
@@ -375,27 +376,41 @@ def _best_per_passage(verified):
 
 def _rerank(client, query, configured, verified):
     """Rerank the verified passages per knowledge base and scope and sort them in place (by recall score when
-    the rerank fails); returns the rerank receipt."""
+    the rerank fails); returns the rerank receipt.
+
+    The receipt counts what was sent, and nothing is held back by the count: provider_calls (one request to the
+    bridge per knowledge base and scope, so also the batches), documents, and input_chars - the characters of the
+    passages after the cut to RERANK_PASSAGE_CHARS. A call that failed is counted, its characters were put on the
+    wire. Fabric does not retry; whether the bridge does is not reported, so retries is "unknown" once a call was made."""
+    sent = {"provider_calls": 0, "documents": 0, "input_chars": 0}
     if not verified:
-        return {"state": "not_run"}
+        return {"state": "not_run", "calls": [], **sent, "retries": 0}
+    calls = []
     by_group = {}
     for item in verified:
         target = next(t for t in configured if t.source_id == item["source_id"] and t.is_demo == item["is_demo"])
         by_group.setdefault((target.knowledge_base_id, target.source_scope, target.is_demo), []).append(item)
     try:
-        usage = []
         for (kb, scope, is_demo), items_ in by_group.items():
+            documents = [i["text"][:RERANK_PASSAGE_CHARS] for i in items_]
+            call = {"knowledge_base_id": kb, "source_scope": scope, "documents": len(documents),
+                    "input_chars": sum(map(len, documents))}
+            sent["provider_calls"] += 1
+            sent["documents"] += call["documents"]
+            sent["input_chars"] += call["input_chars"]
+            calls.append(call)
             answer = client.rerank({"knowledge_base_id": kb, "source_scope": scope, "is_demo": is_demo,
-                                    "query_text": query, "documents": [i["text"][:8000] for i in items_]})
+                                    "query_text": query, "documents": documents})
             for score in answer["scores"]:
                 items_[score["index"]]["rerank_score"] = score["relevance_score"]
-            usage.append({"rerank_model": answer.get("rerank_model"), "usage": answer.get("usage"),
-                          "usage_status": answer.get("usage_status")})
+            call.update(rerank_model=answer.get("rerank_model"), usage=answer.get("usage"),
+                        usage_status=answer.get("usage_status"))
         verified.sort(key=lambda i: (-i["rerank_score"], i["version_id"], i["start"]))
-        return {"state": "succeeded", "calls": usage}
+        outcome = {"state": "succeeded"}
     except HistoryError as exc:
         verified.sort(key=lambda i: (-(i["recall_score"] or 0), i["version_id"], i["start"]))
-        return {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion"}
+        outcome = {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion"}
+    return {**outcome, "calls": calls, **sent, "retries": "unknown"}
 
 
 def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_categories=(), evidence_types=(),

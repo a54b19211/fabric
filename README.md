@@ -76,6 +76,8 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 `POST /api/history/index/{id}/retry`（History 管理员凭据）。发送和失败退避由发表循环里的 `index_tick` 自动做；
 连续失败 6 次的作业变为 `blocked`，修好 `error.code` 指出的原因后再重试。细节见 `api/README.md`“正文索引发布”。
 
+两个字符计数（只记，不设上限，也不据此跳过重排或拒绝上传；上传仍受原有的在途预算）：`GET /api/history/index/scheduler` 里每个知识库的 `uploaded` 是已发出的物理上传次数 `uploads`、上传正文字符数 `chars`（含桥接证明首传被拒而重发的部分，另列 `retried_uploads`、`retried_chars`）和没有记录大小的条目数 `unsized_entries`；`embedding_requests` 写 `unknown`，WeKnora 自己分批、重试嵌入，不回报。检索回执 `execution.rerank` 记 `provider_calls`（每个知识库和范围一次，也就是一批）、`documents`、`input_chars`（每段截到 8000 字符之后发给重排模型的字符数）和 `retries`；Fabric 自己不重试，桥接是否重试不回报，所以发过调用就写 `unknown`。Fabric 不保存检索的累计值，累计由保存各次检索回执的一方相加。
+
 已删除、不要再用的旧入口：WeKnora 文档同步接口（待同步列表、单篇/批量同步、文档同步统计）、文档重爬与上传接口，
 以及旧的 ETL、WeKnora 同步、WeKnora 重解析、反馈导入命令行脚本。正文进 WeKnora 只走上面的索引发布；新资料只经采集框架入 History。
 

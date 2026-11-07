@@ -761,6 +761,9 @@ def test_retrieval_binds_each_hit_to_the_version_visible_at_the_cutoff(pg):
     assert before_any["results"] == [] and before_any["execution"]["insufficient"]
     # 只有通过校验的片段进了重排
     assert set(client.reranked) == {t1[:40], t2[:40]}
+    rerank = now["execution"]["rerank"]  # what went to the rerank model is counted in the receipt
+    assert (rerank["provider_calls"], rerank["documents"], rerank["input_chars"]) == (1, 1, len(t2[:40]))
+    assert (before_any["execution"]["rerank"]["state"], before_any["execution"]["rerank"]["input_chars"]) == ("not_run", 0)
 
 
 def test_returned_evidence_uses_the_visible_version_not_the_representative(pg):
