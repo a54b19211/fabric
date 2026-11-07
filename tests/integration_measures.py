@@ -690,8 +690,25 @@ def test_a_wrong_checker_or_subject_is_never_adopted(db, fake):
 def test_two_workers_never_take_the_same_window(db, fake):
     who_version()
     runs.plan(model=fake.model())
-    a, b = runs._claim(), runs._claim()
+    routes = runs.routes_of(fake.model(), False)
+    a, b = runs._claim(routes), runs._claim(routes)
     assert a and b and (a["run_id"], a["window_index"]) != (b["run_id"], b["window_index"])
+
+
+def test_a_process_claims_only_the_windows_of_runs_by_its_own_producer(db, fake, monkeypatch):
+    who_version()
+    with monkeypatch.context() as earlier:  # the runs an earlier processor version planned, both routes
+        earlier.setattr(mx, "PROCESSOR_VERSION", "datafabric.measure_extract.v1")
+        assert runs.plan(model=fake.model(), with_rules=True) == 2
+    other = fake.model("fake-measure-model-2")  # and the run of another model configuration
+    assert runs.plan(model=other, producer_upgrade=True) == 1
+    windows = "SELECT run_id, window_index, state, attempts FROM derived_measure_windows ORDER BY 1, 2"
+    before = rows(db, windows)
+    assert runs.process_once(model=fake.model(), with_rules=True)["state"] == "idle"
+    assert fake.requests == [] and rows(db, windows) == before  # the old runs stay as they were: owed, unread
+    assert rows(db, "SELECT count(*) AS n FROM derived_measure_window_attempts")[0]["n"] == 0
+    assert runs.process_once(model=other)["state"] == "sent"  # the run of its own producer is read
+    assert len(fake.requests) == 1 and fake.requests[0]["model"] == "fake-measure-model-2"
 
 
 @real_checker

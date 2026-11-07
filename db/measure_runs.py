@@ -4,7 +4,9 @@
   record kind original only - a graph package, report or computed result never goes back into extraction) and is
   readable now; the run key is the original, the artifact and the producer, so planning again inserts nothing. A
   clean-text upgrade gives a new artifact and a new run that supersedes the old one; a producer upgrade (another
-  model configuration) is planned only when asked (producer_upgrade=True: a budgeted backfill, never automatic).
+  model configuration or processor version) is planned only when asked (producer_upgrade=True: a budgeted backfill,
+  never automatic). The old run keeps its identity and its windows as they are; a process claims windows only of
+  the runs of its own producer.
   The versions a bounded backfill created (db.history.background_version_ids) are not planned by it: background
   material is measured only when a scope names it.
 - plan_scope(): the one entry that plans an explicit list (Scope) of versions, each with all its reading windows or
@@ -350,11 +352,12 @@ def _plan_one(conn, row, route, selection=None) -> str | None:
 # ---- one window ---------------------------------------------------------------------------------------------
 
 
-def _claim(scope=None, *, models=True, with_rules=False):
-    """The next due window of a route this process serves (models: the model route, with_rules: the rules route),
-    and, when a scope is given, of its listed versions only and, where it names windows, only of those windows -
-    also in a run the standing queue planned before."""
-    is_rules = _is_rules("r")
+def _claim(routes: list[Route], scope=None):
+    """The next due window of a run by the current producer of one of these routes (the producer identity names the
+    processor version and the model configuration digest) and, when a scope is given, of its listed versions only
+    and, where it names windows, only of those windows - also in a run the standing queue planned before. A run of
+    another producer is left as it is: this process would read its windows with its own prompt and file the
+    readings under the old identity."""
     whole = [v for v, windows in scope.versions.items() if windows is None] if scope else None
     named = [f"{v}:{i}" for v, windows in scope.versions.items() for i in windows or ()] if scope else None
     with history.history_engine().begin() as conn:
@@ -364,11 +367,10 @@ def _claim(scope=None, *, models=True, with_rules=False):
                     "r.text_processor_version, r.text_sha256, r.producer_identity, r.model_config_sha256",
             joins="JOIN derived_measure_runs r ON r.run_id = w.run_id",
             where="r.state = 'reading' AND w.state IN ('pending','failed','budget_spent') "
-                  "AND w.next_at <= clock_timestamp() "
-                  f"AND (CAST(:models AS boolean) OR {is_rules}) AND (CAST(:rules AS boolean) OR NOT {is_rules}) "
+                  "AND w.next_at <= clock_timestamp() AND r.producer_identity = ANY(CAST(:identities AS text[])) "
                   "AND (CAST(:whole AS text[]) IS NULL OR r.version_id = ANY(CAST(:whole AS text[])) "
                   "OR r.version_id || ':' || w.window_index = ANY(CAST(:named AS text[])))",
-            params={"models": models, "rules": with_rules, "whole": whole, "named": named},
+            params={"identities": [route.key["identity"] for route in routes], "whole": whole, "named": named},
             order_by="w.next_at, w.run_id, w.window_index", also_set="updated_at=clock_timestamp()")
 
 
@@ -619,13 +621,13 @@ def _after_call(w, record, attempt, blocked, call_id):
 
 def process_once(*, model: Model | None = None, client: httpx.Client | None = None,
                  budget: RequestBudget | None = None, scope: Scope | None = None, with_rules=False) -> dict:
-    """One due window of a route this process serves - the model route when a model is configured, the rules route
-    when with_rules - and, with a scope, of the listed versions and windows only. The request budget is the model's
-    alone."""
+    """One due window of a run by the current producer of a route this process serves - the model route when a model
+    is configured, the rules route when with_rules - and, with a scope, of the listed versions and windows only. The
+    request budget is the model's alone."""
     model = model or model_from_env()
     if model is None and not with_rules:
         return {"state": "disabled"}
-    w = _claim(scope, models=model is not None, with_rules=with_rules)
+    w = _claim(routes_of(model, with_rules), scope)
     if w is None:
         return {"state": "idle"}
     by_rules = mx.route_of(w["producer_identity"]) == mx.RULES
