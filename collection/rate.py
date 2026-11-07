@@ -31,6 +31,9 @@ from urllib.parse import parse_qs, urlparse
 
 REDIS_FAILURE_RETRIES = 8
 HOUR, DAY = 3600, 86400
+# The stop reasons of a read that reached an outbound ceiling (take_for_url): its request was not sent.
+QUOTA_DAY, QUOTA_HOUR = "outbound_quota_day", "outbound_quota_hour"
+CEILING_STOPS = frozenset({QUOTA_DAY, QUOTA_HOUR})
 
 
 @lru_cache(maxsize=1)
@@ -137,11 +140,11 @@ def _ceilings(url: str) -> tuple[str, list[_Ceiling]]:
     cap = declared.outbound_cap if declared else None
     if cap is None:
         return "", []
-    ceilings = [_Ceiling("outbound_quota_day", "all", cap.per_day, DAY)]
+    ceilings = [_Ceiling(QUOTA_DAY, "all", cap.per_day, DAY)]
     if cap.per_hour_per_query:
         query = parse_qs(urlparse(url).query).get("query", [""])[0]
         digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
-        ceilings.append(_Ceiling("outbound_quota_hour", "query:" + digest, cap.per_hour_per_query, HOUR))
+        ceilings.append(_Ceiling(QUOTA_HOUR, "query:" + digest, cap.per_hour_per_query, HOUR))
     return declared.rate_group, ceilings
 
 

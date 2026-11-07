@@ -19,7 +19,8 @@ from biz_rules.history_models import (
     sha256,
 )
 from biz_rules.timestamps import parse_timestamp
-from collection.catalog import WATCHABLE, spec
+from collection import rate
+from collection.catalog import CATALOG, WATCHABLE, spec
 from collection.windows import cycle_request, first_unread
 from db import history, publication
 
@@ -27,7 +28,7 @@ from db import history, publication
 class SourceWatch(Model):
     id: str = Field(pattern=r"^[a-z0-9_-]{1,60}$")
     request: FetchRequest
-    cadence_seconds: int = Field(default=3600, ge=3600, le=604800)
+    cadence_seconds: int = Field(default=3600, gt=0, le=604800)  # the floor is the source's own, see query_budget
     lookback_days: int = Field(default=30, ge=1, le=3650)
     # realtime：按来源更新窗口增量读，窗口有持久检查点；backfill：不加窗口，按续页读完整个范围，
     # 读到底后按 cadence 重新对账。实时优先，回填在每轮实时之后各走一页（保底，不被饿死）。
@@ -35,6 +36,9 @@ class SourceWatch(Model):
 
     @model_validator(mode="after")
     def query_budget(self):
+        declared = CATALOG.get(self.request.source_id)
+        if declared and self.cadence_seconds < declared.incremental.min_cadence_seconds:
+            raise ValueError("刷新间隔短于该来源目录声明的下限")
         if self.mode == "backfill" and not (
             self.request.source_id in WATCHABLE and spec(self.request.source_id).backfill
         ):
@@ -107,15 +111,31 @@ def _save(engine, key, state):
             )
 
 
+def _hold_at_ceiling(watch, state, coverage, now):
+    """The read stopped at an outbound ceiling (collection.rate). That is neither a failure nor a loss: the reason is
+    the run's stop_reason, kept in last_coverage. Pages already read stay read. The cycle ends without success and
+    without moving the checkpoint, and the next cycle resumes at the cursor, or, when no page was read, plans its
+    window again from the same checkpoint."""
+    if coverage.get("next_continuation"):
+        state["request"]["continuation"] = coverage["next_continuation"]
+    elif not state["request"].get("continuation"):
+        state.pop("request")
+    state["state"] = "idle"
+    state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
+
+
 def _page_finished(watch, state, coverage, now):
     """Record a read that ended without error: ask for the next page, or end the cycle.
 
-    A read that stopped short without a cursor is an error, except a windowed one (GDELT): its receipts show which
-    intervals may be cut short and which windows were not reached. The cycle ends with those gaps left in the
-    receipts, and the checkpoint moves to the first window not reached so that the next cycle reads from there."""
+    A read that stopped at an outbound ceiling ends the cycle with that reason (_hold_at_ceiling). Any other read that
+    stopped short without a cursor is an error, except a windowed one (GDELT): its receipts show which intervals may
+    be cut short and which windows were not reached. The cycle ends with those gaps left in the receipts, and the
+    checkpoint moves to the first window not reached so that the next cycle reads from there."""
     state["last_page_at"] = now.isoformat()
     state["last_coverage"] = coverage
     state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
+    if coverage.get("stop_reason") in rate.CEILING_STOPS and "window_coverage" not in coverage:
+        return _hold_at_ceiling(watch, state, coverage, now)
     if coverage.get("next_continuation"):
         state["request"]["continuation"] = coverage["next_continuation"]
         state["state"] = "paging"

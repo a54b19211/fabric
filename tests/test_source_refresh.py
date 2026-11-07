@@ -1,6 +1,8 @@
 """固定观测契约/官方公告协议反例；HTTP替身不冒充线上采集。"""
 
 import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -9,8 +11,10 @@ from pydantic import ValidationError
 from biz_rules.history_models import ArchiveRecord, FetchRequest
 from biz_rules.history_sources import project_record, read_public
 from biz_rules.observations import observation
-from biz_rules.who_don import project_who
+from biz_rules.who_don import ENDPOINT, project_who
 from collection import rate
+from collection.windows import cycle_request
+from db.source_refresh import SourceWatch, _page_finished
 
 
 def metric():
@@ -255,3 +259,35 @@ def test_who_keyset_does_not_skip_when_previous_notice_moves_out_of_fixed_window
         who_value(3)["Id"],
         who_value(4)["Id"],
     ]
+
+
+def test_who_cycle_at_the_daily_ceiling_ends_with_the_reason_and_the_next_cycle_picks_up(monkeypatch, mid_hour_clock):
+    sent = []
+    mocked_client(monkeypatch, lambda request: sent.append(request) or httpx.Response(200, json={"value": [who_value(1)]}))
+    for _ in range(200):  # the 200 requests of the day are used
+        assert rate.take_for_url(ENDPOINT) is None
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+    checkpoint = "2026-11-03T00:00:00+00:00"
+    watch = SourceWatch.model_validate(
+        {"id": "w", "cadence_seconds": 900, "request": {"source_id": "who_don", "query": "*", "max_records": 2}}
+    )
+    state = {"window_checkpoint": checkpoint}
+
+    def cycle(moment):
+        request, _, end = cycle_request(watch, state, moment)
+        state.update(window_ended_at=end.isoformat(), request=request)
+        batch = read_public(FetchRequest.model_validate(request))
+        _page_finished(watch, state, {key: value for key, value in batch.items() if key != "records"}, moment)
+        return batch
+
+    refused = cycle(now)  # nothing was read, so there is no cursor: this used to end as source_watch_no_cursor
+    assert refused["stop_reason"] == "outbound_quota_day" and refused["next_continuation"] is None and sent == []
+    assert state["state"] == "idle" and "request" not in state and "last_success_at" not in state
+    assert state["window_checkpoint"] == checkpoint and state["last_coverage"]["stop_reason"] == "outbound_quota_day"
+    assert state["next_check_at"] == (now + timedelta(seconds=900)).isoformat()
+    tomorrow = SimpleNamespace(time=lambda: 1_800_000_000 + 86400.0, monotonic=rate.time.monotonic, sleep=rate.time.sleep)
+    monkeypatch.setattr(rate, "time", tomorrow)  # the ceiling counts per UTC day
+    later = now + timedelta(days=1)
+    read = cycle(later)  # the same checkpoint, the window reaches the new moment
+    assert len(read["records"]) == 1 and len(sent) == 1
+    assert state["window_checkpoint"] == later.isoformat() and state["last_success_at"] and "request" not in state

@@ -104,6 +104,18 @@ def test_watch_limit_is_configurable_and_bounded(monkeypatch):
         watches()
 
 
+def test_cadence_floor_is_each_sources_own_who_don_runs_every_15_minutes():
+    def watch(source, seconds):
+        return SourceWatch.model_validate(
+            {"id": "w", "cadence_seconds": seconds, "request": {"source_id": source, "query": "*"}}
+        )
+
+    assert watch("who_don", 900).cadence_seconds == 900 and watch("clinicaltrials", 3600).cadence_seconds == 3600
+    for source, seconds in (("who_don", 899), ("clinicaltrials", 900)):
+        with pytest.raises(ValueError):
+            watch(source, seconds)
+
+
 def test_unconnected_source_cannot_be_watched(monkeypatch):
     monkeypatch.setenv(
         "DATAFABRIC_HISTORY_WATCHES", json.dumps([{"id": "p", "request": {"source_id": "pubmed", "query": "x"}}])
@@ -184,6 +196,24 @@ def test_page_finished_pages_on_ends_at_the_end_and_still_rejects_a_stop_short_w
     with pytest.raises(HistoryError) as exc:
         _page_finished(ct_watch(), stopped, {"upstream_pagination_exhausted": False, "stop_reason": "page_budget"}, NOW)
     assert exc.value.code == "source_watch_no_cursor"
+
+
+def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the_cursor():
+    who = SourceWatch.model_validate(
+        {"id": "w", "cadence_seconds": 900, "request": {"source_id": "who_don", "query": "*"}}
+    )
+    checkpoint = "2026-11-03T00:00:00+00:00"
+    state = {"request": {}, "window_ended_at": NOW.isoformat(), "window_checkpoint": checkpoint}
+    cursor = {"cursor": "c"}
+    # pages were read, then the daily ceiling refused the next request: the cursor is kept, the cycle waits
+    _page_finished(who, state, {"stop_reason": "outbound_quota_day", "next_continuation": cursor}, NOW)
+    assert state["state"] == "idle" and state["request"]["continuation"] == cursor  # not paging: no retry at once
+    assert state["window_checkpoint"] == checkpoint and "last_success_at" not in state
+    assert state["next_check_at"] == (NOW + timedelta(seconds=900)).isoformat()
+    # the next cycle asks for the same page and is refused again: still the same cursor, still no failure
+    _page_finished(who, state, {"stop_reason": "outbound_quota_day"}, NOW)
+    assert state["state"] == "idle" and state["request"]["continuation"] == cursor
+    assert state["last_coverage"]["stop_reason"] == "outbound_quota_day"
 
 
 def test_outbound_caps_are_the_declared_ones_and_count_per_site(mid_hour_clock):

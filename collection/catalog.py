@@ -39,6 +39,9 @@ class Incremental:
     semantics: str
     # 窗口回看重叠：来源更新日期常是“天”精度且有发布延迟，重叠读到的同一原件按版本身份去重。
     overlap_days: int = 2
+    # The shortest cadence a watch of this source may have (db.source_refresh). One round costs at least one request,
+    # so a source with a daily ceiling declares a floor its ceiling can carry.
+    min_cadence_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -145,7 +148,10 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="who_don",
         evidence_types=("official_notice",),
         decisions=("D", "E"),
-        incremental=Incremental("modified_window", "LastModified", "公告最后修改时间；不是暴发开始时间"),
+        # Rounds of 15 minutes: at one request each, 96 a day, well inside the 200 of the daily ceiling.
+        incremental=Incremental(
+            "modified_window", "LastModified", "公告最后修改时间；不是暴发开始时间", min_cadence_seconds=900
+        ),
         rate_group="who.int",
         min_interval_seconds=30.0,
         outbound_cap=OutboundCap(per_day=200),  # a backfill's requests count inside the 200

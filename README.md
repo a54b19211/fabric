@@ -553,8 +553,8 @@ WHO DON 的官方公开 OData 已实际只读验证可达；who_don 保留原生
 [
   {
     "id": "who-recent",
-    "request": {"source_id":"who_don","query":"*","max_records":5,"max_pages":1,"deadline_seconds":30},
-    "cadence_seconds":3600,
+    "request": {"source_id":"who_don","query":"*","max_records":50,"max_pages":1,"deadline_seconds":30},
+    "cadence_seconds":900,
     "lookback_days":30
   },
   {
@@ -591,6 +591,8 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 `gdelt_doc` 可以进固定刷新（`DATAFABRIC_HISTORY_WATCHES`，每个查询一条，`lookback_days` 设为 1：首轮没有检查点，按它回看）。每轮读 [检查点, 当前整点)，不读还没走完的这一小时，不回看重叠。读到最细窗口仍满额的区间只留在读取回执里（`truncated_intervals`），不重试，检查点照常前进；预算或出站额度用完时，检查点停在第一个没读到的窗口起点，下一轮从那里继续，这一轮不记 `last_success_at`。
 
 出站额度是本实例自己的硬限，不是与其他实例或现役系统共享的全局限：GDELT 间隔 5 秒，每个查询每小时 ≤7 次、每天 ≤900 次；who.int 间隔 30 秒，每天 ≤200 次（回填的请求也算在内）。额度写在 `collection/catalog.py` 的 `outbound_cap`，计数放在限速闸门的同一处（配置了 `DATAFABRIC_HISTORY_REDIS_URL` 用 Redis，否则是 `DATAFABRIC_RATE_DIR` 下的文件），跨读取、跨进程累计，按 UTC 小时和 UTC 日算。到限的请求不发出，读取停下，`stop_reason` 和未读窗口的回执写 `outbound_quota_hour` 或 `outbound_quota_day`。Redis 被清空或限速目录被删，计数从零开始。
+
+WHO 的固定刷新每 15 分钟一轮：目录给 who_don 声明的刷新间隔下限是 900 秒（其他来源仍是 3600 秒），窗口重叠 2 天、检查点照旧。一轮至少一次请求，每天 96 次起，在 who.int 每天 200 次之内。读取碰到出站额度时，这一轮带着原因结束，不算失败：`last_coverage.stop_reason` 写 `outbound_quota_day`，状态回到 idle，已读的页保留，检查点不动，也不记 `last_success_at`；下一轮（`cadence_seconds` 之后）从续页位置接着读，一页都没读到时按同一检查点重新规划窗口。其他没有续页的提前停止仍是 `source_watch_no_cursor`。
 
 新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
 
