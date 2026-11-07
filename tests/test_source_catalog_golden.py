@@ -1,7 +1,8 @@
 """SOURCE_CATALOG is pinned: the licence catalog Fabric publishes in /api/history/sources, source by source.
 
 The golden file was produced from the hand-written catalog of 1df47aa (before the catalog became generated from
-declarations). Changing a source's text means changing the golden file in the same commit, on purpose."""
+declarations) and changed once, on purpose, when legacy_documents left the catalog and the site sources stopped saying
+that documents are frozen into it. Changing the text of a source means changing the golden file in the same commit."""
 
 import json
 from pathlib import Path

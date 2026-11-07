@@ -17,9 +17,9 @@ def test_every_fetchable_collection_spec_has_exactly_one_licence_and_nothing_els
     assert {c.source_id for c in COLLECTED} | SITE_SOURCES == set(FETCHABLE)
 
 
-def test_the_catalog_is_exactly_the_declarations_collected_derived_retired():
-    expected = set(FETCHABLE) | {d.source_id for d in DERIVED} | set(retired_sources.RETIRED)
-    assert set(SOURCE_CATALOG) == expected
+def test_the_catalog_is_exactly_the_collected_and_derived_declarations_and_holds_no_retired_source():
+    assert set(SOURCE_CATALOG) == set(FETCHABLE) | {d.source_id for d in DERIVED}
+    assert not set(SOURCE_CATALOG) & set(retired_sources.RETIRED)
     for source_id, entry in SOURCE_CATALOG.items():
         declared = collected_licenses().get(source_id) or next((d for d in DERIVED if d.source_id == source_id), None)
         if declared is not None:

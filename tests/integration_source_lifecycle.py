@@ -1,5 +1,6 @@
 """History source lifecycle (V036): the retirement decision, the deployment's effective time, rollback, old data untouched."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -8,6 +9,7 @@ from integration_migration_baselines import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
+from biz_rules.retired_sources import RETIRED
 from migration import baseline, runner, source_lifecycle
 
 
@@ -93,8 +95,10 @@ def snapshot(engine):
 
 def test_old_legacy_rows_and_their_audit_are_untouched_by_the_migration(pg, tmp_path, monkeypatch):
     _, engine = old_history(pg, tmp_path, monkeypatch, "legacyrows")
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET published_seq=7 WHERE source_id='legacy_documents'"))
+    with engine.begin() as conn:  # the row the earlier seed gave the bridge (the catalog no longer lists it)
+        conn.execute(text("INSERT INTO history_sources(source_id, catalog, published_seq) "
+                          "VALUES ('legacy_documents', CAST(:c AS jsonb), 7) ON CONFLICT (source_id) DO UPDATE "
+                          "SET published_seq=7"), {"c": json.dumps(RETIRED["legacy_documents"].catalog_entry())})
         conn.execute(text(
             "INSERT INTO legacy_aliases(legacy_version_id, legacy_record_id, is_demo, status, reason, converter) "
             "VALUES (repeat('a', 64), 'legacy:one', false, 'pending', 'detail_url_not_proven', 'test')"))

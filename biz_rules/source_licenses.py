@@ -269,7 +269,7 @@ def site_license(item) -> LicenseSpec:
         license_url=None,
         history_coverage="本系统采用后的不可变版本；不是原站历史档案",
         native_id="详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-        read_scope="按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+        read_scope="按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
         limitations=("需管理员逐源许可", "插件未对原站实测（verified=False）", "不保证原站覆盖、原日期语义或专业结论"),
     )
 
@@ -320,16 +320,13 @@ def validate_declarations(collected: dict[str, LicenseSpec] | None = None) -> No
 
 
 def source_catalog() -> dict[str, dict]:
-    """SOURCE_CATALOG: collected API sources, the retired bridge (until it leaves the catalog), derived sources, then
-    the site plugins - the order the catalog has always had."""
-    from biz_rules.retired_sources import RETIRED
-
+    """SOURCE_CATALOG: the sources that may be offered - collected API sources, derived sources, then the site plugins.
+    Retired sources are not in it (biz_rules.retired_sources)."""
     collected = collected_licenses()
     validate_declarations(collected)
     api = [item for item in COLLECTED]
     sites = [item for source_id, item in collected.items() if source_id not in {c.source_id for c in COLLECTED}]
     catalog = {item.source_id: item.catalog_entry() for item in api}
-    catalog.update({source_id: retired.catalog_entry() for source_id, retired in RETIRED.items()})
     catalog.update({item.source_id: item.catalog_entry() for item in DERIVED})
     catalog.update({item.source_id: item.catalog_entry() for item in sites})
     return catalog

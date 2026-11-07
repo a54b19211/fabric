@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from biz_rules.history_models import canonical
 from biz_rules.history_sources import SOURCE_CATALOG
+from biz_rules.retired_sources import RETIRED
 
 
 def seed_history_sources(conn) -> dict:
@@ -12,7 +13,9 @@ def seed_history_sources(conn) -> dict:
     administrator's decision (read_enabled, dependencies, access) and its `catalog` is the snapshot taken when it was
     seeded. The descriptive text of a source is its declaration (biz_rules.source_licenses), which /sources reads."""
     inserted = []
-    for source_id, catalog in SOURCE_CATALOG.items():
+    # a retired source keeps its row: its old identifiers still resolve through it, under the same permission rules
+    rows = [*SOURCE_CATALOG.items(), *((source_id, item.catalog_entry()) for source_id, item in RETIRED.items())]
+    for source_id, catalog in rows:
         created = conn.execute(
             text("""
           INSERT INTO history_sources(source_id,catalog) VALUES (:id,CAST(:catalog AS jsonb))

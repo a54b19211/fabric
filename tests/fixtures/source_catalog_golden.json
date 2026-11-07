@@ -11,9 +11,9 @@
   "access": "public_metadata",
   "license_url": "https://www.gdeltproject.org/about.html#termsofuse",
   "attribution": "The GDELT Project — https://www.gdeltproject.org/",
+  "native_analysis_mode": "news_index_not_independent_evidence",
   "history_coverage": "仅本地采用后版本；实时DOC接口不是十年新闻档案",
   "native_id": "完整新闻URL的SHA256，query参数保留",
-  "native_analysis_mode": "news_index_not_independent_evidence",
   "read_scope": "查询的有界新闻索引；默认最近24小时，支持显式起止窗口",
   "limitations": [
    "只有标题、原网址和索引元数据，没有新闻全文；第三方正文另核许可",
@@ -50,9 +50,9 @@
   "acquisition_channel": "public_api",
   "access": "public_registry",
   "license_url": "https://clinicaltrials.gov/data-api/about-api",
+  "native_analysis_mode": "registered_study_not_drug_program",
   "history_coverage": "本应用采用后不可变版本；当前API不是过去快照",
   "native_id": "NCT ID",
-  "native_analysis_mode": "registered_study_not_drug_program",
   "read_scope": "公开登记字段，含未决/终止记录",
   "limitations": [
    "登记状态不是药物成败；日期保留原精度和ACTUAL/ESTIMATED"
@@ -97,9 +97,9 @@
   "acquisition_channel": "public_api",
   "access": "public_metadata",
   "license_url": "https://europepmc.org/Copyright",
+  "native_analysis_mode": "bibliographic_record_not_independent_study",
   "history_coverage": "当前元数据/更正关系采用；非过去全文版本档案",
   "native_id": "source:id",
-  "native_analysis_mode": "bibliographic_record_not_independent_study",
   "read_scope": "core元数据/摘要/许可和关系；不自动抓全文",
   "limitations": [
    "firstPublicationDate可能补算，保留原值，不作历史原件证明",
@@ -114,9 +114,9 @@
   "acquisition_channel": "public_api",
   "access": "public_metadata",
   "license_url": "https://www.who.int/about/policies/publishing/copyright",
+  "native_analysis_mode": "notice_event_only",
   "history_coverage": "本地采用后版本；当前公告API不提供过去原件资格",
   "native_id": "WHO原生Id（DonId单独保留）",
-  "native_analysis_mode": "notice_event_only",
   "read_scope": "明确LastModified时间窗内DON公告、原文和发布元数据",
   "limitations": [
    "DON是选择性公告，不是全球疫情全量；零公告不证明没有暴发",
@@ -141,24 +141,6 @@
    "许可与来源由上传者负责，系统不核实",
    "集合名和文件名由上传者给出，不是来源原生编号",
    "不推断发布日期、作者或专业结论"
-  ]
- },
- "legacy_documents": {
-  "name": "已授权旧文档的精确冻结桥",
-  "business_types": [
-   "trials_pipeline",
-   "regulatory",
-   "literature"
-  ],
-  "acquisition_channel": "derived_export",
-  "access": "controlled_import",
-  "license_url": null,
-  "history_coverage": "本次采用后版本；旧文档日期不是历史图证明",
-  "native_id": "原source_site+source_doc_uuid",
-  "read_scope": "明确范围内原文；许可取全部原站依赖交集",
-  "dependency_source_ids": [],
-  "limitations": [
-   "派生来源组保守授权；任一依赖撤权则整个来源组停读"
   ]
  },
  "reviewed_graph": {
@@ -224,7 +206,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -241,7 +223,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -258,7 +240,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -275,7 +257,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -292,7 +274,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -309,7 +291,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -326,7 +308,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -343,7 +325,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -360,7 +342,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -377,7 +359,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -394,7 +376,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -411,7 +393,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -428,7 +410,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -445,7 +427,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -462,7 +444,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -479,7 +461,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -496,7 +478,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",
@@ -513,7 +495,7 @@
   "license_url": null,
   "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
   "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；documents 库存按原站经 legacy_documents 冻结",
+  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
   "limitations": [
    "需管理员逐源许可",
    "插件未对原站实测（verified=False）",

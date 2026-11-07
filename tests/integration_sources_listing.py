@@ -28,7 +28,7 @@ def library(pg, monkeypatch):
     monkeypatch.setattr(store, "history_engine", lambda: engine)
     monkeypatch.setattr(migration, "history_engine", lambda: engine)
     migration.migrate_history()
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted(SOURCE_CATALOG)))
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted([*SOURCE_CATALOG, "legacy_documents"])))
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", json.dumps(TARGETS))
     with engine.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=true, published_seq=3"))
@@ -48,7 +48,7 @@ def listing():
 def test_every_collected_and_derived_source_is_listed_with_its_declared_text_and_the_library_state(library):
     receipt = listing()
     listed = by_id(receipt["sources"])
-    assert sorted(listed) == sorted(set(SOURCE_CATALOG) - {"legacy_documents"})
+    assert sorted(listed) == sorted(SOURCE_CATALOG)
     for source_id, item in listed.items():
         text_of = {key: value for key, value in item.items() if key in SOURCE_CATALOG[source_id]}
         assert json.loads(json.dumps(text_of)) == json.loads(json.dumps(SOURCE_CATALOG[source_id])), source_id
@@ -140,7 +140,7 @@ def expected_flags(source_id, library_has_versions=True):
             "watch": bool(spec and spec.watchable)}
 
 
-@pytest.mark.parametrize("source_id", sorted(SOURCE_CATALOG))
+@pytest.mark.parametrize("source_id", sorted([*SOURCE_CATALOG, "legacy_documents"]))
 def test_each_sources_capabilities_follow_the_declarations(library, source_id):
     receipt = listing()
     entry = by_id(receipt["sources"] + receipt["retired_sources"])[source_id]
