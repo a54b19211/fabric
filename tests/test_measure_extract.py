@@ -46,13 +46,39 @@ def test_the_output_is_parsed_strictly_and_aliases_are_mapped_mechanically():
     assert len(mx.parse_output(json.dumps(many))[0]) == mx.MAX_MEASURES
 
 
+# One measure of a real answer of the first D1 measurement (Qwen, json_object and no schema in the prompt; run
+# e853c35f, window 0), cut to what decided the refusal: measures at the top level, an index inside the measure,
+# empty values for enum fields and sources as a list.
+FIRST_ANSWER = {"measures": [{"index": 1, "quote": "4 additional cases", "value_text": "4",
+                              "metric_text": "cases of Zika virus infection", "period_text": "On 12 November 2015",
+                              "kind": "flow", "qualifier": "", "modality": "", "status": "",
+                              "sources": [{"key": "period", "value": "text"}]}]}
+
+
+def test_the_prompt_carries_the_schema_and_a_skeleton_the_parser_accepts():
+    assert mx.SCHEMA in mx.PROMPT and json.loads(mx.SCHEMA) == mx.Extraction.model_json_schema()
+    measures, _, why = mx.parse_output(mx.SKELETON)
+    assert why is None and len(measures) == 1
+    assert mx.parse_output(mx.EMPTY) == ([], [], None)
+
+
+def test_an_answer_outside_the_schema_is_refused_and_not_repaired():
+    assert mx.parse_output(json.dumps(FIRST_ANSWER)) == (None, [], "output_not_the_schema")
+    rewrapped = {"items": [{"index": 1, "measures": FIRST_ANSWER["measures"]}]}  # still empty enums, sources a list
+    assert mx.parse_output(json.dumps(rewrapped))[2] == "output_not_the_schema"
+    conforming = {k: v for k, v in FIRST_ANSWER["measures"][0].items() if k not in ("qualifier", "modality", "status")}
+    conforming["sources"] = {"period": "window"}
+    measures, _, why = mx.parse_output(json.dumps({"items": [{"index": 1, "measures": [conforming]}]}))
+    assert why is None and measures[0]["qualifier"] == "exact" and measures[0]["sources"] == {"period": "window"}
+
+
 def test_another_model_configuration_is_another_producer():
     other = mx.ModelConfig(**{**CONFIG.__dict__, "model": "fake-model-2"})
     assert CONFIG.sha256() != other.sha256()
     assert mx.ModelConfig(**CONFIG.__dict__).sha256() == CONFIG.sha256()  # stable
     assert "base_url" not in CONFIG.__dict__ and "api_key" not in CONFIG.__dict__  # where and the key are not identity
     identity = mx.producer_identity(CONFIG.sha256())
-    assert identity.startswith("datafabric.measure_extract.v1+") and len(identity) <= 80  # the contract's length
+    assert identity.startswith("datafabric.measure_extract.v2+") and len(identity) <= 80  # the contract's length
     assert mx.run_id(**{k: v for k, v in keys().items()}) != mx.run_id(**keys(other))
 
 

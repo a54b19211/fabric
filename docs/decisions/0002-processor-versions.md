@@ -25,3 +25,9 @@
 
 - v4：监管机构公告/通知的大类按内容判（写明监管动作的才是监管决定，其余是官方通报）；v3 把这类公告整体算作决定。
 - v5：加入 v3 6.2 的可复用注释（实验类型候选、可取得的材料层级）。
+
+## processing/measure_extract（当前 `datafabric.measure_extract.v2`）
+
+- v2：提示词带上输出模型的 JSON Schema 和一个最小骨架。v1 只用 `response_format=json_object` 要求“是 JSON”，D1 首批测量
+  的 24 个窗口全部返回了顶层 `measures`、空串枚举值和列表形式的 `sources`，按产品的输出形状被拒（`output_not_the_schema`）。
+  解析器不放宽，机械修补后的答案不算模型成功。生产者标识里的版本随之变化，v1 的运行原样保留。

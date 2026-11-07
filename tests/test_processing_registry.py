@@ -42,7 +42,7 @@ def test_the_definition_lists_each_processor_with_the_sources_it_applies_to():
 
 def test_measurements_are_read_from_the_declared_sources_only():
     assert registry.MEASURE_SOURCES == ("who_don",)
-    assert registry.applicable("who_don")["measure_extract"] == "datafabric.measure_extract.v1"
+    assert registry.applicable("who_don")["measure_extract"] == "datafabric.measure_extract.v2"
     assert "measure_extract" not in registry.applicable("clinicaltrials")
     assert "measure_extract" not in registry.applicable("reviewed_graph")
     definition = {item["name"]: item for item in registry.definition()}

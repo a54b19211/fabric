@@ -1,4 +1,4 @@
-"""The measurement extraction processor datafabric.measure_extract.v1: what one model call over one reading window
+"""The measurement extraction processor datafabric.measure_extract.v2: what one model call over one reading window
 of a fixed cleaned artifact asks, what output it accepts, and how each measure it returns becomes a reading.
 
 Identity (docs/decisions/0006): a run is keyed by the fixed original (source, record, version, raw sha256), the
@@ -9,7 +9,9 @@ BioCheck contract-v3 request item it will be checked with (without the caller's 
 the three keys, so two interpretations of the same span are two readings, each checked on its own.
 
 The prompt carries no workspace context (no known series, no topic): a measurement is extracted once for every
-reader. Rules for the measure fields come from BioRadar measure.v10 unchanged (processing.measure_rules).
+reader. Rules for the measure fields come from BioRadar measure.v10 unchanged (processing.measure_rules). It does
+carry the JSON Schema of the output and a minimal skeleton: the request's response_format guarantees a JSON
+object, not this shape, and the parser below does not repair an answer.
 
 Two candidate routes make measures for a window and go through everything above alike: the model route (this
 module's prompt and output schema) and the rules route (processing.measure_counts: the explicit counts of
@@ -29,7 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from processing import measure_rules as rules
 
-PROCESSOR_VERSION = "datafabric.measure_extract.v1"
+PROCESSOR_VERSION = "datafabric.measure_extract.v2"
 PRODUCER = "datafabric.measure_extract"
 MAX_MEASURES = 3  # per window
 MODEL, RULES = "model", "rules"  # the candidate routes of this one processor
@@ -50,13 +52,6 @@ MEASURE_RULES = (
     "范围或口径。kind 区分 stock 存量、flow 当期新增、cumulative 累计、rate 比例，不能混用；疑似、确诊、就诊人次和人数是"
     "不同指标。约、超过、至少写在数旁时用 qualifier 标出；计划、预计的数用 modality 标 planned / projected。status 写"
     "计划/在建/投运或报告/确认。原文没给出具体数就不填，不要估算或换算。")
-
-PROMPT = (BASE + """
-下面是一条记录正文的一个阅读窗口（正文按窗口逐段阅读，相邻窗口有重叠）。这个窗口只做一件事：找出窗口原文明确给出的数值。
-- 返回一项，index 为 1；窗口里没有就返回空的 measures。
-- 同一句话在相邻窗口都出现时，只在包含整句的那个窗口里填。
-- title 是记录标题，heading 是窗口之前最近的标题，table_header 是窗口所在表格的表头，table_title 是这张表格上方的表题：只作上下文，不是窗口原文。quote、value_text、metric_text、unit_text 必须逐字取自窗口的 text；period_text、object_text、scope_text、denominator_text 若窗口里没有、写在 heading / table_header / table_title 里，可逐字取自那里，并在 sources 里写明取自哪一处（键只能是 period / object / scope / denominator）。
-""" + MEASURE_RULES)
 
 
 # ---- the output the model must give (the measure fields of BioRadar measure.v10) --------------------------------
@@ -99,6 +94,25 @@ class ExtractItem(BaseModel):
 
 class Extraction(BaseModel):
     items: list[ExtractItem]
+
+
+# What the model is told about the shape of its answer: the schema the parser validates against, and the least
+# answer that passes it. The parser does not accept anything else.
+SCHEMA = json.dumps(Extraction.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
+SKELETON = '{"items":[{"index":1,"measures":[{"metric_text":"…","value_text":"…","quote":"…"}]}]}'
+EMPTY = '{"items":[{"index":1,"measures":[]}]}'
+FORMAT = f"""
+输出格式：只返回一个 JSON 对象，不加说明文字，严格符合下面的 JSON Schema。顶层是 items，index 写在 items 的每一项上，不写在 measure 里。字段名和枚举值逐字使用；枚举字段没有把握就整个省略（取默认值），写出来的值必须是枚举里列出的，空串也一样。sources 是对象，键为 period / object / scope / denominator，值为来源名，不是列表。
+{SCHEMA}
+最小示例（… 处换成原文里的词）：{SKELETON}
+窗口里没有数值：{EMPTY}"""
+
+PROMPT = (BASE + """
+下面是一条记录正文的一个阅读窗口（正文按窗口逐段阅读，相邻窗口有重叠）。这个窗口只做一件事：找出窗口原文明确给出的数值。
+- 返回一项，index 为 1；窗口里没有就返回空的 measures。
+- 同一句话在相邻窗口都出现时，只在包含整句的那个窗口里填。
+- title 是记录标题，heading 是窗口之前最近的标题，table_header 是窗口所在表格的表头，table_title 是这张表格上方的表题：只作上下文，不是窗口原文。quote、value_text、metric_text、unit_text 必须逐字取自窗口的 text；period_text、object_text、scope_text、denominator_text 若窗口里没有、写在 heading / table_header / table_title 里，可逐字取自那里，并在 sources 里写明取自哪一处（键只能是 period / object / scope / denominator）。
+""" + MEASURE_RULES + FORMAT)
 
 
 # the only aliases mapped, mechanically, inside a measure's `sources`: each <field>_text to its <field>; with the
