@@ -7,11 +7,12 @@ from uuid import UUID
 import httpx
 from bs4 import BeautifulSoup
 
-from biz_rules.history_models import ArchiveRecord, HistoryError, canonical, source_time
+from biz_rules.history_models import MAX_RESPONSE_BYTES, ArchiveRecord, HistoryError, canonical, source_time
 from collection import transport
 
 ENDPOINT = "https://www.who.int/api/emergencies/diseaseoutbreaknews"
 WHO_PARSER = "datafabric.who.don.projection.v0.2"
+PAGE_SIZE = 50  # records the plugin takes from one response
 PATHS = {
     "native_notice_id": "/Id",
     "notice_id": "/DonId",
@@ -143,7 +144,7 @@ def read_who(request):
                 remaining = request.max_records - len(records)
                 if remaining <= 0:
                     break
-                size = min(remaining, 50)
+                size = min(remaining, PAGE_SIZE)
                 params = {
                     "$top": size + 1,
                     "$orderby": "LastModified asc,Id asc",
@@ -157,7 +158,7 @@ def read_who(request):
                 if page_filters:
                     params["$filter"] = " and ".join(page_filters)
                 # 限速、请求/字节/期限预算由 collection.transport 在发出处统一执行
-                status, body = transport.get(client, ENDPOINT, params, cap=8 * 1024 * 1024)
+                status, body = transport.get(client, ENDPOINT, params, cap=MAX_RESPONSE_BYTES)
                 if status != 200:
                     raise ValueError("HTTP " + str(status))
                 raw = body.decode("utf-8")

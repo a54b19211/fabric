@@ -654,7 +654,7 @@ def _publish(
     """Adopt the prepared originals as versions of the run's source (one transaction) and close the run."""
     source = _source(conn, run["source_id"], lock=True)
     seq = source["published_seq"]
-    version_ids, new_count = [], 0
+    version_ids, new_ids = [], []
     dependencies = set()
     for item, projected in prepared:
         dependencies.update(_validate_derived(conn, run, item, now, proof))
@@ -669,7 +669,7 @@ def _publish(
         if existing is None:
             seq += 1
             _insert_version(conn, run, item, projected, proof, mapping_review, version_id, seq, now, current)
-            new_count += 1
+            new_ids.append(version_id)
         version_ids.append(version_id)
     _persist_dependencies(conn, source, dependencies)
     _link_attachments(conn, run, prepared, version_ids)
@@ -677,7 +677,7 @@ def _publish(
         text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
         {"seq": seq, "id": run["source_id"]},
     )
-    _close_run(conn, run, prepared, version_ids, new_count, coverage, error, now)
+    _close_run(conn, run, prepared, version_ids, new_ids, coverage, error, now)
 
 
 _MAPPING_FIELDS = ("program_id", "lineage_id", "indication", "jurisdiction", "mapping_available_at")
@@ -872,7 +872,7 @@ def _insert_version(conn, run, item, projected, proof, mapping_review, version_i
         )
 
 
-def _close_run(conn, run, prepared, version_ids, new_count, coverage, error, now):
+def _close_run(conn, run, prepared, version_ids, new_ids, coverage, error, now):
     state = "partial" if error and version_ids else "failed" if error else "completed"
     if (
         run["kind"] == "fetch"
@@ -882,10 +882,13 @@ def _close_run(conn, run, prepared, version_ids, new_count, coverage, error, now
         state = "partial"
     coverage = {
         **coverage,
-        "new_version_count": new_count,
-        "same_version_count": len(version_ids) - new_count,
+        "new_version_count": len(new_ids),
+        "same_version_count": len(version_ids) - len(new_ids),
         "adopted_count": len(version_ids),
     }
+    if "backfill" in coverage:
+        # Only what this run created is background: a version an earlier run already adopted was first seen then.
+        coverage["backfill"] = {**coverage["backfill"], "background_version_ids": new_ids}
     attempts = list(run["attempts"]) + [
         {
             "attempt": run["attempt"],
@@ -1001,14 +1004,15 @@ def job_input(run_id, attempt):
 
 def _reported_coverage(batch):
     """The parts of a read's coverage that only some plugins report: where to resume, how each attachment went,
-    and for a windowed read what each window returned and which intervals may be cut short."""
+    for a windowed read what each window returned and which intervals may be cut short, and for a read made by an
+    explicit backfill its receipt (flows.who_backfill), which marks the run's new versions as background."""
     reported = {}
     if batch.get("next_continuation") is not None:
         reported["next_continuation"] = batch["next_continuation"]
     if batch.get("attachment_coverage"):
         # 本次读取每个附件读没读到（站点插件），留在读取记录里，不进原件
         reported["attachment_coverage"] = batch["attachment_coverage"][:500]
-    for key in ("window_coverage", "truncated_intervals"):
+    for key in ("window_coverage", "truncated_intervals", "backfill"):
         if key in batch:
             reported[key] = batch[key]
     return reported
