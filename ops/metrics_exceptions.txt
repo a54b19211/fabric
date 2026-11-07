@@ -14,8 +14,6 @@
 collection/legacy_migration.py:plan  74/28  legacy migration planner, retires with the legacy source (audit 1.2)
 collection/pubmed_fulltext.py:_unpaywall  53/21  full-text access resolver with one branch per publisher/licence case
 collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with one branch per publisher/licence case
-collection/site_crawler.py:_read  81/32  crawler capture projection, one branch per page element
-collection/site_crawler.py:project_capture  65/38  crawler capture projection, one branch per page element
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
 processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
 processing/clean_text.py:_apply_templates  34/22  text cleaners, one branch per markup pattern; table-driven rewrite
