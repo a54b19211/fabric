@@ -18,7 +18,7 @@
 #
 # PYTHON           the interpreter with the locked dependencies (default .venv/bin/python, `make venv`)
 # ITEST_PREFIX     container name prefix (default fabric-itest)
-# ITEST_MANIFEST   the container manifest (default /tmp/fabric-itest-<run id>.containers.jsonl)
+# ITEST_MANIFEST   the container manifest (default .test-artifacts/fabric-itest-<run id>.containers.jsonl in the checkout, git-ignored)
 # BIOCHECK_SRC     a BioCheck checkout for the real-checker tests (default ../clean-biocheck; without one
 #                  those tests are reported as skipped)
 # BIOCHECK_PYTHON  the interpreter of that checkout (default $BIOCHECK_SRC/.venv/bin/python)
@@ -37,7 +37,8 @@ R=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 PW=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 PG=$PREFIX-pg-$R RTPG=$PREFIX-pg-rt-$R RD=$PREFIX-redis-$R RDS=$PREFIX-redis-sock-$R
 LABEL=fabric-itest.run
-MANIFEST=${ITEST_MANIFEST:-/tmp/fabric-itest-$R.containers.jsonl}
+MANIFEST=${ITEST_MANIFEST:-$ROOT/.test-artifacts/fabric-itest-$R.containers.jsonl}
+mkdir -p "$(dirname "$MANIFEST")"
 WORK=$(mktemp -d /tmp/fabric-itest.XXXXXX)
 SOCK=$WORK/pgsock RSOCK=$WORK/redissock RUN=$WORK/run
 

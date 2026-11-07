@@ -115,3 +115,5 @@ frontend-next/
 .kiro/
 .claude/
 *.log
+# container manifests of test runs (scripts default here, not /tmp)
+.test-artifacts/
