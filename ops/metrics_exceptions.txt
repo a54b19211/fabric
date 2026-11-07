@@ -78,7 +78,6 @@ db/retrieval.py:search  89/43  retrieval search/verify with the filter and ranki
 db/retrieval.py:verify  103/39  retrieval search/verify with the filter and ranking logic inline
 db/source_refresh.py:refresh_once  152/31  source refresh/health worker: schedule, fetch and report in one pass; split per step
 db/source_refresh.py:source_health  174/34  source refresh/health worker: schedule, fetch and report in one pass; split per step
-disambiguation/engine.py:disambiguate  135/50  disambiguation pipeline in one function (recall, rerank, decide); split per stage
 disambiguation/llm_ranker.py:rank_with_llm  101/21  LLM/reranker call with prompt, parse and fallback inline
 disambiguation/llm_ranker.py:rank_with_reranker  69/26  LLM/reranker call with prompt, parse and fallback inline
 flows/extraction_flow.py:extract_single_document  261/67  legacy per-document extraction (261 lines, cc 67), retires with the old extraction queue (audit 1.4)

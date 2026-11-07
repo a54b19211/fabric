@@ -14,6 +14,120 @@ from disambiguation.rules import match_strong_id, match_by_entity_rules
 from disambiguation.llm_ranker import rank_with_reranker, rank_with_llm, SCORE_MID
 
 
+def _exact_alias_result(candidate_names, entity_type, session):
+    """Step 2: exact names still need identity review. Keep matches from every generated name rather than
+    accepting the first weak alias."""
+    alias_candidates = {}
+    for idx, name in enumerate(candidate_names):
+        for match in lookup_alias_candidates(name, entity_type, session=session):
+            dict_id = match["dict_id"]
+            confidence, match_type = (0.95, "exact_original") if idx == 0 else (
+                (0.90, "exact_alias") if idx < 5 else (0.85, "exact_normalized"))
+            alias_candidates.setdefault(dict_id, CandidateEntity(
+                dict_id=dict_id, name=match.get("canonical_name") or name,
+                similarity_score=confidence, match_type=match_type,
+                canonical_data=match.get("canonical_data") or {}, aliases=[name],
+                external_ids=match.get("external_ids") or {},
+            ))
+    if not alias_candidates:
+        return None
+    candidates = list(alias_candidates.values())
+    top = candidates[0]
+    return DisambiguationResult(
+        status=STATUS_CANDIDATE_MATCHED if len(candidates) == 1 else STATUS_AMBIGUOUS,
+        dict_id=top.dict_id if len(candidates) == 1 else None,
+        confidence=top.similarity_score, matched_name=top.name,
+        reason=f"alias exact match requires review: '{top.name}' (type={top.match_type})",
+        candidates=candidates, match_step="step2_exact_alias",
+    )
+
+
+class _VectorRecall:
+    """Step 4: vectors recall candidates; similarity is not a link decision."""
+
+    def __init__(self, entity_type, session):
+        self.entity_type, self.session = entity_type, session
+        self.candidates = []
+        self.seen_ids = set()
+        self.failed = False
+
+    def add_name(self, name: str, match_type: str = "vector") -> None:
+        if not name or not name.strip():
+            return
+        try:
+            embedding = generate_embedding(name)
+            if not embedding:
+                self.failed = True
+                return
+            similar = search_similar_entities(embedding, self.entity_type, top_k=10,
+                                              session=self.session, strict_errors=True)
+            for candidate in similar or []:
+                if candidate["dict_id"] not in self.seen_ids:
+                    self.seen_ids.add(candidate["dict_id"])
+                    self.candidates.append(CandidateEntity(
+                        dict_id=candidate["dict_id"], name=candidate["name"],
+                        similarity_score=candidate["similarity_score"], match_type=match_type,
+                        canonical_data=candidate.get("canonical_data") or {},
+                        aliases=candidate.get("aliases") or [],
+                        external_ids=candidate.get("external_ids") or {},
+                    ))
+        except Exception as error:
+            self.failed = True
+            logger.warning(f"[Disambiguation] Candidate recall failed for '{name}': {error}")
+
+
+def _recall_candidates(entity_name, entity_type, entity_data, normalized_name, session) -> _VectorRecall:
+    recall = _VectorRecall(entity_type, session)
+    recall.add_name(entity_name)
+    name_en = str(entity_data.get("name_en") or "").strip()
+    if name_en and name_en.lower() != entity_name.lower():
+        recall.add_name(name_en, "vector_en")
+    if normalized_name and normalized_name.lower() not in (entity_name.lower(), name_en.lower()):
+        recall.add_name(normalized_name, "vector_normalized")
+    return recall
+
+
+def _rank_proposals(entity_name, entity_type, entity_data, source_text, all_candidates) -> DisambiguationResult:
+    """Step 5: existing score bands triage proposals, never automatic links."""
+    try:
+        result = rank_with_reranker(entity_name, entity_type, entity_data, source_text, all_candidates)
+    except Exception as error:
+        result = DisambiguationResult(
+            status=STATUS_AMBIGUOUS, reason=f"Reranker failed: {error}",
+            match_step="step5_reranker_error",
+        )
+    result.auto_link = False
+    result.retain_candidates(all_candidates)
+    if result.status in (STATUS_AUTO_MATCHED, STATUS_NEW_ENTITY):
+        result.status = STATUS_AMBIGUOUS
+    return result
+
+
+def _llm_review(result, entity_name, entity_type, entity_data, source_text) -> DisambiguationResult:
+    """Step 6 is opt-in, requires real candidates and an existing review band.
+    The bands are uncalibrated and cannot authorize automatic links/new IDs."""
+    try:
+        llm_result = rank_with_llm(entity_name, entity_type, entity_data, source_text, result.candidates)
+        llm_result.auto_link = False
+        llm_result.retain_candidates(result.candidates)
+        llm_result.model_trace = result.model_trace + llm_result.model_trace
+        if llm_result.status in (STATUS_AUTO_MATCHED, STATUS_NEW_ENTITY):
+            llm_result.status = STATUS_AMBIGUOUS
+        return llm_result
+    except Exception as error:
+        result.reason = f"LLM review failed; candidates retained: {error}"
+        result.match_step = "step6_llm_error"
+    return result
+
+
+def _no_candidates_result(recall_failed: bool) -> DisambiguationResult:
+    return DisambiguationResult(
+        status=STATUS_AMBIGUOUS if recall_failed else STATUS_NEW_ENTITY,
+        reason="candidate recall unavailable; requires review" if recall_failed else "no match in any step",
+        match_step="step4_recall_error" if recall_failed else "step_none",
+    )
+
+
 def disambiguate(
     entity_name: str,
     entity_type: str,
@@ -37,30 +151,9 @@ def disambiguate(
         result.retain_candidates()
         return result
 
-    # Step 2: exact names still need identity review. Keep matches from every
-    # generated name rather than accepting the first weak alias.
-    alias_candidates = {}
-    for idx, name in enumerate(candidate_names):
-        for match in lookup_alias_candidates(name, entity_type, session=session):
-            dict_id = match["dict_id"]
-            confidence, match_type = (0.95, "exact_original") if idx == 0 else (
-                (0.90, "exact_alias") if idx < 5 else (0.85, "exact_normalized"))
-            alias_candidates.setdefault(dict_id, CandidateEntity(
-                dict_id=dict_id, name=match.get("canonical_name") or name,
-                similarity_score=confidence, match_type=match_type,
-                canonical_data=match.get("canonical_data") or {}, aliases=[name],
-                external_ids=match.get("external_ids") or {},
-            ))
-    if alias_candidates:
-        candidates = list(alias_candidates.values())
-        top = candidates[0]
-        return DisambiguationResult(
-            status=STATUS_CANDIDATE_MATCHED if len(candidates) == 1 else STATUS_AMBIGUOUS,
-            dict_id=top.dict_id if len(candidates) == 1 else None,
-            confidence=top.similarity_score, matched_name=top.name,
-            reason=f"alias exact match requires review: '{top.name}' (type={top.match_type})",
-            candidates=candidates, match_step="step2_exact_alias",
-        )
+    result = _exact_alias_result(candidate_names, entity_type, session)
+    if result:
+        return result
 
     # Step 3: preserve both the selected dictionary ID and every rule candidate.
     step3_result = match_by_entity_rules(entity_name, entity_type, entity_data, session=session)
@@ -69,85 +162,24 @@ def disambiguate(
         if step3_result.status == STATUS_AUTO_MATCHED and step3_result.auto_link:
             return step3_result
 
-    # Step 4: vectors recall candidates; similarity is not a link decision.
-    vector_candidates = []
-    seen_ids = set()
-    recall_failed = False
-
-    def _recall_with_name(name: str, match_type: str = "vector") -> None:
-        nonlocal recall_failed
-        if not name or not name.strip():
-            return
-        try:
-            embedding = generate_embedding(name)
-            if not embedding:
-                recall_failed = True
-                return
-            similar = search_similar_entities(embedding, entity_type, top_k=10, session=session, strict_errors=True)
-            for candidate in similar or []:
-                if candidate["dict_id"] not in seen_ids:
-                    seen_ids.add(candidate["dict_id"])
-                    vector_candidates.append(CandidateEntity(
-                        dict_id=candidate["dict_id"], name=candidate["name"],
-                        similarity_score=candidate["similarity_score"], match_type=match_type,
-                        canonical_data=candidate.get("canonical_data") or {},
-                        aliases=candidate.get("aliases") or [],
-                        external_ids=candidate.get("external_ids") or {},
-                    ))
-        except Exception as error:
-            recall_failed = True
-            logger.warning(f"[Disambiguation] Candidate recall failed for '{name}': {error}")
-
-    _recall_with_name(entity_name)
-    name_en = str(entity_data.get("name_en") or "").strip()
-    if name_en and name_en.lower() != entity_name.lower():
-        _recall_with_name(name_en, "vector_en")
-    if normalized_name and normalized_name.lower() not in (entity_name.lower(), name_en.lower()):
-        _recall_with_name(normalized_name, "vector_normalized")
+    recall = _recall_candidates(entity_name, entity_type, entity_data, normalized_name, session)
 
     # A rule-only candidate is already a review proposal; no extra model is
     # needed when recall is unavailable or provides nothing further.
-    if not vector_candidates and step3_result:
+    if not recall.candidates and step3_result:
         return step3_result
 
-    all_candidates = vector_candidates[:]
+    all_candidates = recall.candidates[:]
     if step3_result:
         all_candidates.extend(candidate for candidate in step3_result.candidates
-                              if candidate.dict_id not in seen_ids)
+                              if candidate.dict_id not in recall.seen_ids)
     if not all_candidates:
-        return DisambiguationResult(
-            status=STATUS_AMBIGUOUS if recall_failed else STATUS_NEW_ENTITY,
-            reason="candidate recall unavailable; requires review" if recall_failed else "no match in any step",
-            match_step="step4_recall_error" if recall_failed else "step_none",
-        )
+        return _no_candidates_result(recall.failed)
 
-    # Step 5: existing score bands triage proposals, never automatic links.
-    try:
-        result = rank_with_reranker(entity_name, entity_type, entity_data, source_text, all_candidates)
-    except Exception as error:
-        result = DisambiguationResult(
-            status=STATUS_AMBIGUOUS, reason=f"Reranker failed: {error}",
-            match_step="step5_reranker_error",
-        )
-    result.auto_link = False
-    result.retain_candidates(all_candidates)
-    if result.status in (STATUS_AUTO_MATCHED, STATUS_NEW_ENTITY):
-        result.status = STATUS_AMBIGUOUS
-    # Step 6 is opt-in, requires real candidates and an existing review band.
-    # The bands are uncalibrated and cannot authorize automatic links/new IDs.
+    result = _rank_proposals(entity_name, entity_type, entity_data, source_text, all_candidates)
     if (enable_llm_review and result.status == STATUS_AMBIGUOUS
             and result.match_step == "step5_reranker" and result.confidence >= SCORE_MID):
-        try:
-            llm_result = rank_with_llm(entity_name, entity_type, entity_data, source_text, result.candidates)
-            llm_result.auto_link = False
-            llm_result.retain_candidates(result.candidates)
-            llm_result.model_trace = result.model_trace + llm_result.model_trace
-            if llm_result.status in (STATUS_AUTO_MATCHED, STATUS_NEW_ENTITY):
-                llm_result.status = STATUS_AMBIGUOUS
-            return llm_result
-        except Exception as error:
-            result.reason = f"LLM review failed; candidates retained: {error}"
-            result.match_step = "step6_llm_error"
+        return _llm_review(result, entity_name, entity_type, entity_data, source_text)
     return result
 
 
