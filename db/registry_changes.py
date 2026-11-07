@@ -87,56 +87,49 @@ def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, fact
         )
 
 
-def for_versions(source_id, is_demo, version_ids, mode, cutoff):
-    """一页版本各自的差分。两版都须在本次模式和截止时间下可见，否则不给值（不借后来的版本泄露信息）。"""
-    from db import history
+def _eligible(history, mode, alias):
+    """The mode's visibility condition on the versions joined as `alias`."""
+    return history._eligibility(mode).replace("first_seen_at", alias + ".first_seen_at").replace(
+        "proof_available_at", alias + ".proof_available_at"
+    )
 
-    if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
-        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
-    eligible_to = history._eligibility(mode).replace("first_seen_at", "t.first_seen_at").replace(
-        "proof_available_at", "t.proof_available_at"
-    )
-    eligible_from = history._eligibility(mode).replace("first_seen_at", "f.first_seen_at").replace(
-        "proof_available_at", "f.proof_available_at"
-    )
-    with history.history_engine().begin() as conn:
-        conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        history._source(conn, source_id)
-        cutoff = history._cutoff(cutoff)
-        if cutoff > history._now(conn):
-            raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
-        params = {
-            "source": source_id,
-            "demo": is_demo,
-            "ids": list(version_ids),
-            "pv": registry_diff.PROCESSOR_VERSION,
-            "cutoff": cutoff,
-        }
-        runs = conn.execute(
-            text(
-                "SELECT r.to_version_id,r.from_version_id,r.pairing,r.change_count,r.material_count,"
-                "r.source_record_id,"
-                "(r.from_version_id IS NULL OR (" + eligible_from + ")) AS from_visible "
-                "FROM derived_registry_diff_runs r JOIN history_versions t ON t.version_id=r.to_version_id "
-                "LEFT JOIN history_versions f ON f.version_id=r.from_version_id "
-                "WHERE r.processor_version=:pv AND r.source_id=:source AND r.is_demo=:demo "
-                "AND r.to_version_id=ANY(:ids) AND " + eligible_to
-            ),
-            params,
-        ).mappings().all()
-        rows = conn.execute(
-            text(
-                "SELECT to_version_id,field,change_kind,json_pointer,old_value,new_value,detail,material,"
-                "material_reason FROM derived_registry_changes WHERE processor_version=:pv "
-                "AND source_id=:source AND is_demo=:demo AND to_version_id=ANY(:ids) ORDER BY to_version_id,field"
-            ),
-            params,
-        ).mappings().all()
+
+def _diff_rows(conn, params, eligible_from, eligible_to):
+    """(the diff runs of the requested versions that are visible, their changes in version and field order)."""
+    runs = conn.execute(
+        text(
+            "SELECT r.to_version_id,r.from_version_id,r.pairing,r.change_count,r.material_count,"
+            "r.source_record_id,"
+            "(r.from_version_id IS NULL OR (" + eligible_from + ")) AS from_visible "
+            "FROM derived_registry_diff_runs r JOIN history_versions t ON t.version_id=r.to_version_id "
+            "LEFT JOIN history_versions f ON f.version_id=r.from_version_id "
+            "WHERE r.processor_version=:pv AND r.source_id=:source AND r.is_demo=:demo "
+            "AND r.to_version_id=ANY(:ids) AND " + eligible_to
+        ),
+        params,
+    ).mappings().all()
+    rows = conn.execute(
+        text(
+            "SELECT to_version_id,field,change_kind,json_pointer,old_value,new_value,detail,material,"
+            "material_reason FROM derived_registry_changes WHERE processor_version=:pv "
+            "AND source_id=:source AND is_demo=:demo AND to_version_id=ANY(:ids) ORDER BY to_version_id,field"
+        ),
+        params,
+    ).mappings().all()
+    return runs, rows
+
+
+def _changes_by_version(rows) -> dict[str, list]:
     by_version: dict[str, list] = {}
     for row in rows:
         change = {k: row[k] for k in row if k != "to_version_id"}
         change["description"] = registry_diff.describe(change)
         by_version.setdefault(row["to_version_id"], []).append(change)
+    return by_version
+
+
+def _version_states(version_ids, runs, by_version) -> dict:
+    """version -> its diff state; a version without a visible run is not_processed."""
     out = {v: {"state": "not_processed"} for v in version_ids}
     for run in runs:
         version = run["to_version_id"]
@@ -158,6 +151,32 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
             "material_count": run["material_count"],
             "changes": by_version.get(version, []),
         }
+    return out
+
+
+def for_versions(source_id, is_demo, version_ids, mode, cutoff):
+    """一页版本各自的差分。两版都须在本次模式和截止时间下可见，否则不给值（不借后来的版本泄露信息）。"""
+    from db import history
+
+    if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
+        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
+    eligible_to = _eligible(history, mode, "t")
+    eligible_from = _eligible(history, mode, "f")
+    with history.history_engine().begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+        history._source(conn, source_id)
+        cutoff = history._cutoff(cutoff)
+        if cutoff > history._now(conn):
+            raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        params = {
+            "source": source_id,
+            "demo": is_demo,
+            "ids": list(version_ids),
+            "pv": registry_diff.PROCESSOR_VERSION,
+            "cutoff": cutoff,
+        }
+        runs, rows = _diff_rows(conn, params, eligible_from, eligible_to)
+    out = _version_states(version_ids, runs, _changes_by_version(rows))
     return {
         "schema_version": "datafabric.registry_changes.v1",
         "processor_version": registry_diff.PROCESSOR_VERSION,

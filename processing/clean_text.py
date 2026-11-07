@@ -155,40 +155,53 @@ def _block_text(block):
     return "\n".join(n for n in (_norm_line(x) for x, _ in block[1]) if n)
 
 
-def _apply_templates(blocks, site):
-    """返回（保留的块, 删掉的行数）。"""
-    dropped = 0
+def _skip_rewrite_appendix(blocks):
+    """Rewritten registry pages keep only what follows their appendix heading → (blocks, dropped lines)."""
     for i, block in enumerate(blocks):
         if block[0] == "heading" and _REWRITE_APPENDIX.fullmatch(_block_text(block)):
-            dropped += sum(len(b[1]) for b in blocks[:i + 1])
-            blocks = blocks[i + 1:]
-            break
-    template = SITE_TEMPLATES.get(site or "")
-    if not template or not blocks:
-        return blocks, dropped
-    keep, start = [], 0
+            return blocks[i + 1:], sum(len(b[1]) for b in blocks[:i + 1])
+    return blocks, 0
+
+
+def _is_lead_block(block, template):
+    text = _block_text(block)
+    lines = [x for x in text.split("\n") if x]
+    return len(text) <= 20 or all(any(p.fullmatch(x) for p in template["lead"]) for x in lines)
+
+
+def _drop_lead(blocks, template):
+    """The site navigation before the body (a first heading stays) → (kept heading, rest, dropped lines)."""
+    keep, start, dropped = [], 0, 0
     if blocks[0][0] == "heading":
         keep, start = [blocks[0]], 1
-    while start < len(blocks):
-        text = _block_text(blocks[start])
-        lines = [x for x in text.split("\n") if x]
-        if len(text) <= 20 or all(any(p.fullmatch(x) for p in template["lead"]) for x in lines):
-            dropped += len(blocks[start][1])
-            start += 1
-            continue
-        break
-    rest = blocks[start:]
+    while start < len(blocks) and _is_lead_block(blocks[start], template):
+        dropped += len(blocks[start][1])
+        start += 1
+    return keep, blocks[start:], dropped
+
+
+def _drop_footer(rest, template):
+    """The site footer: from the first footer block past the first quarter of the text → (rest, dropped lines)."""
     total = sum(len(_block_text(b)) for b in rest)
     seen = 0
     for j, block in enumerate(rest):
         text = _block_text(block)
         if seen > total // 4 and (text.startswith(template["footer"])
                                   or text.split("\n")[0] in template.get("footer_lines", ())):
-            dropped += sum(len(b[1]) for b in rest[j:])
-            rest = rest[:j]
-            break
+            return rest[:j], sum(len(b[1]) for b in rest[j:])
         seen += len(text)
-    return keep + rest, dropped
+    return rest, 0
+
+
+def _apply_templates(blocks, site):
+    """返回（保留的块, 删掉的行数）。"""
+    blocks, dropped = _skip_rewrite_appendix(blocks)
+    template = SITE_TEMPLATES.get(site or "")
+    if not template or not blocks:
+        return blocks, dropped
+    keep, rest, lead = _drop_lead(blocks, template)
+    rest, footer = _drop_footer(rest, template)
+    return keep + rest, dropped + lead + footer
 
 
 def is_boilerplate(line: str) -> bool:
@@ -230,64 +243,87 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
     source_id 是站点（documents 库存按原站）：SITE_TEMPLATES 里有它的，再按站点模板整块删导航和页尾。
     documents 库存里被旧采集器“改写成叙述段落 + 原文附录”的登记页，只保留“原始注册信息”之后的原文部分。
     """
-    blocks = []  # 每块：[kind, [(line, offset), ...]]
-    current = None
-    removed = 0
-
-    def flush():
-        nonlocal current
-        if current is not None and current[1]:
-            blocks.append(current)
-        current = None
-
-    in_html_table = False
+    scanner = _MarkdownBlocks()
     for line, offset in _lines_with_offsets(text or ""):
-        norm = _norm_line(line)
-        if in_html_table:
-            current[1].append((line, offset))
-            if _HTML_TABLE_CLOSE.search(line):
-                in_html_table = False
-                flush()
-            continue
-        if not norm:
-            flush()
-            continue
-        if _HTML_TABLE_OPEN.match(norm):
-            flush()
-            current = ["table", [(line, offset)]]
-            if _HTML_TABLE_CLOSE.search(line):
-                flush()
-            else:
-                in_html_table = True
-            continue
-        if norm.startswith("|"):
-            if current is None or current[0] != "pipe_table":
-                flush()
-                current = ["pipe_table", []]
-            current[1].append((line, offset))
-            continue
-        if current is not None and current[0] == "pipe_table":
-            flush()
-        if is_boilerplate(norm):
-            removed += 1
-            flush()
-            continue
-        if _HEADING.match(norm):
-            flush()
-            blocks.append(["heading", [(line, offset)]])
-            continue
-        is_item = bool(_LIST_ITEM.match(norm))
-        if current is None:
-            current = ["list" if is_item else "paragraph", []]
-        elif current[0] == "paragraph" and is_item:
-            # 段落后紧跟列表项（无空行）：列表另起一段；列表后的非列表行视为列表项的续行
-            flush()
-            current = ["list", []]
-        current[1].append((line, offset))
-    flush()  # 没有闭合的 <table> 也照样整块保留到结尾，不丢内容
-    blocks, dropped = _apply_templates(blocks, source_id)
-    removed += dropped
+        scanner.feed(line, offset)
+    scanner.flush()  # 没有闭合的 <table> 也照样整块保留到结尾，不丢内容
+    blocks, dropped = _apply_templates(scanner.blocks, source_id)
+    body, segments = _markdown_segments(blocks)
+    warnings = [] if body else ["no_body"]
+    return _result(body, segments, detect_language(body), scanner.removed + dropped, warnings)
 
+
+class _MarkdownBlocks:
+    """The blocks of a Markdown text, line by line: blocks[i] = [kind, [(line, offset), ...]]; removed counts the
+    boilerplate lines left out."""
+
+    def __init__(self):
+        self.blocks = []
+        self.current = None
+        self.removed = 0
+        self.in_html_table = False
+
+    def flush(self):
+        if self.current is not None and self.current[1]:
+            self.blocks.append(self.current)
+        self.current = None
+
+    def feed(self, line, offset):
+        norm = _norm_line(line)
+        if self.in_html_table:
+            self._html_table_line(line, offset)
+        elif not norm:
+            self.flush()
+        elif _HTML_TABLE_OPEN.match(norm):
+            self._html_table_open(line, offset)
+        elif norm.startswith("|"):
+            self._pipe_table_line(line, offset)
+        else:
+            self._text_line(line, offset, norm)
+
+    def _html_table_line(self, line, offset):
+        self.current[1].append((line, offset))
+        if _HTML_TABLE_CLOSE.search(line):
+            self.in_html_table = False
+            self.flush()
+
+    def _html_table_open(self, line, offset):
+        self.flush()
+        self.current = ["table", [(line, offset)]]
+        if _HTML_TABLE_CLOSE.search(line):
+            self.flush()
+        else:
+            self.in_html_table = True
+
+    def _pipe_table_line(self, line, offset):
+        if self.current is None or self.current[0] != "pipe_table":
+            self.flush()
+            self.current = ["pipe_table", []]
+        self.current[1].append((line, offset))
+
+    def _text_line(self, line, offset, norm):
+        if self.current is not None and self.current[0] == "pipe_table":
+            self.flush()
+        if is_boilerplate(norm):
+            self.removed += 1
+            self.flush()
+            return
+        if _HEADING.match(norm):
+            self.flush()
+            self.blocks.append(["heading", [(line, offset)]])
+            return
+        is_item = bool(_LIST_ITEM.match(norm))
+        if self.current is None:
+            self.current = ["list" if is_item else "paragraph", []]
+        elif self.current[0] == "paragraph" and is_item:
+            # 段落后紧跟列表项（无空行）：列表另起一段；列表后的非列表行视为列表项的续行
+            self.flush()
+            self.current = ["list", []]
+        self.current[1].append((line, offset))
+
+
+def _markdown_segments(blocks):
+    """The body (blocks joined by a blank line) and one segment per non-empty block → (body, segments)."""
     parts, segments, cursor = [], [], 0
     for kind, lines in blocks:
         seg_text = "\n".join(n for n in (_norm_line(x) for x, _ in lines) if n)
@@ -306,9 +342,7 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
         })
         parts.append(seg_text)
         cursor += len(seg_text)
-    body = "\n\n".join(parts)
-    warnings = [] if body else ["no_body"]
-    return _result(body, segments, detect_language(body), removed, warnings)
+    return "\n\n".join(parts), segments
 
 
 # ---------------------------------------------------------------- 临床登记
@@ -403,23 +437,31 @@ def _readable(value, path=""):
     只含标量的列表写成一行，用“; ”分隔；含结构的列表逐项展开，项前标 [序号]；更深的嵌套用“上级.键”写路径。
     空值不写。"""
     if isinstance(value, dict):
-        items = sorted((k, v) for k, v in value.items() if not _empty(v))
-        flat = [(k, v) for k, v in items if not isinstance(v, (dict, list))]
-        if flat:  # 标量字段同一行，嵌套的字段随后逐个展开
-            yield (path + " " if path else "") + "; ".join(k + ": " + _leaf(v) for k, v in flat)
-        for k, v in items:
-            if isinstance(v, (dict, list)):
-                yield from _readable(v, path + "." + k if path else k)
+        yield from _readable_dict(value, path)
     elif isinstance(value, list):
-        values = [v for v in value if not _empty(v)]
-        if all(not isinstance(v, (dict, list)) for v in values):
-            if values:
-                yield (path + ": " if path else "") + "; ".join(_leaf(v) for v in values)
-            return
-        for i, v in enumerate(values, 1):
-            yield from _readable(v, path + "[" + str(i) + "]")
+        yield from _readable_list(value, path)
     elif not _empty(value):
         yield (path + ": " if path else "") + _leaf(value)
+
+
+def _readable_dict(value, path):
+    items = sorted((k, v) for k, v in value.items() if not _empty(v))
+    flat = [(k, v) for k, v in items if not isinstance(v, (dict, list))]
+    if flat:  # 标量字段同一行，嵌套的字段随后逐个展开
+        yield (path + " " if path else "") + "; ".join(k + ": " + _leaf(v) for k, v in flat)
+    for k, v in items:
+        if isinstance(v, (dict, list)):
+            yield from _readable(v, path + "." + k if path else k)
+
+
+def _readable_list(value, path):
+    values = [v for v in value if not _empty(v)]
+    if all(not isinstance(v, (dict, list)) for v in values):
+        if values:
+            yield (path + ": " if path else "") + "; ".join(_leaf(v) for v in values)
+        return
+    for i, v in enumerate(values, 1):
+        yield from _readable(v, path + "[" + str(i) + "]")
 
 
 def _site(site):
@@ -740,74 +782,90 @@ def _who_blocks(html: str):
     """一节 HTML 的块，按文档顺序：[(kind, text)]，kind 为 heading / paragraph / list / table。"""
     from bs4 import BeautifulSoup, Comment, NavigableString
 
-    soup = BeautifulSoup(html, "html.parser")
-    out, inline = [], []
+    reader = _WhoBlockReader(Comment, NavigableString)
+    reader.walk(BeautifulSoup(html, "html.parser"))
+    reader.flush()
+    return reader.out
 
-    def flush():
-        text = normalize_whitespace(" ".join(inline)).replace("\n", " ")
-        inline.clear()
+
+def _who_text_block(kind, text, prefix=""):
+    return [(kind, prefix + text)] if text else []
+
+
+def _who_list_blocks(child):
+    out = []
+    for li in child.find_all("li", recursive=False):
+        out += _who_text_block("list", _who_text(li), "- ")
+    rest = [c for c in child.children if getattr(c, "name", None) != "li"]
+    for c in rest:  # 列表里不在 <li> 中的文字也不丢
+        text = c.get_text(" ", strip=True) if hasattr(c, "get_text") else str(c).strip()
         if text:
-            out.append(("paragraph", text))
+            out.append(("paragraph", normalize_whitespace(text).replace("\n", " ")))
+    return out
 
-    def walk(node):
+
+def _who_table_blocks(child):
+    if child.find("table") is not None:
+        # 嵌套表格：行列关系没有可靠的展开方式，不冒充结构化表格；可读文字整块保留（含表题）
+        return _who_text_block("table_degraded", _who_text(child))
+    caption, table, placeholders = _who_table(child)
+    out = []
+    if caption:
+        out.append(("paragraph", caption))
+    if table:
+        out.append(("table", table, placeholders))
+    return out
+
+
+def _who_element_blocks(child):
+    """The blocks of one block-level element; None for a container, which is read block by block
+    (div / section / blockquote / figure / unknown: a table inside a figure is still a table)."""
+    name = child.name
+    if name in _HEADING_TAGS:
+        return _who_text_block("heading", _who_text(child), "#" * max(2, int(name[1])) + " ")
+    if name in ("p", "figcaption"):
+        return _who_text_block("paragraph", _who_text(child))
+    if name in ("ul", "ol"):
+        return _who_list_blocks(child)
+    if name == "li":
+        return _who_text_block("list", _who_text(child), "- ")
+    if name == "table":
+        return _who_table_blocks(child)
+    return None
+
+
+class _WhoBlockReader:
+    """Walks one section's HTML in document order; inline text between blocks becomes a paragraph."""
+
+    def __init__(self, comment_type, string_type):
+        self.comment_type, self.string_type = comment_type, string_type
+        self.out, self.inline = [], []
+
+    def flush(self):
+        text = normalize_whitespace(" ".join(self.inline)).replace("\n", " ")
+        self.inline.clear()
+        if text:
+            self.out.append(("paragraph", text))
+
+    def walk(self, node):
         for child in node.children:
-            if isinstance(child, Comment):
+            if isinstance(child, self.comment_type):
                 continue
-            if isinstance(child, NavigableString):
+            if isinstance(child, self.string_type):
                 if child.strip():
-                    inline.append(str(child))
+                    self.inline.append(str(child))
                 continue
-            name = child.name
-            if name in _INLINE_TAGS:
+            if child.name in _INLINE_TAGS:
                 text = child.get_text(" ", strip=True)
                 if text:
-                    inline.append(text)
+                    self.inline.append(text)
                 continue
-            flush()
-            if name in _HEADING_TAGS:
-                text = _who_text(child)
-                if text:
-                    out.append(("heading", "#" * max(2, int(name[1])) + " " + text))
-            elif name == "p":
-                text = _who_text(child)
-                if text:
-                    out.append(("paragraph", text))
-            elif name in ("ul", "ol"):
-                for li in child.find_all("li", recursive=False):
-                    text = _who_text(li)
-                    if text:
-                        out.append(("list", "- " + text))
-                rest = [c for c in child.children if getattr(c, "name", None) != "li"]
-                for c in rest:  # 列表里不在 <li> 中的文字也不丢
-                    text = c.get_text(" ", strip=True) if hasattr(c, "get_text") else str(c).strip()
-                    if text:
-                        out.append(("paragraph", normalize_whitespace(text).replace("\n", " ")))
-            elif name == "li":
-                text = _who_text(child)
-                if text:
-                    out.append(("list", "- " + text))
-            elif name == "table" and child.find("table") is not None:
-                # 嵌套表格：行列关系没有可靠的展开方式，不冒充结构化表格；可读文字整块保留（含表题）
-                text = _who_text(child)
-                if text:
-                    out.append(("table_degraded", text))
-            elif name == "table":
-                caption, table, placeholders = _who_table(child)
-                if caption:
-                    out.append(("paragraph", caption))
-                if table:
-                    out.append(("table", table, placeholders))
-            elif name == "figcaption":
-                text = _who_text(child)
-                if text:
-                    out.append(("paragraph", text))
-            else:  # div / section / blockquote / figure / 未知容器：进去按块读（figure 里的表格仍是表格）
-                walk(child)
-        return out
-
-    walk(soup)
-    flush()
-    return out
+            self.flush()
+            blocks = _who_element_blocks(child)
+            if blocks is None:
+                self.walk(child)
+            else:
+                self.out.extend(blocks)
 
 
 def clean_who(raw_json: str) -> dict:

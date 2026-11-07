@@ -117,21 +117,15 @@ def _sections(markdown: str):
     return out or None
 
 
-def plan(payload: dict) -> dict:
-    """A legacy version's payload -> {status: ready | pending, reason, basis, real_source_id, real_record_id,
-    record_kind, envelope, block}. Pure: reads nothing but the version itself and the site rules."""
-    from collection.catalog import SITE_SOURCES
-    from collection.site_crawler import SITE_PROFILES
-
-    doc = json.loads(payload["raw_content"])
-    site = doc.get("source_site") or ""
+def _legacy_block(payload: dict, doc: dict, site: str) -> dict:
+    """The migration block: converter, the legacy version and record, hashes and what the old system claimed."""
     claimed = {
         "crawl_or_created_at": doc.get("original_created_at"),
         "updated_at": doc.get("original_updated_at"),
         "publish_date": doc.get("publish_date_raw"),
         "state_observed_at": doc.get("state_observed_at"),
     }
-    block = {
+    return {
         "converter": CONVERTER,
         "legacy_source_id": payload["source_id"],
         "legacy_record_id": payload["source_record_id"],
@@ -142,44 +136,46 @@ def plan(payload: dict) -> dict:
         "source_site": site,
         "claimed": claimed,
     }
-    out = {"status": "pending", "reason": None, "basis": None, "real_source_id": None, "real_record_id": None,
-           "record_kind": None, "envelope": None, "block": block}
-    if doc.get("publication_state") == "withdrawn":
-        return dict(out, reason="legacy_withdrawn")  # a deletion notice carries no content to migrate
-    markdown = doc.get("original_raw_content") or ""
-    meta, body = front_matter(markdown)
-    if site == "clinicaltrials":
-        sections = _sections(markdown)
-        nct = (((sections or {}).get("protocolSection") or {}).get("identificationModule") or {}).get("nctId")
-        if not sections or not isinstance(sections.get("protocolSection"), dict):
-            return dict(out, reason="embedded_json_incomplete")
-        if not isinstance(nct, str) or not NCT.match(nct):
-            return dict(out, reason="nct_not_found")
-        block = dict(block, basis="embedded_api_sections", sections=sorted(sections),
-                     scalar_rendering={k: "python_str" for k in SCALARS if k in sections})
-        return dict(out, status="ready", basis="embedded_api_sections", real_source_id="clinicaltrials",
-                    real_record_id=nct, record_kind="trial", block=block,
-                    envelope={"legacy_migration": block, **sections})
-    if site not in SITE_SOURCES:
-        return dict(out, reason="source_unknown")
-    profile = SITE_PROFILES.get(site) or {}
+
+
+def _plan_clinicaltrials(out: dict, block: dict, markdown: str) -> dict:
+    """ClinicalTrials.gov: the record is the nctId of the complete embedded API sections."""
+    sections = _sections(markdown)
+    nct = (((sections or {}).get("protocolSection") or {}).get("identificationModule") or {}).get("nctId")
+    if not sections or not isinstance(sections.get("protocolSection"), dict):
+        return dict(out, reason="embedded_json_incomplete")
+    if not isinstance(nct, str) or not NCT.match(nct):
+        return dict(out, reason="nct_not_found")
+    block = dict(block, basis="embedded_api_sections", sections=sorted(sections),
+                 scalar_rendering={k: "python_str" for k in SCALARS if k in sections})
+    return dict(out, status="ready", basis="embedded_api_sections", real_source_id="clinicaltrials",
+                real_record_id=nct, record_kind="trial", block=block,
+                envelope={"legacy_migration": block, **sections})
+
+
+def _site_record_proof(doc: dict, site: str, profile: dict, markdown: str):
+    """(record_id, basis, kind) when the legacy uuid is reproduced from the site's own rule, else the pending
+    reason."""
     legacy_uuid = doc.get("source_doc_uuid") or ""
     url = doc.get("source_url") or ""
     if profile.get("uid_field"):
         key = _field(markdown, profile["uid_field"])
         if key is None:
-            return dict(out, reason="record_key_not_found")
+            return "record_key_not_found"
         if _uuid5(site + ":" + key) != legacy_uuid:
-            return dict(out, reason="uuid_not_reproducible")
-        record_id, basis, kind = legacy_uuid, "uuid5_record_key", "record"
-    else:
-        if not of_site(url, profile.get("url_pattern") or ""):
-            return dict(out, reason="url_not_of_site")
-        if _uuid5(url) != legacy_uuid:
-            return dict(out, reason="detail_url_not_proven")
-        record_id, basis, kind = url, "uuid5_detail_url", "page"
-    block = dict(block, basis=basis)
-    capture = {
+            return "uuid_not_reproducible"
+        return legacy_uuid, "uuid5_record_key", "record"
+    if not of_site(url, profile.get("url_pattern") or ""):
+        return "url_not_of_site"
+    if _uuid5(url) != legacy_uuid:
+        return "detail_url_not_proven"
+    return url, "uuid5_detail_url", "page"
+
+
+def _legacy_capture(doc: dict, site: str, kind: str, record_id: str, meta: dict, body: str) -> dict:
+    """The legacy_capture body site_crawler.project_capture reads."""
+    url = doc.get("source_url") or ""
+    return {
         "schema_version": CAPTURE_SCHEMA,
         "role": "legacy_capture",
         "kind": kind,
@@ -189,6 +185,33 @@ def plan(payload: dict) -> dict:
         "parsed": {"title": doc.get("title") or meta.get("title") or "", "markdown": body.strip(),
                    "publish_date": meta.get("publish_date") or doc.get("publish_date_raw")},
     }
+
+
+def plan(payload: dict) -> dict:
+    """A legacy version's payload -> {status: ready | pending, reason, basis, real_source_id, real_record_id,
+    record_kind, envelope, block}. Pure: reads nothing but the version itself and the site rules."""
+    from collection.catalog import SITE_SOURCES
+    from collection.site_crawler import SITE_PROFILES
+
+    doc = json.loads(payload["raw_content"])
+    site = doc.get("source_site") or ""
+    block = _legacy_block(payload, doc, site)
+    out = {"status": "pending", "reason": None, "basis": None, "real_source_id": None, "real_record_id": None,
+           "record_kind": None, "envelope": None, "block": block}
+    if doc.get("publication_state") == "withdrawn":
+        return dict(out, reason="legacy_withdrawn")  # a deletion notice carries no content to migrate
+    markdown = doc.get("original_raw_content") or ""
+    meta, body = front_matter(markdown)
+    if site == "clinicaltrials":
+        return _plan_clinicaltrials(out, block, markdown)
+    if site not in SITE_SOURCES:
+        return dict(out, reason="source_unknown")
+    proof = _site_record_proof(doc, site, SITE_PROFILES.get(site) or {}, markdown)
+    if isinstance(proof, str):
+        return dict(out, reason=proof)
+    record_id, basis, kind = proof
+    block = dict(block, basis=basis)
+    capture = _legacy_capture(doc, site, kind, record_id, meta, body)
     return dict(out, status="ready", basis=basis, real_source_id=site, real_record_id=record_id,
                 record_kind="document", block=block, envelope={"legacy_migration": block, **capture})
 

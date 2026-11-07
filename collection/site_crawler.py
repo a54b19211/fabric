@@ -352,66 +352,97 @@ def read_site(request) -> dict:
         return _read(request, _Reader(request, budget))
 
 
+class _Progress:
+    """The parent item a read is at; the resume cursor of a stop names it."""
+
+    __slots__ = ("position",)
+
+    def __init__(self):
+        self.position = 0
+
+
+def _read_named(request, reader, start, at):
+    """query=by_url / stored_attachments: the parents are the requested record ids, in order."""
+    start_i, start_a, start_recorded = start
+    for url in request.source_record_ids:
+        if not _on_site(reader.site, url):
+            raise HistoryError("url_outside_site", "链接不属于该来源站点")
+    for position in range(start_i, len(request.source_record_ids)):
+        at.position = position
+        url = request.source_record_ids[position]
+        skip = start_a if position == start_i else 0
+        if request.query == "by_url":
+            reader.page(url, skip_attachments=skip,
+                        record_page=not (position == start_i and start_recorded))
+            continue
+        for k, link in enumerate(_stored_attachment_links(reader.site, url)):
+            if k < skip:
+                continue
+            try:
+                reader.attachment(link, url, None, "stored_attachments_table")
+            except _Stop as stop_here:
+                raise _Resume(stop_here.reason, k, page_recorded=False) from None
+
+
+def _read_site_records(request, reader, start, at):
+    """API and table-page sites: the parents are the site's results, replayed from the start."""
+    start_i, start_a, start_recorded = start
+    for position, (parsed, raw) in enumerate(_site_results(reader, request.query)):
+        at.position = position
+        if position < start_i:
+            continue
+        first = position == start_i
+        reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
+                           record_page=not (first and start_recorded))
+
+
+def _read_detail_pages(request, reader, start, at):
+    """List sites: the parents are the detail pages the list entry leads to."""
+    start_i, start_a, start_recorded = start
+    if request.query not in reader.profile.get("start_urls", []):
+        raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
+    seen = -1
+    for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
+        seen += 1
+        if seen < start_i:
+            continue
+        at.position = seen
+        first = seen == start_i
+        reader.page(url, skip_attachments=start_a if first else 0,
+                    record_page=not (first and start_recorded))
+
+
 def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
     续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件}。"""
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
-    position = 0
+    at = _Progress()
     try:
-        start_i, start_a, start_recorded = _cursor(request)
-        position = start_i
+        start = _cursor(request)
+        at.position = start[0]
         if request.query in {"by_url", "stored_attachments"}:
-            for url in request.source_record_ids:
-                if not _on_site(reader.site, url):
-                    raise HistoryError("url_outside_site", "链接不属于该来源站点")
-            for position in range(start_i, len(request.source_record_ids)):
-                url = request.source_record_ids[position]
-                skip = start_a if position == start_i else 0
-                if request.query == "by_url":
-                    reader.page(url, skip_attachments=skip,
-                                record_page=not (position == start_i and start_recorded))
-                    continue
-                for k, link in enumerate(_stored_attachment_links(reader.site, url)):
-                    if k < skip:
-                        continue
-                    try:
-                        reader.attachment(link, url, None, "stored_attachments_table")
-                    except _Stop as stop_here:
-                        raise _Resume(stop_here.reason, k, page_recorded=False) from None
-            exhausted = True
+            _read_named(request, reader, start, at)
         elif reader.profile.get("source_type") == "api" or reader.profile.get("source_type") == "table_page":
-            for position, (parsed, raw) in enumerate(_site_results(reader, request.query)):
-                if position < start_i:
-                    continue
-                first = position == start_i
-                reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
-                                   record_page=not (first and start_recorded))
-            exhausted = True
+            _read_site_records(request, reader, start, at)
         else:
-            if request.query not in reader.profile.get("start_urls", []):
-                raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
-            seen = -1
-            for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
-                seen += 1
-                if seen < start_i:
-                    continue
-                position = seen
-                first = seen == start_i
-                reader.page(url, skip_attachments=start_a if first else 0,
-                            record_page=not (first and start_recorded))
-            exhausted = True
+            _read_detail_pages(request, reader, start, at)
+        exhausted = True
     except _Resume as stopped:
-        stop, resume = stopped.reason, (position, stopped.attachment, stopped.page_recorded)
+        stop, resume = stopped.reason, (at.position, stopped.attachment, stopped.page_recorded)
     except _Stop as stopped:
-        stop, resume = stopped.reason, (position, 0, False)
+        stop, resume = stopped.reason, (at.position, 0, False)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
         if reader.budget.stopped:  # 浏览器里的请求因预算被中止，驱动随后报的错不是来源失败
-            stop, resume = reader.budget.stopped, (position, 0, False)
+            stop, resume = reader.budget.stopped, (at.position, 0, False)
         else:
             error = {"code": "source_read_failed", "message": "站点读取失败：" + type(exc).__name__}
             stop = "source_failed"
+    return _site_read_result(request, reader, exhausted, stop, error, resume)
+
+
+def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
     next_continuation = None
     if resume and error is None:
         next_continuation = {
@@ -435,6 +466,70 @@ def _read(request, reader) -> dict:
     }
 
 
+def _parsed_text(parsed):
+    """(title, clean text, publication time) of a parsed page."""
+    title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
+    return title, clean_text, source_time(parsed.get("publish_date") or None, "site_publish_date")
+
+
+def _web_capture_fields(data):
+    parsed = data.get("parsed") or {}
+    facts = {
+        "role": "web_capture",
+        "parse_method": parsed.get("parse_method"),
+        "html_sha256": data.get("html_sha256"),
+        "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
+        "extra": parsed.get("extra") or {},
+    }
+    return (facts, *_parsed_text(parsed))
+
+
+def _site_record_fields(data):
+    parsed = data.get("parsed") or {}
+    facts = {
+        "role": "site_record",
+        "parse_method": parsed.get("parse_method"),
+        "structured": parsed.get("structured_data") or {},
+        "extra": parsed.get("extra") or {},
+        "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
+        "source_fields_kept": data.get("raw") is not None,
+    }
+    return (facts, *_parsed_text(parsed))
+
+
+def _legacy_capture_fields(data):
+    parsed = data.get("parsed") or {}
+    facts = {"role": "legacy_capture", "capture_kind": data.get("kind"), "parse_method": "legacy_documents_markdown"}
+    return (facts, *_parsed_text(parsed))
+
+
+def _attachment_fields(data):
+    facts = {
+        k: data.get(k)
+        for k in ("parent_record_id", "file_name", "file_ext", "sha256", "size", "store_path", "discovered_from")
+    }
+    facts["role"] = "attachment"
+    return facts, data.get("file_name") or "", "", None
+
+
+# role -> (the schema version it must carry, its (facts, title, clean text, publication time) projection)
+_CAPTURE_ROLES = {
+    "web_capture": (WEB_SCHEMA, _web_capture_fields),
+    "site_record": (RECORD_SCHEMA, _site_record_fields),
+    "legacy_capture": (LEGACY_SCHEMA, _legacy_capture_fields),
+    "attachment": (ATT_SCHEMA, _attachment_fields),
+}
+
+
+def _expected_capture_id(role, data):
+    """The source record id a capture of this role must be stored under."""
+    if role == "attachment":
+        return attachment_record_id(data.get("parent_record_id") or "", data.get("url") or "")
+    if role in ("site_record", "legacy_capture"):
+        return data.get("record_id")
+    return data.get("url")
+
+
 def project_capture(source_id: str, item: ArchiveRecord) -> dict:
     """web_capture / site_record / attachment 原件的确定性投影。附件正文不在这里，由加工层产出。"""
     try:
@@ -442,51 +537,12 @@ def project_capture(source_id: str, item: ArchiveRecord) -> dict:
     except ValueError:
         raise HistoryError("invalid_source_fields", "站点原件不是合法 JSON") from None
     role = data.get("role") if isinstance(data, dict) else None
-    if role == "web_capture" and data.get("schema_version") == WEB_SCHEMA:
-        parsed = data.get("parsed") or {}
-        facts = {
-            "role": role,
-            "parse_method": parsed.get("parse_method"),
-            "html_sha256": data.get("html_sha256"),
-            "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
-            "extra": parsed.get("extra") or {},
-        }
-        title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
-        published = source_time(parsed.get("publish_date") or None, "site_publish_date")
-    elif role == "site_record" and data.get("schema_version") == RECORD_SCHEMA:
-        parsed = data.get("parsed") or {}
-        facts = {
-            "role": role,
-            "parse_method": parsed.get("parse_method"),
-            "structured": parsed.get("structured_data") or {},
-            "extra": parsed.get("extra") or {},
-            "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
-            "source_fields_kept": data.get("raw") is not None,
-        }
-        title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
-        published = source_time(parsed.get("publish_date") or None, "site_publish_date")
-    elif role == "legacy_capture" and data.get("schema_version") == LEGACY_SCHEMA:
-        parsed = data.get("parsed") or {}
-        facts = {"role": role, "capture_kind": data.get("kind"), "parse_method": "legacy_documents_markdown"}
-        title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
-        published = source_time(parsed.get("publish_date") or None, "site_publish_date")
-    elif role == "attachment" and data.get("schema_version") == ATT_SCHEMA:
-        facts = {
-            k: data.get(k)
-            for k in ("parent_record_id", "file_name", "file_ext", "sha256", "size", "store_path", "discovered_from")
-        }
-        facts["role"] = role
-        title, clean_text, published = data.get("file_name") or "", "", None
-    else:
+    kind = _CAPTURE_ROLES.get(role) if isinstance(role, str) else None
+    if kind is None or data.get("schema_version") != kind[0]:
         raise HistoryError("invalid_source_fields",
                            "站点原件不符合 web_capture / site_record / attachment / legacy_capture 契约")
-    if role == "attachment":
-        expected = attachment_record_id(data.get("parent_record_id") or "", data.get("url") or "")
-    elif role in ("site_record", "legacy_capture"):
-        expected = data.get("record_id")
-    else:
-        expected = data.get("url")
-    if expected != item.source_record_id or data.get("site") != source_id:
+    facts, title, clean_text, published = kind[1](data)
+    if _expected_capture_id(role, data) != item.source_record_id or data.get("site") != source_id:
         raise HistoryError("native_id_mismatch", "站点原件的链接或来源与记录不一致")
     return {
         "record_kind": "document",

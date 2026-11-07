@@ -215,6 +215,25 @@ def _claim(engine, key, chunk_seqs, lease_seconds):
 def _process_rows(conn, key, rows, counts):
     """一块版本：清洗（按输入复用）、编号、画像，批量写入。附件没解析完的记等待表。"""
     work = [r for r in rows if r["record_kind"] != "graph" and r["source_id"] not in SKIP_SOURCES]
+    prepared, inputs = _prepare_rows(conn, key, work, counts)
+    _reuse_cleaned(conn, inputs)
+    clean_rows, id_rows, profile_rows = [], [], []
+    for r, basis, sha, extra in prepared:
+        body, text_pv, warnings, parse_status = _version_text(r, basis, sha, extra, inputs, counts, clean_rows)
+        found = identifiers.extract(body) if body else []
+        for hit in found:
+            id_rows.append({"v": r["version_id"], "pv": identifiers.PROCESSOR_VERSION, "tpv": text_pv,
+                            "kind": hit["kind"], "value": hit["value"], "s": hit["start"], "e": hit["end"]})
+        prof = _profile_of(r, body, warnings, found, parse_status)
+        profile_rows.append(_profile_row(r, prof, text_pv))
+        counts[prof["route"]] = counts.get(prof["route"], 0) + 1
+    _write_rows(conn, clean_rows, id_rows, profile_rows, counts)
+
+
+def _prepare_rows(conn, key, work, counts):
+    """(prepared, inputs): per version (row, basis, input sha, cleaner input) or, for an attachment,
+    (row, None, None, its final parse result); inputs maps every input sha to None. An attachment whose parse
+    is not final yet goes into the waiting table instead, in row order."""
     attachments = [r["version_id"] for r in work if (r["facts"] or {}).get("role") == "attachment"]
     finals = _final_attachment_texts(conn, attachments)
     prepared, inputs = [], {}
@@ -233,7 +252,11 @@ def _process_rows(conn, key, rows, counts):
         sha = hashlib.sha256(json.dumps(inp, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         inputs[sha] = None
         prepared.append((r, basis, sha, inp))
-    # 已有结果（同样输入、同一清洗器版本）直接复用
+    return prepared, inputs
+
+
+def _reuse_cleaned(conn, inputs):
+    """已有结果（同样输入、同一清洗器版本）直接复用：fills inputs[sha] for every input already cleaned."""
     if inputs:
         for hit in conn.execute(text(
             "SELECT DISTINCT ON (input_sha256) input_sha256,text,segments,language,warnings FROM derived_clean_text "
@@ -241,54 +264,64 @@ def _process_rows(conn, key, rows, counts):
         ), {"shas": list(inputs), "pv": clean_text.PROCESSOR_VERSION}).mappings():
             inputs[hit["input_sha256"]] = {"text": hit["text"], "segments": hit["segments"], "language": hit["language"],
                                            "warnings": hit["warnings"], "processor_version": clean_text.PROCESSOR_VERSION}
-    clean_rows, id_rows, profile_rows = [], [], []
-    for r, basis, sha, extra in prepared:
-        facts = r["facts"] or {}
-        if basis is None:  # 附件：正文来自加工层
-            done = extra
-            body = done["text"] if done["status"] == "parsed" else ""
-            text_pv, warnings, parse_status = attachment_parse.PROCESSOR_VERSION, [], done["status"]
-        else:
-            result = inputs.get(sha)
-            if result is None:
-                result = _run_cleaner(r["source_id"], extra, basis)
-                inputs[sha] = result
-                counts["cleaned"] += 1
-            else:
-                counts["reused"] += 1
-            body, text_pv = result["text"], clean_text.PROCESSOR_VERSION
-            warnings, parse_status = list(result.get("warnings") or []), None
-            clean_rows.append({
-                "v": r["version_id"], "pv": text_pv, "source": r["source_id"], "demo": r["is_demo"],
-                "native": r["source_record_id"], "status": "parsed" if body else "failed", "method": basis,
-                "error": None if body else ",".join(warnings or ["no_body"]), "text": body, "chars": len(body),
-                "sha": hashlib.sha256(body.encode()).hexdigest(),
-                "kind": "json_pointer" if basis in ("registry_fields", "literature_fields") else "char_span",
-                "segments": json.dumps(_anchored(result.get("segments"), basis), ensure_ascii=False),
-                "lang": result.get("language"), "warnings": json.dumps(warnings), "input": sha,
-            })
-        found = identifiers.extract(body) if body else []
-        for hit in found:
-            id_rows.append({"v": r["version_id"], "pv": identifiers.PROCESSOR_VERSION, "tpv": text_pv,
-                            "kind": hit["kind"], "value": hit["value"], "s": hit["start"], "e": hit["end"]})
-        pub = facts.get("publication_types")
-        pub_types = pub.get("pubType") if isinstance(pub, dict) else pub
-        # 按内容分大类只看标题、摘要和来源给的类别字段（如 openFDA 召回记录的“药品召回”），不看正文
-        structured = facts.get("structured") or {}
-        lead = " ".join(str(x) for x in (r.get("title"), structured.get("summary"), structured.get("category")) if x)
-        prof = profile.profile(source_id=r["source_id"], role=facts.get("role"), chars=len(body), warnings=warnings,
-                               identifiers=found, pub_types=pub_types, parse_status=parse_status, lead_text=lead,
-                               text=body)
-        profile_rows.append({"v": r["version_id"], "pv": prof["processor_version"], "tpv": text_pv,
-                             "source": r["source_id"], "demo": r["is_demo"], "doc": prof["doc_type"],
-                             "cat": prof.get("doc_category"),
-                             "cats": json.dumps(prof.get("evidence_categories") or []),
-                             "ev": json.dumps(prof["evidence_types"]), "dec": json.dumps(prof["decisions"]),
-                             "q": json.dumps(prof["quality"], ensure_ascii=False), "route": prof["route"],
-                             "reasons": json.dumps(prof["route_reasons"], ensure_ascii=False),
-                             "exp": json.dumps(prof["experiment_types"], ensure_ascii=False),
-                             "level": json.dumps(prof["reading_level"])})
-        counts[prof["route"]] = counts.get(prof["route"], 0) + 1
+
+
+def _version_text(r, basis, sha, extra, inputs, counts, clean_rows):
+    """(body, text processor version, warnings, parse status) of one prepared version. A cleaned version
+    (basis given) is cleaned or reused by its input sha and its derived_clean_text row is appended to
+    clean_rows; an attachment's text comes from the processing layer."""
+    if basis is None:  # 附件：正文来自加工层
+        done = extra
+        body = done["text"] if done["status"] == "parsed" else ""
+        return body, attachment_parse.PROCESSOR_VERSION, [], done["status"]
+    result = inputs.get(sha)
+    if result is None:
+        result = _run_cleaner(r["source_id"], extra, basis)
+        inputs[sha] = result
+        counts["cleaned"] += 1
+    else:
+        counts["reused"] += 1
+    body, text_pv = result["text"], clean_text.PROCESSOR_VERSION
+    warnings = list(result.get("warnings") or [])
+    clean_rows.append({
+        "v": r["version_id"], "pv": text_pv, "source": r["source_id"], "demo": r["is_demo"],
+        "native": r["source_record_id"], "status": "parsed" if body else "failed", "method": basis,
+        "error": None if body else ",".join(warnings or ["no_body"]), "text": body, "chars": len(body),
+        "sha": hashlib.sha256(body.encode()).hexdigest(),
+        "kind": "json_pointer" if basis in ("registry_fields", "literature_fields") else "char_span",
+        "segments": json.dumps(_anchored(result.get("segments"), basis), ensure_ascii=False),
+        "lang": result.get("language"), "warnings": json.dumps(warnings), "input": sha,
+    })
+    return body, text_pv, warnings, None
+
+
+def _profile_of(r, body, warnings, found, parse_status):
+    facts = r["facts"] or {}
+    pub = facts.get("publication_types")
+    pub_types = pub.get("pubType") if isinstance(pub, dict) else pub
+    # 按内容分大类只看标题、摘要和来源给的类别字段（如 openFDA 召回记录的“药品召回”），不看正文
+    structured = facts.get("structured") or {}
+    lead = " ".join(str(x) for x in (r.get("title"), structured.get("summary"), structured.get("category")) if x)
+    return profile.profile(source_id=r["source_id"], role=facts.get("role"), chars=len(body), warnings=warnings,
+                           identifiers=found, pub_types=pub_types, parse_status=parse_status, lead_text=lead,
+                           text=body)
+
+
+def _profile_row(r, prof, text_pv):
+    return {"v": r["version_id"], "pv": prof["processor_version"], "tpv": text_pv,
+            "source": r["source_id"], "demo": r["is_demo"], "doc": prof["doc_type"],
+            "cat": prof.get("doc_category"),
+            "cats": json.dumps(prof.get("evidence_categories") or []),
+            "ev": json.dumps(prof["evidence_types"]), "dec": json.dumps(prof["decisions"]),
+            "q": json.dumps(prof["quality"], ensure_ascii=False), "route": prof["route"],
+            "reasons": json.dumps(prof["route_reasons"], ensure_ascii=False),
+            "exp": json.dumps(prof["experiment_types"], ensure_ascii=False),
+            "level": json.dumps(prof["reading_level"])}
+
+
+def _write_rows(conn, clean_rows, id_rows, profile_rows, counts):
+    """The chunk's batched writes, in this order: clean texts, identifiers, profiles, then (with the profiles,
+    in the same transaction) the index and extraction-check work they make due."""
     if clean_rows:
         conn.execute(text("""
             INSERT INTO derived_clean_text
@@ -476,24 +509,38 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_versio
                   "pvs": [processor_version] if processor_version else [clean_text.PROCESSOR_VERSION,
                                                                         attachment_parse.PROCESSOR_VERSION],
                   "prof": profile.PROCESSOR_VERSION, "idpv": identifiers.PROCESSOR_VERSION}
-        meta = {r["version_id"]: dict(r) for r in conn.execute(text(
-            "SELECT v.version_id,v.source_record_id,v.first_seen_at,v.proof_available_at FROM history_versions v "
-            "WHERE v.source_id=:source AND v.is_demo=:demo AND v.version_id=ANY(:ids) AND " + eligible),
-            params).mappings()}
-        visible = set(meta)
-        cleans = conn.execute(text(
-            "SELECT DISTINCT ON (version_id) version_id,processor_version,parse_method AS basis,text,text_sha256,"
-            "segments,language,warnings,"
-            "locator_kind,status FROM derived_clean_text WHERE version_id=ANY(:ids) AND processor_version=ANY(:pvs) "
-            "ORDER BY version_id, attempt DESC"), params).mappings().all()  # 当前处理器（或指定的那一版）
-        ids = conn.execute(text(
-            "SELECT version_id,text_processor_version,kind,value,start_offset,end_offset FROM derived_identifiers "
-            "WHERE version_id=ANY(:ids) AND processor_version=:idpv ORDER BY version_id,start_offset"),
-            params).mappings().all()
-        profiles = conn.execute(text(
-            "SELECT version_id,doc_type,doc_category,evidence_categories,evidence_types,decisions,quality,route,"
-            "route_reasons,experiment_types,reading_level,text_processor_version "
-            "FROM derived_profiles WHERE version_id=ANY(:ids) AND processor_version=:prof"), params).mappings().all()
+        meta, cleans, ids, profiles = _read_products(conn, eligible, params)
+    return {"schema_version": "datafabric.clean_stage.v1", "source_id": source_id, "mode": mode,
+            "as_of": cutoff.isoformat(), "versions": _version_products(version_ids, meta, cleans, ids, profiles),
+            "limitations": ["编号是文本抽取，宁漏勿误；结构化来源的原生编号以原件字段为准",
+                            "entity_match / fact_check 在这一层未评估，不代表没有问题"]}
+
+
+def _read_products(conn, eligible, params):
+    """(visible versions' metadata by id, clean texts, identifiers, profiles) of one page, in one transaction."""
+    meta = {r["version_id"]: dict(r) for r in conn.execute(text(
+        "SELECT v.version_id,v.source_record_id,v.first_seen_at,v.proof_available_at FROM history_versions v "
+        "WHERE v.source_id=:source AND v.is_demo=:demo AND v.version_id=ANY(:ids) AND " + eligible),
+        params).mappings()}
+    cleans = conn.execute(text(
+        "SELECT DISTINCT ON (version_id) version_id,processor_version,parse_method AS basis,text,text_sha256,"
+        "segments,language,warnings,"
+        "locator_kind,status FROM derived_clean_text WHERE version_id=ANY(:ids) AND processor_version=ANY(:pvs) "
+        "ORDER BY version_id, attempt DESC"), params).mappings().all()  # 当前处理器（或指定的那一版）
+    ids = conn.execute(text(
+        "SELECT version_id,text_processor_version,kind,value,start_offset,end_offset FROM derived_identifiers "
+        "WHERE version_id=ANY(:ids) AND processor_version=:idpv ORDER BY version_id,start_offset"),
+        params).mappings().all()
+    profiles = conn.execute(text(
+        "SELECT version_id,doc_type,doc_category,evidence_categories,evidence_types,decisions,quality,route,"
+        "route_reasons,experiment_types,reading_level,text_processor_version "
+        "FROM derived_profiles WHERE version_id=ANY(:ids) AND processor_version=:prof"), params).mappings().all()
+    return meta, cleans, ids, profiles
+
+
+def _version_products(version_ids, meta, cleans, ids, profiles):
+    """{version_id: state and products} of the requested page."""
+    visible = set(meta)
     out = {v: {"state": "not_visible_or_not_processed"} for v in version_ids}
     for v in visible:
         out[v] = {"state": "not_processed", **meta[v]}
@@ -504,19 +551,23 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_versio
                                     "identifiers": [], "profile": None}
     # 编号和画像只取在“这份”清洗正文上算出来的（同一版本可能有旧处理器版本留下的行）
     for i in ids:
-        entry = out.get(i["version_id"])
-        if entry and entry.get("state") == "processed" and i["text_processor_version"] == entry["clean"][
-                "processor_version"]:
+        entry = _processed_on(out, i)
+        if entry:
             entry["identifiers"].append({k: i[k] for k in i if k not in ("version_id", "text_processor_version")})
     for p in profiles:
-        entry = out.get(p["version_id"])
-        if entry and entry.get("state") == "processed" and p["text_processor_version"] == entry["clean"][
-                "processor_version"]:
+        entry = _processed_on(out, p)
+        if entry:
             entry["profile"] = {k: p[k] for k in p if k != "version_id"}
-    return {"schema_version": "datafabric.clean_stage.v1", "source_id": source_id, "mode": mode,
-            "as_of": cutoff.isoformat(), "versions": out,
-            "limitations": ["编号是文本抽取，宁漏勿误；结构化来源的原生编号以原件字段为准",
-                            "entity_match / fact_check 在这一层未评估，不代表没有问题"]}
+    return out
+
+
+def _processed_on(out, row):
+    """The processed entry a derived row belongs to when it was computed on that entry's clean text, else None."""
+    entry = out.get(row["version_id"])
+    if entry and entry.get("state") == "processed" and row["text_processor_version"] == entry["clean"][
+            "processor_version"]:
+        return entry
+    return None
 
 
 def identifier_links(version_id):

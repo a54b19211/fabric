@@ -73,6 +73,23 @@ def _cc_code(urls):
     return None
 
 
+def _licenses(article):
+    """(license URLs, license types, license statements) of every <license> of the article, in document order."""
+    urls, types, statements = [], [], []
+    for lic in article.iter("license"):
+        urls.append(lic.get(XLINK) or "")
+        types.append(lic.get("license-type") or "")
+        urls.extend((ref.text or "").strip() for ref in lic.iter(ALI))
+        statements.extend(" ".join("".join(p.itertext()).split())[:500] for p in lic.iter("license-p"))
+    return urls, types, statements
+
+
+def _has_body(article) -> bool:
+    """The article has a <body> with at least one non-empty paragraph."""
+    body = article.find("body")
+    return body is not None and any("".join(p.itertext()).strip() for p in body.iter("p"))
+
+
 def jats_access(raw: bytes, pmcid: str) -> dict:
     """PMC efetch 返回的 JATS → 可取得层级与许可（只看原件里写了什么）。"""
     head = raw[:4096]
@@ -86,15 +103,9 @@ def jats_access(raw: bytes, pmcid: str) -> dict:
     found = ids.get("pmcid") or ("PMC" + ids["pmc"] if ids.get("pmc") else "")
     if found and found.upper() != pmcid.upper():
         return {"tier": "pmc_id_mismatch", "license": None}
-    urls, types, statements = [], [], []
-    for lic in article.iter("license"):
-        urls.append(lic.get(XLINK) or "")
-        types.append(lic.get("license-type") or "")
-        urls.extend((ref.text or "").strip() for ref in lic.iter(ALI))
-        statements.extend(" ".join("".join(p.itertext()).split())[:500] for p in lic.iter("license-p"))
+    urls, types, statements = _licenses(article)
     urls = [u for u in urls if u]
-    body = article.find("body")
-    has_body = body is not None and any("".join(p.itertext()).strip() for p in body.iter("p"))
+    has_body = _has_body(article)
     code = _cc_code(urls)
     tier = ("pmc_fulltext_not_available" if not has_body
             else "pmc_fulltext_cc" if code else "pmc_license_unclear")
@@ -189,6 +200,12 @@ def _unpaywall(client, budget, pmid, doi):
              "oa_version": location.get("version"), "record_id": attachment_record_id(pmid, url)}
     if not (isinstance(license_value, str) and OPEN_UNPAYWALL.fullmatch(license_value.strip())):
         return {**entry, "status": "oa_license_unclear", "needs_review": True}, None
+    return _store_oa_pdf(budget, pmid, doi, entry, location)
+
+
+def _store_oa_pdf(budget, pmid, doi, entry, location):
+    """Download the open-licence PDF Unpaywall named and make it the attachment version."""
+    url, license_value = location["url_for_pdf"], location.get("license")
     try:
         info = _download(url, pmid=pmid, cap=max(0, min(max_file_bytes(), budget.max_bytes - budget.bytes)),
                          timeout=budget.timeout(60.0))

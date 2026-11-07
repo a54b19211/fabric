@@ -48,32 +48,42 @@ def parse(path, *, token=None, client=None, model_version="pipeline", poll_secon
         upload = client.put(body["data"]["file_urls"][0], content=file.read_bytes())
         if upload.status_code != 200:
             return _fail("cloud_upload_failed")
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            polled = client.get(BASE + "/api/v4/extract-results/batch/" + batch_id, headers=headers).json()
-            results = (polled.get("data") or {}).get("extract_result") or []
-            state = results[0].get("state") if results else None
-            if state == "done":
-                archive = client.get(results[0]["full_zip_url"])
-                with zipfile.ZipFile(io.BytesIO(archive.content)) as z:
-                    names = [n for n in z.namelist() if n.endswith("full.md")]
-                    if not names:
-                        return _fail("cloud_no_markdown")
-                    out = {"success": True, "markdown": z.read(names[0]).decode("utf-8"), "error": ""}
-                    lists = [n for n in z.namelist() if n.endswith("content_list.json")]
-                    if lists:  # 每个内容块的 page_idx，加工层用来定位
-                        try:
-                            out["content_list"] = json.loads(z.read(sorted(lists, key=len)[0]))
-                        except ValueError:
-                            out["content_list"] = None
-                    return out
-            if state == "failed":
-                return _fail("cloud_failed")
-            if time.monotonic() >= deadline:
-                return _fail("cloud_timeout")
-            time.sleep(poll_seconds)
+        return _wait_for_result(client, headers, batch_id, poll_seconds, timeout_seconds)
     except (httpx.HTTPError, ValueError, KeyError, IndexError, zipfile.BadZipFile):
         return _fail("cloud_error")
     finally:
         if own:
             client.close()
+
+
+def _wait_for_result(client, headers, batch_id, poll_seconds, timeout_seconds):
+    """Poll the batch until it is done (then read its archive), failed, or past the deadline."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        polled = client.get(BASE + "/api/v4/extract-results/batch/" + batch_id, headers=headers).json()
+        results = (polled.get("data") or {}).get("extract_result") or []
+        state = results[0].get("state") if results else None
+        if state == "done":
+            archive = client.get(results[0]["full_zip_url"])
+            return _read_archive(archive.content)
+        if state == "failed":
+            return _fail("cloud_failed")
+        if time.monotonic() >= deadline:
+            return _fail("cloud_timeout")
+        time.sleep(poll_seconds)
+
+
+def _read_archive(content):
+    """full.md of the result archive, with the content list (each block's page_idx) when there is one."""
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        names = [n for n in z.namelist() if n.endswith("full.md")]
+        if not names:
+            return _fail("cloud_no_markdown")
+        out = {"success": True, "markdown": z.read(names[0]).decode("utf-8"), "error": ""}
+        lists = [n for n in z.namelist() if n.endswith("content_list.json")]
+        if lists:  # 每个内容块的 page_idx，加工层用来定位
+            try:
+                out["content_list"] = json.loads(z.read(sorted(lists, key=len)[0]))
+            except ValueError:
+                out["content_list"] = None
+        return out

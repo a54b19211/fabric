@@ -149,29 +149,38 @@ def immaterial_reason(key, old, new, old_present, new_present) -> str | None:
 def _detail(key, old, new, old_present, new_present) -> dict:
     """描述用的细节（天数、增减、名称增删、地点数），只复述，不参与“是否送模型”。缺失就是未知。"""
     kind = FIELDS[key]
-    detail = {}
     if kind == "enrollment_change" and isinstance(old, int) and isinstance(new, int):
-        detail["delta"] = new - old
-    elif kind == "date_change":
-        a, pa = _parse_date(old)
-        b, pb = _parse_date(new)
-        if a and b:
-            days = (b - a).days
-            detail.update(
-                days=days,
-                precision="day" if pa == pb == "day" else "month",
-                direction="later" if days > 0 else "earlier" if days < 0 else "same_at_precision",
-            )
-    elif kind in {"condition_change", "intervention_change", "arm_change", "primary_outcome_change",
-                  "secondary_outcome_change"}:
-        before, after = _names(old), _names(new)
-        detail["added"] = [x for x in after if x not in before][:20]
-        detail["removed"] = [x for x in before if x not in after][:20]
-        if not detail["added"] and not detail["removed"]:
-            detail["same_names_content_changed"] = True  # 同名项内容变了（如剂量、描述），要看原件
-    elif kind == "location_change":
-        detail["count_before"] = len(old) if old_present and isinstance(old, list) else None
-        detail["count_after"] = len(new) if new_present and isinstance(new, list) else None
+        return {"delta": new - old}
+    if kind == "date_change":
+        return _date_detail(old, new)
+    if kind in {"condition_change", "intervention_change", "arm_change", "primary_outcome_change",
+                "secondary_outcome_change"}:
+        return _names_detail(old, new)
+    if kind == "location_change":
+        return {"count_before": len(old) if old_present and isinstance(old, list) else None,
+                "count_after": len(new) if new_present and isinstance(new, list) else None}
+    return {}
+
+
+def _date_detail(old, new) -> dict:
+    a, pa = _parse_date(old)
+    b, pb = _parse_date(new)
+    if not (a and b):
+        return {}
+    days = (b - a).days
+    return {
+        "days": days,
+        "precision": "day" if pa == pb == "day" else "month",
+        "direction": "later" if days > 0 else "earlier" if days < 0 else "same_at_precision",
+    }
+
+
+def _names_detail(old, new) -> dict:
+    before, after = _names(old), _names(new)
+    detail = {"added": [x for x in after if x not in before][:20],
+              "removed": [x for x in before if x not in after][:20]}
+    if not detail["added"] and not detail["removed"]:
+        detail["same_names_content_changed"] = True  # 同名项内容变了（如剂量、描述），要看原件
     return detail
 
 

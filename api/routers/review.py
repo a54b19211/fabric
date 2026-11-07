@@ -599,255 +599,269 @@ def get_review_graph(
         statuses = ["pending", "approved"]
 
     type_list = [t.strip() for t in entity_types.split(",") if t.strip()]
+    entity_filters = (statuses, type_list, source_site, source_doc_uuid)
 
     with get_session() as session:
         if session is None:
             raise HTTPException(status_code=503, detail="数据库未连接")
-
-        # ── 公共：关系度数子查询 ──────────────────────────────────────────
-        def _degree_subquery():
-            from_deg = (
-                session.query(
-                    EntityRelation.from_entity_id.label('entity_id'),
-                    func.count('*').label('degree'),
-                )
-                .filter(
-                    EntityRelation.review_status.in_(statuses),
-                    EntityRelation.is_deleted == false(),
-                )
-                .group_by(EntityRelation.from_entity_id)
-            )
-            to_deg = (
-                session.query(
-                    EntityRelation.to_entity_id.label('entity_id'),
-                    func.count('*').label('degree'),
-                )
-                .filter(
-                    EntityRelation.review_status.in_(statuses),
-                    EntityRelation.is_deleted == false(),
-                )
-                .group_by(EntityRelation.to_entity_id)
-            )
-            union = from_deg.union_all(to_deg).subquery()
-            return (
-                session.query(
-                    union.c.entity_id,
-                    func.sum(union.c.degree).label('degree'),
-                )
-                .group_by(union.c.entity_id)
-                .subquery()
-            )
-
-        degree_agg = _degree_subquery()
-
-        # ── 公共：实体基础过滤 ────────────────────────────────────────────
-        def _entity_filter(q):
-            q = q.filter(
-                ExtractedEntity.review_status.in_(statuses),
-                ExtractedEntity.is_deleted == false(),
-            )
-            if type_list:
-                q = q.filter(ExtractedEntity.entity_type.in_(type_list))
-            if source_site:
-                q = q.filter(ExtractedEntity.source_site == source_site)
-            if source_doc_uuid:
-                q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
-            return q
-
-        # ── 公共：按实体 ID 拉取完整数据 ──────────────────────────────────
-        _NODE_COLS = (
-            ExtractedEntity.id,
-            ExtractedEntity.entity_type,
-            ExtractedEntity.entity_name,
-            ExtractedEntity.entity_data,
-            ExtractedEntity.dict_id,
-            ExtractedEntity.review_status,
-            ExtractedEntity.source_doc_uuid,
-            ExtractedEntity.source_site,
-            ExtractedEntity.confidence_score,
-            EntityDict.is_verified,
-            ExtractedEntity.source_version_id, ExtractedEntity.source_quote,
-            ExtractedEntity.source_char_start, ExtractedEntity.source_char_end,
-            ExtractedEntity.first_seen_at, ExtractedEntity.valid_from, ExtractedEntity.valid_to,
-            ExtractedEntity.reviewed_by, ExtractedEntity.reviewed_at, ExtractedEntity.reviewer_note,
-            ExtractedEntity.identity_confirmed_by, ExtractedEntity.identity_confirmed_at,
-            ExtractedEntity.identity_confirmation_basis,
-            EntityDict.verified_by.label('dict_verified_by'), EntityDict.verified_at.label('dict_verified_at'),
-            EntityDict.verification_basis.label('dict_verification_basis'),
-
-        )
-
-        def _fetch_nodes(entity_ids: list[int]) -> list[GraphNode]:
-            rows = (
-                session.query(*_NODE_COLS)
-                .outerjoin(EntityDict, ExtractedEntity.dict_id == EntityDict.id)
-                .filter(ExtractedEntity.id.in_(entity_ids))
-                .all()
-            )
-            evidence_map = get_objects_evidence('entity', entity_ids, session=session)
-            review_evidence_map = get_current_review_evidence('entity', entity_ids, session=session)
-            row_map = {r.id: r for r in rows}
-            return [
-                GraphNode(
-                    evidence=evidence_map.get(eid, []),
-                    current_review_evidence=review_evidence_map.get(eid, []),
-                    id=row_map[eid].id,
-                    entity_type=row_map[eid].entity_type or "",
-                    entity_name=row_map[eid].entity_name or "",
-                    entity_data=row_map[eid].entity_data or {},
-                    dict_id=row_map[eid].dict_id,
-                    review_status=row_map[eid].review_status or "",
-                    source_doc_uuid=row_map[eid].source_doc_uuid or "",
-                    confidence_score=row_map[eid].confidence_score or 0.0,
-                    is_verified=row_map[eid].is_verified if row_map[eid].is_verified is not None else False,
-                    **_source_review_fields(row_map[eid]), **_mention_review_fields(row_map[eid]),
-                    dict_context={'id': row_map[eid].dict_id, 'is_verified': row_map[eid].is_verified,
-                                  'verified_by': row_map[eid].dict_verified_by, 'verified_at': row_map[eid].dict_verified_at,
-                                  'verification_basis': row_map[eid].dict_verification_basis} if row_map[eid].dict_id else None,
-                )
-                for eid in entity_ids
-            ]
-
-        # ── 公共：边查询 ──────────────────────────────────────────────────
-        def _fetch_edges(node_ids: list[int]) -> list[GraphEdge]:
-            if not node_ids:
-                return []
-            rq = session.query(
-                EntityRelation.id,
-                EntityRelation.relation_type,
-                EntityRelation.from_entity_id,
-                EntityRelation.to_entity_id,
-                EntityRelation.review_status,
-                EntityRelation.relation_props,
-                EntityRelation.source_doc_uuid,
-                EntityRelation.source_site, EntityRelation.source_version_id, EntityRelation.source_quote,
-                EntityRelation.source_char_start, EntityRelation.source_char_end,
-                EntityRelation.first_seen_at, EntityRelation.valid_from, EntityRelation.valid_to,
-                EntityRelation.reviewed_by, EntityRelation.reviewed_at, EntityRelation.reviewer_note,
-            ).filter(
-                EntityRelation.review_status.in_(statuses),
-                EntityRelation.is_deleted == false(),
-                EntityRelation.from_entity_id.in_(node_ids),
-                EntityRelation.to_entity_id.in_(node_ids),
-            )
-            if source_doc_uuid:
-                rq = rq.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
-            rows = rq.all()
-            evidence_map = get_objects_evidence('relation', [row.id for row in rows], session=session)
-            review_evidence_map = get_current_review_evidence('relation', [row.id for row in rows], session=session)
-            return [
-                GraphEdge(
-                    evidence=evidence_map.get(r.id, []),
-                    current_review_evidence=review_evidence_map.get(r.id, []),
-                    id=r.id,
-                    relation_type=r.relation_type or "",
-                    from_entity_id=r.from_entity_id,
-                    to_entity_id=r.to_entity_id,
-                    review_status=r.review_status or "",
-                    relation_props=r.relation_props or {},
-                    source_doc_uuid=r.source_doc_uuid or "",
-                    **_source_review_fields(r),
-                )
-                for r in rows
-            ]
-
-        # ══════════════════════════════════════════════════════════════════
-        # 遍历模式选择
-        # ══════════════════════════════════════════════════════════════════
-
+        degree_agg = _graph_degree_subquery(session, statuses)
         if traversal == "bfs":
-            # ── BFS 模式：从高连接度种子节点逐跳展开 ─────────────────────
-
-            # Step 1: 获取所有符合过滤条件的实体 ID + 度数
-            all_entities_q = (
-                session.query(
-                    ExtractedEntity.id,
-                    func.coalesce(degree_agg.c.degree, 0).label('degree'),
-                )
-                .outerjoin(degree_agg, ExtractedEntity.id == degree_agg.c.entity_id)
-            )
-            all_entities_q = _entity_filter(all_entities_q)
-            all_entities = {row.id: row.degree for row in all_entities_q.all()}
-
-            if not all_entities:
+            ordered_ids = _graph_bfs_ids(session, degree_agg, entity_filters, limit, max_depth)
+            if ordered_ids is None:
                 return GraphResponse(nodes=[], edges=[], entity_types=[], source_sites=[])
-
-            # Step 3: 构建邻接表（仅查匹配实体之间的边）
-            all_ids = set(all_entities.keys())
-            adj: dict[int, list[int]] = {eid: [] for eid in all_ids}
-            rel_rows = session.query(
-                EntityRelation.from_entity_id,
-                EntityRelation.to_entity_id,
-            ).filter(
-                EntityRelation.review_status.in_(statuses),
-                EntityRelation.is_deleted == false(),
-                EntityRelation.from_entity_id.in_(all_ids),
-                EntityRelation.to_entity_id.in_(all_ids),
-            ).all()
-            for from_id, to_id in rel_rows:
-                adj[from_id].append(to_id)
-                adj[to_id].append(from_id)
-
-            # Step 4: BFS 逐跳展开，队列空了就从剩余未访问节点补种子
-            visited: list[int] = []
-            visited_set: set[int] = set()
-            # 按度数降序排列，作为种子选取顺序
-            sorted_by_deg = sorted(all_entities.items(), key=lambda x: x[1], reverse=True)
-            seed_idx = 0
-
-            while len(visited) < limit and seed_idx < len(sorted_by_deg):
-                # 找下一个未访问的最高度节点当新种子
-                frontier = deque()
-                while seed_idx < len(sorted_by_deg):
-                    sid, _ = sorted_by_deg[seed_idx]
-                    seed_idx += 1
-                    if sid not in visited_set:
-                        frontier.append((sid, 0))
-                        break
-
-                # 从该种子 BFS 展开
-                while frontier and len(visited) < limit:
-                    eid, depth = frontier.popleft()
-                    if eid in visited_set:
-                        continue
-                    visited.append(eid)
-                    visited_set.add(eid)
-                    if depth < max_depth:
-                        for neighbor in adj.get(eid, []):
-                            if neighbor not in visited_set:
-                                frontier.append((neighbor, depth + 1))
-
-            ordered_ids = visited[:limit]
-
         else:
-            # ── degree 模式：按度数降序 ──────────────────────────────────
-            q = (
-                session.query(ExtractedEntity.id)
-                .outerjoin(degree_agg, ExtractedEntity.id == degree_agg.c.entity_id)
-            )
-            q = _entity_filter(q)
-            q = q.order_by(func.coalesce(degree_agg.c.degree, 0).desc())
-            ordered_ids = [r.id for r in q.limit(limit).all()]
-
-        # ── 拉取节点 + 边 ────────────────────────────────────────────────
-        nodes = _fetch_nodes(ordered_ids)
-        edges = _fetch_edges(ordered_ids) if include_relations else []
+            ordered_ids = _graph_degree_ids(session, degree_agg, entity_filters, limit)
+        nodes = _graph_nodes(session, ordered_ids)
+        edges = _graph_edges(session, ordered_ids, statuses, source_doc_uuid) if include_relations else []
 
     return GraphResponse(
         nodes=nodes,
         edges=edges,
-        entity_types=sorted(
-            t[0] for t in session.query(ExtractedEntity.entity_type.distinct())
-            .filter(ExtractedEntity.is_deleted == false(), ExtractedEntity.entity_type.isnot(None))
-            .all()
-            if t[0]
-        ),
-        source_sites=sorted(
-            s[0] for s in session.query(ExtractedEntity.source_site.distinct())
-            .filter(ExtractedEntity.is_deleted == false(), ExtractedEntity.source_site.isnot(None))
-            .all()
-            if s[0]
-        ),
+        entity_types=_graph_distinct(session, ExtractedEntity.entity_type),
+        source_sites=_graph_distinct(session, ExtractedEntity.source_site),
+    )
+
+
+# The steps of get_review_graph. A relation counts towards a node's degree, and joins two nodes, only when it
+# is in one of the requested review statuses and not deleted.
+
+def _graph_degree_subquery(session, statuses):
+    """Per entity ID, the number of relation ends at it."""
+    from_deg = (
+        session.query(
+            EntityRelation.from_entity_id.label('entity_id'),
+            func.count('*').label('degree'),
+        )
+        .filter(
+            EntityRelation.review_status.in_(statuses),
+            EntityRelation.is_deleted == false(),
+        )
+        .group_by(EntityRelation.from_entity_id)
+    )
+    to_deg = (
+        session.query(
+            EntityRelation.to_entity_id.label('entity_id'),
+            func.count('*').label('degree'),
+        )
+        .filter(
+            EntityRelation.review_status.in_(statuses),
+            EntityRelation.is_deleted == false(),
+        )
+        .group_by(EntityRelation.to_entity_id)
+    )
+    union = from_deg.union_all(to_deg).subquery()
+    return (
+        session.query(
+            union.c.entity_id,
+            func.sum(union.c.degree).label('degree'),
+        )
+        .group_by(union.c.entity_id)
+        .subquery()
+    )
+
+
+def _graph_entity_filter(q, entity_filters):
+    statuses, type_list, source_site, source_doc_uuid = entity_filters
+    q = q.filter(
+        ExtractedEntity.review_status.in_(statuses),
+        ExtractedEntity.is_deleted == false(),
+    )
+    if type_list:
+        q = q.filter(ExtractedEntity.entity_type.in_(type_list))
+    if source_site:
+        q = q.filter(ExtractedEntity.source_site == source_site)
+    if source_doc_uuid:
+        q = q.filter(ExtractedEntity.source_doc_uuid == source_doc_uuid)
+    return q
+
+
+def _graph_bfs_ids(session, degree_agg, entity_filters, limit, max_depth):
+    """BFS mode: up to `limit` entity IDs expanded hop by hop from the highest-degree seeds; None when no
+    entity matches the filters."""
+    all_entities_q = (
+        session.query(
+            ExtractedEntity.id,
+            func.coalesce(degree_agg.c.degree, 0).label('degree'),
+        )
+        .outerjoin(degree_agg, ExtractedEntity.id == degree_agg.c.entity_id)
+    )
+    all_entities_q = _graph_entity_filter(all_entities_q, entity_filters)
+    all_entities = {row.id: row.degree for row in all_entities_q.all()}
+    if not all_entities:
+        return None
+    adj = _graph_adjacency(session, entity_filters[0], set(all_entities.keys()))
+    return _graph_bfs_visit(all_entities, adj, limit, max_depth)
+
+
+def _graph_adjacency(session, statuses, all_ids):
+    """The adjacency lists of the matching entities, over the relations between them only."""
+    adj: dict[int, list[int]] = {eid: [] for eid in all_ids}
+    rel_rows = session.query(
+        EntityRelation.from_entity_id,
+        EntityRelation.to_entity_id,
+    ).filter(
+        EntityRelation.review_status.in_(statuses),
+        EntityRelation.is_deleted == false(),
+        EntityRelation.from_entity_id.in_(all_ids),
+        EntityRelation.to_entity_id.in_(all_ids),
+    ).all()
+    for from_id, to_id in rel_rows:
+        adj[from_id].append(to_id)
+        adj[to_id].append(from_id)
+    return adj
+
+
+def _graph_bfs_visit(all_entities, adj, limit, max_depth):
+    """BFS hop by hop; when the queue runs dry the highest-degree unvisited entity is the next seed."""
+    visited: list[int] = []
+    visited_set: set[int] = set()
+    # 按度数降序排列，作为种子选取顺序
+    sorted_by_deg = sorted(all_entities.items(), key=lambda x: x[1], reverse=True)
+    seed_idx = 0
+
+    while len(visited) < limit and seed_idx < len(sorted_by_deg):
+        # 找下一个未访问的最高度节点当新种子
+        frontier = deque()
+        while seed_idx < len(sorted_by_deg):
+            sid, _ = sorted_by_deg[seed_idx]
+            seed_idx += 1
+            if sid not in visited_set:
+                frontier.append((sid, 0))
+                break
+
+        # 从该种子 BFS 展开
+        while frontier and len(visited) < limit:
+            eid, depth = frontier.popleft()
+            if eid in visited_set:
+                continue
+            visited.append(eid)
+            visited_set.add(eid)
+            if depth < max_depth:
+                for neighbor in adj.get(eid, []):
+                    if neighbor not in visited_set:
+                        frontier.append((neighbor, depth + 1))
+
+    return visited[:limit]
+
+
+def _graph_degree_ids(session, degree_agg, entity_filters, limit):
+    """Degree mode: up to `limit` matching entity IDs by degree, highest first."""
+    q = (
+        session.query(ExtractedEntity.id)
+        .outerjoin(degree_agg, ExtractedEntity.id == degree_agg.c.entity_id)
+    )
+    q = _graph_entity_filter(q, entity_filters)
+    q = q.order_by(func.coalesce(degree_agg.c.degree, 0).desc())
+    return [r.id for r in q.limit(limit).all()]
+
+
+def _graph_node_columns():
+    return (
+        ExtractedEntity.id,
+        ExtractedEntity.entity_type,
+        ExtractedEntity.entity_name,
+        ExtractedEntity.entity_data,
+        ExtractedEntity.dict_id,
+        ExtractedEntity.review_status,
+        ExtractedEntity.source_doc_uuid,
+        ExtractedEntity.source_site,
+        ExtractedEntity.confidence_score,
+        EntityDict.is_verified,
+        ExtractedEntity.source_version_id, ExtractedEntity.source_quote,
+        ExtractedEntity.source_char_start, ExtractedEntity.source_char_end,
+        ExtractedEntity.first_seen_at, ExtractedEntity.valid_from, ExtractedEntity.valid_to,
+        ExtractedEntity.reviewed_by, ExtractedEntity.reviewed_at, ExtractedEntity.reviewer_note,
+        ExtractedEntity.identity_confirmed_by, ExtractedEntity.identity_confirmed_at,
+        ExtractedEntity.identity_confirmation_basis,
+        EntityDict.verified_by.label('dict_verified_by'), EntityDict.verified_at.label('dict_verified_at'),
+        EntityDict.verification_basis.label('dict_verification_basis'),
+    )
+
+
+def _graph_nodes(session, entity_ids: list[int]) -> list[GraphNode]:
+    """The nodes of the given entity IDs, in that order, with their evidence and dictionary context."""
+    rows = (
+        session.query(*_graph_node_columns())
+        .outerjoin(EntityDict, ExtractedEntity.dict_id == EntityDict.id)
+        .filter(ExtractedEntity.id.in_(entity_ids))
+        .all()
+    )
+    evidence_map = get_objects_evidence('entity', entity_ids, session=session)
+    review_evidence_map = get_current_review_evidence('entity', entity_ids, session=session)
+    row_map = {r.id: r for r in rows}
+    return [
+        GraphNode(
+            evidence=evidence_map.get(eid, []),
+            current_review_evidence=review_evidence_map.get(eid, []),
+            id=row_map[eid].id,
+            entity_type=row_map[eid].entity_type or "",
+            entity_name=row_map[eid].entity_name or "",
+            entity_data=row_map[eid].entity_data or {},
+            dict_id=row_map[eid].dict_id,
+            review_status=row_map[eid].review_status or "",
+            source_doc_uuid=row_map[eid].source_doc_uuid or "",
+            confidence_score=row_map[eid].confidence_score or 0.0,
+            is_verified=row_map[eid].is_verified if row_map[eid].is_verified is not None else False,
+            **_source_review_fields(row_map[eid]), **_mention_review_fields(row_map[eid]),
+            dict_context={'id': row_map[eid].dict_id, 'is_verified': row_map[eid].is_verified,
+                          'verified_by': row_map[eid].dict_verified_by, 'verified_at': row_map[eid].dict_verified_at,
+                          'verification_basis': row_map[eid].dict_verification_basis} if row_map[eid].dict_id else None,
+        )
+        for eid in entity_ids
+    ]
+
+
+def _graph_edges(session, node_ids: list[int], statuses, source_doc_uuid) -> list[GraphEdge]:
+    """The relations between the given nodes, with their evidence."""
+    if not node_ids:
+        return []
+    rq = session.query(
+        EntityRelation.id,
+        EntityRelation.relation_type,
+        EntityRelation.from_entity_id,
+        EntityRelation.to_entity_id,
+        EntityRelation.review_status,
+        EntityRelation.relation_props,
+        EntityRelation.source_doc_uuid,
+        EntityRelation.source_site, EntityRelation.source_version_id, EntityRelation.source_quote,
+        EntityRelation.source_char_start, EntityRelation.source_char_end,
+        EntityRelation.first_seen_at, EntityRelation.valid_from, EntityRelation.valid_to,
+        EntityRelation.reviewed_by, EntityRelation.reviewed_at, EntityRelation.reviewer_note,
+    ).filter(
+        EntityRelation.review_status.in_(statuses),
+        EntityRelation.is_deleted == false(),
+        EntityRelation.from_entity_id.in_(node_ids),
+        EntityRelation.to_entity_id.in_(node_ids),
+    )
+    if source_doc_uuid:
+        rq = rq.filter(EntityRelation.source_doc_uuid == source_doc_uuid)
+    rows = rq.all()
+    evidence_map = get_objects_evidence('relation', [row.id for row in rows], session=session)
+    review_evidence_map = get_current_review_evidence('relation', [row.id for row in rows], session=session)
+    return [
+        GraphEdge(
+            evidence=evidence_map.get(r.id, []),
+            current_review_evidence=review_evidence_map.get(r.id, []),
+            id=r.id,
+            relation_type=r.relation_type or "",
+            from_entity_id=r.from_entity_id,
+            to_entity_id=r.to_entity_id,
+            review_status=r.review_status or "",
+            relation_props=r.relation_props or {},
+            source_doc_uuid=r.source_doc_uuid or "",
+            **_source_review_fields(r),
+        )
+        for r in rows
+    ]
+
+
+def _graph_distinct(session, column):
+    """The sorted distinct non-empty values of an entity column over the entities not deleted."""
+    return sorted(
+        v[0] for v in session.query(column.distinct())
+        .filter(ExtractedEntity.is_deleted == false(), column.isnot(None))
+        .all()
+        if v[0]
     )
 
 
