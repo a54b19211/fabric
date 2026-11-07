@@ -1,6 +1,6 @@
 # 0004 统一迁移执行器：每库独立账本，未知状态拒绝
 
-- 状态：已实现（分支 `r2/fabric-b1`），待评审。设计：`r2-migration-runner.md` 及 r219 修订（`r2-migration-runner-r2.md`）。
+- 状态：已实现，评审通过并合入 `integration/rebuild-2026-11`（2026-11-07；原分支 `r2/fabric-b1`）。设计：`r2-migration-runner.md` 及 r219 修订（`r2-migration-runner-r2.md`）。
 - 日期：2026-11-07
 
 ## 决定

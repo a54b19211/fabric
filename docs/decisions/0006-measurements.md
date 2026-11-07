@@ -1,7 +1,7 @@
 # 0006 客观测量归加工层：键、欠账、核验、事件与两种回放
 
-- 状态：已实现（分支 `r2/fabric-s1`，Fabric 一侧的切片 S1：WHO DON 病例数），待评审；Radar 一侧（`series_points`、
-  `measurement_inbox`、`series_sync`、冻结雷达七张测量表、planner 可选字段）是后续批次。
+- 状态：已实现（Fabric 一侧的切片 S1：WHO DON 病例数），评审通过并合入 `integration/rebuild-2026-11`（2026-11-07；原分支 `r2/fabric-s1`）；Radar 一侧（`series_points`、
+  `measurement_inbox`、`series_sync`、旧测量表冻结为只读）见 BioRadar 的 ADR 0010（已合入）；planner 可选字段仍是后续事项。
 - 设计：`.rebuild-work/design/r2-measurement-migration.md`、其 r219 修订 `r2-measurement-migration-r2.md`，
   Codex r219 B3 与 r222 的实施约束。日期 2026-11-07。
 
