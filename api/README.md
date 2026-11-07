@@ -182,14 +182,14 @@ retry 返回 `{"scheduled": true, "state": "waiting"}` 表示已放回队列，�
 
 WHO v0.2 的 `count_statements` 与 `count_extraction` 是派生 facts，不能走逐字段顶层 JSON literal 校验。应核对 `who.explicit-count.v1`、原始字段范围和完整 `clean_text` 的 Unicode 字符位置，逐字核对 quote 与数值；完整契约见本轮交接的 `fabric-who-count-contract.json`。旧 v0.1 没有这两个字段，仍按原契约读取。
 
-### 测量对象（，加工层，docs/decisions/0006）
+### 测量对象（`/api/history/measurements`，加工层，docs/decisions/0006）
 
 | 接口 | 用途 |
 |---|---|
-|  | 可见版本的已核验测量对象（），每个带截止时的状态（由事件折叠）、身份、维度核验结果和所用版本；默认只给该模式下当前的， 连历史一起 |
-|  | 一个固定对象（含已替代、非当前的）；截止时不可见返回 404  |
-|  | 事件变更流，按提交顺序； 是看过的最后一个序号；当前不可读来源的事件只计入  |
-|  | 每个版本的阅读 run：状态、已读窗口、欠着的窗口及原因（ 是覆盖缺口，不等于没有数字） |
-| （管理员） | 把对象绑定到固定图包里已确认、且证据就是这处提及的身份；否则 409 |
+| `GET /api/history/measurements?source_id=&is_demo=&mode=&cutoff=&version_ids=` | 可见版本的已核验测量对象（`datafabric.data_objects.v2`），每个带截止时的状态（由事件折叠）、身份、维度核验结果和所用版本；默认只给该模式下当前的，`include_history=true` 连历史一起 |
+| `GET /api/history/measurements/{measurement_id}?is_demo=&mode=&cutoff=` | 一个固定对象（含已替代、非当前的）；截止时不可见返回 404 `version_not_found` |
+| `GET /api/history/measurements/changes?is_demo=&after_seq=&limit=` | 事件变更流，按提交顺序；`next_after` 是看过的最后一个序号；当前不可读来源的事件只计入 `withheld` |
+| `GET /api/history/measure-coverage?source_id=&is_demo=&mode=&cutoff=&version_ids=` | 每个版本的阅读 run：状态、已读窗口、欠着的窗口及原因（`partial` 是覆盖缺口，不等于没有数字） |
+| `POST /api/history/measurements/{measurement_id}/identities`（管理员） | 把对象绑定到固定图包里已确认、且证据就是这处提及的身份；否则 409 |
 
-消费方（雷达 ）的约定见 。
+消费方（雷达 `series_sync`）的约定见 `tests/fixtures/measurement_feed_contract.json`。
