@@ -287,3 +287,130 @@ def test_the_object_library_plan_lists_the_35_compatibility_files_and_no_other(p
     _, engine = pg("appplan")
     receipt = runner.plan("app", engine)
     assert receipt["ledger"] == "absent" and [p["file"] for p in receipt["pending"]] == list(manifests.APP_COMPAT_FILES)
+
+
+# ---- Codex r231 faults, each reproduced here first ----
+
+def column_names(engine, table):
+    with engine.begin() as conn:
+        return {c for (c,) in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=:t"),
+            {"t": table})}
+
+
+def test_a_file_with_its_own_begin_and_commit_is_still_one_transaction_with_its_postcondition_and_ledger(pg, monkeypatch):
+    """Fault 1: the real V008 carries BEGIN/COMMIT. With a failing post-condition nothing of it may remain: not its index
+    or column, not a schema_migrations row, not a ledger event."""
+    import dataclasses
+
+    schema, engine = pg("atomic8")
+    app = MANIFESTS["app"]
+    upto = lambda n: dataclasses.replace(app, files=app.files[:n])  # noqa: E731
+    monkeypatch.setattr(runner, "MANIFESTS", {**MANIFESTS, "app": upto(7)})
+    runner.apply("app", engine, actor="test")  # V001-V007
+    with engine.begin() as conn:  # make V008's work visible: take away what it creates
+        conn.exec_driver_sql("DROP INDEX IF EXISTS idx_alias_entity_type")
+        conn.exec_driver_sql("ALTER TABLE entity_aliases DROP COLUMN IF EXISTS updated_at")
+    monkeypatch.setattr(runner, "MANIFESTS", {**MANIFESTS, "app": upto(8)})
+    monkeypatch.setattr(runner, "POSTCONDITIONS", {"V008__add_alias_columns.sql": ("SELECT false",)})
+    with pytest.raises(MigrationStateError, match="postcondition"):
+        runner.apply("app", engine, actor="test")
+    assert "updated_at" not in column_names(engine, "entity_aliases")
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() "
+                                 "AND indexname='idx_alias_entity_type'")).scalar_one() == 0
+        assert [v for (v,) in conn.execute(text("SELECT version FROM schema_migrations ORDER BY 1"))] == [
+            f"V00{n}" for n in range(1, 8)]
+        assert conn.execute(text(f"SELECT count(*) FROM {ledger.EVENTS} WHERE file LIKE 'V008%'")).scalar_one() == 0
+    monkeypatch.setattr(runner, "POSTCONDITIONS", {})
+    runner.apply("app", engine, actor="test")  # without the failing check it applies, and the work is there
+    assert "updated_at" in column_names(engine, "entity_aliases")
+
+
+def test_the_four_legacy_files_run_neutralised_and_are_recorded_with_the_checksum_of_the_published_file(pg):
+    from migration.manifests import TRANSACTION_CONTROL_ALLOWED
+    from migration.runner import file_text
+
+    _, engine = pg("legacyfiles")
+    receipt = runner.apply("app", engine, actor="test")
+    assert receipt["state"] == "applied"
+    with engine.begin() as conn:
+        rows = {f: m for f, m in conn.execute(text(
+            f"SELECT file, checksum_md5 FROM {ledger.EVENTS} WHERE db_role='app'"))}
+        recorded = dict(conn.execute(text("SELECT version, checksum FROM schema_migrations")).all())
+    for name in TRANSACTION_CONTROL_ALLOWED:
+        assert rows[name] == ledger.md5(file_text(name)) == recorded[name.split("__")[0]]  # the published bytes
+        assert "BEGIN;" in file_text(name)  # and the file on disk still has them
+
+
+def test_a_synthetic_file_with_begin_and_commit_rolls_back_whole_on_a_failed_postcondition(pg, monkeypatch, tmp_path):
+    schema, engine = pg("atomicsyn")
+    synthetic(monkeypatch, tmp_path, {"V901__a.sql": "BEGIN;\nCREATE TABLE a(x int);\nCOMMIT;\n"})
+    monkeypatch.setattr(runner, "TRANSACTION_CONTROL_ALLOWED", frozenset({"V901__a.sql"}))
+    monkeypatch.setattr(runner, "POSTCONDITIONS", {"V901__a.sql": ("SELECT false",)})
+    with pytest.raises(MigrationStateError, match="postcondition"):
+        runner.apply("history", engine, actor="test")
+    with engine.begin() as conn:
+        assert "a" not in tables(conn, schema)
+    assert event_rows(engine) == []
+
+
+def lock_pids(engine):
+    with engine.connect() as probe:
+        return [p for (p,) in probe.execute(text(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND pid <> pg_backend_pid() "
+            "AND ((classid::bigint << 32) | objid::bigint) = :k"), {"k": runner.LOCK_KEY})]
+
+
+def test_a_run_whose_lock_connection_is_terminated_does_not_commit_the_next_migration(pg, monkeypatch, tmp_path):
+    """Fault 2: another process takes the lock after the holder was killed; the first run must stop, not carry on."""
+    import time
+
+    schema, engine = pg("lockkill")
+    synthetic(monkeypatch, tmp_path, {"V901__a.sql": "CREATE TABLE a(x int);", "V902__b.sql": "CREATE TABLE b(x int);"})
+    original = runner.check_postconditions
+    holder = {}
+
+    def kill_the_lock_holder_and_take_over(conn, name):
+        original(conn, name)
+        if name == "V901__a.sql":
+            (pid,) = lock_pids(engine)
+            with engine.connect() as admin:
+                admin.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})
+                admin.commit()
+            second = engine.connect()
+            for _ in range(50):
+                if second.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": runner.LOCK_KEY}).scalar_one():
+                    break
+                time.sleep(0.1)
+            holder["second"] = second
+
+    monkeypatch.setattr(runner, "check_postconditions", kill_the_lock_holder_and_take_over)
+    try:
+        with pytest.raises(Exception):
+            runner.apply("history", engine, actor="test")
+        assert "second" in holder
+        with engine.begin() as conn:
+            assert not {"a", "b"} & tables(conn, schema)  # neither migration was committed by the displaced run
+        assert event_rows(engine) == []
+    finally:
+        if "second" in holder:
+            holder["second"].invalidate()
+            holder["second"].close()
+
+
+def test_a_lock_that_is_released_during_the_run_stops_the_commit(pg, monkeypatch, tmp_path):
+    schema, engine = pg("lockdrop")
+    synthetic(monkeypatch, tmp_path, {"V901__a.sql": "CREATE TABLE a(x int);", "V902__b.sql": "CREATE TABLE b(x int);"})
+    original = runner.check_postconditions
+
+    def release(conn, name):
+        original(conn, name)
+        conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": runner.LOCK_KEY})
+
+    monkeypatch.setattr(runner, "check_postconditions", release)
+    with pytest.raises(MigrationStateError, match="no longer held"):
+        runner.apply("history", engine, actor="test")
+    with engine.begin() as conn:
+        assert not {"a", "b"} & tables(conn, schema)
+    assert event_rows(engine) == []

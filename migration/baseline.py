@@ -134,32 +134,32 @@ def adopt(role: str, engine, *, reference_url: str | None = None, reference_engi
                                   "already has its ledger")
     actor = actor or runner.default_actor()
     manifest = MANIFESTS[role]
-    with runner.migration_lock(engine):
-        with engine.connect() as conn:
-            state = ledger.read_current(conn, role)
-            conn.rollback()
+    with runner.migration_lock(engine) as conn:
+        state = ledger.read_current(conn, role)
+        conn.rollback()
         if state.present:
             return Refusal("ledger_not_empty", {"detail": "--adopt-baseline runs once, on an empty ledger"}
                            ).receipt(role)
         ref, scratch = _reference(role, reference_engine, reference_url)
         try:
-            return _adopt_locked(role, manifest, engine, ref, actor)
+            return _adopt_locked(role, manifest, conn, ref, actor)
         except Refusal as refusal:
+            conn.rollback()
             return refusal.receipt(role)
         finally:
             if scratch is not None:
                 scratch.stop()
 
 
-def _adopt_locked(role: str, manifest: Manifest, engine, ref, actor: str) -> dict:
-    with ref.connect() as conn:
-        if fingerprint.read_facts(conn):
+def _adopt_locked(role: str, manifest: Manifest, conn, ref, actor: str) -> dict:
+    with ref.connect() as reference_conn:
+        if fingerprint.read_facts(reference_conn):
             raise Refusal("reference_not_empty", {"detail": "the reference library must be empty"})
     fingerprints, owned = fingerprint.prefix_fingerprints(manifest, ref)
-    with engine.begin() as conn:
-        target = fingerprint.project(fingerprint.read_facts(conn), owned)
-        k, event, evidence = decide(manifest, fingerprints, target, conn)
-        _write(conn, role, manifest, k, event, evidence, actor)
+    target = fingerprint.project(fingerprint.read_facts(conn), owned)
+    k, event, evidence = decide(manifest, fingerprints, target, conn)
+    _write(conn, role, manifest, k, event, evidence, actor)
+    runner.commit(conn)
     return {"runner": runner.RUNNER_VERSION, "db_role": role, "action": "adopt-baseline", "state": "adopted",
             "event": event, "prefix_length": k, "adopted": list(manifest.files[:k]),
             "pending": list(manifest.files[k:]), "evidence": evidence, "written": True,
