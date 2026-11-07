@@ -1,4 +1,4 @@
-"""The measurement extraction processor datafabric.measure_extract.v4: what one model call over one reading window
+"""The measurement extraction processor datafabric.measure_extract.v5: what one model call over one reading window
 of a fixed cleaned artifact asks, what output it accepts, and how each measure it returns becomes a reading.
 
 Identity (docs/decisions/0006): a run is keyed by the fixed original (source, record, version, raw sha256), the
@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from processing import measure_rules as rules
 
-PROCESSOR_VERSION = "datafabric.measure_extract.v4"
+PROCESSOR_VERSION = "datafabric.measure_extract.v5"
 PRODUCER = "datafabric.measure_extract"
 MAX_MEASURES = 3  # per window
 MODEL, RULES = "model", "rules"  # the candidate routes of this one processor
@@ -47,7 +47,8 @@ MEASURE_RULES = (
     "每个窗口最多3个：只取窗口里最先出现的前 3 条明确计数（按原文先后），其余不写。所有 *_text 都逐字照抄原文里的那个词，不改写、不换同义词、不缩写，原文没写就留空；程序据此回原文"
     "核对，核对不过的数不会成为测量对象。object_text 是谁的数（机构、公司、疾病），metric_text 是数的是什么，连同限定语"
     "一起抄（如“批准注册医疗器械产品”“suspected cases of anthrax in humans”）。value_text 是 quote 里写出的那个数，"
-    "unit_text 逐字取原文里紧跟在数值后面的计量词（如 cases、deaths），数值后面没有计量词才留空。period_text 抄期间原文，period 写规范形式（2026-04、2026Q2、2026H1、2026、2022-09/2023-01；只写起点的写“起点/”，"
+    "unit_text 逐字取原文里紧跟在数值后面的计量词（如 cases、deaths）：数值后面紧跟计量词时必须写出，不能省略；紧跟的是标点"
+    "或句末才留空。period_text 抄期间原文，period 写规范形式（2026-04、2026Q2、2026H1、2026、2022-09/2023-01；只写起点的写“起点/”，"
     "如 since September 2012 写 2012-09/），周写成周一到周日的日期区间（week 43 of 2017 写 2017-10-23/2017-10-29；"
     "写了 ending 日期的周，以该日为末日往前推 6 天），一个月到一个具体日期写成日区间且首月从 1 日起（Between August 2015 "
     "and 23 January 2016 写 2015-08-01/2016-01-23），两个年份之间写成月区间（Between 2017 and 2021 写 2017-01/2021-12），"
@@ -105,10 +106,10 @@ class Extraction(BaseModel):
 # What the model is told about the shape of its answer: the schema the parser validates against, and the least
 # answer that passes it. The parser does not accept anything else.
 SCHEMA = json.dumps(Extraction.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
-SKELETON = '{"items":[{"index":1,"measures":[{"metric_text":"…","value_text":"…","quote":"…"}]}]}'
+SKELETON = '{"items":[{"index":1,"measures":[{"metric_text":"…","value_text":"…","unit_text":"…","quote":"…"}]}]}'
 EMPTY = '{"items":[{"index":1,"measures":[]}]}'
 FORMAT = f"""
-输出格式：只返回一个 JSON 对象，写成单行紧凑 JSON：不缩进、不换行（字符串里也不要换行），不加说明文字，严格符合下面的 JSON Schema。顶层是 items，index 写在 items 的每一项上，不写在 measure 里。字段名和枚举值逐字使用；枚举字段没有把握就整个省略（取默认值），写出来的值必须是枚举里列出的，空串也一样。sources 是对象，键为 period / object / scope / denominator，值为来源名，不是列表。
+输出格式：只返回一个 JSON 对象，写成单行紧凑 JSON：不缩进、不换行（字符串里也不要换行），不加说明文字，严格符合下面的 JSON Schema。顶层是 items，index 写在 items 的每一项上，不写在 measure 里。字段名和枚举值逐字使用；枚举字段没有把握就整个省略（取默认值），写出来的值必须是枚举里列出的，空串也一样。没有内容的字段整个省略，不要写 null。sources 是对象，键为 period / object / scope / denominator，值为来源名，不是列表。
 {SCHEMA}
 最小示例（… 处换成原文里的词）：{SKELETON}
 窗口里没有数值：{EMPTY}"""

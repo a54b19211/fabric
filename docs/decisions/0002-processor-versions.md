@@ -26,7 +26,7 @@
 - v4：监管机构公告/通知的大类按内容判（写明监管动作的才是监管决定，其余是官方通报）；v3 把这类公告整体算作决定。
 - v5：加入 v3 6.2 的可复用注释（实验类型候选、可取得的材料层级）。
 
-## processing/measure_extract（当前 `datafabric.measure_extract.v4`）
+## processing/measure_extract（当前 `datafabric.measure_extract.v5`）
 
 - v2：提示词带上输出模型的 JSON Schema 和一个最小骨架。v1 只用 `response_format=json_object` 要求“是 JSON”，D1 首批测量
   的 24 个窗口全部返回了顶层 `measures`、空串枚举值和列表形式的 `sources`，按产品的输出形状被拒（`output_not_the_schema`）。
@@ -43,3 +43,8 @@
   `unit_text` 取数值后紧跟的计量词；期间、对象、范围只取自这条引句自己或允许的上下文（`heading` / `table_header` /
   `table_title`，并在 `sources` 里准确标出），不从别的句子继承；累计和新增按原文语义区分（As of 加 total、since 这类明确说法
   可以是累计，不要求出现某个关键词）。解析器不放宽，被截断的答案不拼接、不修复。提示词变了，所以升版本：v3 的运行和读数原样保留。
+- v5：提示词对读者的说明再改三点。v4 在 D1 的 25 个 v2 窗口上结构对、没有截断，但 65 条测量里只有 20 条带 `unit_text`（其中
+  4 条有值），建成的 35 条模型读数单位全空，BioCheck v17 对其中 26 条判 `unit_written_at_value`（原文数值后面写着单位，item 却
+  说单位未知）；W11 因一个 `period_text: null` 整窗被拒（`output_not_the_schema`）。v5：最小骨架带上 `unit_text`；数值后面紧跟
+  计量词时 `unit_text` 必须写出，不能省略；没有内容的字段整个省略，不要写 `null`。解析器不放宽，单位也不由代码补。提示词变了，
+  所以升版本：v4 的运行和读数原样保留。
