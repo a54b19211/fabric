@@ -275,3 +275,47 @@ def test_the_publication_role_is_adopted_on_top_of_the_object_library_base(pg, t
     receipt = baseline.adopt("publication", engine, reference_engine=pg("ref")[1], actor="test")
     assert receipt["state"] == "adopted" and receipt["adopted"] == list(MANIFESTS["publication"].files)
     assert runner.plan("publication", engine)["state"] == "up_to_date"
+
+
+# ---- Codex r231 fault 3: unknown state on a table the role owns is never defaulted to a known prefix ----
+
+import pytest as _pytest  # noqa: E402
+
+
+@_pytest.mark.parametrize("statement,expected", [
+    ("ALTER TABLE history_sources ADD COLUMN unknown_extra text NOT NULL DEFAULT 'x'",
+     "column history_sources.unknown_extra"),
+    ("CREATE INDEX unknown_extra_idx ON history_sources(read_enabled)", "index history_sources.unknown_extra_idx"),
+    ("ALTER TABLE history_sources ADD CONSTRAINT unknown_extra_ck CHECK (published_seq < 1000000000)",
+     "constraint history_sources.unknown_extra_ck"),
+    ("CREATE FUNCTION unknown_extra_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; "
+     "CREATE TRIGGER unknown_extra_tg BEFORE UPDATE ON history_sources FOR EACH ROW EXECUTE FUNCTION unknown_extra_fn()",
+     "trigger history_sources.unknown_extra_tg"),
+])
+def test_something_unknown_on_a_table_the_role_owns_is_a_difference_not_a_known_prefix(
+        pg, tmp_path, monkeypatch, statement, expected):
+    schema, engine = old_history(pg, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(statement)
+    receipt = baseline.adopt("history", engine, reference_engine=pg("ref")[1], actor="test")
+    assert receipt["state"] == "refused" and receipt["reason"] == "fingerprint_matches_no_prefix"
+    assert expected in receipt["diff"]["extra"] and receipt["written"] is False
+    with engine.begin() as conn:
+        assert ledger.EVENTS not in tables(conn, schema)
+
+
+def test_a_table_of_another_role_is_compared_only_on_the_keys_this_role_adds(pg, tmp_path, monkeypatch):
+    """The explicit ownership rule: the publication role adds columns to documents; what else sits on documents is the
+    object library's, not this role's, and is not read as this role's state."""
+    schema, engine = pg("pubown")
+    with engine.begin() as conn:
+        for name in manifests.PUBLICATION_BASE_FILES:
+            conn.exec_driver_sql((manifests.VERSIONS_DIR / name).read_text(encoding="utf-8"))
+    old_module(BEFORE, tmp_path, "publication", monkeypatch, "publication_engine", engine).migrate_publication()
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE documents ADD COLUMN other_roles_column text")
+        conn.exec_driver_sql("ALTER TABLE publication_outbox ADD COLUMN unknown_extra text")
+    receipt = baseline.adopt("publication", engine, reference_engine=pg("ref")[1], actor="test")
+    assert receipt["reason"] == "fingerprint_matches_no_prefix"  # the owned table's extra column refuses it
+    assert "column publication_outbox.unknown_extra" in receipt["diff"]["extra"]
+    assert not any("documents.other_roles_column" in fact for fact in receipt["diff"]["extra"])
