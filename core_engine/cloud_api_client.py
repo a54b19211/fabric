@@ -1,12 +1,17 @@
 """
 API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）的请求逻辑。
+
+非流式的对话调用（qwen_extract_structured、qwen_chat）的 HTTP 一侧是共享的 llm_transport；流式调试输出和 embedding
+仍走 OpenAI SDK（docs/decisions/0007-llm-transport-chat-calls.md）。
 """
 
 import json
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
+import llm_transport as lt
 from openai import OpenAI
 from prefect import task
 from loguru import logger
@@ -125,20 +130,54 @@ def _mineru_parse(file_path: str, base: str | None = None, content_list: bool = 
 #  Qwen 大模型 API —— Markdown → 结构化 JSON
 # ===================================================================
 
-def _build_qwen_client() -> OpenAI:
-    """构建兼容 OpenAI 协议的 LLM 客户端（爬虫阶段元数据提取用）。"""
-    return OpenAI(
-        api_key=APP.LLM_API_KEY,
-        base_url=APP.LLM_API_BASE,
-    )
+# What the OpenAI SDK did for these calls and they keep: a new client per call that follows redirects, 600 s per
+# request with 5 s to connect, two resends (0.5 s, then 1 s later) after a timeout, a connection failure or status
+# 408/409/429/5xx, and the SDK's error text. ADR 0007 lists what is not kept.
+_TIMEOUT_SECONDS = 600.0
+_CONNECT_SECONDS = 5.0
+_RESEND_WAITS = (0.5, 1.0)
 
 
-def _build_extraction_client() -> OpenAI:
-    """构建实体抽取专用 LLM 客户端（可配置独立模型）。"""
-    return OpenAI(
-        api_key=APP.EXTRACTION_API_KEY,
-        base_url=APP.EXTRACTION_API_BASE,
-    )
+class ChatFailed(Exception):
+    """A chat request that gave no usable completion; the text is the OpenAI SDK's for the same outcome."""
+
+
+def _connect_timeout(request: httpx.Request) -> None:
+    # llm_transport gives every phase the provider's timeout; connecting keeps the SDK's shorter limit
+    request.extensions["timeout"] = {**request.extensions["timeout"], "connect": _CONNECT_SECONDS}
+
+
+def _resend(sent: lt.Attempt) -> bool:
+    return sent.exception is not None or sent.status in (408, 409, 429) or (sent.status or 0) >= 500
+
+
+def _failure(sent: lt.Attempt) -> str:
+    if sent.exception is not None:
+        return "Request timed out." if sent.timed_out else "Connection error."
+    text = (sent.response_text or "").strip()
+    try:
+        return f"Error code: {sent.status} - {json.loads(text)}"
+    except ValueError:
+        return text or f"Error code: {sent.status}"
+
+
+def _chat_completion(stage: str, api_key: str, base_url: str, body: dict) -> str | None:
+    """The first choice's message content for one chat request, resent as above; raises ChatFailed otherwise."""
+    provider = lt.Provider(kind="openai_compatible", base_url=base_url, model=body["model"], api_key=api_key,
+                           timeout_seconds=_TIMEOUT_SECONDS)
+    record = lt.CallRecord(stage=stage, endpoint_id="", model=provider.model)
+    with httpx.Client(follow_redirects=True, event_hooks={"request": [_connect_timeout]}) as client:
+        for wait in (*_RESEND_WAITS, None):
+            sent = lt.send(provider, body, record, client=client)
+            if wait is None or not _resend(sent):
+                break
+            time.sleep(wait)
+    if sent.status is None or not 200 <= sent.status < 300:
+        raise ChatFailed(_failure(sent))
+    answer = sent.envelope()
+    if answer.problem:
+        raise ChatFailed(f"unreadable chat completion ({answer.problem})")
+    return answer.content
 
 
 @task(
@@ -165,6 +204,7 @@ def qwen_extract_structured(
         dict: 解析后的 JSON，失败时返回空 dict
     """
     api_key = APP.EXTRACTION_API_KEY if use_extraction_model else APP.LLM_API_KEY
+    base_url = APP.EXTRACTION_API_BASE if use_extraction_model else APP.LLM_API_BASE
     model_name = APP.EXTRACTION_MODEL_NAME if use_extraction_model else APP.LLM_MODEL_NAME
 
     if not api_key:
@@ -178,28 +218,25 @@ def qwen_extract_structured(
     ]
 
     try:
-        client = _build_extraction_client() if use_extraction_model else _build_qwen_client()
-
         if stream:
-            return _stream_extract(client, model_name, messages)
-        else:
-            return _batch_extract(client, model_name, messages)
+            return _stream_extract(OpenAI(api_key=api_key, base_url=base_url), model_name, messages)
+        return _batch_extract(api_key, base_url, model_name, messages)
 
     except Exception as e:
         logger.error(f"LLM API 调用异常: {e}")
         return {}
 
 
-def _batch_extract(client: OpenAI, model_name: str, messages: list) -> dict:
+def _batch_extract(api_key: str, base_url: str, model_name: str, messages: list) -> dict:
     """非流式调用，等待完整响应后返回。"""
     try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
-        raw_content = _strip_json_fence(response.choices[0].message.content)
+        content = _chat_completion("qwen_extract_structured", api_key, base_url, {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        })
+        raw_content = _strip_json_fence(content)
         result = json.loads(raw_content)
         logger.info(f"LLM 提取成功，模型={model_name}，字段数={len(result)}")
         return result
@@ -298,17 +335,16 @@ def qwen_chat(
         logger.error("LLM API Key 未配置")
         return ""
     try:
-        client = OpenAI(api_key=APP.LLM_API_KEY, base_url=APP.LLM_API_BASE)
-        response = client.chat.completions.create(
-            model=APP.LLM_MODEL_NAME,
-            messages=[
+        content = _chat_completion("qwen_chat", APP.LLM_API_KEY, APP.LLM_API_BASE, {
+            "model": APP.LLM_MODEL_NAME,
+            "messages": [
                 {"role": "system", "content": system_prompt or ""},
                 {"role": "user", "content": user_message},
             ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content or ""
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        })
+        return content or ""
     except Exception as e:
         logger.error(f"qwen_chat 调用失败: {e}")
         return ""
