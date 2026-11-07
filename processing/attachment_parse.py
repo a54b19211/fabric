@@ -194,12 +194,9 @@ def _jats(path: Path, ext: str) -> dict:
 
 def parse_file(*, store_path: str, sha256: str, file_ext: str | None = None, **_ignored) -> dict:
     path = Path(store_path or "")
-    if not store_path or not path.is_file():
-        return _result("failed", error="original_missing", ext=file_ext)
-    if path.stat().st_size > max_parse_bytes():
-        return _result("failed", error="too_large", ext=file_ext)
-    if _sha256_file(path) != sha256:
-        return _result("failed", error="original_digest_mismatch", ext=file_ext)
+    unusable = _unusable_original(path, store_path, sha256, file_ext)
+    if unusable is not None:
+        return unusable
     ext = (file_ext or path.suffix or "").lower()
     if ext in JATS_EXTS:
         return _jats(path, ext)
@@ -208,31 +205,55 @@ def parse_file(*, store_path: str, sha256: str, file_ext: str | None = None, **_
             ext = _sniff(stream.read(4 * 1024 * 1024))
     if ext not in SUPPORTED:
         return _result("unsupported", ext=ext)
-    attempts, method, error = [], None, "parser_failed"
     with tempfile.TemporaryDirectory(prefix="attachment-parse-") as work:
         # 解析器（尤其 LibreOffice）会在输入文件旁写东西：一律在临时副本上做；文件名带正确后缀
         copy = Path(work) / ("original" + ext)
         shutil.copyfile(path, copy)
-        for method, call, page_kind in _plan(ext):
-            try:
-                answer = call(str(copy))
-            except Exception:  # noqa: BLE001 -- 解析服务/转换器故障记为失败，换下一个
-                answer = {"success": False, "markdown": "", "error": "exception"}
-            markdown = (answer.get("markdown") or "") if answer.get("success") else ""
-            if not markdown.strip():
-                error = "empty_text" if answer.get("success") else "parser_failed"
-                attempts.append(method + ":" + error)
-                continue
-            attempts.append(method + ":ok")
-            blocks = answer.get("content_list")
-            if method == "excel":
-                return _result("parsed", text=markdown, method=method, ext=ext, attempts=attempts,
-                               segments=_sheets(markdown), locator_kind="sheet")
-            if isinstance(blocks, list) and blocks:
-                text, segments, kind = from_blocks(blocks, page_kind)
-                if text.strip():
-                    return _result("parsed", text=text, method=method, ext=ext, attempts=attempts,
-                                   segments=segments, locator_kind=kind)
-            return _result("parsed", text=markdown, method=method, ext=ext, attempts=attempts,
-                           locator_kind="unavailable")
+        return _parse_copy(copy, ext)
+
+
+def _unusable_original(path, store_path, sha256, file_ext):
+    """The failure result for an original that is missing, too large or not the stored one; else None."""
+    if not store_path or not path.is_file():
+        return _result("failed", error="original_missing", ext=file_ext)
+    if path.stat().st_size > max_parse_bytes():
+        return _result("failed", error="too_large", ext=file_ext)
+    if _sha256_file(path) != sha256:
+        return _result("failed", error="original_digest_mismatch", ext=file_ext)
+    return None
+
+
+def _call_parser(call, copy):
+    try:
+        return call(str(copy))
+    except Exception:  # noqa: BLE001 -- 解析服务/转换器故障记为失败，换下一个
+        return {"success": False, "markdown": "", "error": "exception"}
+
+
+def _parse_copy(copy, ext):
+    """Each parser of the plan in turn on the working copy; the first one with text wins."""
+    attempts, method, error = [], None, "parser_failed"
+    for method, call, page_kind in _plan(ext):
+        answer = _call_parser(call, copy)
+        markdown = (answer.get("markdown") or "") if answer.get("success") else ""
+        if not markdown.strip():
+            error = "empty_text" if answer.get("success") else "parser_failed"
+            attempts.append(method + ":" + error)
+            continue
+        attempts.append(method + ":ok")
+        return _parsed(answer, markdown, method, page_kind, ext, attempts)
     return _result("failed", method=method, error=error, ext=ext, attempts=attempts)
+
+
+def _parsed(answer, markdown, method, page_kind, ext, attempts):
+    blocks = answer.get("content_list")
+    if method == "excel":
+        return _result("parsed", text=markdown, method=method, ext=ext, attempts=attempts,
+                       segments=_sheets(markdown), locator_kind="sheet")
+    if isinstance(blocks, list) and blocks:
+        text, segments, kind = from_blocks(blocks, page_kind)
+        if text.strip():
+            return _result("parsed", text=text, method=method, ext=ext, attempts=attempts,
+                           segments=segments, locator_kind=kind)
+    return _result("parsed", text=markdown, method=method, ext=ext, attempts=attempts,
+                   locator_kind="unavailable")

@@ -12,7 +12,6 @@
 # (git rev-list ebe7c17 ^82bad7b ^d316aad: the rebuild branch since it left the team's 82bad7b, without what
 # came in from feat/server_fix). Code in this section is split, not frozen: the section is to be empty.
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
-processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
 processing/index_pieces.py:plan  38/24  index piece planner with the split rules inline
 processing/registry_diff.py:_detail  27/22  registry detail diff, one branch per field
 
