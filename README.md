@@ -266,6 +266,7 @@ rq worker --url "$DATAFABRIC_HISTORY_REDIS_URL" extraction
 - `POST /api/history/archives`：固定原站ID、trial/program/outcome/document JSON原件（PubMed也支持XML），需幂等键。服务器生成版本ID和本地时间，客户端不得倒填first_seen/received。
 - `GET /api/history/records`：必填 `source_id,is_demo,mode,cutoff`；可给 `run_id`冻结清单、`source_record_ids`交集、至多3个字面AND `terms`，每页1–100。日期/时刻必须保留精度，完整时刻必须含时区。
 - `GET /api/history/versions/{version_id}`及 `/raw`：必填相同来源/原站ID/demo/模式/截点绑定；旧版本也重新核当前来源许可。
+- `GET /api/history/version-differences`：必填 `source_id,is_demo,mode,cutoff,version_ids`（至多100个）；每个版本与它上一个可见版本比，只给事实：`serialization_only`（原件只差序列化）、`projection_only`（原件相同，解析器或投影不同）、`raw_changed`（原件变了）；另附解析器、正文、来源更新时间、其余结构字段是否变化。不做判断，也不存储。
 - `GET /api/history/changes`：采用提交日志，`source_id,is_demo,after,limit,cursor`；不是上游完整变更feed，也不能直接当历史特征。
 
 `current`与`operational_replay`要求该版本本地首次采用不晚于cutoff。

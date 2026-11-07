@@ -330,6 +330,20 @@ def registry_changes(
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
 
+@router.get("/version-differences", dependencies=[Depends(require_read)])
+def version_differences(
+    source_id: str,
+    is_demo: bool,
+    mode: Mode,
+    cutoff: datetime,
+    version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
+):
+    """一页版本各自与上一可见版本的差异事实：只差序列化、只差投影、原文变了。只陈述事实，不做判断。"""
+    from db.version_difference import for_versions
+
+    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+
+
 @router.get("/derived-text", dependencies=[Depends(require_read)])
 def derived_text(
     source_id: str,

@@ -1307,6 +1307,35 @@ def test_registry_diff_backfill_pairs_existing_versions_once(pg):
     assert enrollment["detail"]["delta"] == -200 and enrollment["material"]
 
 
+def test_version_differences_pair_a_version_with_its_visible_predecessor(pg):
+    from db.version_difference import for_versions
+
+    v1 = _fetch_study("NCT09990003", "vd-1").version_ids[0]
+    v2 = _fetch_study("NCT09990003", "vd-2", n=200).version_ids[0]
+    now = datetime.now(timezone.utc)
+    got = for_versions("clinicaltrials", False, [v1, v2], "current", now)["versions"]
+    assert got[v1] == {"state": "first_adoption", "source_record_id": "NCT09990003"}
+    assert got[v2]["state"] == "compared" and got[v2]["from_version_id"] == v1
+    assert got[v2]["kind"] == "raw_changed" and got[v2]["structure_changed"] and not got[v2]["parser_changed"]
+    # at a cutoff before v2 was adopted it does not exist for the reader, and v1 has no predecessor
+    with pg.begin() as conn:
+        first_seen = conn.execute(
+            text("SELECT first_seen_at FROM history_versions WHERE version_id=:v"), {"v": v1}
+        ).scalar_one()
+    earlier = for_versions("clinicaltrials", False, [v1, v2], "operational_replay", first_seen)
+    assert earlier["mode"] == "operational_replay"
+    assert earlier["versions"][v1]["state"] == "first_adoption" and earlier["versions"][v2] == {"state": "not_visible"}
+    # an observed version carries no archive proof, so it is not part of a public-history reconstruction
+    hidden = for_versions("clinicaltrials", False, [v2], "public_history_reconstruction", now)
+    assert hidden["versions"][v2] == {"state": "not_visible"}
+    unknown = "f" * 64
+    assert for_versions("clinicaltrials", False, [unknown], "current", now)["versions"][unknown] == {
+        "state": "not_visible"
+    }
+    with pytest.raises(HistoryError):
+        for_versions("clinicaltrials", False, [v2], "current", now + timedelta(days=1))
+
+
 # ——附件（V023）：旧站点插件的附件版本 → 加工层 attachment_parse → 派生正文——
 
 
