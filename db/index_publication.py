@@ -723,108 +723,159 @@ def _hold(row, seconds):
 def process_once(*, client=None, classes=None, lane=None, sent=None):
     """处理一个到期作业。默认按作业类别（T-30：classes 依次尝试，空的让给下一类）；lane/sent 仍可显式指定
     （旧调用，先在那一类里找，没有就退到同 lane，再退到不限）。"""
-    row = None
+    row = _claim_next(classes, lane, sent)
+    if row is None:
+        return {"state": "idle"}
+    attempt = _Attempt(row, client)
+    owned = client is None
+    try:
+        return _process_job(attempt)
+    except HistoryError as exc:
+        if exc.code == "index_lease_lost":
+            return {"id": row["id"], "state": "lease_lost"}
+        return _finish(row, "waiting", attempt.desired, receipt=attempt.verified_receipt,
+                       error={"code": exc.code, "message": exc.message})
+    except Exception:
+        return _finish(row, "waiting", attempt.desired, receipt=attempt.verified_receipt,
+                       error={"code": "index_unavailable", "message": "索引处理暂不可用；已发送请求保留对账状态"})
+    finally:
+        if owned and attempt.client is not None:
+            attempt.client.close()
+
+
+def _claim_next(classes, lane, sent):
+    """The next due job: by job class in rotation order, or (lane/sent given) in that lane and sent kind,
+    then the lane, then any. None when nothing is due."""
     if lane is None and sent is None:
         for klass in dict.fromkeys(classes or ROTATION):
             row = _claim_class(klass)
             if row is not None:
-                break
-    else:
-        for want in dict.fromkeys(((lane, sent), (lane, None), (None, None))):
-            row = _claim(*want)
-            if row is not None:
-                break
-    if row is None:
-        return {"state": "idle"}
-    desired = "unknown"
-    owned = client is None
-    verified_receipt = None
-    try:
-        desired = _current_state(row)
-        if "is_demo" in row["manifest"] and row["manifest"]["is_demo"] is not row["config"]["is_demo"]:
-            raise HistoryError("index_source_space_mismatch", "索引意图与目标空间不一致", 409)
-        if desired != "active" and never_sent(row):
-            return _finish(row, "disabled", desired, delay=300)  # 确认从没发出过：不联网，直接停用
-        if desired == "retiring":
-            return _hold(row, 300)  # 等替代产物 ready（先上后下），不联网
-        if row["state"] == "blocked":
-            if desired == row["desired_state"] and desired == "active":
-                return _hold(row, 60)  # 不无限重发失败请求；保留错误，继续检查是否需要清理
-            if desired != row["desired_state"]:
-                row["attempts"] = 0
-        client = client or WeKnoraIndexClient()
-        receipt = client.status(row["remote_id"])
-        if receipt is not None:
-            _validate_receipt(row, receipt)
-            verified_receipt = receipt
-        if desired != "active":
-            if receipt is None:
-                raise HistoryError("index_disable_unknown", "曾发送的索引结果未知，尚不能确认停用", 409)
-            receipt = client.disable(row["remote_id"], desired)
-            _validate_receipt(row, receipt)
-            confirmed = (
-                receipt.get("source_status") == "disabled"
-                and receipt.get("index_status") == receipt.get("vector_status") == "disabled"
-                and receipt.get("parse_status") in {"completed", "failed", "cancelled"}
-                and receipt.get("vector_count") == 0
-            )
-            return _finish(row, "disabled" if confirmed else "disabling", desired, receipt=receipt, delay=300 if confirmed else 15)
-        with history.history_engine().begin() as conn:
-            full = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
-        content = index_pieces.content(full, row["piece"]) if row.get("piece") else full
-        if not content.strip():
-            raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
-        if not index_pieces.fits(content):
-            # 改造前冻结的整篇清单、或分片规则之外的超长内容：不上传，记缺口（原件与清洗产物都保留）
-            return _finish(row, "blocked", desired, final=True, error={
-                "code": "index_content_budget", "message": "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，"
-                "记为覆盖缺口" % (len(content), len(content.encode()))})
-        if sha256(content) != row["manifest"]["content_sha256"]:
-            raise HistoryError("index_content_changed", "清洗产物与冻结摘要不符", 409)
-        if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
-            # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
-            # 桥接还不知道这条（首传），或明确记为建档前拒收（重传）：这才是一次物理上传，无论哪一类作业领到，
-            # 都先过同一个原子在途预算和共享发送令牌（T-30）。补绑定、对账找回只是 GET/补投影，不占名额。
-            physical = receipt is None or (receipt.get("upload_status") == "rejected" and not receipt.get("knowledge_id"))
-            if physical:
-                denied = _reserve(row, content, receipt)
-                if denied:
-                    return _hold(row, 15)
-            else:
-                _sent(row)
-            receipt = client.publish(_bridge_body(row, content))
+                return row
+        return None
+    for want in dict.fromkeys(((lane, sent), (lane, None), (None, None))):
+        row = _claim(*want)
+        if row is not None:
+            return row
+    return None
+
+
+class _Attempt:
+    """One processing of a claimed job. The failure handling of process_once records what the steps had
+    reached: the state the job should be in (desired), the last receipt that passed validation, and the
+    bridge client once one is in use."""
+
+    def __init__(self, row, client):
+        self.row, self.client = row, client
+        self.desired = "unknown"
+        self.verified_receipt = None
+
+
+def _process_job(attempt):
+    """The steps of one job: decide the wanted state, settle what needs no network, then read the bridge's
+    receipt and either disable the entry or publish it."""
+    row = attempt.row
+    attempt.desired = desired = _current_state(row)
+    if "is_demo" in row["manifest"] and row["manifest"]["is_demo"] is not row["config"]["is_demo"]:
+        raise HistoryError("index_source_space_mismatch", "索引意图与目标空间不一致", 409)
+    offline = _settle_offline(row, desired)
+    if offline is not None:
+        return offline
+    attempt.client = client = attempt.client or WeKnoraIndexClient()
+    receipt = client.status(row["remote_id"])
+    if receipt is not None:
         _validate_receipt(row, receipt)
-        verified_receipt = receipt
-        # 网络请求期间可能撤权/换头版；不能以旧资格确认ready。
-        latest = _current_state(row)
-        if latest in ("revoked", "superseded"):
-            return _finish(row, "disabling", latest, receipt=receipt, delay=0)
-        if receipt.get("index_status") == "budget_exceeded":
-            # 上游实际分出的块数超过桥接核验预算：按新分片规则重新计划之前不会好，不无休止等待
-            return _finish(row, "blocked", desired, receipt=receipt, final=True, error={
-                "code": "index_chunk_budget", "message": "实际块数超过核验预算（%s 块），记为覆盖缺口"
-                % receipt.get("chunk_count")})
-        if receipt.get("source_status") != "active":
-            if (receipt.get("source_change_type") == "disabled_upstream"
-                    and receipt.get("parse_status") in {"pending", "processing", "finalizing"}):
-                return _finish(row, "indexing", "active", receipt=receipt, delay=15)
-            raise HistoryError("index_upstream_disabled", "索引已停用，须明确恢复授权后再启用", 409)
-        ready = (
-            bool(receipt.get("knowledge_id")) and receipt.get("upload_status") == "uploaded"
-            and receipt.get("parse_status") in {"completed", "finalizing"}
-            and receipt.get("vector_status") == receipt.get("index_status") == "ready"
-            and receipt.get("binding_status") == "bound"
-        )
-        return _finish(row, "ready" if ready else "indexing", "active", receipt=receipt, delay=60 if ready else 15)
-    except HistoryError as exc:
-        if exc.code == "index_lease_lost":
-            return {"id": row["id"], "state": "lease_lost"}
-        return _finish(row, "waiting", desired, receipt=verified_receipt, error={"code": exc.code, "message": exc.message})
-    except Exception:
-        return _finish(row, "waiting", desired, receipt=verified_receipt, error={"code": "index_unavailable", "message": "索引处理暂不可用；已发送请求保留对账状态"})
-    finally:
-        if owned and client is not None:
-            client.close()
+        attempt.verified_receipt = receipt
+    if desired != "active":
+        return _disable(row, client, receipt, desired)
+    return _publish_active(attempt, receipt)
+
+
+def _settle_offline(row, desired):
+    """The outcome reached without calling the bridge, or None to go on. A blocked job whose wanted state
+    changed starts counting its attempts again."""
+    if desired != "active" and never_sent(row):
+        return _finish(row, "disabled", desired, delay=300)  # 确认从没发出过：不联网，直接停用
+    if desired == "retiring":
+        return _hold(row, 300)  # 等替代产物 ready（先上后下），不联网
+    if row["state"] == "blocked":
+        if desired == row["desired_state"] and desired == "active":
+            return _hold(row, 60)  # 不无限重发失败请求；保留错误，继续检查是否需要清理
+        if desired != row["desired_state"]:
+            row["attempts"] = 0
+    return None
+
+
+def _disable(row, client, receipt, desired):
+    """Withdraw an entry that was sent: only once the bridge knows it, and disabled only when confirmed."""
+    if receipt is None:
+        raise HistoryError("index_disable_unknown", "曾发送的索引结果未知，尚不能确认停用", 409)
+    receipt = client.disable(row["remote_id"], desired)
+    _validate_receipt(row, receipt)
+    confirmed = (
+        receipt.get("source_status") == "disabled"
+        and receipt.get("index_status") == receipt.get("vector_status") == "disabled"
+        and receipt.get("parse_status") in {"completed", "failed", "cancelled"}
+        and receipt.get("vector_count") == 0
+    )
+    return _finish(row, "disabled" if confirmed else "disabling", desired, receipt=receipt, delay=300 if confirmed else 15)
+
+
+def _publish_active(attempt, receipt):
+    """An entry that should be active: check its content against the frozen manifest, upload it when the bridge
+    does not have it bound, then settle on the validated receipt."""
+    row, client, desired = attempt.row, attempt.client, attempt.desired
+    with history.history_engine().begin() as conn:
+        full = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
+    content = index_pieces.content(full, row["piece"]) if row.get("piece") else full
+    if not content.strip():
+        raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
+    if not index_pieces.fits(content):
+        # 改造前冻结的整篇清单、或分片规则之外的超长内容：不上传，记缺口（原件与清洗产物都保留）
+        return _finish(row, "blocked", desired, final=True, error={
+            "code": "index_content_budget", "message": "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，"
+            "记为覆盖缺口" % (len(content), len(content.encode()))})
+    if sha256(content) != row["manifest"]["content_sha256"]:
+        raise HistoryError("index_content_changed", "清洗产物与冻结摘要不符", 409)
+    if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
+        # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
+        # 桥接还不知道这条（首传），或明确记为建档前拒收（重传）：这才是一次物理上传，无论哪一类作业领到，
+        # 都先过同一个原子在途预算和共享发送令牌（T-30）。补绑定、对账找回只是 GET/补投影，不占名额。
+        physical = receipt is None or (receipt.get("upload_status") == "rejected" and not receipt.get("knowledge_id"))
+        if physical:
+            denied = _reserve(row, content, receipt)
+            if denied:
+                return _hold(row, 15)
+        else:
+            _sent(row)
+        receipt = client.publish(_bridge_body(row, content))
+    _validate_receipt(row, receipt)
+    attempt.verified_receipt = receipt
+    return _settle_published(row, receipt, desired)
+
+
+def _settle_published(row, receipt, desired):
+    """The job's state from a validated publish receipt, after re-checking the wanted state."""
+    # 网络请求期间可能撤权/换头版；不能以旧资格确认ready。
+    latest = _current_state(row)
+    if latest in ("revoked", "superseded"):
+        return _finish(row, "disabling", latest, receipt=receipt, delay=0)
+    if receipt.get("index_status") == "budget_exceeded":
+        # 上游实际分出的块数超过桥接核验预算：按新分片规则重新计划之前不会好，不无休止等待
+        return _finish(row, "blocked", desired, receipt=receipt, final=True, error={
+            "code": "index_chunk_budget", "message": "实际块数超过核验预算（%s 块），记为覆盖缺口"
+            % receipt.get("chunk_count")})
+    if receipt.get("source_status") != "active":
+        if (receipt.get("source_change_type") == "disabled_upstream"
+                and receipt.get("parse_status") in {"pending", "processing", "finalizing"}):
+            return _finish(row, "indexing", "active", receipt=receipt, delay=15)
+        raise HistoryError("index_upstream_disabled", "索引已停用，须明确恢复授权后再启用", 409)
+    ready = (
+        bool(receipt.get("knowledge_id")) and receipt.get("upload_status") == "uploaded"
+        and receipt.get("parse_status") in {"completed", "finalizing"}
+        and receipt.get("vector_status") == receipt.get("index_status") == "ready"
+        and receipt.get("binding_status") == "bound"
+    )
+    return _finish(row, "ready" if ready else "indexing", "active", receipt=receipt, delay=60 if ready else 15)
 
 
 def configured():
