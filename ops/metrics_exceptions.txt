@@ -74,7 +74,6 @@ db/publication.py:_publish_graph  84/5  graph publication worker: lease, plan, w
 db/publication.py:backfill_once  166/23  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:publish_once  101/21  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/registry_changes.py:for_versions  84/13  registry-change detection over versions, one branch per change kind
-db/repository/extraction_results.py:_do_insert_extraction_result  139/74  legacy extraction result writer (cc 74), retires with the old extraction queue (audit 1.4)
 db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
 db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_entities.py:approve_entity_with_alias_writeback  92/51  multi-step write/review function of the legacy graph repository; split per step

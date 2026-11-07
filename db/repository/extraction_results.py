@@ -172,12 +172,9 @@ def insert_extraction_result(
         )
 
 
-def _do_insert_extraction_result(session, source_doc_uuid, source_site, entities, relations) -> list[int]:
-    """Persist observations and link proposals without turning repeated evidence into approval."""
-    from db.identity import (digest, evidence_values, record_evidence, row_evidence_columns,
-                             batch_identity_keys, compatible_identity, disambiguation,
-                             has_candidates, persist_candidates, native_identity_claim, verified_native_identity)
-    from db.models import EntitySourceEvidence
+def _lock_document_and_native_identities(session, source_doc_uuid, source_site, entities):
+    """Serialise replays of one document and its strong identifiers; return the stored native projection."""
+    from db.identity import digest, native_identity_claim, verified_native_identity
     # Stable across Python processes, unlike hash(). Serialize replays of one document.
     lock_key = int(digest(['extraction', source_doc_uuid])[:15], 16)
     session.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock_key})
@@ -197,93 +194,114 @@ def _do_insert_extraction_result(session, source_doc_uuid, source_site, entities
     for namespace, field, value in sorted(native_identities):
         session.execute(text('SELECT pg_advisory_xact_lock(:key)'),
                         {'key': int(digest(['native_identity', namespace, value])[:15], 16)})
-    final_ids = []
-    batch = []
-    for incoming in entities:
-        rec = {**incoming, 'entity_data': dict(incoming.get('entity_data') or {})}
-        info = dict(disambiguation(rec))
-        native_identifier = verified_native_identity(rec, source_site, native_projection)
-        if native_identity_claim(rec) and native_identifier is None:
-            candidates = list(info.get('candidates') or [])
-            proposed_id = rec.get('dict_id') or info.get('dict_id')
-            if proposed_id and not any(item.get('dict_id') == proposed_id for item in candidates):
-                candidates.append({'dict_id': proposed_id, 'score': info.get('confidence', 0.0)})
-            info.update(status='ambiguous', auto_link=False, dict_id=None, candidates=candidates,
-                        match_step='step1_native_source_unverified',
-                        reason='Native identity does not match the stored source projection')
-            rec['dict_id'] = None
-        if native_identifier:
-            namespace, native_field, native_value = native_identifier
-            matches = {}
-            for key in (namespace, native_field):
-                for match in lookup_external_id_candidates(rec['entity_type'], key, native_value, session=session):
-                    matches[match['dict_id']] = match
-            candidates = [{'dict_id': match['dict_id'], 'name': match['canonical_name'],
-                           'similarity_score': 1.0, 'match_type': 'native_id'} for match in matches.values()]
-            selected_id = next(iter(matches)) if len(matches) == 1 else None
-            info.update(status='auto_matched' if selected_id else 'ambiguous' if matches else 'new_entity',
-                        auto_link=bool(selected_id), dict_id=selected_id, candidates=candidates,
-                        match_step='step1_native_id', rule_version='native-fields.20261031.v1',
-                        reason='Unique native identifier' if selected_id else 'Native identifier has multiple dictionaries' if matches else 'Native identifier first observation')
-            rec['dict_id'] = selected_id
-        if info:
-            rec['_disambig'] = info
-            rec['entity_data']['_disambig'] = info
-        # Intermediate and ambiguous candidates cannot allocate a new dictionary.
-        candidate = has_candidates(rec)
-        dict_id = None if candidate else (rec.get('dict_id') or info.get('dict_id'))
-        if dict_id:
-            dictionary = session.query(EntityDict).filter(EntityDict.id == dict_id).populate_existing().with_for_update().first()
-            if dictionary is None or dictionary.is_deleted or dictionary.entity_type != rec['entity_type']:
-                raise ValueError('Invalid extraction dictionary link')
-            if native_identifier:
-                namespace, native_field, native_value = native_identifier
-                if not any((dictionary.external_ids or {}).get(key) == native_value for key in (namespace, native_field)):
-                    raise ValueError('Native dictionary identity changed during persistence')
-        observation = evidence_values({**rec, **((rec.get('evidence') or [{}])[0])}, source_doc_uuid, source_site)
-        replay = session.query(EntitySourceEvidence).filter(
-            EntitySourceEvidence.object_type == 'entity',
-            EntitySourceEvidence.evidence_key == observation['evidence_key']).first()
-        entity = session.get(ExtractedEntity, replay.object_id) if replay else None
-        if entity is not None and entity.is_deleted:
-            entity = None
-        if entity is None and dict_id:
-            dictionary = session.get(EntityDict, dict_id)
-            if dictionary is None or dictionary.is_deleted or dictionary.entity_type != rec['entity_type']:
-                raise ValueError('Invalid extraction dictionary link')
-            entity = _find_existing_entity_by_dict_id(session, dict_id, rec['entity_type'])
-        keys = batch_identity_keys(rec)
-        if entity is None and not candidate and not native_identifier:
-            for previous_keys, previous_data, previous in batch:
-                if (keys & previous_keys and compatible_identity(rec['entity_data'], previous_data) and
-                        not (dict_id and previous.dict_id and dict_id != previous.dict_id)):
-                    entity = previous
-                    break
-        if entity is None:
-            if dict_id is None and not candidate and (rec.get('entity_name') or '').strip():
-                dict_id = _create_entity_dict_from_extraction(
-                    session, rec.get('entity_name', ''), rec['entity_type'], rec['entity_data'],
-                    source_site=source_site, is_verified=False, source_doc_uuid=source_doc_uuid,
-                    force_create=bool(native_identifier))
-            base_evidence = {**rec, **((rec.get('evidence') or [{}])[0])}
-            entity = ExtractedEntity(
-                source_doc_uuid=source_doc_uuid, source_site=source_site,
-                entity_type=rec['entity_type'], entity_name=rec.get('entity_name', ''),
-                entity_data=rec['entity_data'], source_text=rec.get('source_text', ''), dict_id=dict_id,
-                confidence_score=rec.get('confidence_score', 0.0),
-                confidence_reason=rec.get('confidence_reason', ''), review_status='pending',
-                **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
-            session.add(entity); session.flush()
-            _write_operation_log(session, 'insert', 'extracted_entities', entity.id,
-                                 business_action='extract', description='New unreviewed entity observation',
-                                 details={'source_doc_uuid': source_doc_uuid, 'dict_id': dict_id},
-                                 trigger_source='_do_insert_extraction_result')
-        # No approval, canonical overwrite, alias migration or historical bulk repair here.
-        observation_key = record_evidence(session, 'entity', entity, rec, source_doc_uuid, source_site)
-        if info.get('candidates') or info.get('dict_id'):
-            persist_candidates(session, entity, rec, observation_key)
-        batch.append((keys, rec['entity_data'], entity))
-        final_ids.append(entity.id)
+    return native_projection
+
+
+def _mark_native_identity_unverified(rec, info):
+    """A native identity claim that does not match the stored original becomes an ambiguous candidate list."""
+    candidates = list(info.get('candidates') or [])
+    proposed_id = rec.get('dict_id') or info.get('dict_id')
+    if proposed_id and not any(item.get('dict_id') == proposed_id for item in candidates):
+        candidates.append({'dict_id': proposed_id, 'score': info.get('confidence', 0.0)})
+    info.update(status='ambiguous', auto_link=False, dict_id=None, candidates=candidates,
+                match_step='step1_native_source_unverified',
+                reason='Native identity does not match the stored source projection')
+    rec['dict_id'] = None
+
+
+def _match_native_identity(session, rec, info, native_identifier):
+    """Link by a verified native identifier: unique dictionary -> auto match, several -> ambiguous."""
+    namespace, native_field, native_value = native_identifier
+    matches = {}
+    for key in (namespace, native_field):
+        for match in lookup_external_id_candidates(rec['entity_type'], key, native_value, session=session):
+            matches[match['dict_id']] = match
+    candidates = [{'dict_id': match['dict_id'], 'name': match['canonical_name'],
+                   'similarity_score': 1.0, 'match_type': 'native_id'} for match in matches.values()]
+    selected_id = next(iter(matches)) if len(matches) == 1 else None
+    info.update(status='auto_matched' if selected_id else 'ambiguous' if matches else 'new_entity',
+                auto_link=bool(selected_id), dict_id=selected_id, candidates=candidates,
+                match_step='step1_native_id', rule_version='native-fields.20261031.v1',
+                reason='Unique native identifier' if selected_id else 'Native identifier has multiple dictionaries' if matches else 'Native identifier first observation')
+    rec['dict_id'] = selected_id
+
+
+def _prepare_entity_record(session, incoming, source_site, native_projection):
+    """The working copy of one incoming entity with its disambiguation decision settled."""
+    from db.identity import disambiguation, native_identity_claim, verified_native_identity
+    rec = {**incoming, 'entity_data': dict(incoming.get('entity_data') or {})}
+    info = dict(disambiguation(rec))
+    native_identifier = verified_native_identity(rec, source_site, native_projection)
+    if native_identity_claim(rec) and native_identifier is None:
+        _mark_native_identity_unverified(rec, info)
+    if native_identifier:
+        _match_native_identity(session, rec, info, native_identifier)
+    if info:
+        rec['_disambig'] = info
+        rec['entity_data']['_disambig'] = info
+    return rec, info, native_identifier
+
+
+def _lock_linked_dictionary(session, dict_id, rec, native_identifier):
+    dictionary = session.query(EntityDict).filter(EntityDict.id == dict_id).populate_existing().with_for_update().first()
+    if dictionary is None or dictionary.is_deleted or dictionary.entity_type != rec['entity_type']:
+        raise ValueError('Invalid extraction dictionary link')
+    if native_identifier:
+        namespace, native_field, native_value = native_identifier
+        if not any((dictionary.external_ids or {}).get(key) == native_value for key in (namespace, native_field)):
+            raise ValueError('Native dictionary identity changed during persistence')
+
+
+def _find_observed_entity(session, rec, dict_id, candidate, native_identifier, keys, batch,
+                          source_doc_uuid, source_site):
+    """The entity this observation already belongs to: a replay, the linked dictionary's entity, or the batch."""
+    from db.identity import compatible_identity, evidence_values
+    from db.models import EntitySourceEvidence
+    observation = evidence_values({**rec, **((rec.get('evidence') or [{}])[0])}, source_doc_uuid, source_site)
+    replay = session.query(EntitySourceEvidence).filter(
+        EntitySourceEvidence.object_type == 'entity',
+        EntitySourceEvidence.evidence_key == observation['evidence_key']).first()
+    entity = session.get(ExtractedEntity, replay.object_id) if replay else None
+    if entity is not None and entity.is_deleted:
+        entity = None
+    if entity is None and dict_id:
+        dictionary = session.get(EntityDict, dict_id)
+        if dictionary is None or dictionary.is_deleted or dictionary.entity_type != rec['entity_type']:
+            raise ValueError('Invalid extraction dictionary link')
+        entity = _find_existing_entity_by_dict_id(session, dict_id, rec['entity_type'])
+    if entity is None and not candidate and not native_identifier:
+        for previous_keys, previous_data, previous in batch:
+            if (keys & previous_keys and compatible_identity(rec['entity_data'], previous_data) and
+                    not (dict_id and previous.dict_id and dict_id != previous.dict_id)):
+                return previous
+    return entity
+
+
+def _new_unreviewed_entity(session, rec, dict_id, candidate, native_identifier, source_doc_uuid, source_site):
+    from db.identity import row_evidence_columns
+    if dict_id is None and not candidate and (rec.get('entity_name') or '').strip():
+        dict_id = _create_entity_dict_from_extraction(
+            session, rec.get('entity_name', ''), rec['entity_type'], rec['entity_data'],
+            source_site=source_site, is_verified=False, source_doc_uuid=source_doc_uuid,
+            force_create=bool(native_identifier))
+    base_evidence = {**rec, **((rec.get('evidence') or [{}])[0])}
+    entity = ExtractedEntity(
+        source_doc_uuid=source_doc_uuid, source_site=source_site,
+        entity_type=rec['entity_type'], entity_name=rec.get('entity_name', ''),
+        entity_data=rec['entity_data'], source_text=rec.get('source_text', ''), dict_id=dict_id,
+        confidence_score=rec.get('confidence_score', 0.0),
+        confidence_reason=rec.get('confidence_reason', ''), review_status='pending',
+        **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
+    session.add(entity); session.flush()
+    _write_operation_log(session, 'insert', 'extracted_entities', entity.id,
+                         business_action='extract', description='New unreviewed entity observation',
+                         details={'source_doc_uuid': source_doc_uuid, 'dict_id': dict_id},
+                         trigger_source='_do_insert_extraction_result')
+    return entity
+
+
+def _insert_relations(session, relations, final_ids, source_doc_uuid, source_site):
+    from db.identity import record_evidence, row_evidence_columns
     for incoming in relations:
         rel = dict(incoming)
         from_idx, to_idx = rel.get('from_entity_idx'), rel.get('to_entity_idx')
@@ -305,6 +323,34 @@ def _do_insert_extraction_result(session, source_doc_uuid, source_site, entities
                 review_status='pending', **row_evidence_columns(base_evidence, source_doc_uuid, source_site))
             session.add(row); session.flush()
         record_evidence(session, 'relation', row, rel, source_doc_uuid, source_site)
+
+
+def _do_insert_extraction_result(session, source_doc_uuid, source_site, entities, relations) -> list[int]:
+    """Persist observations and link proposals without turning repeated evidence into approval."""
+    from db.identity import batch_identity_keys, has_candidates, persist_candidates, record_evidence
+    native_projection = _lock_document_and_native_identities(session, source_doc_uuid, source_site, entities)
+    final_ids = []
+    batch = []
+    for incoming in entities:
+        rec, info, native_identifier = _prepare_entity_record(session, incoming, source_site, native_projection)
+        # Intermediate and ambiguous candidates cannot allocate a new dictionary.
+        candidate = has_candidates(rec)
+        dict_id = None if candidate else (rec.get('dict_id') or info.get('dict_id'))
+        if dict_id:
+            _lock_linked_dictionary(session, dict_id, rec, native_identifier)
+        keys = batch_identity_keys(rec)
+        entity = _find_observed_entity(session, rec, dict_id, candidate, native_identifier, keys, batch,
+                                       source_doc_uuid, source_site)
+        if entity is None:
+            entity = _new_unreviewed_entity(session, rec, dict_id, candidate, native_identifier,
+                                            source_doc_uuid, source_site)
+        # No approval, canonical overwrite, alias migration or historical bulk repair here.
+        observation_key = record_evidence(session, 'entity', entity, rec, source_doc_uuid, source_site)
+        if info.get('candidates') or info.get('dict_id'):
+            persist_candidates(session, entity, rec, observation_key)
+        batch.append((keys, rec['entity_data'], entity))
+        final_ids.append(entity.id)
+    _insert_relations(session, relations, final_ids, source_doc_uuid, source_site)
     doc = session.query(Document).filter(Document.uuid == source_doc_uuid).first()
     if doc:
         doc.extraction_status = 'done'; doc.extracted_at = datetime.now(timezone.utc)
