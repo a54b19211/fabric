@@ -599,6 +599,20 @@ class AcceptanceCase(BaseModel):
     @model_validator(mode="after")
     def _business_rules(self) -> AcceptanceCase:
         errors: list[str] = []
+        errors += self._identity_errors()
+        errors += self._sources_errors()
+        errors += self._wording_errors()
+        errors += self._checks_errors()
+        errors += self._judgment_e_errors()
+        errors += self._chain_errors()
+        errors += self._truth_errors()
+        if errors:
+            raise ValueError(f"案例 {self.id}：" + "；".join(errors))
+        return self
+
+    def _identity_errors(self) -> list[str]:
+        """id and design_ref agree with the judgment, case kind and chain"""
+        errors: list[str] = []
         prefix = "V" if self.judgment == "view" else self.judgment
         if not self.id.startswith(prefix + "-"):
             errors.append(f"id {self.id} 与 judgment {self.judgment} 不符")
@@ -610,7 +624,11 @@ class AcceptanceCase(BaseModel):
             errors.append(
                 f"design_ref {self.design_ref!r} 应为 judgment={ref.judgment} case_kind={ref.case_kind} "
                 f"chain={ref.chain}")
+        return errors
 
+    def _sources_errors(self) -> list[str]:
+        """the three source lists match the availability the catalogue state and deployment facts give"""
+        errors: list[str] = []
         # 三个来源列表要与目录状态加部署事实推出的可用性一致：有材料、状态未知、缺口各归各位（裁定 2）
         placement = (("sources_available", self.sources_available, "has_material"),
                      ("sources_status_unknown", self.sources_status_unknown, "unknown"),
@@ -624,7 +642,11 @@ class AcceptanceCase(BaseModel):
         dup_src = sorted(s for s, n in Counter(listed).items() if n > 1)
         if dup_src:
             errors.append(f"来源同时出现在多个来源列表中：{dup_src}")
+        return errors
 
+    def _wording_errors(self) -> list[str]:
+        """must_say / must_not name every required statement and shortcut; the counterexample is not empty"""
+        errors: list[str] = []
         need_say = REPORT_MUST_SAY + JUDGMENT_MUST_SAY[self.judgment]
         if self.judgment == "view":
             need_say += BRIEFING_STRUCTURE + VIEW_MUST_SAY
@@ -644,7 +666,12 @@ class AcceptanceCase(BaseModel):
 
         if not self.counterexample.must_not_conclude:
             errors.append("counterexample.must_not_conclude 不能为空：反例必须写明不能得出的结论")
+        return errors
 
+    def _checks_errors(self) -> list[str]:
+        """the checks the case kind, judgment, data basis, sources and trigger require"""
+        errors: list[str] = []
+        listed = self.sources_available + self.sources_status_unknown + self.sources_gap
         kinds = {c.kind for c in self.checks}
         need_checks = {"cites_fixed_version"}
         need_checks |= set(REQUIRED_CHECKS_BY_KIND.get(self.case_kind, ()))
@@ -667,7 +694,11 @@ class AcceptanceCase(BaseModel):
         missing_checks = sorted(need_checks - kinds)
         if missing_checks:
             errors.append(f"checks 缺少 {missing_checks}")
+        return errors
 
+    def _judgment_e_errors(self) -> list[str]:
+        """judgment E is the long-running judgment update"""
+        errors: list[str] = []
         if self.judgment == "E":
             if self.work_mode != "judgment_update":
                 errors.append("判断 E 本身就是长期判断更新，work_mode 必须是 judgment_update")
@@ -675,14 +706,22 @@ class AcceptanceCase(BaseModel):
                 errors.append("判断 E 案例必须写 trigger（新材料自动触发 / 用户追问 / 历史回放）")
             if self.expected_outcome is None:
                 errors.append("判断 E 案例必须写 expected_outcome（maintain / revise / either_with_reason）")
+        return errors
 
+    def _chain_errors(self) -> list[str]:
+        """chain correction and anomaly cases"""
+        errors: list[str] = []
         if self.case_kind == "chain_correction":
             want = CORRECTION_TRIGGER_BY_CHAIN[self.chain] if self.chain else None
             if self.correction_trigger != want:
                 errors.append(f"链路{self.chain} 更正的 correction_trigger 必须是 {want}")
         if self.case_kind == "chain_anomaly" and not self.fault_injected:
             errors.append("异常案例就是故障案例，fault_injected 必须为 true")
+        return errors
 
+    def _truth_errors(self) -> list[str]:
+        """target, material truthfulness and execution status agree (rulings 6 and 7)"""
+        errors: list[str] = []
         # 裁定 6、7：目标、材料真实性、执行状态三者一致
         if self.data_basis == "synthetic_flow_only" and self.data_truth != "synthetic":
             errors.append("目标是 synthetic_flow_only 时 data_truth 必须是 synthetic")
@@ -690,10 +729,7 @@ class AcceptanceCase(BaseModel):
             errors.append("目标是真实材料时 data_truth 不能是 synthetic：合成材料不算真实覆盖")
         if self.data_truth == "to_be_sourced" and self.status != "to_be_sourced":
             errors.append(f"材料待找（data_truth=to_be_sourced）时 status 不能是 {self.status}")
-
-        if errors:
-            raise ValueError(f"案例 {self.id}：" + "；".join(errors))
-        return self
+        return errors
 
 
 # ---------- 入口 ----------

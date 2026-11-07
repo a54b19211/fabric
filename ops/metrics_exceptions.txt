@@ -40,7 +40,6 @@ collection/pubmed_fulltext.py:_unpaywall  53/21  full-text access resolver with 
 collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with one branch per publisher/licence case
 collection/site_crawler.py:_read  81/32  crawler capture projection, one branch per page element
 collection/site_crawler.py:project_capture  65/38  crawler capture projection, one branch per page element
-contracts/acceptance.py:AcceptanceCase._business_rules  97/48  acceptance-case validator, one check per business rule; keep the rules in one place
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
 core_engine/agent_runner.py:AgentRunner.run_document_review  122/31  legacy graph agent runner (AgentRunner is a god class, audit 2.1); split with the legacy graph feature
 core_engine/agent_runner.py:AgentRunner.run_entity_merge_stream  190/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
