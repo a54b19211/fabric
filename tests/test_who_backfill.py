@@ -12,6 +12,7 @@ import pytest
 from test_source_refresh import who_value
 
 from biz_rules import who_don
+from biz_rules.history_models import HistoryError
 from collection import rate
 from flows.who_backfill import SINCE, Counts, backfill_who
 
@@ -108,6 +109,21 @@ def test_backfill_starts_at_2024_reads_in_legs_and_stops_at_400_records_leaving_
         assert int(request.url.params["$top"]) <= who_don.PAGE_SIZE + 1  # at most 50 records a page (+1 to see the end)
     assert all(run.coverage["backfill"]["background"] for run in store.runs.values())
     assert backfill_who(UNTIL, store=store) == receipt and len(who.requests) == 8  # a finished backfill sends nothing
+
+
+def test_backfill_with_a_since_is_another_task_that_reads_only_its_window_and_leaves_the_first_alone(monkeypatch):
+    who, store = WhoStandIn(monkeypatch, count=200), RunStore()
+    first = backfill_who(UNTIL, bounds=Counts(records=100, bytes=40 << 20, requests=20), store=store)
+    sent = len(who.requests)
+    since = FIRST_NEW + timedelta(hours=150)
+    inside = [n["Id"] for n in who.notices if n["LastModified"] >= since.strftime("%Y-%m-%dT%H:%M:%SZ")]
+    window = backfill_who(UNTIL, since=since, store=store)
+    assert window["since"] == since.isoformat() and window["reached_end"] and window["spent"]["records"] == len(inside)
+    assert len(store.runs) == 2 and first["since"] == SINCE.isoformat()  # its own run; the first task's run is as it was
+    assert all(f"LastModified ge {since.isoformat()}" in r.url.params["$filter"] for r in who.requests[sent:])
+    assert adopted(store)[-len(inside):] == inside  # only the window's notices, oldest first
+    with pytest.raises(HistoryError):
+        backfill_who(since, since=since, store=store)  # an end that is not after the start
 
 
 def test_backfill_stops_when_its_request_bound_is_reached(monkeypatch):
