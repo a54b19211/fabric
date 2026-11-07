@@ -88,7 +88,7 @@ flows/graph_publish.py:main  94/8  graph publication flow: capture and bundle bu
 flows/history_fetch.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place
 flows/history_fetch.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
 flows/history_publish.py:main  100/18  command-line entry with its argument handling and run loop inline
-migration/migrate.py:_split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case
+migration/sqltext.py:split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case
 processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
 processing/clean_text.py:_apply_templates  34/22  text cleaners, one branch per markup pattern; table-driven rewrite
 processing/clean_text.py:_readable  22/23  text cleaners, one branch per markup pattern; table-driven rewrite
