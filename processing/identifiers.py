@@ -146,37 +146,47 @@ def _hk(code: str) -> str | None:
     return f"{code}.HK"
 
 
+def _doi_cut(text: str, folded: str, doi_start: int, end: int) -> int | None:
+    """Where the matched DOI ends in the text, or None when it must not be reported."""
+    # 原文是全角标点（如“）”“；”）的地方截断：它们折叠后是 ASCII，但在原文里是中文句读
+    for i in range(doi_start, end):
+        if ord(text[i]) > 0x7F and not (folded[i].isalnum() or folded[i] in _DOI_FULLWIDTH_OK):
+            return i
+    # 后缀在 ASCII 的 < : ; , 处停下、且后面紧跟字母数字：多半是 SICI 式老 DOI
+    # （…30:1<1::AID-JBM1>3.0.CO;2-O）或两个编号粘在一起，截断会得到错的 DOI，不出
+    if end < len(folded) and ord(text[end]) <= 0x7F:
+        nxt = folded[end]
+        after = folded[end + 1] if end + 1 < len(folded) else ""
+        if nxt == "<" and after != "/":
+            return None
+        if nxt in ":;," and after.isascii() and after.isalnum():
+            return None
+    return end
+
+
+def _strip_doi_trail(folded: str, doi_start: int, end: int) -> int:
+    # 剥掉结尾标点；括号配对的保留（DOI 内部的括号）
+    while end > doi_start:
+        last = folded[end - 1]
+        if last not in _DOI_TRAIL:
+            break
+        body = folded[doi_start:end]
+        if last == ")" and body.count("(") >= body.count(")"):
+            break
+        if last == "]" and body.count("[") >= body.count("]"):
+            break
+        end -= 1
+    return end
+
+
 def _doi_hits(text: str, folded: str):
     for m in _DOI.finditer(folded):
         start = m.start()
         doi_start = m.start("doi")
-        end = m.end()
-        # 原文是全角标点（如“）”“；”）的地方截断：它们折叠后是 ASCII，但在原文里是中文句读
-        for i in range(doi_start, end):
-            if ord(text[i]) > 0x7F and not (folded[i].isalnum() or folded[i] in _DOI_FULLWIDTH_OK):
-                end = i
-                break
-        else:
-            # 后缀在 ASCII 的 < : ; , 处停下、且后面紧跟字母数字：多半是 SICI 式老 DOI
-            # （…30:1<1::AID-JBM1>3.0.CO;2-O）或两个编号粘在一起，截断会得到错的 DOI，不出
-            if end < len(folded) and ord(text[end]) <= 0x7F:
-                nxt = folded[end]
-                after = folded[end + 1] if end + 1 < len(folded) else ""
-                if nxt == "<" and after != "/":
-                    continue
-                if nxt in ":;," and after.isascii() and after.isalnum():
-                    continue
-        # 剥掉结尾标点；括号配对的保留（DOI 内部的括号）
-        while end > doi_start:
-            last = folded[end - 1]
-            if last not in _DOI_TRAIL:
-                break
-            body = folded[doi_start:end]
-            if last == ")" and body.count("(") >= body.count(")"):
-                break
-            if last == "]" and body.count("[") >= body.count("]"):
-                break
-            end -= 1
+        end = _doi_cut(text, folded, doi_start, m.end())
+        if end is None:
+            continue
+        end = _strip_doi_trail(folded, doi_start, end)
         doi = folded[doi_start:end]
         registrant, _, suffix = doi.partition("/")
         if not suffix or not registrant[3:].isdigit():
@@ -194,48 +204,60 @@ def _cde_standalone(folded: str, start: int, end: int) -> bool:
     return not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_")
 
 
-def _scan(text: str):
-    folded = _fold(text)
-    found = []
+def _trial_and_literature_hits(folded: str):
     for m in _NCT.finditer(folded):
-        found.append(("nct", "NCT" + m.group(1), m.start(), m.end()))
+        yield "nct", "NCT" + m.group(1), m.start(), m.end()
     for m in _CTR.finditer(folded):
-        found.append(("ctr", "CTR" + m.group(1), m.start(), m.end()))
+        yield "ctr", "CTR" + m.group(1), m.start(), m.end()
     for m in _CHICTR.finditer(folded):
         if m.group(3):
             value = "ChiCTR" + m.group(3)
         else:
             value = f"ChiCTR-{m.group(1).upper()}-{m.group(2)}"
-        found.append(("chictr", value, m.start(), m.end()))
+        yield "chictr", value, m.start(), m.end()
     for m in _PMID.finditer(folded):
-        found.append(("pmid", m.group(1), m.start(), m.end()))
+        yield "pmid", m.group(1), m.start(), m.end()
     for m in _PMCID.finditer(folded):
-        found.append(("pmcid", "PMC" + m.group(1), m.start(), m.end()))
-    found.extend(_doi_hits(text, folded))
+        yield "pmcid", "PMC" + m.group(1), m.start(), m.end()
+
+
+def _regulatory_hits(folded: str):
     for m in _NMPA.finditer(folded):
-        found.append(("nmpa_approval", "国药准字" + m.group(1).upper() + m.group(2), m.start(), m.end()))
+        yield "nmpa_approval", "国药准字" + m.group(1).upper() + m.group(2), m.start(), m.end()
     for m in _NMPA_LABELED.finditer(folded):
-        found.append(("nmpa_registration", m.group(1).upper(), m.start(), m.end()))
+        yield "nmpa_registration", m.group(1).upper(), m.start(), m.end()
     for m in _CDE.finditer(folded):
         window = folded[max(0, m.start() - _CDE_WINDOW):m.start()]
         if _CDE_LABEL in window or _cde_standalone(folded, m.start(), m.end()):
-            found.append(("cde_acceptance", m.group(1).upper(), m.start(), m.end()))
+            yield "cde_acceptance", m.group(1).upper(), m.start(), m.end()
+
+
+def _stock_hits(folded: str):
     for m in _STOCK_SUFFIX.finditer(folded):
         value = _a_share(m.group(1), m.group(2))
         if value:
-            found.append(("stock", value, m.start(), m.end()))
+            yield "stock", value, m.start(), m.end()
     for m in _STOCK_PREFIX.finditer(folded):
         value = _a_share(m.group(2), m.group(1))
         if value:
-            found.append(("stock", value, m.start(), m.end()))
+            yield "stock", value, m.start(), m.end()
     for m in _STOCK_HK.finditer(folded):
         value = _hk(m.group(1))
         if value:
-            found.append(("stock", value, m.start(), m.end()))
+            yield "stock", value, m.start(), m.end()
     for m in _STOCK_LABEL.finditer(folded):
         exchange = _infer_exchange(m.group(1))
         if exchange:
-            found.append(("stock", f"{m.group(1)}.{exchange}", m.start(), m.end()))
+            yield "stock", f"{m.group(1)}.{exchange}", m.start(), m.end()
+
+
+def _scan(text: str):
+    folded = _fold(text)
+    # the order of the kinds matters: hits with the same start and length keep it through the stable sort below
+    found = list(_trial_and_literature_hits(folded))
+    found.extend(_doi_hits(text, folded))
+    found.extend(_regulatory_hits(folded))
+    found.extend(_stock_hits(folded))
 
     # 同一位置只出一个：按起点、长度从长到短排，与已保留结果重叠的丢掉。
     # 典型是 DOI 后缀里嵌着 NCT 之类——那是 DOI 的一部分，不另算一个引用
