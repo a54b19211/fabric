@@ -17,7 +17,6 @@ collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with
 collection/site_crawler.py:_read  81/32  crawler capture projection, one branch per page element
 collection/site_crawler.py:project_capture  65/38  crawler capture projection, one branch per page element
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
-db/registry_changes.py:for_versions  84/13  registry-change detection over versions, one branch per change kind
 processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
 processing/clean_text.py:_apply_templates  34/22  text cleaners, one branch per markup pattern; table-driven rewrite
 processing/clean_text.py:_readable  22/23  text cleaners, one branch per markup pattern; table-driven rewrite
