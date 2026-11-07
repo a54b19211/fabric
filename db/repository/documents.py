@@ -17,6 +17,59 @@ from db.models import (
 from db.repository.audit import _write_operation_log
 
 
+def _new_document(envelope) -> Document:
+    return Document(
+        uuid=envelope.uuid,
+        title=envelope.title or "",
+        publish_date=envelope.publish_date or "",
+        category=envelope.category or "",
+        summary=envelope.summary or "",
+        raw_content=envelope.raw_content or "",
+        source_url=envelope.provenance.source_url or "",
+        source_site=envelope.provenance.source_site or "",
+        parent_uuid=envelope.provenance.parent_uuid or "",
+        crawl_timestamp=_parse_ts(envelope.provenance.crawl_timestamp),
+        confidence_score=envelope.confidence.score,
+        confidence_reason=envelope.confidence.reason or "",
+        parse_method=envelope.parse_method or "",
+        doc_status=envelope.status or "AUTO_PROCESSED",
+        reviewer_note=envelope.reviewer_note or "",
+        doc_type=envelope.doc_type or "",
+        language=envelope.language or "",
+        lineage=json.dumps(envelope.lineage or {}, ensure_ascii=False),
+        weknora_sync_status="pending",
+        extraction_status="pending",
+    )
+
+
+def _update_mutable_fields(doc: Document, envelope) -> None:
+    """只更新可变字段，保留 extraction_status / weknora_sync_status 等流水线状态"""
+    doc.title = envelope.title or doc.title
+    doc.summary = envelope.summary or doc.summary
+    doc.raw_content = envelope.raw_content or doc.raw_content
+    doc.source_url = envelope.provenance.source_url or doc.source_url
+    doc.parse_method = envelope.parse_method or doc.parse_method
+    doc.doc_type = envelope.doc_type or doc.doc_type
+    doc.language = envelope.language or doc.language
+    if envelope.lineage:
+        doc.lineage = json.dumps(envelope.lineage, ensure_ascii=False)
+
+
+def _replace_attachments(session, envelope) -> None:
+    """先删后插，保证幂等"""
+    session.query(Attachment).filter(
+        Attachment.parent_uuid == envelope.uuid
+    ).delete(synchronize_session=False)
+    for att in envelope.attachments:
+        session.add(Attachment(
+            parent_uuid=envelope.uuid,
+            file_name=att.file_name or "",
+            file_url=att.file_url or "",
+            file_uuid=att.file_uuid or "",
+            local_path=getattr(att, "local_path", "") or "",
+        ))
+
+
 def upsert_document(envelope) -> dict | None:
     """
     幂等写入文档。同一 uuid 重复调用只更新，不新增。
@@ -32,28 +85,7 @@ def upsert_document(envelope) -> dict | None:
         # ── 1. documents 表 ──────────────────────────────────────────
         doc = session.query(Document).filter(Document.uuid == envelope.uuid).with_for_update().first()
         if doc is None:
-            doc = Document(
-                uuid=envelope.uuid,
-                title=envelope.title or "",
-                publish_date=envelope.publish_date or "",
-                category=envelope.category or "",
-                summary=envelope.summary or "",
-                raw_content=envelope.raw_content or "",
-                source_url=envelope.provenance.source_url or "",
-                source_site=envelope.provenance.source_site or "",
-                parent_uuid=envelope.provenance.parent_uuid or "",
-                crawl_timestamp=_parse_ts(envelope.provenance.crawl_timestamp),
-                confidence_score=envelope.confidence.score,
-                confidence_reason=envelope.confidence.reason or "",
-                parse_method=envelope.parse_method or "",
-                doc_status=envelope.status or "AUTO_PROCESSED",
-                reviewer_note=envelope.reviewer_note or "",
-                doc_type=envelope.doc_type or "",
-                language=envelope.language or "",
-                lineage=json.dumps(envelope.lineage or {}, ensure_ascii=False),
-                weknora_sync_status="pending",
-                extraction_status="pending",
-            )
+            doc = _new_document(envelope)
             session.add(doc)
             logger.info(f"[DB] 新增文档: {envelope.uuid}")
             is_new = True
@@ -64,16 +96,7 @@ def upsert_document(envelope) -> dict | None:
                 from db.publication import enqueue_changed_document
 
                 return enqueue_changed_document(session, envelope)
-            # 只更新可变字段，保留 extraction_status / weknora_sync_status 等流水线状态
-            doc.title = envelope.title or doc.title
-            doc.summary = envelope.summary or doc.summary
-            doc.raw_content = envelope.raw_content or doc.raw_content
-            doc.source_url = envelope.provenance.source_url or doc.source_url
-            doc.parse_method = envelope.parse_method or doc.parse_method
-            doc.doc_type = envelope.doc_type or doc.doc_type
-            doc.language = envelope.language or doc.language
-            if envelope.lineage:
-                doc.lineage = json.dumps(envelope.lineage, ensure_ascii=False)
+            _update_mutable_fields(doc, envelope)
             logger.info(f"[DB] 更新文档: {envelope.uuid}")
             is_new = False
 
@@ -96,19 +119,9 @@ def upsert_document(envelope) -> dict | None:
                 extra=envelope.extra,
             )
 
-        # ── 3. attachments 表（先删后插，保证幂等）───────────────────
+        # ── 3. attachments 表 ────────────────────────────────────────
         if envelope.attachments:
-            session.query(Attachment).filter(
-                Attachment.parent_uuid == envelope.uuid
-            ).delete(synchronize_session=False)
-            for att in envelope.attachments:
-                session.add(Attachment(
-                    parent_uuid=envelope.uuid,
-                    file_name=att.file_name or "",
-                    file_url=att.file_url or "",
-                    file_uuid=att.file_uuid or "",
-                    local_path=getattr(att, "local_path", "") or "",
-                ))
+            _replace_attachments(session, envelope)
 
         from db.publication import enqueue_current_document
 
