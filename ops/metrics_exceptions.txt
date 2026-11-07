@@ -24,7 +24,6 @@ biz_rules/graph_tools.py:paths  56/34  graph query helper with the traversal and
 biz_rules/graph_tools.py:subgraph  25/25  graph query helper with the traversal and its filters inline
 biz_rules/history_models.py:FetchRequest.fixed_scope  32/23  request validator with one check per scope rule; keep the rules in one place
 biz_rules/history_sources.py:_project_pubmed  91/20  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
-biz_rules/history_sources.py:_read_public_api  111/54  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
 biz_rules/native_extraction.py:_index_json  53/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 biz_rules/native_extraction.py:_index_json.walk  46/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 biz_rules/native_extraction.py:_project  102/39  projection of source JSON into attributes, one branch per field kind; table-driven rewrite

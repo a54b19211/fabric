@@ -987,6 +987,125 @@ def _api_total(source, data):
     return data.get("hitCount")
 
 
+class _PublicApiRead:
+    """State of one paged read of a public API: the originals read so far and where to resume."""
+
+    def __init__(self, request: FetchRequest):
+        self.request = request
+        self.source = request.source_id
+        self.records, self.seen, self.source_total = [], {}, None
+        self.exhausted, self.error, self.stop = False, None, "record_budget"
+        self.cursor = "*" if self.source == "europe_pmc" else None
+        if request.continuation:
+            self.cursor = request.continuation.cursor
+        self.consumed = request.continuation.read_count if request.continuation else 0
+        self.next_continuation = self.count_drift = None
+        self.previous_cursors = {self.cursor} if self.cursor else set()
+
+    def read_page(self, client) -> bool:
+        """Read and absorb one page. True when reading ends here (budget, end of the source, no-match)."""
+        request, source = self.request, self.source
+        remaining = request.max_records - len(self.records)
+        if remaining <= 0:
+            return True
+        url, params, path = _api_page(request, self.cursor, min(remaining, 100), len(self.records))
+        status, body = transport.get(client, url, params, cap=PAGE_BYTES)
+        text = body.decode("utf-8")
+        # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
+        if status == 404 and source == "fda_crl":
+            failure = parse_json(text).get("error") or {}
+            if failure.get("code") == "NOT_FOUND" and failure.get("message") == "No matches found!":
+                self.exhausted, self.stop = True, "upstream_no_match"
+                return True
+        _ok(status)
+        data = parse_json(text)
+        self.source_total = _api_total(source, data)
+        page_items = list(_raw_array_items(text, path))
+        self._absorb(page_items)
+        next_cursor = self._next_cursor(data, page_items)
+        if not page_items and not self.exhausted:
+            raise HistoryError("unexpected_empty_page", "来源仍有后续标记但返回空页")
+        if source in {"clinicaltrials", "europe_pmc"}:
+            self.next_continuation = None if self.exhausted else {
+                "scope_hash": request.scope_hash(), "cursor": next_cursor, "read_count": self.consumed}
+        if self.exhausted:
+            self.stop = "upstream_exhausted"
+            return True
+        if len(self.records) >= request.max_records:
+            self.stop = "record_budget"
+            return True
+        if source != "fda_crl":
+            if next_cursor in self.previous_cursors:
+                raise HistoryError("repeated_page_cursor", "来源分页标记重复")
+            self.previous_cursors.add(next_cursor)
+            self.cursor = next_cursor
+        return False
+
+    def _absorb(self, page_items) -> None:
+        for data_item, raw in page_items:
+            native, kind = _api_native(self.source, data_item)
+            item = ArchiveRecord(source_record_id=native, record_kind=kind, raw_content=raw)
+            project_record(self.source, item)
+            if native in self.seen:
+                if self.seen[native] != sha256(raw):
+                    self.records = [value for value in self.records if value.source_record_id != native]
+                    raise HistoryError("ambiguous_native_id", "同批同来源ID对应不同原件，拒绝猜测修订顺序")
+                continue
+            self.seen[native] = sha256(raw)
+            self.records.append(item)
+            if len(self.records) >= self.request.max_records:
+                break
+
+    def _next_cursor(self, data, page_items):
+        """The source's own paging rule: the next page marker, with exhaustion decided (and checked) per source."""
+        if self.source == "clinicaltrials":
+            return self._clinicaltrials_cursor(data, page_items)
+        if self.source == "europe_pmc":
+            return self._europe_pmc_cursor(data, page_items)
+        self.exhausted = isinstance(self.source_total, int) and len(self.records) >= self.source_total
+        return None
+
+    def _clinicaltrials_cursor(self, data, page_items):
+        next_cursor = data.get("nextPageToken")
+        self.consumed += len(page_items)
+        if not next_cursor and self.source_total is not None and self.consumed < self.source_total:
+            raise HistoryError("invalid_source_pagination", "临床登记仍有未读命中但缺少续页标记，不能视为EOF")
+        if next_cursor and (not isinstance(next_cursor, str) or not page_items
+                            or next_cursor in self.previous_cursors):
+            raise HistoryError("invalid_source_pagination", "临床登记分页中断，不能视为EOF")
+        self.exhausted = not bool(next_cursor)
+        return next_cursor
+
+    def _europe_pmc_cursor(self, data, page_items):
+        next_cursor = data.get("nextCursorMark")
+        source_total = self.source_total
+        if not isinstance(source_total, int) or isinstance(source_total, bool) or source_total < 0:
+            raise HistoryError("invalid_source_pagination", "Europe PMC缺可信命中总数，不能确认EOF")
+        # Europe PMC recounts hitCount: a record updated again inside the fixed UPDATE_DATE window leaves it, so the
+        # count can fall mid-paging. An empty page without a new marker after reads is its documented end; treat
+        # it as read to the end and record the drifted count next to the read count in the coverage statement.
+        drifted = not page_items and self.consumed > 0 and (not next_cursor or next_cursor == self.cursor)
+        self.consumed += len(page_items)
+        self.exhausted = self.consumed >= source_total or drifted
+        if drifted and self.consumed < source_total:
+            self.count_drift = {"source_total": source_total, "read_count": self.consumed}
+        if not self.exhausted and (not page_items or not next_cursor or next_cursor == self.cursor):
+            raise HistoryError("invalid_source_pagination", "Europe PMC仍有未读命中但分页中断，不能视为EOF")
+        return next_cursor
+
+    def result(self) -> dict:
+        return {
+            "records": self.records,
+            "complete": False,
+            "upstream_pagination_exhausted": self.exhausted,
+            "stop_reason": self.stop,
+            "error": self.error,
+            "source_total": self.source_total,
+            "count_drift": self.count_drift,
+            "next_continuation": self.next_continuation if not self.error else None,
+        }
+
+
 def _read_public_api(request: FetchRequest) -> dict:
     """ClinicalTrials / Europe PMC / FDA CRL 的公开接口分页读取（PubMed 见 _read_pubmed）。返回真实完成/截断/失败
     及已读原件；HTTP异常绝不伪装EOF。预算用完停在最后读完的一页，续读位置指向下一页。"""
@@ -995,109 +1114,23 @@ def _read_public_api(request: FetchRequest) -> dict:
     spec(request.source_id)  # 来源必须在采集目录里（不在则 KeyError）
     if request.source_id == "pubmed":
         return _read_pubmed(request)
-    source = request.source_id
-    records, seen, source_total = [], {}, None
-    exhausted, error, stop = False, None, "record_budget"
-    cursor = "*" if source == "europe_pmc" else None
-    if request.continuation:
-        cursor = request.continuation.cursor
-    consumed = request.continuation.read_count if request.continuation else 0
-    next_continuation = count_drift = None
-    previous_cursors = {cursor} if cursor else set()
+    read = _PublicApiRead(request)
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
             for _ in range(request.max_pages):
-                remaining = request.max_records - len(records)
-                if remaining <= 0:
+                if read.read_page(client):
                     break
-                url, params, path = _api_page(request, cursor, min(remaining, 100), len(records))
-                status, body = transport.get(client, url, params, cap=PAGE_BYTES)
-                text = body.decode("utf-8")
-                # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
-                if status == 404 and source == "fda_crl":
-                    failure = parse_json(text).get("error") or {}
-                    if failure.get("code") == "NOT_FOUND" and failure.get("message") == "No matches found!":
-                        exhausted, stop = True, "upstream_no_match"
-                        break
-                _ok(status)
-                data = parse_json(text)
-                source_total = _api_total(source, data)
-                page_items = list(_raw_array_items(text, path))
-                for data_item, raw in page_items:
-                    native, kind = _api_native(source, data_item)
-                    item = ArchiveRecord(source_record_id=native, record_kind=kind, raw_content=raw)
-                    project_record(source, item)
-                    if native in seen:
-                        if seen[native] != sha256(raw):
-                            records = [value for value in records if value.source_record_id != native]
-                            raise HistoryError("ambiguous_native_id", "同批同来源ID对应不同原件，拒绝猜测修订顺序")
-                        continue
-                    seen[native] = sha256(raw)
-                    records.append(item)
-                    if len(records) >= request.max_records:
-                        break
-                if source == "clinicaltrials":
-                    next_cursor = data.get("nextPageToken")
-                    consumed += len(page_items)
-                    if not next_cursor and source_total is not None and consumed < source_total:
-                        raise HistoryError("invalid_source_pagination", "临床登记仍有未读命中但缺少续页标记，不能视为EOF")
-                    if next_cursor and (not isinstance(next_cursor, str) or not page_items
-                                        or next_cursor in previous_cursors):
-                        raise HistoryError("invalid_source_pagination", "临床登记分页中断，不能视为EOF")
-                    exhausted = not bool(next_cursor)
-                elif source == "europe_pmc":
-                    next_cursor = data.get("nextCursorMark")
-                    if not isinstance(source_total, int) or isinstance(source_total, bool) or source_total < 0:
-                        raise HistoryError("invalid_source_pagination", "Europe PMC缺可信命中总数，不能确认EOF")
-                    # Europe PMC重算hitCount；固定UPDATE_DATE窗内的记录被再次更新会移出窗口，
-                    # 命中数可在翻页中途下降。已读过后返回空页且无新标记是其文档化的结束，
-                    # 按读完处理，并把漂移的命中数与已读数如实记入覆盖说明。
-                    drifted = not page_items and consumed > 0 and (not next_cursor or next_cursor == cursor)
-                    consumed += len(page_items)
-                    exhausted = consumed >= source_total or drifted
-                    if drifted and consumed < source_total:
-                        count_drift = {"source_total": source_total, "read_count": consumed}
-                    if not exhausted and (not page_items or not next_cursor or next_cursor == cursor):
-                        raise HistoryError("invalid_source_pagination", "Europe PMC仍有未读命中但分页中断，不能视为EOF")
-                else:
-                    next_cursor = None
-                    exhausted = isinstance(source_total, int) and len(records) >= source_total
-                if not page_items and not exhausted:
-                    raise HistoryError("unexpected_empty_page", "来源仍有后续标记但返回空页")
-                if source in {"clinicaltrials", "europe_pmc"}:
-                    next_continuation = None if exhausted else {
-                        "scope_hash": request.scope_hash(), "cursor": next_cursor, "read_count": consumed}
-                if exhausted:
-                    stop = "upstream_exhausted"
-                    break
-                if len(records) >= request.max_records:
-                    stop = "record_budget"
-                    break
-                if source != "fda_crl":
-                    if next_cursor in previous_cursors:
-                        raise HistoryError("repeated_page_cursor", "来源分页标记重复")
-                    previous_cursors.add(next_cursor)
-                    cursor = next_cursor
             else:
-                stop = "page_budget"
+                read.stop = "page_budget"
         except transport.Stop as stopped:
-            stop = stopped.reason  # 停在最后读完的一页，续读位置不变
+            read.stop = stopped.reason  # 停在最后读完的一页，续读位置不变
         except HistoryError as exc:
-            error = {"code": exc.code, "message": exc.message}
-            stop = "source_failed"
+            read.error = {"code": exc.code, "message": exc.message}
+            read.stop = "source_failed"
         except (httpx.HTTPError, UnicodeError, ValueError, TypeError, KeyError, IndexError):
-            error = {"code": "source_read_failed", "message": "公开来源读取或格式校验失败；已读原件单独保留"}
-            stop = "source_failed"
-    return {
-        "records": records,
-        "complete": False,
-        "upstream_pagination_exhausted": exhausted,
-        "stop_reason": stop,
-        "error": error,
-        "source_total": source_total,
-        "count_drift": count_drift,
-        "next_continuation": next_continuation if not error else None,
-    }
+            read.error = {"code": "source_read_failed", "message": "公开来源读取或格式校验失败；已读原件单独保留"}
+            read.stop = "source_failed"
+    return read.result()
 
 
 def _pubmed_cursor(request):
