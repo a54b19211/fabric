@@ -1,4 +1,4 @@
-"""The measurement extraction processor datafabric.measure_extract.v2: what one model call over one reading window
+"""The measurement extraction processor datafabric.measure_extract.v3: what one model call over one reading window
 of a fixed cleaned artifact asks, what output it accepts, and how each measure it returns becomes a reading.
 
 Identity (docs/decisions/0006): a run is keyed by the fixed original (source, record, version, raw sha256), the
@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from processing import measure_rules as rules
 
-PROCESSOR_VERSION = "datafabric.measure_extract.v2"
+PROCESSOR_VERSION = "datafabric.measure_extract.v3"
 PRODUCER = "datafabric.measure_extract"
 MAX_MEASURES = 3  # per window
 MODEL, RULES = "model", "rules"  # the candidate routes of this one processor
@@ -47,7 +47,11 @@ MEASURE_RULES = (
     "每个窗口最多3个。所有 *_text 都逐字照抄原文里的那个词，不改写、不换同义词、不缩写，原文没写就留空；程序据此回原文"
     "核对，核对不过的数不会成为测量对象。object_text 是谁的数（机构、公司、疾病），metric_text 是数的是什么，连同限定语"
     "一起抄（如“批准注册医疗器械产品”“suspected cases of anthrax in humans”）。value_text 是 quote 里写出的那个数，"
-    "unit_text 是紧跟它的单位。period_text 抄期间原文，period 写规范形式（2026-04、2026Q2、2026H1、2026、2022-09/2023-01），"
+    "unit_text 是紧跟它的单位。period_text 抄期间原文，period 写规范形式（2026-04、2026Q2、2026H1、2026、2022-09/2023-01；只写起点的写“起点/”，"
+    "如 since September 2012 写 2012-09/），周写成周一到周日的日期区间（week 43 of 2017 写 2017-10-23/2017-10-29；"
+    "写了 ending 日期的周，以该日为末日往前推 6 天），一个月到一个具体日期写成日区间且首月从 1 日起（Between August 2015 "
+    "and 23 January 2016 写 2015-08-01/2016-01-23），两个年份之间写成月区间（Between 2017 and 2021 写 2017-01/2021-12），"
+    "某一天写成 2015-11-12，这些区间和 since 起点的 period_type 都写 interval；"
     "period_type 区分截至时点 point 和期间内 interval；原文没写期间就都留空，不要用发布日期补。scope_text 是原文写出的"
     "范围或口径。kind 区分 stock 存量、flow 当期新增、cumulative 累计、rate 比例，不能混用；疑似、确诊、就诊人次和人数是"
     "不同指标。约、超过、至少写在数旁时用 qualifier 标出；计划、预计的数用 modality 标 planned / projected。status 写"

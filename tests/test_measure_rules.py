@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from contracts import data_objects as do
 from processing import measure_extract as mx
 from processing import measure_rules as rules
 
@@ -95,8 +96,8 @@ def test_a_literal_is_never_guessed():
     assert built is None and why == "value_literal_not_located"  # "12" twice: ambiguous, not chosen
 
 
-def build_one(text, **fields):
-    m = mx.Measure.model_validate({"kind": "cumulative", "quote": text, **fields}).model_dump()
+def build_one(text, quote=None, **fields):
+    m = mx.Measure.model_validate({"kind": "cumulative", "quote": quote or text, **fields}).model_dump()
     span, _ = rules.place_quote(text, m["quote"], (0, len(text)))
     return rules.build(rules.Bound({"raw_sha256": "b" * 64}, *span, m, RADAR_PRODUCER), text, {}, {})
 
@@ -112,3 +113,18 @@ def test_only_the_value_may_be_spelled_and_only_up_to_twelve():
     base = {"metric_text": "cases", "value_text": "nine", "kind": "cumulative", "quote": "q"}
     assert rules.final_of(dict(base, denominator_text="twelve"))[1] == "denominator_not_a_supported_number"
     assert rules.final_of(dict(base, value_text="thirteen"))[1] == "value_not_a_supported_number"
+
+
+def test_a_period_open_at_its_end_is_accepted_and_reaches_the_request_as_written():
+    open_at_its_end = {"type": "interval", "precision": "month", "start": "2012-09"}
+    assert rules.structured_period("2012-09/", "interval") == open_at_its_end
+    assert rules.structured_period("2012-09-03/", "interval")["precision"] == "day"
+    assert rules.structured_period("2012-09/", "point") is None and rules.structured_period("/2012-09", "interval") is None
+    text = ("Globally, since September 2012, WHO has been notified of 1,599 laboratory-confirmed cases of infection "
+            "with MERS-CoV, including at least 574 related deaths.")
+    built, why = build_one(text, "WHO has been notified of 1,599 laboratory-confirmed cases of infection with MERS-CoV",
+                           metric_text="laboratory-confirmed cases of infection with MERS-CoV", value_text="1,599",
+                           period_text="since September 2012", period="2012-09/", period_type="interval")
+    assert why is None
+    sent = built[0]["items"][0]["fields"]["period"]["value"]
+    assert sent == open_at_its_end and do.PeriodV2.model_validate(sent)

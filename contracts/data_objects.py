@@ -266,7 +266,8 @@ class Measurement(Derived):
 
 
 class PeriodV2(Strict):
-    """结构化时期（与 BioCheck 契约 v2+ 的 PeriodValue 同形）：某精度的一个值，或日/月精度的起止区间。"""
+    """结构化时期（与 BioCheck 契约 v2+ 的 PeriodValue 同形）：某精度的一个值，或日/月精度的起止区间；只写起点的区间
+    （终点缺省）是起点之后至今仍开放的时期（since ...）。"""
 
     type: Literal["point", "interval"]
     precision: Literal["day", "month", "quarter", "half", "year"]
@@ -280,9 +281,9 @@ class PeriodV2(Strict):
         if self.value is not None:
             if self.start is not None or self.end is not None or not re.match(form, self.value):
                 raise ValueError("时期要么是该精度的一个值，要么是起止，不能两者都有")
-        elif (self.start is None or self.end is None or self.type != "interval" or self.precision not in ("day", "month")
-              or not re.match(form, self.start) or not re.match(form, self.end)):
-            raise ValueError("时期区间只能是日或月精度的 interval，起止都要有")
+        elif (self.start is None or self.type != "interval" or self.precision not in ("day", "month")
+              or not re.match(form, self.start) or not (self.end is None or re.match(form, self.end))):
+            raise ValueError("时期区间只能是日或月精度的 interval，要有起点；终点可以缺省（开放）")
         return self
 
 

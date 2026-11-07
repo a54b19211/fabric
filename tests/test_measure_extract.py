@@ -78,7 +78,7 @@ def test_another_model_configuration_is_another_producer():
     assert mx.ModelConfig(**CONFIG.__dict__).sha256() == CONFIG.sha256()  # stable
     assert "base_url" not in CONFIG.__dict__ and "api_key" not in CONFIG.__dict__  # where and the key are not identity
     identity = mx.producer_identity(CONFIG.sha256())
-    assert identity.startswith("datafabric.measure_extract.v2+") and len(identity) <= 80  # the contract's length
+    assert identity.startswith("datafabric.measure_extract.v3+") and len(identity) <= 80  # the contract's length
     assert mx.run_id(**{k: v for k, v in keys().items()}) != mx.run_id(**keys(other))
 
 

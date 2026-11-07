@@ -1,4 +1,4 @@
-"""The measure rules of the extraction processor datafabric.measure_extract.v2: how a cleaned artifact is cut into
+"""The measure rules of the extraction processor datafabric.measure_extract.v3: how a cleaned artifact is cut into
 reading windows, what context goes along with a window, and how one measure a model wrote for a window becomes a
 strict BioCheck contract-v3 request item - every literal located at its real offset in the artifact, or not built.
 
@@ -167,7 +167,8 @@ class Sent:
 
 def structured_period(period, period_type):
     """The model's normalized period string -> the contract's period, or None (a format reading only: what it
-    means is BioCheck's to check against the written period)."""
+    means is BioCheck's to check against the written period). "2012-09/" is an interval open at its end: only its
+    start (a day or a month), for a period that begins at a date and has no end ("since September 2012")."""
     p, t = (period or "").strip().upper(), period_type
     if not p or t not in ("point", "interval"):
         return None
@@ -176,8 +177,8 @@ def structured_period(period, period_type):
     if "/" in p:
         a, _, b = p.partition("/")
         for precision, form in forms[:2]:
-            if re.fullmatch(form, a) and re.fullmatch(form, b) and t == "interval":
-                return {"type": "interval", "precision": precision, "start": a, "end": b}
+            if re.fullmatch(form, a) and (not b or re.fullmatch(form, b)) and t == "interval":
+                return {"type": "interval", "precision": precision, "start": a, **({"end": b} if b else {})}
         return None
     for precision, form in forms:
         if re.fullmatch(form, p):
