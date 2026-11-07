@@ -57,9 +57,10 @@ def test_the_container_id_label_and_volumes_are_recorded_before_anything_is_remo
     url = sp.start()
     assert url.startswith("postgresql://postgres@127.0.0.1:") and url.endswith("/scratch")
     created = lines(tmp_path / "m.jsonl")
-    assert created[0]["event"] == "created" and created[0]["id"] == "c0ffee" * 10
-    assert created[0]["label"] == f"{LABEL}={sp.run_id}"
-    assert created[1]["event"] == "volumes" and created[1]["volumes"] == ["anon-vol-1", "anon-vol-2"]
+    assert created[0]["event"] == "run" and created[0]["label"] == f"{LABEL}={sp.run_id}"  # before the create
+    assert created[1]["event"] == "created" and created[1]["id"] == "c0ffee" * 10
+    assert created[1]["label"] == f"{LABEL}={sp.run_id}"
+    assert created[2]["event"] == "volumes" and created[2]["volumes"] == ["anon-vol-1", "anon-vol-2"]
     run_call = next(c for c in docker.calls if c[1] == "create")
     assert "--label" in run_call and f"{LABEL}={sp.run_id}" in run_call and "--name" not in run_call
     assert any(arg.startswith("127.0.0.1:") for arg in run_call)  # bound to loopback only
@@ -125,7 +126,7 @@ def test_a_start_that_fails_after_the_container_exists_is_torn_down_by_its_id(tm
     with pytest.raises(MigrationStateError, match="docker start failed"):
         sp.start()
     assert ["docker", "rm", "-v", "c0ffee" * 10] in docker.calls
-    assert lines(tmp_path / "m.jsonl")[0]["event"] == "created"
+    assert [e["event"] for e in lines(tmp_path / "m.jsonl")][:2] == ["run", "created"]
 
 
 def test_a_failed_create_that_left_a_labelled_container_is_still_removed(tmp_path):
@@ -142,5 +143,77 @@ def test_a_failed_create_that_left_a_labelled_container_is_still_removed(tmp_pat
     sp = ScratchPostgres(image="img:1", manifest=str(tmp_path / "m.jsonl"), run=failing_create, sleep=lambda s: None)
     docker._run_id = sp.run_id
     with pytest.raises(MigrationStateError, match="docker create failed"):
+        sp.start()
+    assert ["docker", "rm", "-v", "c0ffee" * 10] in docker.calls
+
+
+def failing_start(docker):
+    original = docker.__call__
+
+    def run(args, **kwargs):
+        if args[1] == "start":
+            docker.calls.append(args)
+            return SimpleNamespace(returncode=1, stdout="", stderr="port is already allocated")
+        return original(args, **kwargs)
+
+    return run
+
+
+def test_a_manifest_that_cannot_be_written_stops_the_run_before_anything_is_created(tmp_path):
+    (tmp_path / "file").write_text("not a directory")
+    docker = FakeDocker()
+    sp = ScratchPostgres(image="img:1", manifest=str(tmp_path / "file" / "m.jsonl"), run=docker, sleep=lambda s: None)
+    docker._run_id = sp.run_id
+    with pytest.raises(MigrationStateError, match="cannot write the container manifest.*nothing was started"):
+        sp.start()
+    assert docker.calls == [] and sp.container_id is None  # not even a create
+
+
+def test_a_missing_manifest_directory_is_prepared_before_the_create(tmp_path):
+    docker = FakeDocker()
+    sp = ScratchPostgres(image="img:1", manifest=str(tmp_path / "new" / "deeper" / "m.jsonl"), run=docker,
+                         sleep=lambda s: None)
+    docker._run_id = sp.run_id
+    sp.start()
+    first = lines(tmp_path / "new" / "deeper" / "m.jsonl")[0]
+    assert first["event"] == "run" and first["label"] == f"{LABEL}={sp.run_id}"  # written before the create
+    assert docker.calls[0][1] == "create"
+    sp.stop()
+
+
+def test_a_manifest_that_fails_to_write_after_the_create_never_prevents_the_cleanup(tmp_path, monkeypatch, capsys):
+    docker = FakeDocker()
+    sp = ScratchPostgres(image="img:1", manifest=str(tmp_path / "m.jsonl"), run=failing_start(docker),
+                         sleep=lambda s: None)
+    docker._run_id = sp.run_id
+    appended = []
+    real = ScratchPostgres._append
+
+    def disk_full_after_the_first_line(self, line):
+        if appended:
+            raise OSError(28, "No space left on device")
+        appended.append(line)
+        real(self, line)
+
+    monkeypatch.setattr(ScratchPostgres, "_append", disk_full_after_the_first_line)
+    with pytest.raises(MigrationStateError, match="docker start failed"):  # the real error, not the I/O one
+        sp.start()
+    assert ["docker", "rm", "-v", "c0ffee" * 10] in docker.calls  # removed by the ID known in memory
+    assert not docker.container_present
+    err = capsys.readouterr().err
+    assert "not writable" in err and "c0ffee" * 10 in err  # the registration and the result reach stderr
+    assert '"event": "removed"' in err and '"containers_left": []' in err
+
+
+def test_the_registration_itself_failing_still_tears_the_container_down(tmp_path, monkeypatch, capsys):
+    docker = FakeDocker()
+    sp = ScratchPostgres(image="img:1", manifest=str(tmp_path / "m.jsonl"), run=docker, sleep=lambda s: None)
+    docker._run_id = sp.run_id
+
+    def boom(**fact):
+        raise RuntimeError("registration bug")
+
+    monkeypatch.setattr(sp, "_record", boom)
+    with pytest.raises(RuntimeError, match="registration bug"):
         sp.start()
     assert ["docker", "rm", "-v", "c0ffee" * 10] in docker.calls

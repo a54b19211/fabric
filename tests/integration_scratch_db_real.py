@@ -37,7 +37,7 @@ def test_a_port_taken_at_start_leaves_no_container_and_no_volume_and_the_manifes
     assert victim.container_id is not None  # registered before it was started
     assert labelled(victim.run_id) == []  # removed by that ID
     events = [json.loads(line) for line in (tmp_path / "victim.jsonl").read_text().splitlines()]
-    assert [e["event"] for e in events][:2] == ["created", "volumes"] and events[-1]["event"] == "removed"
+    assert [e["event"] for e in events][:3] == ["run", "created", "volumes"] and events[-1]["event"] == "removed"
     assert events[-1]["containers_left"] == [] and events[-1]["volumes_left"] == []
-    for volume in events[1]["volumes"]:
+    for volume in events[2]["volumes"]:
         assert docker("volume", "inspect", volume).returncode != 0  # the anonymous volume is gone too
