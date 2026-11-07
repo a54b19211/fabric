@@ -1,0 +1,1129 @@
+{
+ "generated_by": "bioradar b452279 measure.v10 (measure_checks.build, continuation.windows_of/_contexts)",
+ "overlap": 300,
+ "inputs": [
+  {
+   "object_text": "Marburg virus disease",
+   "metric_text": "confirmed cases",
+   "value_text": "66",
+   "unit_text": "cases",
+   "period_text": "28 October 2026",
+   "period": "2026-10-28",
+   "period_type": "point",
+   "scope_text": "Rwanda",
+   "kind": "cumulative",
+   "family": "case_count",
+   "quote": "As of 28 October 2026, a total of 66 confirmed cases of Marburg virus disease",
+   "dims": [
+    {
+     "kind": "disease",
+     "text": "Marburg virus disease"
+    },
+    {
+     "kind": "population",
+     "text": "Rwanda"
+    }
+   ],
+   "sources": {
+    "scope": "window"
+   }
+  },
+  {
+   "object_text": "Marburg virus disease",
+   "metric_text": "deaths",
+   "value_text": "15",
+   "kind": "cumulative",
+   "quote": "including 15 deaths",
+   "period_text": "28 October 2026",
+   "period": "2026-10-28",
+   "period_type": "point",
+   "sources": {
+    "period": "window"
+   }
+  },
+  {
+   "metric_text": "case fatality ratio",
+   "value_text": "23",
+   "unit_text": "%",
+   "denominator_text": "66",
+   "kind": "rate",
+   "quote": "The case fatality ratio among confirmed cases is 23% (15/66)",
+   "dims": [
+    {
+     "kind": "denominator_definition",
+     "text": "confirmed cases"
+    }
+   ]
+  },
+  {
+   "metric_text": "contacts",
+   "value_text": "1 444",
+   "kind": "cumulative",
+   "quote": "Since the last update, 1 444 contacts have been listed"
+  },
+  {
+   "object_text": "District 40",
+   "metric_text": "confirmed cases",
+   "value_text": "120",
+   "unit_text": "cases",
+   "period_text": "between 1 October and 28 October 2026",
+   "period": "2026-10-01/2026-10-28",
+   "period_type": "interval",
+   "kind": "flow",
+   "quote": "In District 40, 120 confirmed cases were reported",
+   "family": "case_count",
+   "dims": [
+    {
+     "kind": "disease",
+     "text": "Marburg virus disease",
+     "source": "heading"
+    }
+   ]
+  },
+  {
+   "object_text": "District 37",
+   "metric_text": "Confirmed cases",
+   "value_text": "111",
+   "kind": "cumulative",
+   "quote": "| District 37 | 111 | 37 |",
+   "sources": {
+    "object": "quote"
+   },
+   "dims": [
+    {
+     "kind": "disease",
+     "text": "Confirmed cases",
+     "source": "table_header"
+    }
+   ]
+  },
+  {
+   "object_text": "District 52",
+   "metric_text": "Deaths",
+   "value_text": "52",
+   "kind": "cumulative",
+   "quote": "| District 52 | 156 | 52 |",
+   "sources": {
+    "scope": "table_title"
+   },
+   "scope_text": "by district"
+  },
+  {
+   "metric_text": "suspected cases of mpox",
+   "value_text": "1 444",
+   "unit_text": "cases",
+   "period_text": "2026",
+   "period": "2026",
+   "period_type": "interval",
+   "scope_text": "Équateur",
+   "kind": "flow",
+   "quote": "In 2026, 1 444 suspected cases of mpox were reported in Équateur",
+   "family": "case_count"
+  },
+  {
+   "metric_text": "confirmed cases",
+   "value_text": "66",
+   "kind": "other",
+   "quote": "WHO reports 66 confirmed cases of Marburg virus disease in Rwanda"
+  },
+  {
+   "metric_text": "confirmed cases",
+   "value_text": "about 66",
+   "kind": "cumulative",
+   "quote": "WHO reports 66 confirmed cases"
+  }
+ ],
+ "measures": [
+  {
+   "object_text": "Marburg virus disease",
+   "metric_text": "confirmed cases",
+   "value_text": "66",
+   "unit_text": "cases",
+   "period_text": "28 October 2026",
+   "period": "2026-10-28",
+   "period_type": "point",
+   "scope_text": "Rwanda",
+   "denominator_text": "",
+   "kind": "cumulative",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "As of 28 October 2026, a total of 66 confirmed cases of Marburg virus disease",
+   "family": "case_count",
+   "dims": [
+    {
+     "kind": "disease",
+     "text": "Marburg virus disease",
+     "source": "quote"
+    },
+    {
+     "kind": "population",
+     "text": "Rwanda",
+     "source": "quote"
+    }
+   ],
+   "sources": {
+    "scope": "window"
+   }
+  },
+  {
+   "object_text": "Marburg virus disease",
+   "metric_text": "deaths",
+   "value_text": "15",
+   "unit_text": "",
+   "period_text": "28 October 2026",
+   "period": "2026-10-28",
+   "period_type": "point",
+   "scope_text": "",
+   "denominator_text": "",
+   "kind": "cumulative",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "including 15 deaths",
+   "family": "",
+   "dims": [],
+   "sources": {
+    "period": "window"
+   }
+  },
+  {
+   "object_text": "",
+   "metric_text": "case fatality ratio",
+   "value_text": "23",
+   "unit_text": "%",
+   "period_text": "",
+   "period": "",
+   "period_type": "",
+   "scope_text": "",
+   "denominator_text": "66",
+   "kind": "rate",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "The case fatality ratio among confirmed cases is 23% (15/66)",
+   "family": "",
+   "dims": [
+    {
+     "kind": "denominator_definition",
+     "text": "confirmed cases",
+     "source": "quote"
+    }
+   ],
+   "sources": {}
+  },
+  {
+   "object_text": "",
+   "metric_text": "contacts",
+   "value_text": "1 444",
+   "unit_text": "",
+   "period_text": "",
+   "period": "",
+   "period_type": "",
+   "scope_text": "",
+   "denominator_text": "",
+   "kind": "cumulative",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "Since the last update, 1 444 contacts have been listed",
+   "family": "",
+   "dims": [],
+   "sources": {}
+  },
+  {
+   "object_text": "District 40",
+   "metric_text": "confirmed cases",
+   "value_text": "120",
+   "unit_text": "cases",
+   "period_text": "between 1 October and 28 October 2026",
+   "period": "2026-10-01/2026-10-28",
+   "period_type": "interval",
+   "scope_text": "",
+   "denominator_text": "",
+   "kind": "flow",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "In District 40, 120 confirmed cases were reported",
+   "family": "case_count",
+   "dims": [
+    {
+     "kind": "disease",
+     "text": "Marburg virus disease",
+     "source": "heading"
+    }
+   ],
+   "sources": {}
+  },
+  {
+   "object_text": "District 37",
+   "metric_text": "Confirmed cases",
+   "value_text": "111",
+   "unit_text": "",
+   "period_text": "",
+   "period": "",
+   "period_type": "",
+   "scope_text": "",
+   "denominator_text": "",
+   "kind": "cumulative",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "| District 37 | 111 | 37 |",
+   "family": "",
+   "dims": [
+    {
+     "kind": "disease",
+     "text": "Confirmed cases",
+     "source": "table_header"
+    }
+   ],
+   "sources": {
+    "object": "quote"
+   }
+  },
+  {
+   "object_text": "District 52",
+   "metric_text": "Deaths",
+   "value_text": "52",
+   "unit_text": "",
+   "period_text": "",
+   "period": "",
+   "period_type": "",
+   "scope_text": "by district",
+   "denominator_text": "",
+   "kind": "cumulative",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "| District 52 | 156 | 52 |",
+   "family": "",
+   "dims": [],
+   "sources": {
+    "scope": "table_title"
+   }
+  },
+  {
+   "object_text": "",
+   "metric_text": "suspected cases of mpox",
+   "value_text": "1 444",
+   "unit_text": "cases",
+   "period_text": "2026",
+   "period": "2026",
+   "period_type": "interval",
+   "scope_text": "Équateur",
+   "denominator_text": "",
+   "kind": "flow",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "In 2026, 1 444 suspected cases of mpox were reported in Équateur",
+   "family": "case_count",
+   "dims": [],
+   "sources": {}
+  },
+  {
+   "object_text": "",
+   "metric_text": "confirmed cases",
+   "value_text": "66",
+   "unit_text": "",
+   "period_text": "",
+   "period": "",
+   "period_type": "",
+   "scope_text": "",
+   "denominator_text": "",
+   "kind": "other",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "WHO reports 66 confirmed cases of Marburg virus disease in Rwanda",
+   "family": "",
+   "dims": [],
+   "sources": {}
+  },
+  {
+   "object_text": "",
+   "metric_text": "confirmed cases",
+   "value_text": "about 66",
+   "unit_text": "",
+   "period_text": "",
+   "period": "",
+   "period_type": "",
+   "scope_text": "",
+   "denominator_text": "",
+   "kind": "cumulative",
+   "qualifier": "exact",
+   "modality": "actual",
+   "status": "other",
+   "quote": "WHO reports 66 confirmed cases",
+   "family": "",
+   "dims": [],
+   "sources": {}
+  }
+ ],
+ "cases": [
+  {
+   "name": "who_marburg",
+   "record_id": "8c6e4a3e-2b0e-4b8e-9d55-1d1b1c7f5a01",
+   "text": "# Marburg virus disease - Rwanda\n\nWHO reports 66 confirmed cases of Marburg virus disease in Rwanda.\n\n## Situation at a glance\n\nAs of 28 October 2026, a total of 66 confirmed cases of Marburg virus disease, including 15 deaths, have been reported in Rwanda. The case fatality ratio among confirmed cases is 23% (15/66).\n\nSince the last update, 1 444 contacts have been listed and 1 210 of them have completed follow-up.\n\nParagraph 1: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 2: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 3: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 4: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 5: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 6: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 7: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 8: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\n### Cases by district\n\nTable 1. Confirmed cases and deaths by district\n\n| District | Confirmed cases | Deaths |\n| --- | --- | --- |\n| District 01 | 3 | 1 |\n| District 02 | 6 | 2 |\n| District 03 | 9 | 3 |\n| District 04 | 12 | 4 |\n| District 05 | 15 | 5 |\n| District 06 | 18 | 6 |\n| District 07 | 21 | 7 |\n| District 08 | 24 | 8 |\n| District 09 | 27 | 9 |\n| District 10 | 30 | 10 |\n| District 11 | 33 | 11 |\n| District 12 | 36 | 12 |\n| District 13 | 39 | 13 |\n| District 14 | 42 | 14 |\n| District 15 | 45 | 15 |\n| District 16 | 48 | 16 |\n| District 17 | 51 | 17 |\n| District 18 | 54 | 18 |\n| District 19 | 57 | 19 |\n| District 20 | 60 | 20 |\n| District 21 | 63 | 21 |\n| District 22 | 66 | 22 |\n| District 23 | 69 | 23 |\n| District 24 | 72 | 24 |\n| District 25 | 75 | 25 |\n| District 26 | 78 | 26 |\n| District 27 | 81 | 27 |\n| District 28 | 84 | 28 |\n| District 29 | 87 | 29 |\n| District 30 | 90 | 30 |\n| District 31 | 93 | 31 |\n| District 32 | 96 | 32 |\n| District 33 | 99 | 33 |\n| District 34 | 102 | 34 |\n| District 35 | 105 | 35 |\n| District 36 | 108 | 36 |\n| District 37 | 111 | 37 |\n| District 38 | 114 | 38 |\n| District 39 | 117 | 39 |\n| District 40 | 120 | 40 |\n| District 41 | 123 | 41 |\n| District 42 | 126 | 42 |\n| District 43 | 129 | 43 |\n| District 44 | 132 | 44 |\n| District 45 | 135 | 45 |\n| District 46 | 138 | 46 |\n| District 47 | 141 | 47 |\n| District 48 | 144 | 48 |\n| District 49 | 147 | 49 |\n| District 50 | 150 | 50 |\n| District 51 | 153 | 51 |\n| District 52 | 156 | 52 |\n| District 53 | 159 | 53 |\n| District 54 | 162 | 54 |\n| District 55 | 165 | 55 |\n| District 56 | 168 | 56 |\n| District 57 | 171 | 57 |\n| District 58 | 174 | 58 |\n| District 59 | 177 | 59 |\n| District 60 | 180 | 60 |\n| District 61 | 183 | 61 |\n| District 62 | 186 | 62 |\n| District 63 | 189 | 63 |\n| District 64 | 192 | 64 |\n| District 65 | 195 | 65 |\n| District 66 | 198 | 66 |\n| District 67 | 201 | 67 |\n| District 68 | 204 | 68 |\n| District 69 | 207 | 69 |\n| District 70 | 210 | 70 |\n| District 71 | 213 | 71 |\n| District 72 | 216 | 72 |\n| District 73 | 219 | 73 |\n| District 74 | 222 | 74 |\n\nIn District 40, 120 confirmed cases were reported between 1 October and 28 October 2026.",
+   "text_sha256": "35ea3d842b20ef4d5e20b342f00cf830a63a0963345ac17fd355a21d1f9b11e0",
+   "windows": [
+    {
+     "window": [
+      0,
+      1500
+     ],
+     "contexts": {
+      "heading": null,
+      "table_header": null,
+      "table_title": null
+     },
+     "results": [
+      {
+       "quote": [
+        128,
+        205
+       ],
+       "reason": "scope_ambiguous_in_cited_source"
+      },
+      {
+       "quote": [
+        207,
+        226
+       ],
+       "reason": "period_literal_not_the_whole_period"
+      },
+      {
+       "quote": [
+        258,
+        318
+       ],
+       "body": {
+        "contract_version": "extraction_consistency.v3",
+        "subject": {
+         "source_id": "who_don",
+         "record_id": "8c6e4a3e-2b0e-4b8e-9d55-1d1b1c7f5a01",
+         "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+         "raw_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "is_demo": false,
+         "artifact": {
+          "processor_version": "datafabric.clean_text.v12",
+          "text_sha256": "35ea3d842b20ef4d5e20b342f00cf830a63a0963345ac17fd355a21d1f9b11e0"
+         }
+        },
+        "passages": [
+         {
+          "id": "p1",
+          "role": "primary",
+          "start": 0,
+          "end": 518,
+          "text": "# Marburg virus disease - Rwanda\n\nWHO reports 66 confirmed cases of Marburg virus disease in Rwanda.\n\n## Situation at a glance\n\nAs of 28 October 2026, a total of 66 confirmed cases of Marburg virus disease, including 15 deaths, have been reported in Rwanda. The case fatality ratio among confirmed cases is 23% (15/66).\n\nSince the last update, 1 444 contacts have been listed and 1 210 of them have completed follow-up.\n\nParagraph 1: response teams continue contact tracing, infection prevention and community engageme"
+         }
+        ],
+        "items": [
+         {
+          "id": "m1",
+          "kind": "measurement",
+          "producer": {
+           "name": "bioradar.triage",
+           "version": "measure.v10"
+          },
+          "locator": {
+           "passage": "p1",
+           "start": 258,
+           "end": 318
+          },
+          "quote": "The case fatality ratio among confirmed cases is 23% (15/66)",
+          "fields": {
+           "object": {
+            "state": "unknown"
+           },
+           "metric": {
+            "state": "stated",
+            "value": "case fatality ratio",
+            "span": {
+             "passage": "p1",
+             "start": 262,
+             "end": 281
+            }
+           },
+           "value": {
+            "state": "stated",
+            "value": "23",
+            "span": {
+             "passage": "p1",
+             "start": 307,
+             "end": 309
+            }
+           },
+           "unit": {
+            "state": "stated",
+            "value": "%",
+            "span": {
+             "passage": "p1",
+             "start": 309,
+             "end": 310
+            }
+           },
+           "period": {
+            "state": "unknown"
+           },
+           "scope": {
+            "state": "unknown"
+           },
+           "scope_mode": "unknown",
+           "denominator": {
+            "state": "stated",
+            "value": "66",
+            "span": {
+             "passage": "p1",
+             "start": 315,
+             "end": 317
+            }
+           },
+           "measure_kind": "rate",
+           "qualifier": "exact",
+           "modality": "actual"
+          },
+          "family": "",
+          "dims": [
+           {
+            "kind": "denominator_definition",
+            "state": "stated",
+            "value": "confirmed cases",
+            "span": {
+             "passage": "p1",
+             "start": 288,
+             "end": 303
+            }
+           }
+          ]
+         }
+        ]
+       },
+       "final": {
+        "object": "",
+        "metric": "case fatality ratio",
+        "value": "23",
+        "unit": "%",
+        "period": null,
+        "scope": "",
+        "scope_mode": "unknown",
+        "denominator": "66",
+        "measure_kind": "rate",
+        "qualifier": "exact",
+        "modality": "actual",
+        "dims_unlocated": []
+       }
+      },
+      {
+       "quote": [
+        321,
+        375
+       ],
+       "body": {
+        "contract_version": "extraction_consistency.v3",
+        "subject": {
+         "source_id": "who_don",
+         "record_id": "8c6e4a3e-2b0e-4b8e-9d55-1d1b1c7f5a01",
+         "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+         "raw_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "is_demo": false,
+         "artifact": {
+          "processor_version": "datafabric.clean_text.v12",
+          "text_sha256": "35ea3d842b20ef4d5e20b342f00cf830a63a0963345ac17fd355a21d1f9b11e0"
+         }
+        },
+        "passages": [
+         {
+          "id": "p1",
+          "role": "primary",
+          "start": 0,
+          "end": 575,
+          "text": "# Marburg virus disease - Rwanda\n\nWHO reports 66 confirmed cases of Marburg virus disease in Rwanda.\n\n## Situation at a glance\n\nAs of 28 October 2026, a total of 66 confirmed cases of Marburg virus disease, including 15 deaths, have been reported in Rwanda. The case fatality ratio among confirmed cases is 23% (15/66).\n\nSince the last update, 1 444 contacts have been listed and 1 210 of them have completed follow-up.\n\nParagraph 1: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case "
+         }
+        ],
+        "items": [
+         {
+          "id": "m1",
+          "kind": "measurement",
+          "producer": {
+           "name": "bioradar.triage",
+           "version": "measure.v10"
+          },
+          "locator": {
+           "passage": "p1",
+           "start": 321,
+           "end": 375
+          },
+          "quote": "Since the last update, 1 444 contacts have been listed",
+          "fields": {
+           "object": {
+            "state": "unknown"
+           },
+           "metric": {
+            "state": "stated",
+            "value": "contacts",
+            "span": {
+             "passage": "p1",
+             "start": 350,
+             "end": 358
+            }
+           },
+           "value": {
+            "state": "stated",
+            "value": "1444",
+            "span": {
+             "passage": "p1",
+             "start": 344,
+             "end": 349
+            }
+           },
+           "unit": {
+            "state": "unknown"
+           },
+           "period": {
+            "state": "unknown"
+           },
+           "scope": {
+            "state": "unknown"
+           },
+           "scope_mode": "unknown",
+           "denominator": {
+            "state": "unknown"
+           },
+           "measure_kind": "cumulative",
+           "qualifier": "exact",
+           "modality": "actual"
+          },
+          "family": "",
+          "dims": []
+         }
+        ]
+       },
+       "final": {
+        "object": "",
+        "metric": "contacts",
+        "value": "1444",
+        "unit": "",
+        "period": null,
+        "scope": "",
+        "scope_mode": "unknown",
+        "denominator": null,
+        "measure_kind": "cumulative",
+        "qualifier": "exact",
+        "modality": "actual",
+        "dims_unlocated": []
+       }
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "quote": [
+        34,
+        99
+       ],
+       "reason": "measure_kind_other_is_not_checkable"
+      },
+      {
+       "quote": [
+        34,
+        64
+       ],
+       "reason": "value_not_a_supported_number"
+      }
+     ]
+    },
+    {
+     "window": [
+      1310,
+      2797
+     ],
+     "contexts": {
+      "heading": [
+       [
+        102,
+        126
+       ]
+      ],
+      "table_header": null,
+      "table_title": null
+     },
+     "results": [
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      }
+     ]
+    },
+    {
+     "window": [
+      2511,
+      3931
+     ],
+     "contexts": {
+      "heading": [
+       [
+        1845,
+        1866
+       ]
+      ],
+      "table_header": [
+       [
+        1917,
+        1977
+       ]
+      ],
+      "table_title": [
+       [
+        1868,
+        1915
+       ]
+      ]
+     },
+     "results": [
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "quote": [
+        2904,
+        2930
+       ],
+       "reason": "metric_literal_not_located"
+      },
+      {
+       "quote": [
+        3309,
+        3335
+       ],
+       "reason": "value_literal_not_located"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      }
+     ]
+    },
+    {
+     "window": [
+      3633,
+      4019
+     ],
+     "contexts": {
+      "heading": [
+       [
+        1845,
+        1866
+       ]
+      ],
+      "table_header": [
+       [
+        1917,
+        1977
+       ]
+      ],
+      "table_title": [
+       [
+        1868,
+        1915
+       ]
+      ]
+     },
+     "results": [
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "quote": [
+        3931,
+        3980
+       ],
+       "body": {
+        "contract_version": "extraction_consistency.v3",
+        "subject": {
+         "source_id": "who_don",
+         "record_id": "8c6e4a3e-2b0e-4b8e-9d55-1d1b1c7f5a01",
+         "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+         "raw_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "is_demo": false,
+         "artifact": {
+          "processor_version": "datafabric.clean_text.v12",
+          "text_sha256": "35ea3d842b20ef4d5e20b342f00cf830a63a0963345ac17fd355a21d1f9b11e0"
+         }
+        },
+        "passages": [
+         {
+          "id": "p1",
+          "role": "primary",
+          "start": 0,
+          "end": 4019,
+          "text": "# Marburg virus disease - Rwanda\n\nWHO reports 66 confirmed cases of Marburg virus disease in Rwanda.\n\n## Situation at a glance\n\nAs of 28 October 2026, a total of 66 confirmed cases of Marburg virus disease, including 15 deaths, have been reported in Rwanda. The case fatality ratio among confirmed cases is 23% (15/66).\n\nSince the last update, 1 444 contacts have been listed and 1 210 of them have completed follow-up.\n\nParagraph 1: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 2: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 3: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 4: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 5: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 6: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 7: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\nParagraph 8: response teams continue contact tracing, infection prevention and community engagement in the affected districts; no new information on case numbers is given here.\n\n### Cases by district\n\nTable 1. Confirmed cases and deaths by district\n\n| District | Confirmed cases | Deaths |\n| --- | --- | --- |\n| District 01 | 3 | 1 |\n| District 02 | 6 | 2 |\n| District 03 | 9 | 3 |\n| District 04 | 12 | 4 |\n| District 05 | 15 | 5 |\n| District 06 | 18 | 6 |\n| District 07 | 21 | 7 |\n| District 08 | 24 | 8 |\n| District 09 | 27 | 9 |\n| District 10 | 30 | 10 |\n| District 11 | 33 | 11 |\n| District 12 | 36 | 12 |\n| District 13 | 39 | 13 |\n| District 14 | 42 | 14 |\n| District 15 | 45 | 15 |\n| District 16 | 48 | 16 |\n| District 17 | 51 | 17 |\n| District 18 | 54 | 18 |\n| District 19 | 57 | 19 |\n| District 20 | 60 | 20 |\n| District 21 | 63 | 21 |\n| District 22 | 66 | 22 |\n| District 23 | 69 | 23 |\n| District 24 | 72 | 24 |\n| District 25 | 75 | 25 |\n| District 26 | 78 | 26 |\n| District 27 | 81 | 27 |\n| District 28 | 84 | 28 |\n| District 29 | 87 | 29 |\n| District 30 | 90 | 30 |\n| District 31 | 93 | 31 |\n| District 32 | 96 | 32 |\n| District 33 | 99 | 33 |\n| District 34 | 102 | 34 |\n| District 35 | 105 | 35 |\n| District 36 | 108 | 36 |\n| District 37 | 111 | 37 |\n| District 38 | 114 | 38 |\n| District 39 | 117 | 39 |\n| District 40 | 120 | 40 |\n| District 41 | 123 | 41 |\n| District 42 | 126 | 42 |\n| District 43 | 129 | 43 |\n| District 44 | 132 | 44 |\n| District 45 | 135 | 45 |\n| District 46 | 138 | 46 |\n| District 47 | 141 | 47 |\n| District 48 | 144 | 48 |\n| District 49 | 147 | 49 |\n| District 50 | 150 | 50 |\n| District 51 | 153 | 51 |\n| District 52 | 156 | 52 |\n| District 53 | 159 | 53 |\n| District 54 | 162 | 54 |\n| District 55 | 165 | 55 |\n| District 56 | 168 | 56 |\n| District 57 | 171 | 57 |\n| District 58 | 174 | 58 |\n| District 59 | 177 | 59 |\n| District 60 | 180 | 60 |\n| District 61 | 183 | 61 |\n| District 62 | 186 | 62 |\n| District 63 | 189 | 63 |\n| District 64 | 192 | 64 |\n| District 65 | 195 | 65 |\n| District 66 | 198 | 66 |\n| District 67 | 201 | 67 |\n| District 68 | 204 | 68 |\n| District 69 | 207 | 69 |\n| District 70 | 210 | 70 |\n| District 71 | 213 | 71 |\n| District 72 | 216 | 72 |\n| District 73 | 219 | 73 |\n| District 74 | 222 | 74 |\n\nIn District 40, 120 confirmed cases were reported between 1 October and 28 October 2026."
+         }
+        ],
+        "items": [
+         {
+          "id": "m1",
+          "kind": "measurement",
+          "producer": {
+           "name": "bioradar.triage",
+           "version": "measure.v10"
+          },
+          "locator": {
+           "passage": "p1",
+           "start": 3931,
+           "end": 3980
+          },
+          "quote": "In District 40, 120 confirmed cases were reported",
+          "fields": {
+           "object": {
+            "state": "stated",
+            "value": "District 40",
+            "span": {
+             "passage": "p1",
+             "start": 3934,
+             "end": 3945
+            }
+           },
+           "metric": {
+            "state": "stated",
+            "value": "confirmed cases",
+            "span": {
+             "passage": "p1",
+             "start": 3951,
+             "end": 3966
+            }
+           },
+           "value": {
+            "state": "stated",
+            "value": "120",
+            "span": {
+             "passage": "p1",
+             "start": 3947,
+             "end": 3950
+            }
+           },
+           "unit": {
+            "state": "stated",
+            "value": "cases",
+            "span": {
+             "passage": "p1",
+             "start": 3961,
+             "end": 3966
+            }
+           },
+           "period": {
+            "state": "stated",
+            "value": {
+             "type": "interval",
+             "precision": "day",
+             "start": "2026-10-01",
+             "end": "2026-10-28"
+            },
+            "span": {
+             "passage": "p1",
+             "start": 3981,
+             "end": 4018
+            }
+           },
+           "scope": {
+            "state": "unknown"
+           },
+           "scope_mode": "object_metric_total",
+           "denominator": {
+            "state": "unknown"
+           },
+           "measure_kind": "flow",
+           "qualifier": "exact",
+           "modality": "actual"
+          },
+          "family": "case_count",
+          "dims": []
+         }
+        ]
+       },
+       "final": {
+        "object": "District 40",
+        "metric": "confirmed cases",
+        "value": "120",
+        "unit": "cases",
+        "period": {
+         "type": "interval",
+         "precision": "day",
+         "start": "2026-10-01",
+         "end": "2026-10-28"
+        },
+        "scope": "",
+        "scope_mode": "object_metric_total",
+        "denominator": null,
+        "measure_kind": "flow",
+        "qualifier": "exact",
+        "modality": "actual",
+        "dims_unlocated": [
+         {
+          "kind": "disease",
+          "text": "Marburg virus disease",
+          "source": "heading",
+          "reason": "dim_disease_not_in_cited_source"
+         }
+        ]
+       }
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_window"
+      },
+      {
+       "reason": "quote_not_in_window"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "who_mpox_short",
+   "record_id": "8c6e4a3e-2b0e-4b8e-9d55-1d1b1c7f5a02",
+   "text": "# Mpox - Democratic Republic of the Congo\n\nIn 2026, 1 444 suspected cases of mpox were reported in Équateur.",
+   "text_sha256": "b3fce5919fd1fb3b4703d41926b7a321bb6b062418f0770ea4e264cc232db150",
+   "windows": [
+    {
+     "window": [
+      0,
+      108
+     ],
+     "contexts": {
+      "heading": null,
+      "table_header": null,
+      "table_title": null
+     },
+     "results": [
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "quote": [
+        43,
+        107
+       ],
+       "body": {
+        "contract_version": "extraction_consistency.v3",
+        "subject": {
+         "source_id": "who_don",
+         "record_id": "8c6e4a3e-2b0e-4b8e-9d55-1d1b1c7f5a02",
+         "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+         "raw_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "is_demo": false,
+         "artifact": {
+          "processor_version": "datafabric.clean_text.v12",
+          "text_sha256": "b3fce5919fd1fb3b4703d41926b7a321bb6b062418f0770ea4e264cc232db150"
+         }
+        },
+        "passages": [
+         {
+          "id": "p1",
+          "role": "primary",
+          "start": 0,
+          "end": 108,
+          "text": "# Mpox - Democratic Republic of the Congo\n\nIn 2026, 1 444 suspected cases of mpox were reported in Équateur."
+         }
+        ],
+        "items": [
+         {
+          "id": "m1",
+          "kind": "measurement",
+          "producer": {
+           "name": "bioradar.triage",
+           "version": "measure.v10"
+          },
+          "locator": {
+           "passage": "p1",
+           "start": 43,
+           "end": 107
+          },
+          "quote": "In 2026, 1 444 suspected cases of mpox were reported in Équateur",
+          "fields": {
+           "object": {
+            "state": "unknown"
+           },
+           "metric": {
+            "state": "stated",
+            "value": "suspected cases of mpox",
+            "span": {
+             "passage": "p1",
+             "start": 58,
+             "end": 81
+            }
+           },
+           "value": {
+            "state": "stated",
+            "value": "1444",
+            "span": {
+             "passage": "p1",
+             "start": 52,
+             "end": 57
+            }
+           },
+           "unit": {
+            "state": "stated",
+            "value": "cases",
+            "span": {
+             "passage": "p1",
+             "start": 68,
+             "end": 73
+            }
+           },
+           "period": {
+            "state": "stated",
+            "value": {
+             "type": "interval",
+             "precision": "year",
+             "value": "2026"
+            },
+            "span": {
+             "passage": "p1",
+             "start": 46,
+             "end": 50
+            }
+           },
+           "scope": {
+            "state": "stated",
+            "value": "Équateur",
+            "span": {
+             "passage": "p1",
+             "start": 99,
+             "end": 107
+            }
+           },
+           "scope_mode": "stated",
+           "denominator": {
+            "state": "unknown"
+           },
+           "measure_kind": "flow",
+           "qualifier": "exact",
+           "modality": "actual"
+          },
+          "family": "case_count",
+          "dims": []
+         }
+        ]
+       },
+       "final": {
+        "object": "",
+        "metric": "suspected cases of mpox",
+        "value": "1444",
+        "unit": "cases",
+        "period": {
+         "type": "interval",
+         "precision": "year",
+         "value": "2026"
+        },
+        "scope": "Équateur",
+        "scope_mode": "stated",
+        "denominator": null,
+        "measure_kind": "flow",
+        "qualifier": "exact",
+        "modality": "actual",
+        "dims_unlocated": []
+       }
+      },
+      {
+       "reason": "quote_not_in_text"
+      },
+      {
+       "reason": "quote_not_in_text"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
