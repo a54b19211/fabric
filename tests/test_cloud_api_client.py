@@ -219,3 +219,21 @@ def test_chat_without_a_key_sends_nothing(monkeypatch, endpoints, logs):
     provider = Provider(monkeypatch)
     assert cac.qwen_chat(user_message="candidates") == ""
     assert provider.requests == [] and "ERROR LLM API Key 未配置" in logs
+
+
+# ---- both calls -----------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("answer", [{"choices": []}, "<html>ok</html>"])
+def test_an_answer_that_is_no_chat_completion_gives_nothing(monkeypatch, endpoints, answer):
+    Provider(monkeypatch, (200, answer), (200, answer))
+    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_chat(user_message="candidates") == ""
+
+
+def test_chat_calls_build_no_sdk_client(monkeypatch, endpoints):
+    # their HTTP side is llm_transport; only streaming and embeddings still build an OpenAI client (ADR 0007)
+    monkeypatch.setattr(cac, "OpenAI", None)
+    provider = Provider(monkeypatch, (200, completion('{"a": 1}')), (200, completion("ok")))
+    assert cac.qwen_extract_structured.fn("the prompt") == {"a": 1}
+    assert cac.qwen_chat(user_message="candidates") == "ok"
+    assert len(provider.requests) == 2
