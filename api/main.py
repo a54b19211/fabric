@@ -19,6 +19,15 @@ def _register_review_listeners():
     """API 重启时 Worker 可能仍在执行，不能清理队列或重置任务。"""
     import db.review_listeners  # noqa: F401
 
+@app.on_event("startup")
+def _validate_source_configuration():
+    """A configuration the service cannot honour stops it at start, not at the first request: the index targets must not
+    name a retired source (the declarations themselves were validated when they were imported)."""
+    from db import index_publication
+
+    index_publication.targets()
+
+
 # ── CORS（前端本地开发需要）──────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,

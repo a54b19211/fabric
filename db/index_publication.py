@@ -62,9 +62,17 @@ def targets():
         result = [IndexTarget.model_validate(item) for item in values]
         if len({item.key() for item in result}) != len(result):
             raise ValueError()
-        return result
     except (ValueError, TypeError):
         raise HistoryError("index_target_configuration", "来源到知识库的索引配置无效", 503) from None
+    from biz_rules.retired_sources import RETIRED
+
+    retired = sorted({item.source_id for item in result if item.source_id in RETIRED})
+    if retired:
+        # a configuration error, not something to filter at search time: it is refused when the service or the worker
+        # starts (api.main, run_worker) and by every caller of targets()
+        raise HistoryError("index_target_retired_source",
+                           "索引目标配置了已退役来源 " + ",".join(retired) + "；退役来源不能再作索引目标", 503)
+    return result
 
 
 def _text_processors():
@@ -836,6 +844,7 @@ def run_worker(*, concurrency=2, scan_every_seconds=30.0, idle_seconds=5.0, stop
     stop（threading.Event）置位或跑满 rounds 轮后返回各线程的处理计数。"""
     if not 1 <= concurrency <= 32:
         raise HistoryError("index_budget", "索引并发须为1至32")
+    targets()  # a configuration naming a retired source stops the worker here, not at the first search
     stop = stop or threading.Event()
     counts = [dict() for _ in range(concurrency)]
 

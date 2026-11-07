@@ -2,9 +2,10 @@
 their real sources with honest times, native versions never displaced, aliases on the old ids that respect the
 real source's permission and the real record's state, idempotent re-runs."""
 
+import legacy_bridge
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
@@ -23,7 +24,7 @@ SOURCES = ["legacy_documents", "clinicaltrials", "nmpa", "fda_api_drug_label", "
 @pytest.fixture
 def lpg(pg, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(SOURCES))
-    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # fixtures write legacy versions (cutover mode)
+    legacy_bridge.open_old_writer(monkeypatch)  # fixtures write legacy versions (cutover mode)
     with pg.begin() as conn:
         conn.execute(text("TRUNCATE legacy_aliases"))
     return pg
@@ -216,7 +217,7 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
 
     page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page")  # written in cutover mode (fixture)
     migrate(is_demo=False, apply=True)
-    monkeypatch.delenv("DATAFABRIC_LEGACY_WRITES")
+    legacy_bridge.close_old_writer(monkeypatch)
     with lpg.begin() as conn:
         now = store._now(conn)
     with pytest.raises(HistoryError) as error:
@@ -231,3 +232,74 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
     read = store.read_version(page_v, "legacy_documents", page, False, "current", now)
     assert read.migration["status"] == "imported"
     assert len(rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")) == 1  # kept
+
+
+def test_the_old_cutover_switch_reopens_nothing(lpg, monkeypatch):
+    """N5: whatever DATAFABRIC_LEGACY_WRITES says, the service refuses to write to the retired bridge."""
+    legacy_bridge.close_old_writer(monkeypatch)
+    for setting in ("on", "off", "true", "1"):
+        monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", setting)
+        with pytest.raises(HistoryError) as error:
+            legacy("nmpa", u5(NMPA_URL + setting), NMPA_URL + setting, PAGE, "switch-" + setting)
+        assert (error.value.code, error.value.status) == ("legacy_retired", 410)
+    assert not rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")
+
+
+def test_a_pending_legacy_version_is_blocked_when_its_original_site_is_revoked(lpg, monkeypatch):
+    """A version that never became a real-source version has no real source to re-check; the bridge's own dependency
+    list is empty. Its original site is the permission: revoking it stops the old id too, restoring it restores it."""
+    listed, listed_v = legacy("cde_xxgk", str(uuid.uuid4()), "https://www.cde.org.cn/main/xxgk/listpage/abc",
+                              "---\nsource_site: cde_xxgk\n---\n\n表格", "pending-site")
+    assert migrate(is_demo=False, apply=True)["counts"] == {"pending:detail_url_not_proven": 1}
+    legacy_bridge.close_old_writer(monkeypatch)
+    with lpg.begin() as conn:
+        now = store._now(conn)
+    assert store.read_version(listed_v, "legacy_documents", listed, False, "current", now).migration["status"] == "pending"
+    with lpg.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='cde_xxgk'"))
+    with pytest.raises(HistoryError) as error:
+        store.read_version(listed_v, "legacy_documents", listed, False, "current", now)
+    assert (error.value.code, error.value.status) == ("source_not_available", 403)
+    with lpg.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled=true WHERE source_id='cde_xxgk'"))
+    assert store.read_version(listed_v, "legacy_documents", listed, False, "current", now).version_id == listed_v
+
+
+def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time(lpg, monkeypatch):
+    """N9: the legacy rows are byte-identical after the migration; the migrated version is visible from when it was
+    adopted, never from the crawl or creation time the old system claimed."""
+    page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page", created="2019-03-01 08:00:00")
+    columns = "version_id, first_seen_at, proof_available_at, published_seq, payload"
+    before = rows(lpg, f"SELECT {columns} FROM history_versions WHERE source_id='legacy_documents' ORDER BY version_id")
+    adopted_after = NOW()
+    migrate(is_demo=False, apply=True)
+    migrate(is_demo=False, apply=True)
+    assert rows(lpg, f"SELECT {columns} FROM history_versions WHERE source_id='legacy_documents' "
+                     "ORDER BY version_id") == before
+    (alias_row,) = rows(lpg, "SELECT real_version_id, claimed FROM legacy_aliases")
+    (real,) = rows(lpg, "SELECT first_seen_at, proof_available_at FROM history_versions WHERE version_id=:v",
+                   v=alias_row["real_version_id"].strip())
+    assert real["first_seen_at"] >= adopted_after - timedelta(seconds=5)  # adopted now, not in 2019
+    assert real["first_seen_at"].year >= 2026 and real["proof_available_at"] is None
+    assert "2019-03-01" in json.dumps(alias_row["claimed"], default=str)  # the old claim is kept as a claim only
+
+
+def test_a_new_graph_package_may_not_cite_a_retired_source_and_an_old_one_still_reads(lpg, monkeypatch):
+    """N12: a package published now cites the real version a legacy one became; a package published before keeps
+    validating and reading."""
+    from integration_history import _graph_sources, _publish_fixture_graph, _synthetic_graph_observation
+
+    _graph_sources(monkeypatch)
+    observation = _synthetic_graph_observation()
+    old = _publish_fixture_graph(observation, "before-retirement")  # the bridge and its refusal are open (fixture)
+    assert old.version_ids
+    # the refusal is back in force; the writer stays open so the same documents are adopted again (idempotently)
+    from db import history
+
+    monkeypatch.setattr(history, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
+    with pytest.raises(HistoryError) as error:
+        _publish_fixture_graph(observation, "after-retirement")
+    assert error.value.code == "graph_evidence_retired_source" and "legacy_documents" in error.value.message
+    with store.history_engine().begin() as conn:
+        stored = conn.execute(text("SELECT count(*) FROM history_versions WHERE source_id='reviewed_graph'")).scalar_one()
+    assert stored == 1  # the old package is still there, the new one was not written

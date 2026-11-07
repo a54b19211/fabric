@@ -1,5 +1,6 @@
 """真实两schema PostgreSQL：实际原库写入触发待办再自动发表，不用SQLite或HTTP假写库。"""
 
+import legacy_bridge
 import json
 import os
 from contextlib import contextmanager
@@ -51,7 +52,7 @@ def databases(monkeypatch):
         '["clinicaltrials","legacy_documents","reviewed_graph","external_archive"]',
     )
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_SOURCES", '["clinicaltrials"]')
-    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # these tests drive the old legacy writer (cutover mode)
+    legacy_bridge.open_old_writer(monkeypatch)  # these tests drive the old legacy writer (cutover mode)
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_IS_DEMO", "true")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_NAMESPACE", "synthetic.publication")
@@ -251,7 +252,7 @@ def test_unknown_source_and_disk_pause_are_visible_and_preserve_pending(
     assert publication.backfill_once()["state"] == "paused_disk_low"
     assert publication.publish_once()["state"] == "resource_blocked"
     publication.publisher_heartbeat("resource_blocked")
-    status = publication.publication_status()
+    status = publication.publication_status("legacy_documents")
     assert status["publisher_state"] == "resource_blocked" and status["last_heartbeat"]
     assert status["counts"]["blocked"] == 1
     assert version_count(target) == 0
@@ -367,15 +368,21 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
     ):
         response = client.get(
             "/api/history/publication/status",
+            params={"source_id": "legacy_documents"},
             headers={"Authorization": "Bearer SYNTHETIC-read-only"},
         )
         assert (
             response.status_code == 200
             and response.json()["publisher_state"] == "not_started"
         )
+        assert response.json()["retired"] is True  # an audit reading of the old bridge, not a source to use
+        no_default = client.get("/api/history/publication/status",
+                                headers={"Authorization": "Bearer SYNTHETIC-read-only"})
+        assert no_default.status_code == 422  # the source is chosen, never defaulted to legacy_documents
         publication.publisher_heartbeat("idle")
         result = client.get(
             "/api/history/publication/status",
+            params={"source_id": "legacy_documents"},
             headers={"Authorization": "Bearer SYNTHETIC-read-only"},
         )
         assert (
@@ -388,7 +395,7 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
                     "UPDATE publication_outbox SET snapshot=jsonb_set(snapshot,'{last_heartbeat}',to_jsonb((clock_timestamp()-interval '1 hour')::text)) WHERE kind='control'"
                 )
             )
-        assert publication.publication_status()["publisher_state"] == "stale"
+        assert publication.publication_status("legacy_documents")["publisher_state"] == "stale"
         with target.begin() as conn:
             conn.execute(
                 text(
@@ -397,6 +404,7 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
             )
         denied = client.get(
             "/api/history/publication/status",
+            params={"source_id": "legacy_documents"},
             headers={"Authorization": "Bearer SYNTHETIC-read-only"},
         )
         assert denied.status_code == 403
@@ -880,7 +888,7 @@ def test_oversized_input_is_blocked_for_one_hour_without_losing_fifo_or_other_do
         value["raw_content"]
     )
     publication.publisher_heartbeat("running")
-    assert publication.publication_status()["counts"]["blocked"] == 1
+    assert publication.publication_status("legacy_documents")["counts"]["blocked"] == 1
 
 
 

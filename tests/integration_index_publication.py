@@ -1,5 +1,6 @@
 """Real PostgreSQL fault recovery and retrieval checks (v3 3.6) in an isolated schema; no upstream network."""
 
+import legacy_bridge
 import copy
 import json
 import os
@@ -49,7 +50,7 @@ def pg_engine():
 @pytest.fixture
 def pg(pg_engine, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["external_archive","legacy_documents","clinicaltrials"]')
-    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # withdrawal fixtures are legacy versions (cutover mode)
+    legacy_bridge.open_old_writer(monkeypatch)  # withdrawal fixtures are legacy versions (cutover mode)
     monkeypatch.setattr(history, "history_engine", lambda: pg_engine)
     monkeypatch.setattr(history_migration, "history_engine", lambda: pg_engine)
     monkeypatch.setattr(index_migration, "history_engine", lambda: pg_engine)
@@ -68,6 +69,15 @@ def set_targets(monkeypatch, *, source_id="external_archive"):
                "is_demo": True, "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical(config))
     return config
+
+
+def set_old_targets(monkeypatch):
+    """The target of an index built before the retirement (legacy_documents). The configuration loader refuses such a
+    target now (index_target_retired_source), so the tests of withdrawal and revocation on those old entries install the
+    target object directly."""
+    target = index.IndexTarget(source_instance="synthetic.index.pg", source_id="legacy_documents", is_demo=True,
+                               knowledge_base_id="synthetic-isolated-kb", source_scope="research")
+    monkeypatch.setattr(index, "targets", lambda: [target])
 
 
 def rows(pg, query, params=None):
@@ -443,7 +453,7 @@ def test_same_text_versions_share_one_entry_with_a_fixed_representative(pg):
 
 def test_withdrawal_does_not_disable_the_indexed_text(pg, monkeypatch):
     """撤回是一个新版本：当前模式下检索时剔除（withdrawn），撤回之前的截止时间仍可检索；索引条目保留。"""
-    set_targets(monkeypatch, source_id="legacy_documents")
+    set_old_targets(monkeypatch)
     active = add_collected()
     scan()
     client = JournalClient()
@@ -766,7 +776,7 @@ def test_returned_evidence_uses_the_visible_version_not_the_representative(pg):
 
 
 def test_retrieval_masks_withdrawal_revocation_and_unproven_history_immediately(pg, monkeypatch):
-    set_targets(monkeypatch, source_id="legacy_documents")
+    set_old_targets(monkeypatch)
     active = add_collected()
     scan()
     client = SearchClient(pg)
@@ -1205,29 +1215,46 @@ def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
     assert saved["state"] == "ready" and saved["desired_state"] != "superseded"  # kept, nothing sent to disable
 
 
-def test_a_retired_source_is_not_recalled_and_a_mixed_query_keeps_the_others(pg, monkeypatch):
-    """Codex r94: with legacy_documents retired (DATAFABRIC_LEGACY_WRITES off) semantic search does not choose it:
-    not by default, not when asked for it alone (410), and a mixed query searches only the other sources."""
+def test_a_retired_source_is_not_recalled_is_named_in_the_receipt_and_a_mixed_query_keeps_the_others(pg, monkeypatch):
+    """With legacy_documents retired semantic search does not choose it: not by default, not when asked for it alone (410),
+    and a mixed query searches only the other sources and says which one it left out. No environment setting changes it."""
+    legacy_bridge.close_old_writer(monkeypatch)
+    set_targets(monkeypatch)  # external_archive
+    client = SearchClient(pg)
+    asked = []
+    original = client.search
+    client.search = lambda body: asked.append(body["knowledge_base_id"]) or original(body)
+    assert search(client)["excluded_sources"] == []
+    mixed = search(client, sources=("external_archive", "legacy_documents"))
+    assert mixed["excluded_sources"] == [{"source_id": "legacy_documents", "reason": "retired"}]
+    assert set(asked) == {"synthetic-isolated-kb"}
+    for setting in ("off", "on"):
+        monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", setting)  # the old cutover switch is read by nothing
+        with pytest.raises(HistoryError) as error:
+            search(client, sources=("legacy_documents",))
+        assert (error.value.code, error.value.status) == ("legacy_retired", 410)
+        assert search(client, sources=("external_archive", "legacy_documents"))["excluded_sources"] == [
+            {"source_id": "legacy_documents", "reason": "retired"}]
+
+
+def test_an_index_target_naming_a_retired_source_is_a_configuration_error_found_at_start(pg, monkeypatch):
+    """N4: refused by the loader, so by every caller - search, the worker, and the service's startup check."""
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([
         {"source_instance": "synthetic.index.pg", "source_id": "external_archive", "is_demo": True,
          "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"},
         {"source_instance": "synthetic.index.pg", "source_id": "legacy_documents", "is_demo": True,
          "knowledge_base_id": "synthetic-legacy-kb", "source_scope": "research"}]))
-    monkeypatch.delenv("DATAFABRIC_LEGACY_WRITES")
-    client = SearchClient(pg)
-    asked = []
-    original = client.search
-    client.search = lambda body: asked.append(body["knowledge_base_id"]) or original(body)
-    search(client)
-    search(client, sources=("external_archive", "legacy_documents"))
-    assert set(asked) == {"synthetic-isolated-kb"}
-    with pytest.raises(HistoryError) as error:
-        search(client, sources=("legacy_documents",))
-    assert (error.value.code, error.value.status) == ("legacy_retired", 410)
-    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # cutover mode: still searchable
-    asked.clear()
-    search(client)
-    assert set(asked) == {"synthetic-isolated-kb", "synthetic-legacy-kb"}
+    from api import main
+
+    for call in (index.targets, lambda: search(SearchClient(pg)), lambda: index.run_worker(rounds=0),
+                 main._validate_source_configuration):
+        with pytest.raises(HistoryError) as error:
+            call()
+        assert (error.value.code, error.value.status) == ("index_target_retired_source", 503)
+        assert "legacy_documents" in error.value.message
+    set_targets(monkeypatch)
+    assert [t.source_id for t in index.targets()] == ["external_archive"]
+    main._validate_source_configuration()
 
 
 def test_a_new_artifact_still_parsing_or_failed_never_replaces_the_old_entry(pg, monkeypatch):

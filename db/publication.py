@@ -842,7 +842,7 @@ def publisher_heartbeat(state, *, engine=None):
         )
 
 
-def publication_status(source_id="legacy_documents", engine=None):
+def publication_status(source_id, engine=None):
     if source_id not in {"legacy_documents", "reviewed_graph"}:
         raise HistoryError("publication_status_scope", "仅查询自动文档或审核图发表组")
     with history.history_engine().begin() as permit:
@@ -895,6 +895,8 @@ def publication_status(source_id="legacy_documents", engine=None):
         ),
         "source_database": database_name,
         "source_id": source_id,
+        # legacy_documents is answered as an audit reading of the old bridge's publication state, not as a source to use
+        **({"retired": True} if source_id == "legacy_documents" else {}),
         "observed_at": now.isoformat(),
         "last_heartbeat": last,
         "publisher_state": state,

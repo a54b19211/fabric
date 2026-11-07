@@ -153,9 +153,22 @@ def _ref_key(ref):
     )
 
 
+def _refuse_retired_refs(refs):
+    """A package published now cites the real source version a legacy one became (legacy_aliases.real_version_id),
+    never the retired bridge. Packages published before keep validating on read: this is the publish path only."""
+    from biz_rules.retired_sources import RETIRED
+
+    retired = sorted({ref.source_id for ref in refs if ref.source_id in RETIRED})
+    if retired:
+        raise HistoryError(
+            "graph_evidence_retired_source",
+            "新图包不能引用已退役来源 " + ",".join(retired) + "；请引用迁入后的真实来源版本（legacy_aliases.real_version_id）")
+
+
 def _graph_documents(conn, run, bundle, now):
     """The frozen originals a graph bundle cites (by reference key) and the sources they depend on."""
     documents, dependencies = {}, set()
+    _refuse_retired_refs(bundle.document_refs)
     for ref in bundle.document_refs:
         _source(conn, ref.source_id)
         row = conn.execute(
@@ -561,7 +574,7 @@ def _same_identity(payload, identity, *, ignore_raw=False):
 def import_archive(request: ArchiveImport, key: str):
     # 全包先验证再发布；任何一条非法均不部分提交或改变已有成果。
     if request.source_id == "legacy_documents" and legacy_retired():
-        raise HistoryError(*LEGACY_RETIRED, 410)  # v3 6.3：旧桥不再新写（DATAFABRIC_LEGACY_WRITES=on 为切换期）
+        raise HistoryError(*LEGACY_RETIRED, 410)  # v3 6.3：旧桥不再新写，没有开关
     prepared = [
         (item, project_record(request.source_id, item)) for item in request.records
     ]
@@ -1377,9 +1390,10 @@ def backfill_rank(source_id, *, batch=500):
 def legacy_retired() -> bool:
     """v3 6.3: the legacy_documents bridge is retired - nothing new is written to it (documents come in through
     their real sources, collected or migrated) and no new query chooses it; versions already there stay readable
-    by their old ids (reports, graphs, audit, aliases). DATAFABRIC_LEGACY_WRITES=on keeps the old writer and
-    queries for the time of a cutover."""
-    return os.environ.get("DATAFABRIC_LEGACY_WRITES", "off") != "on"
+    by their old ids (reports, graphs, audit, aliases). There is no environment switch that reopens it. The function
+    is the one place the old writer's code paths ask, kept for the contract tests of the old writer, which replace it
+    explicitly; the service never does."""
+    return True
 
 
 LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥已退役（v3 6.3）：不再写入、不再作新查询的来源；文档经各真实来源进入，"
@@ -1635,6 +1649,11 @@ def _with_legacy_alias(conn, record, mode, cutoff):
     the real record's current version there (withdrawn or not). Pending: its reason; no access is widened."""
     from collection.legacy_migration import alias
 
+    # the bridge's permission is the intersection of its original sites: a revoked site stops its old versions whether
+    # or not they were migrated (the bridge row's own dependency list may be empty)
+    site = (record.facts or {}).get("source_site")
+    if site:
+        _source(conn, site)
     target = conn.execute(text(
         "SELECT real_source_id FROM legacy_aliases WHERE legacy_version_id=:v AND status='imported'"),
         {"v": record.version_id}).scalar()

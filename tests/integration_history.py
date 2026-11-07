@@ -1,5 +1,6 @@
 """真实PostgreSQL隔离schema；不使用SQLite，不碰现役表或parent E2E记录。"""
 
+import legacy_bridge
 import json
 import os
 import uuid
@@ -97,7 +98,7 @@ def pg(pg_engine, monkeypatch):
         '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc"]',
     )
     monkeypatch.setenv("DATAFABRIC_HISTORY_READ_TOKEN", "test-reader-only")
-    monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", "on")  # these tests drive the old legacy writer (cutover mode)
+    legacy_bridge.open_old_writer(monkeypatch)  # these tests drive the old legacy writer (cutover mode)
     monkeypatch.setenv("DATAFABRIC_HISTORY_ADMIN_TOKEN", "test-admin-only")
     monkeypatch.setattr(store, "history_engine", lambda: pg_engine)
     monkeypatch.setattr(migration, "history_engine", lambda: pg_engine)

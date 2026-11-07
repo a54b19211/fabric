@@ -503,7 +503,7 @@ def graph_resolve(
 
 @router.get("/publication/status", dependencies=[Depends(require_read)])
 def publication_status(
-    source_id: Literal["legacy_documents", "reviewed_graph"] = "legacy_documents",
+    source_id: Literal["legacy_documents", "reviewed_graph"],
 ):
     from db.publication import publication_status as read_status
 

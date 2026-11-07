@@ -5,6 +5,7 @@ Run explicitly with DATAFABRIC_PUBLICATION_DATABASE_URL pointing at the coordina
 The fixed-document validator below is an explicit fixture; History's real reader is
 covered separately by the object-evidence integration suite.
 """
+import legacy_bridge
 import json
 import os
 from contextlib import contextmanager
@@ -288,7 +289,7 @@ def real_history(real_history_engine, monkeypatch):
     monkeypatch.setattr(history, 'history_engine', lambda: real_history_engine)
     monkeypatch.setenv('DATAFABRIC_HISTORY_SOURCE_ALLOWLIST', '["legacy_documents","pubmed","clinicaltrials","primekg_graph"]')
     monkeypatch.setenv('DATAFABRIC_PUBLICATION_IS_DEMO', 'true')
-    monkeypatch.setenv('DATAFABRIC_LEGACY_WRITES', 'on')  # these tests freeze documents through the legacy bridge
+    legacy_bridge.open_old_writer(monkeypatch)  # these tests freeze documents through the legacy bridge
     return real_history_engine
 
 

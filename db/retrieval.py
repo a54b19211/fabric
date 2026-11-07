@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
+from biz_rules.retired_sources import RETIRED
 from db import history
 from db import index_publication as index
 from processing import index_pieces
@@ -271,6 +272,17 @@ def _coverage(source_ids):
     return out
 
 
+def _without_retired(sources):
+    """v3 6.3: a retired source is not recalled and is said so: it is named in the receipt's excluded_sources, none of its
+    text reaches rerank, and the other sources of a mixed query stay. Only retired sources chosen: 410. Old ids still
+    read through the record API."""
+    wanted = set(sources)
+    excluded = [{"source_id": s, "reason": "retired"} for s in sorted(wanted & set(RETIRED))]
+    if wanted and len(excluded) == len(wanted):
+        raise HistoryError(*history.LEGACY_RETIRED, 410)
+    return tuple(s for s in sources if s not in RETIRED), excluded
+
+
 def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_categories=(), evidence_types=(),
            top_k=10, client=None):
     """sources / scopes / is_demo 选择检索哪些索引目标（来源、业务范围、演示与否）；其余见模块说明。"""
@@ -278,15 +290,9 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
         raise HistoryError("unsupported_mode", "不支持该检索模式", 422)
     if not 1 <= top_k <= 20 or not 1 <= len(query) <= 2000:
         raise HistoryError("query_budget", "检索词须为1至2000字符，top_k须为1至20", 422)
+    sources, excluded = _without_retired(sources)
     configured = [t for t in index.targets() if (not sources or t.source_id in sources)
                   and (not scopes or t.source_scope in scopes) and (is_demo is None or t.is_demo == is_demo)]
-    if history.legacy_retired():
-        # v3 6.3: a retired source is not recalled (chosen out before recall, so none of its text reaches rerank);
-        # the other sources of a mixed query stay; old ids still read through the record API
-        kept = [t for t in configured if t.source_id != "legacy_documents"]
-        if configured and not kept:
-            raise HistoryError(*history.LEGACY_RETIRED, 410)
-        configured = kept
     if not configured:
         raise HistoryError("search_scope_empty", "所选来源没有配置索引目标", 422)
     # 一个知识库一次召回，覆盖它在本次检索里的所有业务范围（同库的范围不互相挤占候选）
@@ -348,7 +354,7 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
             client.close()
     return {
         "schema_version": SCHEMA, "query": query, "mode": mode, "cutoff": history._cutoff(cutoff).isoformat(),
-        "top_k": top_k, "results": results,
+        "top_k": top_k, "results": results, "excluded_sources": excluded,
         "excluded": {"counts": dict(counts), "items": items},
         "execution": {"candidates": len(candidates), "verified": len(verified), "returned": len(results),
                       "insufficient": len(results) < top_k, "candidate_budget_per_knowledge_base": CANDIDATES,
