@@ -31,7 +31,6 @@ biz_rules/native_extraction.py:clinical_trial_attributes  30/23  projection of s
 biz_rules/native_graph.py:build_native_graph  86/31  field-binding and graph-build rules, one branch per rule kind; table-driven rewrite (audit 2.1)
 biz_rules/object_evidence.py:validate_object_evidence  78/36  validator with one check per evidence rule; keep the rules in one place
 biz_rules/reviewed_graph.py:GraphBundle.consistent  39/27  reviewed-graph neighbourhood/bundle code with traversal and filters inline
-biz_rules/reviewed_graph.py:neighborhood  120/48  reviewed-graph neighbourhood/bundle code with traversal and filters inline
 biz_rules/reviewed_graph.py:primekg_bundle  102/16  reviewed-graph neighbourhood/bundle code with traversal and filters inline
 biz_rules/sec_xbrl.py:financial_rows  50/31  XBRL fact projection with one branch per statement item
 biz_rules/who_don.py:project_who  75/27  WHO disease-outbreak page reader/projection, one branch per page section

@@ -349,19 +349,7 @@ def document_native_id(document):
     return "legacy:" + document.source_site + ":" + document.source_doc_uuid
 
 
-def neighborhood(
-    bundle,
-    graph_ref,
-    seeds,
-    *,
-    relation_types=(),
-    direction="both",
-    max_depth=1,
-    max_nodes=50,
-    max_edges=100,
-    review_scope=None,
-):
-    """只遍历已发布的有限包；保留边方向，不补相同名字的节点或静默跟随redirect。"""
+def _check_neighborhood_request(seeds, relation_types, direction, max_depth, max_nodes, max_edges):
     if (
         direction not in {"out", "in", "both"}
         or not 0 <= max_depth <= 2
@@ -373,15 +361,10 @@ def neighborhood(
         raise HistoryError("graph_query_budget", "须给1至20个明确身份及至多16种关系")
     if len({identity_key(seed) for seed in seeds}) != len(seeds):
         raise HistoryError("duplicate_graph_seed", "查询身份重复")
-    if review_scope is not None:
-        from biz_rules.graph_tools import select_bundle
-        bundle = select_bundle(bundle, review_scope)
-    nodes = {identity_key(node): node for node in bundle.nodes}
-    found = [seed for seed in seeds if identity_key(seed) in nodes]
-    missing = [seed for seed in seeds if identity_key(seed) not in nodes]
-    visited, picked, picked_ids = {}, [], set()
-    boundary = set()
-    queue = deque((identity_key(seed), 0) for seed in found)
+
+
+def _adjacency(bundle, relation_types, direction):
+    """node key -> [(edge, other end)] in edge-id order, for the edge directions and relation types asked for."""
     adjacency = {}
     for edge in bundle.edges:
         if relation_types and edge.relation_type not in relation_types:
@@ -396,6 +379,16 @@ def neighborhood(
             )
     for values in adjacency.values():
         values.sort(key=lambda pair: pair[0].id)
+    return adjacency
+
+
+def _expand(nodes, adjacency, found, max_depth, max_nodes, max_edges):
+    """Breadth-first walk from the found seeds under the budgets.
+
+    Returns visited nodes, picked edges, ids of picked edges, boundary node keys and the stop reason (or None)."""
+    visited, picked, picked_ids = {}, [], set()
+    boundary = set()
+    queue = deque((identity_key(seed), 0) for seed in found)
     reason = None
     while queue:
         key, depth = queue.popleft()
@@ -431,6 +424,32 @@ def neighborhood(
         for edge, _ in adjacency.get(key, ())
     ):
         reason = "depth_budget"
+    return visited, picked, picked_ids, boundary, reason
+
+
+def neighborhood(
+    bundle,
+    graph_ref,
+    seeds,
+    *,
+    relation_types=(),
+    direction="both",
+    max_depth=1,
+    max_nodes=50,
+    max_edges=100,
+    review_scope=None,
+):
+    """只遍历已发布的有限包；保留边方向，不补相同名字的节点或静默跟随redirect。"""
+    _check_neighborhood_request(seeds, relation_types, direction, max_depth, max_nodes, max_edges)
+    if review_scope is not None:
+        from biz_rules.graph_tools import select_bundle
+        bundle = select_bundle(bundle, review_scope)
+    nodes = {identity_key(node): node for node in bundle.nodes}
+    found = [seed for seed in seeds if identity_key(seed) in nodes]
+    missing = [seed for seed in seeds if identity_key(seed) not in nodes]
+    adjacency = _adjacency(bundle, relation_types, direction)
+    visited, picked, _picked_ids, _boundary, reason = _expand(
+        nodes, adjacency, found, max_depth, max_nodes, max_edges)
     # 边端点必须全部在实际返回节点内；预算被截断时不留下悬空引用。
     picked = [
         edge
