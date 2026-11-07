@@ -121,6 +121,36 @@ def backfill(batch_size=200):
                "n": batch_size}).rowcount
 
 
+def enqueue_measures(conn, version_id, producer_identity, text_processor_version):
+    """The check task of one measurement run's readings (producer "measures", the run's producer identity), in the
+    caller's transaction: registered, or queued again when its readings changed after it was done (a retried window,
+    a relocated reading). A blocked task stays blocked."""
+    return conn.execute(text("""
+        INSERT INTO derived_extraction_check_tasks(version_id,producer,producer_version,text_processor_version,
+          checker_version) VALUES (:v,'measures',:pv,:tpv,:c)
+        ON CONFLICT (version_id,producer,producer_version,text_processor_version,checker_version) DO UPDATE
+          SET state='queued',next_check_at=clock_timestamp(),updated_at=clock_timestamp()
+          WHERE derived_extraction_check_tasks.state='done'
+    """), {"v": version_id, "pv": producer_identity, "tpv": text_processor_version,
+           "c": expected_checker("measures")}).rowcount
+
+
+def backfill_measures(batch_size=200):
+    """Tasks for measurement readings that have none for the expected measurements checker: an upgrade of that
+    checker queues every reading again (their objects of the older checker stop being current)."""
+    with history.history_engine().begin() as conn:
+        return conn.execute(text("""
+            INSERT INTO derived_extraction_check_tasks(version_id,producer,producer_version,text_processor_version,
+              checker_version)
+            SELECT DISTINCT version_id,'measures',producer_identity,text_processor_version,:c
+              FROM derived_measure_readings r
+             WHERE NOT EXISTS (SELECT 1 FROM derived_extraction_check_tasks t WHERE t.version_id=r.version_id
+                                 AND t.producer='measures' AND t.producer_version=r.producer_identity
+                                 AND t.text_processor_version=r.text_processor_version AND t.checker_version=:c)
+             LIMIT :n ON CONFLICT DO NOTHING
+        """), {"c": expected_checker("measures"), "n": batch_size}).rowcount
+
+
 def _key(task):
     return {k: task[k] for k in TASK_KEY}
 
@@ -191,9 +221,20 @@ def _record(conn, task, version, run, artifact_sha, request_sha, status, *, item
            "run": run["id"], "batches": run["batches"], "index": run["index"], "reused": reused_from})
 
 
+def _readings(conn, task, sha):
+    """The measurement readings of the task (its version, producer identity and artifact), in a fixed order."""
+    return [dict(r) for r in conn.execute(text(
+        "SELECT reading_id,item,passages FROM derived_measure_readings WHERE version_id=:v AND producer_identity=:pi "
+        "AND text_processor_version=:tpv AND text_sha256=:sha ORDER BY reading_id"),
+        {"v": task["version_id"], "pi": task["producer_version"], "tpv": task["text_processor_version"],
+         "sha": sha}).mappings()]
+
+
 def _items(conn, task, full):
     """The products of the task as contract items (absolute offsets in the fixed artifact)."""
     out = []
+    if task["producer"] == "measures":
+        return _readings(conn, task, hashlib.sha256(full.encode()).hexdigest())
     if task["producer"] == "identifiers":
         for n, r in enumerate(conn.execute(text("""
                 SELECT kind,value,start_offset,end_offset FROM derived_identifiers WHERE version_id=:v
@@ -305,6 +346,34 @@ def _requests(subject, full, items):
                                "quote": i["quote"], "fields": fields})
         out.append({"subject": subject, "passages": passages, "items": body_items})
     return out, unbuildable
+
+
+def _measure_requests(subject, readings):
+    """One contract-v3 request per reading: the strict item and passages it was built with at extraction time."""
+    return [{"contract_version": contract_of("measures"), "subject": subject, "passages": r["passages"],
+             "items": [{"id": "m1", **r["item"]}]} for r in readings], []
+
+
+def _build(work):
+    """(requests, unbuildable) of the task: per producer."""
+    if work.task["producer"] == "measures":
+        work.run["reading_ids"] = [r["reading_id"] for r in work.items]
+        return _measure_requests(_subject(work), work.items)
+    return _requests(_subject(work), work.full, work.items)
+
+
+def _publish(work):
+    """After every batch of a measures run completed: its objects, while the lease is still this worker's and the
+    permission still holds. None, LEASE_LOST or "source_unreadable"."""
+    from db import measurements
+
+    with history.history_engine().begin() as conn:
+        if not _own(conn, work.task):
+            return LEASE_LOST
+        if not _readable(conn, work.version["source_id"]):
+            return "source_unreadable"
+        measurements.publish(conn, work.task, work.run["id"], work.run["reading_ids"])
+    return None
 
 
 def _verdict(body, request, producer="identifiers"):
@@ -434,6 +503,9 @@ def _after_batch(work, request_sha, body, calls, verdict):
     task, sha = work.task, work.art["text_sha256"]
     with history.history_engine().begin() as conn:
         if not _own(conn, task):
+            if task["producer"] == "measures":  # a late answer is kept as audit of the stale run, adopted by nobody
+                _record(conn, task, work.version, work.run, sha, request_sha, "unchecked", error_code="lease_lost",
+                        items=_audit_items(body), checker=_checker_of(body), calls=calls)
             return LEASE_LOST
         if not _readable(conn, work.version["source_id"]):
             verdict = "source_unreadable"  # revoked while the call ran: not adopted
@@ -443,8 +515,19 @@ def _after_batch(work, request_sha, body, calls, verdict):
                     calls={**calls, "llm_calls": len(body.get("llm_calls") or [])})
             return None
         _record(conn, task, work.version, work.run, sha, request_sha, "unchecked", error_code=verdict,
-                checker=body.get("checker_version") if isinstance(body, dict) else None, calls=calls)
+                items=_audit_items(body) if task["producer"] == "measures" else (), checker=_checker_of(body),
+                calls=calls)
         return verdict
+
+
+def _checker_of(body):
+    return body.get("checker_version") if isinstance(body, dict) else None
+
+
+def _audit_items(body):
+    """The items of an answer that is not adopted, kept with the unchecked row as its audit (measurements)."""
+    items = body.get("items") if isinstance(body, dict) else None
+    return items if isinstance(items, list) else []
 
 
 def _send_batches(client, work, requests):
@@ -484,7 +567,7 @@ def process_once(*, client=None):
     work, stop = _load(task, run)
     if stop is not None:
         return stop
-    requests, unbuildable = _requests(_subject(work), work.full, work.items)
+    requests, unbuildable = _build(work)
     run["batches"] = len(requests)
     stop = _record_unsent(work, requests, unbuildable)
     if stop is not None:
@@ -496,6 +579,8 @@ def process_once(*, client=None):
     finally:
         if owned:
             client.close()
+    if failed is None and task["producer"] == "measures":
+        failed = _publish(work)
     return _conclude(task, failed)
 
 
@@ -571,6 +656,7 @@ def run_worker(*, stop, idle_seconds=5.0, backfill_every=60.0, rounds=None):
         if time.monotonic() - last >= backfill_every:
             last = time.monotonic()
             backfill()
+            backfill_measures()
         state = process_once()["state"]
         if state == "idle":
             stop.wait(idle_seconds)
