@@ -10,7 +10,7 @@ def test_identifiers_and_annotations_go_to_v1_and_measurements_to_v3():
     assert table == {
         "identifiers": ("extraction_consistency.v1", "/v1/extraction-consistency", "biocheck.extraction_rules.v3"),
         "profile": ("extraction_consistency.v1", "/v1/extraction-consistency", "biocheck.extraction_rules.v3"),
-        "measures": ("extraction_consistency.v3", "/v3/extraction-consistency", "biocheck.extraction_rules.v16"),
+        "measures": ("extraction_consistency.v3", "/v3/extraction-consistency", "biocheck.extraction_rules.v17"),
     }
     # every default checker answers under the contract its producer is recorded with (the shared table)
     for check in checks.CHECKS_BY_PRODUCER.values():
@@ -20,7 +20,7 @@ def test_identifiers_and_annotations_go_to_v1_and_measurements_to_v3():
 def test_each_producer_has_its_own_checker_setting(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_EXTRACTION_CHECKER", "biocheck.extraction_rules.v4")
     assert checks.expected_checker() == checks.expected_checker("profile") == "biocheck.extraction_rules.v4"
-    assert checks.expected_checker("measures") == "biocheck.extraction_rules.v16"
+    assert checks.expected_checker("measures") == "biocheck.extraction_rules.v17"
     monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", "biocheck.extraction_rules.v17")
     assert checks.expected_checker("measures") == "biocheck.extraction_rules.v17"
     assert checks.expected_checker("identifiers") == "biocheck.extraction_rules.v4"

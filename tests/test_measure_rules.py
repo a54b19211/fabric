@@ -93,3 +93,22 @@ def test_a_literal_is_never_guessed():
     span, _ = rules.place_quote(text, m["quote"], (0, len(text)))
     built, why = rules.build(rules.Bound({"raw_sha256": "b" * 64}, *span, m, RADAR_PRODUCER), text, {}, {})
     assert built is None and why == "value_literal_not_located"  # "12" twice: ambiguous, not chosen
+
+
+def build_one(text, **fields):
+    m = mx.Measure.model_validate({"kind": "cumulative", "quote": text, **fields}).model_dump()
+    span, _ = rules.place_quote(text, m["quote"], (0, len(text)))
+    return rules.build(rules.Bound({"raw_sha256": "b" * 64}, *span, m, RADAR_PRODUCER), text, {}, {})
+
+
+def test_a_count_written_as_a_word_is_a_value_and_is_located_as_a_whole_word():
+    text = "Of the nine cases, there were seven reported deaths (Case Fatality Ratio (CFR) = 78%)."
+    for word, number, metric in (("nine", "9", "cases"), ("seven", "7", "reported deaths")):
+        built, why = build_one(text, metric_text=metric, value_text=word)
+        assert why is None and built[1]["value"] == number
+
+
+def test_only_the_value_may_be_spelled_and_only_up_to_twelve():
+    base = {"metric_text": "cases", "value_text": "nine", "kind": "cumulative", "quote": "q"}
+    assert rules.final_of(dict(base, denominator_text="twelve"))[1] == "denominator_not_a_supported_number"
+    assert rules.final_of(dict(base, value_text="thirteen"))[1] == "value_not_a_supported_number"

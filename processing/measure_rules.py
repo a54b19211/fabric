@@ -187,7 +187,7 @@ def structured_period(period, period_type):
 
 def final_of(m):
     """The values the check is about and a measurement object would carry - or (None, reason)."""
-    value = norm.decimal_text(m["value_text"])
+    value = norm.decimal_text_v6(m["value_text"])  # a count may be written as a word, one to twelve (v6)
     if value is None:
         return None, "value_not_a_supported_number"
     denominator = None
@@ -312,15 +312,17 @@ def _find(text, q0, q1, c0, c1, name, literal):
     ambiguous."""
     pat = re.escape(literal)
     if name in ("value", "denominator"):
-        # a whole number token of its clause: "851" of "7 851" is not one (extraction_normalize.v1)
-        whole = set(norm.number_tokens(text[c0:c1]))
+        # a whole number of its clause: "851" of "7 851" is not one (extraction_normalize.v1); a value may also be a
+        # count written as a word (v6: "nine", never a part of "someone"), a denominator stays a digit number
+        clause_text = text[c0:c1]
+        whole = norm.is_whole_number_v6 if name == "value" else norm.is_whole_number
         inq = [x.start() for x in re.finditer(pat, text[q0:q1])
-               if (q0 + x.start() - c0, q0 + x.end() - c0) in whole]
+               if whole(clause_text, q0 + x.start() - c0, q0 + x.end() - c0)]
         if len(inq) == 1:
             return q0 + inq[0]
         if inq:
             return None
-        inc = [x.start() for x in re.finditer(pat, text[c0:c1]) if (x.start(), x.end()) in whole]
+        inc = [x.start() for x in re.finditer(pat, clause_text) if whole(clause_text, x.start(), x.end())]
         return c0 + inc[0] if len(inc) == 1 else None
     inq = [x.start() for x in re.finditer(pat, text[q0:q1])]
     if len(inq) == 1:

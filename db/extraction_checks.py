@@ -19,7 +19,7 @@ corresponds to the fixed text it was extracted from - never whether a fact is tr
 Producers checked: identifiers (identifier items: the producer's value at its offsets) and profile annotations
 (experiment-type locators; BioCheck v3 checks their locator and quote, the type judgement stays unsupported).
 Each producer is checked under its own contract by its own checker (CHECKS_BY_PRODUCER): identifiers and profile
-annotations by BioCheck /v1 (contract v1, checker v3), measurements by BioCheck /v3 (contract v3, checker v16). A
+annotations by BioCheck /v1 (contract v1, checker v3), measurements by BioCheck /v3 (contract v3, checker v17). A
 task waits for its producer's expected checker; a result is recorded under its producer's contract."""
 
 import hashlib
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import httpx
-from extraction_contract import CHECKER_V3, CHECKER_V16, CONTRACT, CONTRACT_V3, canonical, verdict
+from extraction_contract import CHECKER_V3, CHECKER_V17, CONTRACT, CONTRACT_V3, canonical, verdict
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
@@ -58,7 +58,7 @@ _V1 = Check(CONTRACT, "/v1/extraction-consistency", "DATAFABRIC_EXTRACTION_CHECK
 CHECKS_BY_PRODUCER = {
     "identifiers": _V1,
     "profile": _V1,
-    "measures": Check(CONTRACT_V3, "/v3/extraction-consistency", "DATAFABRIC_MEASURE_CHECKER", CHECKER_V16),
+    "measures": Check(CONTRACT_V3, "/v3/extraction-consistency", "DATAFABRIC_MEASURE_CHECKER", CHECKER_V17),
 }
 # Contract lengths (extraction_consistency.v1). A product longer than these is not sent cut to fit: a prefix of the
 # producer's value is a different value, so the item is unbuildable and reads back unchecked.

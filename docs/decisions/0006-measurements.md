@@ -21,7 +21,7 @@
   预算用完（本轮额度或 429/503）是 `budget_spent`，不计失败次数。撤权 → `source_unreadable`、run `paused_unreadable`，
   恢复后 `resume()`。
 - **核验按产物选契约**：`CHECKS_BY_PRODUCER`：编号、画像注释 → `/v1`（v1 契约、checker v3）；测量 → `/v3`（v3 契约、
-  checker v16）。测量一读数一请求，复用 `derived_extraction_check_tasks`；全部批次完成、租约和许可仍在时才发布对象。
+  checker v17）。测量一读数一请求，复用 `derived_extraction_check_tasks`；全部批次完成、租约和许可仍在时才发布对象。
   未被采纳的晚到回答（核验期间撤权、租约已失）把回答条目存进 unchecked 行作审计；已被替代的 run 晚到的回答产生的对象
   立即被替代，从不成为当前。
 - **对象只追加，状态来自事件**：`derived_measurement_events` 记 created / superseded_by_processor / superseded_by_producer /
@@ -60,7 +60,7 @@
 
 - **一个入口，两条候选路线**：模型路线不变；规则路线把 `who.explicit-count.v1`（`biz_rules/who_facts.py`）的明确计数从清洗正文
   （按产物自带的段落定位 Summary、Overview，不读标题和表格）写成模型会写的 measure（`processing/measure_counts.py`），走同一套
-  严格请求构建、口径、身份和 BioCheck v3/v16 核验，不调模型。没写明累计或新增的计数不猜，记原因（`measure_kind_other_is_not_checkable`）。
+  严格请求构建、口径、身份和 BioCheck v3/v17 核验，不调模型。没写明累计或新增的计数不猜，记原因（`measure_kind_other_is_not_checkable`）。
   投影里原有的正则结果不动。“正则精度高”仍是待验证的假设，不是结论。
 - **路线写在生产者标识里**（`…v2+rules.who.explicit-count.v1`），规则路线的运行没有模型配置摘要；一条路线只替代自己的旧运行，
   两路读数不互相替代、不按路线优先级覆盖。

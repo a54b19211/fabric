@@ -1,7 +1,7 @@
 """Slice S1 on real PostgreSQL: WHO DON case counts from a fixed clean artifact to checked measurement objects.
 
 The model is a loopback OpenAI-compatible server in this process (no model, no network beyond 127.0.0.1); the
-checker is the real BioCheck /v3 rules (checker v16) run from a BioCheck checkout through its own app (TestClient,
+checker is the real BioCheck /v3 rules (checker v17) run from a BioCheck checkout through its own app (TestClient,
 FakeLLM - no model), located by DATAFABRIC_TEST_BIOCHECK_SRC / DATAFABRIC_TEST_BIOCHECK_PYTHON; without them the
 tests that need the real checker are reported as skipped.
 
@@ -295,7 +295,7 @@ def test_who_case_counts_become_checked_objects_with_their_receipts(db, fake):
     assert cases["denominator_state"] == "not_applicable" and cases["measure_kind"] == "cumulative"
     # the measurement basis: each stated dimension with the checker's own result
     assert {d["kind"]: d["check"] for d in cases["dims"]} == {"disease": "match", "date_basis": "match"}
-    assert cases["check"]["checker_version"] == "biocheck.extraction_rules.v16"
+    assert cases["check"]["checker_version"] == "biocheck.extraction_rules.v17"
     assert cases["check"]["contract_version"] == "extraction_consistency.v3" and cases["check"]["status"] == "consistent"
     assert cases["inputs"][0]["version_id"] == version and cases["permission_sources"] == ["who_don"]
     assert cases["state_at_cutoff"] == "ok" and cases["current"] is True and cases["reconstruction"] is False
@@ -315,9 +315,9 @@ def test_who_case_counts_become_checked_objects_with_their_receipts(db, fake):
     # the checks were answered under contract v3, one strict request per reading
     results = rows(db, "SELECT contract_version,checker_version,status FROM derived_extraction_checks")
     assert len(results) == 3 and {(r["contract_version"], r["checker_version"], r["status"]) for r in results} == {
-        ("extraction_consistency.v3", "biocheck.extraction_rules.v16", "completed")}
+        ("extraction_consistency.v3", "biocheck.extraction_rules.v17", "completed")}
     tasks = rows(db, "SELECT producer,state,checker_version FROM derived_extraction_check_tasks")
-    assert tasks == [{"producer": "measures", "state": "done", "checker_version": "biocheck.extraction_rules.v16"}]
+    assert tasks == [{"producer": "measures", "state": "done", "checker_version": "biocheck.extraction_rules.v17"}]
 
 
 @real_checker
@@ -429,7 +429,7 @@ def test_a_checker_change_leaves_objects_not_current_until_rechecked(db, fake, m
     check_all(RealBioCheck(answer=as_checker("biocheck.extraction_rules.v15")))
     old = by_value(listing(version)["measurements"])["66"]
     assert old["check"]["checker_version"] == "biocheck.extraction_rules.v15"
-    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v16 is expected now
+    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is expected now
     now = listing(version)
     assert now["measurements"] == [] and now["excluded"] == {"checker_not_current": 3}
     one = measurement_reads.read_one(old["measurement_id"], True, "current", NOW())
@@ -438,7 +438,7 @@ def test_a_checker_change_leaves_objects_not_current_until_rechecked(db, fake, m
     assert checks.backfill_measures() == 1
     check_all(RealBioCheck())
     new = by_value(listing(version)["measurements"])["66"]
-    assert new["check"]["checker_version"] == "biocheck.extraction_rules.v16"
+    assert new["check"]["checker_version"] == "biocheck.extraction_rules.v17"
     assert new["measurement_id"] != old["measurement_id"] and new["reading_id"] == old["reading_id"]
     assert events_of(db, old["measurement_id"]) == ["created", "rechecked_by_checker"]
     again = measurement_reads.read_one(old["measurement_id"], True, "current", NOW())
@@ -567,7 +567,7 @@ def test_public_history_reconstruction_is_kept_apart_from_operational_replay(db,
     assert error.value.code == "version_not_found"
     rebuilt = listing(version, "public_history_reconstruction", past)
     assert rebuilt["reconstruction"] is True
-    assert rebuilt["versions_used"]["checkers"] == ["biocheck.extraction_rules.v16"]
+    assert rebuilt["versions_used"]["checkers"] == ["biocheck.extraction_rules.v17"]
     assert rebuilt["versions_used"]["producers"] == [cases["versions"]["producer"]]
     got = by_value(rebuilt["measurements"])["66"]
     assert got["reconstruction"] is True and got["state_at_cutoff"] == "ok"
@@ -649,7 +649,7 @@ def test_the_change_feed_is_in_commit_order_and_withholds_revoked_sources(db, fa
     seqs = [i["seq"] for i in first["items"] + rest["items"]]
     assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)) == 3
     assert {i["kind"] for i in first["items"] + rest["items"]} == {"created"}
-    assert all(i["versions"]["checker"] == "biocheck.extraction_rules.v16" for i in rest["items"])
+    assert all(i["versions"]["checker"] == "biocheck.extraction_rules.v17" for i in rest["items"])
     assert measurement_reads.changes(True, after_seq=rest["next_after"])["items"] == []
     revoke(db)
     hidden = measurement_reads.changes(True, after_seq=0)
@@ -892,7 +892,7 @@ def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeyp
     old = by_value(listing(version)["measurements"])["66"]
     produced = NOW()
     assert len(listing(version, "operational_replay", produced)["measurements"]) == 3  # the configured checker
-    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v16 is configured now; when it took over is not recorded
+    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is configured now; when it took over is not recorded
     replay = listing(version, "operational_replay", produced)
     assert replay["measurements"] == [] and replay["excluded"] == {"checker_history_unknown": 3}
     one = measurement_reads.read_one(old["measurement_id"], True, "operational_replay", produced)
@@ -901,7 +901,7 @@ def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeyp
     assert checks.backfill_measures() == 1
     check_all(RealBioCheck())
     later = by_value(listing(version, "operational_replay", NOW())["measurements"])
-    assert later["66"]["check"]["checker_version"] == "biocheck.extraction_rules.v16"
+    assert later["66"]["check"]["checker_version"] == "biocheck.extraction_rules.v17"
     assert measurement_reads.read_one(old["measurement_id"], True, "operational_replay", NOW())[
         "not_current_reason"] == "rechecked_by_checker"
 

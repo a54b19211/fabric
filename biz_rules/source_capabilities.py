@@ -81,12 +81,12 @@ def _measurements(applied, source_id):
     for measurements), with the contract they are served under and the checker that checks them."""
     if "measure_extract" not in applied or record_kind(source_id) != "original":
         return None
-    from extraction_contract import CHECKER_V16, CONTRACT_V3
+    from extraction_contract import CHECKER_V17, CONTRACT_V3
 
     from contracts.data_objects import CONTRACT_VERSION_V2
 
     return {"processor": applied["measure_extract"], "contract": CONTRACT_VERSION_V2,
-            "checker": CHECKER_V16, "check_contract": CONTRACT_V3,
+            "checker": CHECKER_V17, "check_contract": CONTRACT_V3,
             "history_modes": ["current", "operational_replay", "public_history_reconstruction"]}
 
 

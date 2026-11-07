@@ -238,7 +238,7 @@ def who_measurement(**change):
         "denominator_state": "not_applicable", "measure_kind": "cumulative", "qualifier": "exact",
         "modality": "actual", "family": "case_count",
         "dims": [{"kind": "disease", "value": "Marburg virus disease", "start": 120, "end": 141, "check": "match"}],
-        "check": {"checker_version": "biocheck.extraction_rules.v16", "contract_version": "extraction_consistency.v3",
+        "check": {"checker_version": "biocheck.extraction_rules.v17", "contract_version": "extraction_consistency.v3",
                   "run_id": "r-77", "status": "consistent"},
         "quote": "As of 28 October 2026, 1 444 confirmed cases of Marburg virus disease were reported in Rwanda",
         "identity": {"state": "provisional", "key": "literal:who_don|2026-DON512|marburg virus disease"},

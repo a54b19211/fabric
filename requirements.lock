@@ -654,8 +654,8 @@ executing==2.2.1 \
     --hash=sha256:3632cc370565f6648cc328b32435bd120a1e4ebb20c77e3fdde9a13cd1e533c4 \
     --hash=sha256:760643d3452b4d777d295bb167ccc74c64a81df23fb5e08eff250c425a4b2017
     # via stack-data
-extraction-contract==1.13.1 \
-    --hash=sha256:e8a1e14bfd9687920187324cf0e6f1c9b634d17d29fafbdc81d5b1859a75b7cf
+extraction-contract==1.15.0 \
+    --hash=sha256:569de80fc4f5a3d82d1b3d07fbc2090b522b35909fada26c96ae10e1f38faad3
     # via -r requirements-contract.txt
 fastapi==0.136.1 \
     --hash=sha256:7af665ad7acfa0a3baf8983d393b6b471b9da10ede59c60045f49fbc89a0fa7f \
