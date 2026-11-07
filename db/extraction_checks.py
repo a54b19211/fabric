@@ -30,11 +30,10 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import httpx
+from extraction_contract import CHECKER_V3, CHECKER_V16, CONTRACT, CONTRACT_V3, canonical, verdict
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
-from extraction_contract import CHECKER_V3, CHECKER_V16, CONTRACT, CONTRACT_V3, canonical, verdict
-from extraction_contract import derived_status as _derived_status
 from db import history
 from db.lease import LeaseQueue
 
@@ -333,7 +332,7 @@ def _requests(subject, full, items):
         passages = [{"id": f"p{n}", "role": "primary", "start": a, "end": b, "text": full[a:b]}
                     for n, (a, b) in enumerate(spans, 1)]
 
-        def holder(i):
+        def holder(i, passages=passages):
             return next(p["id"] for p in passages if p["start"] <= i["start"] and i["end"] <= p["end"])
 
         body_items = []

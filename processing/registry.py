@@ -8,8 +8,8 @@ processing stages (db.clean_stage, db.registry_changes) read these names, so the
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from processing import attachment_parse, clean_text, measure_extract, profile, registry_diff
 
