@@ -586,7 +586,7 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 
 涉及确认、提案采纳、整对象合并、关系审核和字段裁决的操作使用 `X-Review-Token`。服务端通过私有环境变量 `DATAFABRIC_REVIEW_TOKENS` 将令牌映射到审核人，不接受客户端填写一个名字便获得确认资格。配置未提供时明确拒绝，密钥不写进源码或浏览器页面。
 
-新来源 `gdelt_doc` 只返回标题、原网址及索引元数据，不提供新闻全文；其 `seendate` 是 GDELT 的观察时间，不是原帖发布时间，也不是本机的首次采集时间。接口无续页，到条数上限须缩小查询时间窗。实际探测曾返回 429，故不能声称当前服务器已经稳定采通。资料使用需注明 [GDELT 项目](https://www.gdeltproject.org/about.html#termsofuse)。ProMED 尚无所需许可；各级卫健委网页尚未逐站验证；实时社媒商用接口尚未选定。这些都不能写成已覆盖。
+新来源 `gdelt_doc` 只返回标题、原网址及索引元数据，不提供新闻全文；其 `seendate` 是 GDELT 的观察时间，不是原帖发布时间，也不是本机的首次采集时间。接口无续页：给定起止时间的读取按 UTC 整点切成 1 小时窗，窗口返回满额（达到请求的 `max_records`）就对半拆开再读，最细 15 分钟，每查询每小时最多 7 次请求；最细窗口仍满额的标 `possibly_truncated`。读取运行的 coverage 里 `window_coverage` 逐窗口写区间、返回条数、是否满额、请求数和未读完的原因，`truncated_intervals` 列出可能被截断的区间；少于上限只说明没碰到上限，不等于窗口读全。实际探测曾返回 429，故不能声称当前服务器已经稳定采通。资料使用需注明 [GDELT 项目](https://www.gdeltproject.org/about.html#termsofuse)。ProMED 尚无所需许可；各级卫健委网页尚未逐站验证；实时社媒商用接口尚未选定。这些都不能写成已覆盖。
 
 新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
 

@@ -999,6 +999,21 @@ def job_input(run_id, attempt):
         return request, frozen
 
 
+def _reported_coverage(batch):
+    """The parts of a read's coverage that only some plugins report: where to resume, how each attachment went,
+    and for a windowed read what each window returned and which intervals may be cut short."""
+    reported = {}
+    if batch.get("next_continuation") is not None:
+        reported["next_continuation"] = batch["next_continuation"]
+    if batch.get("attachment_coverage"):
+        # 本次读取每个附件读没读到（站点插件），留在读取记录里，不进原件
+        reported["attachment_coverage"] = batch["attachment_coverage"][:500]
+    for key in ("window_coverage", "truncated_intervals"):
+        if key in batch:
+            reported[key] = batch[key]
+    return reported
+
+
 def finish_fetch(run_id, attempt, batch):
     with history_engine().begin() as conn:
         run = (
@@ -1041,11 +1056,7 @@ def finish_fetch(run_id, attempt, batch):
                 "source_total",
             )
         }
-        if batch.get("next_continuation") is not None:
-            coverage["next_continuation"] = batch["next_continuation"]
-        if batch.get("attachment_coverage"):
-            # 本次读取每个附件读没读到（站点插件），留在读取记录里，不进原件
-            coverage["attachment_coverage"] = batch["attachment_coverage"][:500]
+        coverage.update(_reported_coverage(batch))
         if request.is_demo:
             coverage.update(
                 is_demo=True, fetch_mode="simulated", demo_instance_id=request.demo_instance_id,

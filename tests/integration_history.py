@@ -1670,6 +1670,9 @@ def test_gdelt_index_changes_keep_old_original_and_public_material_type(pg, monk
     new = store.finish_fetch(new.id, new.attempt, read_public(request))
     native = article_id({"url": "https://example.org/news?id=1"})
     assert old.version_ids != new.version_ids
+    [window] = new.coverage["window_coverage"]  # the receipts are kept in the run's coverage; no window, one receipt
+    assert (window["status"], window["returned"], window["possibly_truncated"]) == ("read", 1, False)
+    assert new.coverage["truncated_intervals"] == []
     saved = store.read_version(old.version_ids[0], "gdelt_doc", native, False, "current", datetime.now().astimezone())
     assert saved.clean_text == "SYNTHETIC first headline"
     assert saved.document_evidence.text_level == "title"
