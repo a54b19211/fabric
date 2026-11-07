@@ -11,7 +11,6 @@
 # A function is in this section when at least 40% of its lines come from the rebuild line's own commits
 # (git rev-list ebe7c17 ^82bad7b ^d316aad: the rebuild branch since it left the team's 82bad7b, without what
 # came in from feat/server_fix). Code in this section is split, not frozen: the section is to be empty.
-contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
 
 # ---- (b) The team's older shared code ----
 # Code the team wrote before this round: under 40% of each function's lines come from the rebuild line (under

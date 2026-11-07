@@ -763,19 +763,36 @@ def validate_case_set(cases: list[AcceptanceCase]) -> list[AcceptanceCase]:
     """
     validate_cases(list(cases))
     by_id = {c.id: c for c in cases}
-    errors: list[str] = []
+    errors = _related_case_errors(cases, by_id) + _unreferenced_e_errors(cases) + _e_coverage_errors(cases)
+    if errors:
+        raise AcceptanceContractError("；".join(errors))
+    return list(cases)
+
+
+def _related_case_errors(cases, by_id) -> list[str]:
+    errors = []
     for c in cases:
         for rid in c.related_cases:
             if rid == c.id:
                 errors.append(f"{c.id} 的 related_cases 引用了自己")
             elif rid not in by_id:
                 errors.append(f"{c.id} 的 related_cases 引用了不存在的案例 {rid}")
+    return errors
+
+
+def _unreferenced_e_errors(cases) -> list[str]:
+    errors = []
     for e in cases:
         if e.case_kind != "chain_judgment_e":
             continue
         if not any(e.id in c.related_cases and c.judgment == e.chain for c in cases):
             errors.append(
                 f"链路{e.chain} 的判断E 案例 {e.id} 没有被 {e.chain}.json 里的案例用 related_cases 引用")
+    return errors
+
+
+def _e_coverage_errors(cases) -> list[str]:
+    errors = []
     e_cases = [c for c in cases if c.judgment == "E"]
     if e_cases:
         triggers = {c.trigger for c in e_cases}
@@ -786,9 +803,7 @@ def validate_case_set(cases: list[AcceptanceCase]) -> list[AcceptanceCase]:
         lack = [o for o in ("maintain", "revise") if o not in outcomes]
         if lack:
             errors.append(f"判断 E 案例缺少预期结果 {lack}：维持和修订都要验")
-    if errors:
-        raise AcceptanceContractError("；".join(errors))
-    return list(cases)
+    return errors
 
 
 def score_units(cases: list[AcceptanceCase]) -> list[str]:
