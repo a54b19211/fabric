@@ -36,7 +36,6 @@ biz_rules/reviewed_graph.py:primekg_bundle  102/16  reviewed-graph neighbourhood
 biz_rules/sec_xbrl.py:financial_rows  50/31  XBRL fact projection with one branch per statement item
 biz_rules/who_don.py:project_who  75/27  WHO disease-outbreak page reader/projection, one branch per page section
 biz_rules/who_don.py:read_who  120/32  WHO disease-outbreak page reader/projection, one branch per page section
-biz_rules/who_facts.py:extract_counts  127/67  free-text count extraction with one rule per phrase pattern; table-driven rewrite
 collection/legacy_migration.py:plan  74/28  legacy migration planner, retires with the legacy source (audit 1.2)
 collection/pubmed_fulltext.py:_unpaywall  53/21  full-text access resolver with one branch per publisher/licence case
 collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with one branch per publisher/licence case

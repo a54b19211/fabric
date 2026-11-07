@@ -181,6 +181,125 @@ def _kind(text, match, period, position):
     return "unspecified"
 
 
+def _framing_reason(clause, before):
+    """Compound numbers and clauses with several reporting frames or scopes cannot be bound without a human."""
+    clause_counts = list(COUNT.finditer(clause))
+    if re.search(r"\b(?:hundred|thousand|million|billion)\b", clause, re.I) or re.search(
+        r"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s*$", before, re.I,
+    ):
+        return "unsupported_compound_number"
+    if ((len(clause_counts) > 1 and len(REPORT.findall(clause)) > 1)
+            or len(RANGE.findall(clause)) > 1 or len(AS_OF.findall(clause)) > 1
+            or len(DURATION.findall(clause)) > 1
+            or any(COUNT.search(disease) for other in clause_counts
+                   if (disease := _disease(clause, other)) is not None)):
+        return "multiple_reporting_frames_need_manual_binding"
+    included = re.search(r"\bincluding\b", clause, re.I)
+    mixed_new = re.search(r"\bcumulative\b", clause, re.I) and any(
+        re.search(r"\b(?:new|additional)\b", other["qualifiers"], re.I)
+        for other in COUNT.finditer(clause)
+    )
+    if mixed_new or (included and COUNT.search(clause[:included.start()]) and (
+        DURATION.search(clause[included.end():]) or RANGE.search(clause[included.end():])
+    )):
+        return "multiple_reporting_scopes_need_manual_binding"
+    return None
+
+
+def _context_reason(clause, match, period, before, after):
+    """Negated, subgroup, rate/range/approximate and vaccination wording, or no reporting statement at all."""
+    if re.search(r"\b(?:excludes?|excluded|not|never)\b|\bno longer\b", clause, re.I):
+        return "excluded_or_negated_reporting_context"
+    if re.match(r"\s+(?:(?:had|have|were|are)\s+(?:underlying|comorbidities|symptomatic)|reported\s+(?:direct|no known|contact))\b", after, re.I):
+        return "clinical_or_exposure_subgroup_not_aggregate_count"
+    if re.match(r"\s*(?:per\b|/|for every\b)", after, re.I) or re.search(
+        r"(?:\d\s*[–-]|at least|at most|more than|fewer than|less than|up to|approximately|around|about|roughly|nearly|estimated(?: at)?|\b(?:" + NUMBER + r")\s+(?:to|through|and))\s*$", before, re.I,
+    ):
+        return "rate_range_or_approximate_count_not_supported"
+    if re.search(r"\b(?:vaccinated|vaccination|doses?|received\s+(?:the\s+)?(?:vaccine|OCV))\b", after, re.I):
+        return "vaccination_or_treatment_subset_not_aggregate_count"
+    negative = match["number"].lower() in {"no", "zero"} or _number(match["number"]) == 0
+    if negative and not period["explicit_interval"]:
+        return "negative_count_without_explicit_interval"
+    if not REPORT.search(clause):
+        return "no_explicit_aggregate_reporting_statement"
+    return None
+
+
+def _rejection_reason(clause, match, period, before, after):
+    """Why a count in `clause` is not a supported explicit aggregate statement; None when it is. The first rule wins."""
+    return _framing_reason(clause, before) or _context_reason(clause, match, period, before, after)
+
+
+def _bound_disease(clause, local, metric):
+    disease = _disease(clause, COUNT.match(clause, local))
+    if disease is None and metric == "death_count":
+        # An explicitly included death may share one named case population in this clause.
+        named = {_disease(clause, other) for other in COUNT.finditer(clause)
+                 if other["unit"].lower().startswith("case")}
+        named.discard(None)
+        if len(named) == 1 and re.search(r"\bincluding\b", clause, re.I):
+            disease = named.pop()
+    return disease
+
+
+def _count_row(clause, local, match, period, after, evidence, offset, start, native_notice_id):
+    """The statement row of one supported count, with what the clause leaves unbound listed as uncertainties."""
+    included = re.search(r"\bincluding\b", clause, re.I)
+    metric = "death_count" if match["unit"].lower().startswith("death") or re.match(r"\s+died\b", after, re.I) else "case_count"
+    disease = _bound_disease(clause, local, metric)
+    geography = _geography(clause, local)
+    qualifiers = match["qualifiers"].strip().lower().split()
+    status = next((word for word in ["laboratory-confirmed", "confirmed", "suspected", "probable"] if word in qualifiers), "not_specified")
+    if status == "laboratory-confirmed":
+        status = "confirmed"
+    unknown = []
+    if period["kind"] == "unknown":
+        unknown.append("observation_period_unknown")
+    elif not (period["as_of"] or (period["start"] and period["end"])):
+        unknown.append("calendar_bounds_incomplete_no_publication_date_imputation")
+    if geography is None:
+        unknown.append("geography_not_explicitly_bound")
+    if disease is None:
+        unknown.append("disease_not_explicitly_bound")
+    return {"metric": metric, "value": _number(match["number"]),
+            "unit": "cases" if metric == "case_count" else "deaths",
+            "case_status": status if metric == "case_count" else None,
+            "qualifiers": qualifiers, "count_kind": _kind(clause, match, period, local),
+            "count_role": "included_subgroup" if included and local > included.end() else "statement_count",
+            "time_scope": period, "geography": geography, "disease": disease,
+            "event_id": None, "native_notice_id": native_notice_id,
+            "assertion_status": "source_reported", "uncertainties": unknown,
+            "evidence": evidence,
+            "value_evidence": {**evidence, "start": offset + start + match.start("number"),
+                               "end": offset + start + match.end("number"), "quote": match["number"]},
+            "denominator": None, "rate": None, "method_version": METHOD}
+
+
+def _scan_sentence(sentence, evidence, offset, start, native_notice_id, statements, unparsed, max_statements):
+    """Append the supported counts of one sentence to `statements`; True when the statement cap was hit."""
+    truncated = False
+    emitted, reasons = 0, set()
+    for match in COUNT.finditer(sentence):
+        clause, local = _clause(sentence, match.start())
+        period = _time(clause)
+        before = sentence[max(0, match.start() - 30):match.start()]
+        after = sentence[match.end():match.end() + 75]
+        reason = _rejection_reason(clause, match, period, before, after)
+        if reason:
+            reasons.add(reason)
+            continue
+        row = _count_row(clause, local, match, period, after, evidence, offset, start, native_notice_id)
+        if len(statements) >= max_statements:
+            truncated = True
+            break
+        statements.append(row)
+        emitted += 1
+    if len(unparsed) < 50 and (reasons or (not emitted and re.search(r"\bcases?\b|\bdeaths?\b|\bnegative\b|\bno evidence\b", sentence, re.I))):
+        unparsed.append({"evidence": evidence, "reasons": sorted(reasons or {"no_supported_explicit_count_statement"})})
+    return truncated
+
+
 def extract_counts(sections, *, native_notice_id, clean_text, max_statements=100):
     """sections maps native field names to (rendered text, offset in clean_text).
 
@@ -204,99 +323,8 @@ def extract_counts(sections, *, native_notice_id, clean_text, max_statements=100
             evidence = {"json_pointer": "/" + field, "basis": "clean_text",
                         "start": offset + start, "end": offset + end, "quote": sentence}
             assert clean_text[evidence["start"]:evidence["end"]] == sentence
-            matches = list(COUNT.finditer(sentence))
-            emitted, reasons = 0, set()
-            for match in matches:
-                clause, local = _clause(sentence, match.start())
-                period = _time(clause)
-                before = sentence[max(0, match.start() - 30):match.start()]
-                after = sentence[match.end():match.end() + 75]
-                clause_counts = list(COUNT.finditer(clause))
-                if re.search(r"\b(?:hundred|thousand|million|billion)\b", clause, re.I) or re.search(
-                    r"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s*$", before, re.I,
-                ):
-                    reasons.add("unsupported_compound_number")
-                    continue
-                if ((len(clause_counts) > 1 and len(REPORT.findall(clause)) > 1)
-                        or len(RANGE.findall(clause)) > 1 or len(AS_OF.findall(clause)) > 1
-                        or len(DURATION.findall(clause)) > 1
-                        or any(COUNT.search(disease) for other in clause_counts
-                               if (disease := _disease(clause, other)) is not None)):
-                    reasons.add("multiple_reporting_frames_need_manual_binding")
-                    continue
-                included = re.search(r"\bincluding\b", clause, re.I)
-                mixed_new = re.search(r"\bcumulative\b", clause, re.I) and any(
-                    re.search(r"\b(?:new|additional)\b", other["qualifiers"], re.I)
-                    for other in COUNT.finditer(clause)
-                )
-                if mixed_new or (included and COUNT.search(clause[:included.start()]) and (
-                    DURATION.search(clause[included.end():]) or RANGE.search(clause[included.end():])
-                )):
-                    reasons.add("multiple_reporting_scopes_need_manual_binding")
-                    continue
-                if re.search(r"\b(?:excludes?|excluded|not|never)\b|\bno longer\b", clause, re.I):
-                    reasons.add("excluded_or_negated_reporting_context")
-                    continue
-                if re.match(r"\s+(?:(?:had|have|were|are)\s+(?:underlying|comorbidities|symptomatic)|reported\s+(?:direct|no known|contact))\b", after, re.I):
-                    reasons.add("clinical_or_exposure_subgroup_not_aggregate_count")
-                    continue
-                if re.match(r"\s*(?:per\b|/|for every\b)", after, re.I) or re.search(
-                    r"(?:\d\s*[–-]|at least|at most|more than|fewer than|less than|up to|approximately|around|about|roughly|nearly|estimated(?: at)?|\b(?:" + NUMBER + r")\s+(?:to|through|and))\s*$", before, re.I,
-                ):
-                    reasons.add("rate_range_or_approximate_count_not_supported")
-                    continue
-                if re.search(r"\b(?:vaccinated|vaccination|doses?|received\s+(?:the\s+)?(?:vaccine|OCV))\b", after, re.I):
-                    reasons.add("vaccination_or_treatment_subset_not_aggregate_count")
-                    continue
-                negative = match["number"].lower() in {"no", "zero"} or _number(match["number"]) == 0
-                if negative and not period["explicit_interval"]:
-                    reasons.add("negative_count_without_explicit_interval")
-                    continue
-                if not REPORT.search(clause):
-                    reasons.add("no_explicit_aggregate_reporting_statement")
-                    continue
-                metric = "death_count" if match["unit"].lower().startswith("death") or re.match(r"\s+died\b", after, re.I) else "case_count"
-                disease = _disease(clause, COUNT.match(clause, local))
-                if disease is None and metric == "death_count":
-                    # An explicitly included death may share one named case population in this clause.
-                    named = {_disease(clause, other) for other in COUNT.finditer(clause)
-                             if other["unit"].lower().startswith("case")}
-                    named.discard(None)
-                    if len(named) == 1 and re.search(r"\bincluding\b", clause, re.I):
-                        disease = named.pop()
-                geography = _geography(clause, local)
-                qualifiers = match["qualifiers"].strip().lower().split()
-                status = next((word for word in ["laboratory-confirmed", "confirmed", "suspected", "probable"] if word in qualifiers), "not_specified")
-                if status == "laboratory-confirmed":
-                    status = "confirmed"
-                unknown = []
-                if period["kind"] == "unknown":
-                    unknown.append("observation_period_unknown")
-                elif not (period["as_of"] or (period["start"] and period["end"])):
-                    unknown.append("calendar_bounds_incomplete_no_publication_date_imputation")
-                if geography is None:
-                    unknown.append("geography_not_explicitly_bound")
-                if disease is None:
-                    unknown.append("disease_not_explicitly_bound")
-                row = {"metric": metric, "value": _number(match["number"]),
-                       "unit": "cases" if metric == "case_count" else "deaths",
-                       "case_status": status if metric == "case_count" else None,
-                       "qualifiers": qualifiers, "count_kind": _kind(clause, match, period, local),
-                       "count_role": "included_subgroup" if included and local > included.end() else "statement_count",
-                       "time_scope": period, "geography": geography, "disease": disease,
-                       "event_id": None, "native_notice_id": native_notice_id,
-                       "assertion_status": "source_reported", "uncertainties": unknown,
-                       "evidence": evidence,
-                       "value_evidence": {**evidence, "start": offset + start + match.start("number"),
-                                          "end": offset + start + match.end("number"), "quote": match["number"]},
-                       "denominator": None, "rate": None, "method_version": METHOD}
-                if len(statements) >= max_statements:
-                    truncated = True
-                    break
-                statements.append(row)
-                emitted += 1
-            if len(unparsed) < 50 and (reasons or (not emitted and re.search(r"\bcases?\b|\bdeaths?\b|\bnegative\b|\bno evidence\b", sentence, re.I))):
-                unparsed.append({"evidence": evidence, "reasons": sorted(reasons or {"no_supported_explicit_count_statement"})})
+            truncated = _scan_sentence(sentence, evidence, offset, start, native_notice_id,
+                                       statements, unparsed, max_statements)
             if truncated:
                 break
         if truncated:
