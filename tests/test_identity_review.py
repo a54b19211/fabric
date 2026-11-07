@@ -95,7 +95,8 @@ def test_sensitive_api_rejects_client_claimed_human_without_review_token(path, p
     from fastapi.testclient import TestClient
     from api.routers.review import router
     monkeypatch.delenv('DATAFABRIC_REVIEW_TOKENS', raising=False)
-    app = FastAPI(); app.include_router(router)
+    app = FastAPI()
+    app.include_router(router)
     with TestClient(app) as client:
         response = client.post(path, json=payload)
     assert response.status_code == 403

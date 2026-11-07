@@ -551,12 +551,14 @@ def test_dictionary_qualification_withdrawal_dirties_referencing_graph_only(data
     assert original["state"] == "published"
     with Session(source) as session, session.begin():
         identity = EntityDict(entity_type="Company", is_verified=True)
-        session.add(identity); session.flush()
+        session.add(identity)
+        session.flush()
         identity_id = identity.id
         entity = ExtractedEntity(source_doc_uuid=value["uuid"], source_site="clinicaltrials",
             entity_type="Company", entity_name="SYNTHETIC company", source_text="SYNTHETIC company",
             review_status="approved", dict_id=identity.id)
-        session.add(entity); session.flush()
+        session.add(entity)
+        session.flush()
         entity_id = entity.id
     assert publication.publish_once()["state"] == "published"
     first = history.list_changes("reviewed_graph", True)["items"]
@@ -930,11 +932,13 @@ def test_secondary_source_evidence_reaches_a_real_published_graph(databases):
         adopted[value["uuid"]] = record
     with Session(source) as session, session.begin():
         target_dict = EntityDict(entity_type="Company", is_verified=True)
-        session.add(target_dict); session.flush()
+        session.add(target_dict)
+        session.flush()
         entity = ExtractedEntity(source_doc_uuid=values[0]["uuid"], source_site="clinicaltrials",
             entity_type="Company", entity_name="SYNTHETIC company", source_text="SYNTHETIC company",
             review_status="approved", dict_id=target_dict.id)
-        session.add(entity); session.flush()
+        session.add(entity)
+        session.flush()
         entity_id = entity.id
         for value in values:
             record = adopted[value["uuid"]]

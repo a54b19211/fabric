@@ -55,7 +55,8 @@ def engine():
         legacy = conn.execute(text('SELECT is_verified,verified_by,verified_at FROM entity_dict WHERE id=:id'), {'id': legacy_id}).one()
         assert tuple(legacy) == (True, None, None)
     yield scoped
-    scoped.dispose(); admin.dispose()
+    scoped.dispose()
+    admin.dispose()
 
 
 @pytest.fixture
@@ -92,7 +93,8 @@ def session(engine, monkeypatch):
 def dictionary(session, name=None, **extra):
     row = EntityDict(entity_type='Company', canonical_data={'name': name or uuid4().hex},
                      external_ids=extra.pop('external_ids', {}), is_verified=False, **extra)
-    session.add(row); session.flush()
+    session.add(row)
+    session.flush()
     return row
 
 
@@ -100,7 +102,8 @@ def entity(session, target, document='fixture-doc', **extra):
     row = ExtractedEntity(source_doc_uuid=document, source_site='fixture-site', entity_type='Company',
                           entity_name=(target.canonical_data or {}).get('name', 'Company'),
                           dict_id=target.id, review_status='pending', **extra)
-    session.add(row); session.flush()
+    session.add(row)
+    session.flush()
     return row
 
 
@@ -194,7 +197,8 @@ def test_relation_blocks_unknown_identity_and_requires_checked_fixed_source(sess
     targets[0].is_verified = True  # legacy boolean alone cannot authorise a relation
     relation = EntityRelation(source_doc_uuid='fixture-doc', source_site='fixture-site',
         from_entity_id=endpoints[0].id, to_entity_id=endpoints[1].id, relation_type='SPONSORS', review_status='pending')
-    session.add(relation); session.flush()
+    session.add(relation)
+    session.flush()
     with pytest.raises(ValueError, match='Both relation endpoints'):
         repo.approve_relation(relation.id, '', evidence=[fixed_document], session=session, review_context=principal)
     assert relation.review_status == 'pending'
@@ -221,7 +225,8 @@ def test_dictionary_merge_restores_full_snapshots_not_just_ids(session, principa
     alias = EntityAlias(dict_id=absorbed.id, entity_type='Company', name=uuid4().hex, is_deleted=False)
     queue = EntityMergeQueue(source_entity_id=observed.id, target_dict_id=absorbed.id,
                              field_name='name', existing_value={'v': 1}, new_value={'v': 2}, resolution='pending')
-    session.add_all([alias, queue]); session.flush()
+    session.add_all([alias, queue])
+    session.flush()
     result = repo.merge_entities(keeper.id, [absorbed.id], {}, session=session, review_context=principal)
     assert absorbed.is_deleted and observed.dict_id == keeper.id and alias.dict_id == keeper.id
     assert observed.identity_confirmed_by is None and observed.identity_confirmed_at is None
@@ -280,7 +285,8 @@ def real_history_engine():
     with patch.object(migration, 'history_engine', lambda: scoped):
         migration.migrate_history()
     yield scoped
-    scoped.dispose(); admin.dispose()
+    scoped.dispose()
+    admin.dispose()
 
 
 @pytest.fixture
@@ -403,7 +409,6 @@ def test_confirmation_rejects_identity_changes_during_real_history_read(session,
 
 def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, principal, real_history, monkeypatch):
     import biz_rules.object_evidence as validator
-    from db.identity import use_session
     doc_uuid = 'committed-race-' + uuid4().hex
     evidence = freeze_document(doc_uuid, 'Synthetic frozen identity source before concurrent edit.')
     with Session(engine) as seed, seed.begin():
@@ -495,11 +500,13 @@ def test_existing_native_duplicate_ids_are_candidates_without_rewriting_legacy_r
     nct = 'NCT' + str(int(uuid4().hex[:8], 16) % 100000000).zfill(8)
     old = [EntityDict(entity_type='ClinicalTrial', external_ids={'trial_id': nct},
                       canonical_data={'name': nct}, is_verified=False) for _ in range(2)]
-    session.add_all(old); session.flush()
+    session.add_all(old)
+    session.flush()
     count = session.query(EntityDict).count()
     from db.models import Document
     doc_uuid = uuid4().hex
-    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=native_trial_original(nct))); session.flush()
+    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=native_trial_original(nct)))
+    session.flush()
     entity_id = repo.insert_extraction_result(doc_uuid, 'clinicaltrials', [native_trial_record(nct)], [], session=session)[0]
     assert session.query(EntityDict).count() == count
     observed = session.get(ExtractedEntity, entity_id)
@@ -536,7 +543,8 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
     with Session(engine) as check:
         relation_id = check.query(EntityRelation.id).filter_by(source_doc_uuid=doc_uuid).scalar()
     repo.approve_relation(relation_id, '', review_context=principal)
-    app = FastAPI(); app.include_router(review.router)
+    app = FastAPI()
+    app.include_router(review.router)
     with TestClient(app) as client:
         detail = client.get(f'/api/review/entities/{ids[0]}')
         assert detail.status_code == 200
@@ -564,7 +572,8 @@ def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_h
     doc_uuid = 'native-fixed-' + uuid4().hex
     reference = freeze_document(doc_uuid, raw, source_site='clinicaltrials')
     from db.models import Document
-    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw)); session.flush()
+    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw))
+    session.flush()
     result = extract_native_entities(raw, 'clinicaltrials', source_version_id=reference['version_id'])
     assert 'source_id' not in result['entities'][0] and 'raw_sha256' not in result['entities'][0]
     ids = repo.insert_extraction_result(doc_uuid, 'clinicaltrials', result['entities'], result['relations'], session=session)
@@ -592,7 +601,8 @@ def test_writer_rechecks_native_claim_against_stored_source(session, invalid):
                   if item['entity_type'] == 'ClinicalTrial')
     target = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': 'Existing trial'},
                         external_ids={'trial_id': record['entity_data']['trial_id']}, is_verified=False)
-    session.add(target); session.flush()
+    session.add(target)
+    session.flush()
     record['dict_id'] = target.id
     record['_disambig'] = {'status': 'auto_matched', 'auto_link': True, 'dict_id': target.id,
                           'match_step': 'step1_native_id', 'candidates': [{'dict_id': target.id, 'score': 1.0}]}
@@ -656,7 +666,8 @@ def test_current_review_evidence_cannot_borrow_appended_unreviewed_version(sessi
                                                 evidence=[proof], session=session, review_context=principal)
     relation = EntityRelation(source_doc_uuid=doc_uuid, source_site='pubmed', from_entity_id=endpoints[0].id,
                               to_entity_id=endpoints[1].id, relation_type='SPONSORS', review_status='pending')
-    session.add(relation); session.flush()
+    session.add(relation)
+    session.flush()
     repo.approve_relation(relation.id, '', evidence=[proof], session=session, review_context=principal)
     for kind, objects in [('entity', endpoints), ('relation', [relation])]:
         checked = get_current_review_evidence(kind, [row.id for row in objects], session)
@@ -684,7 +695,8 @@ def test_review_lists_include_recorded_second_source_without_copying_mentions(se
     unrelated = entity(session, dictionary(session), document='unrelated-' + uuid4().hex)
     relation = EntityRelation(source_doc_uuid=first, source_site='pubmed', from_entity_id=first_ids[0],
                               to_entity_id=first_ids[1], relation_type='SPONSORS', review_status='pending')
-    session.add(relation); session.flush()
+    session.add(relation)
+    session.flush()
     record_evidence(session, 'relation', relation, {'relation_type': relation.relation_type,
         'source_text': 'Recorded second source relation'}, second, 'clinicaltrials')
     @contextmanager
@@ -712,7 +724,8 @@ def test_relink_one_mention_preserves_shared_dictionary_and_can_withdraw(session
     sibling.identity_confirmed_at = datetime.now(timezone.utc)
     sibling.identity_confirmation_basis = 'Separate correct mention'
     alias = EntityAlias(dict_id=old.id, entity_type='Company', name='shared-alias-' + uuid4().hex)
-    session.add(alias); session.flush()
+    session.add(alias)
+    session.flush()
     old_canonical, target_canonical = dict(old.canonical_data), dict(target.canonical_data)
     if entrypoint == 'proposal':
         proposal_id = repo.create_identity_merge_proposal(source.id, target.id, session=session)
@@ -746,13 +759,15 @@ def test_canonical_changes_invalidate_confirmation_and_block_relation(session, p
                                                 evidence=[fixed_document], session=session, review_context=principal)
     relation = EntityRelation(source_doc_uuid='fixture-doc', source_site='fixture-site',
         from_entity_id=endpoints[0].id, to_entity_id=endpoints[1].id, relation_type='SPONSORS', review_status='pending')
-    session.add(relation); session.flush()
+    session.add(relation)
+    session.flush()
     repo.approve_relation(relation.id, '', evidence=[fixed_document], session=session, review_context=principal)
     target = targets[0]
     if entrypoint in ('single', 'batch'):
         queue = EntityMergeQueue(source_entity_id=endpoints[0].id, target_dict_id=target.id, field_name='country',
                                  existing_value={'_val': 'OLD'}, new_value={'_val': 'NEW'}, resolution='pending')
-        session.add(queue); session.flush()
+        session.add(queue)
+        session.flush()
         if entrypoint == 'single':
             repo.resolve_merge(queue.id, 'accept_new', 'claimed-human', session=session, review_context=principal)
         else:
@@ -856,7 +871,9 @@ def test_recorded_second_source_enqueues_existing_graph_publication(engine, chan
     with Session(scoped) as seed, seed.begin():
         seed.add_all([Document(uuid=doc, source_site='pubmed', raw_content='Synthetic source') for doc in (first, second)])
         target = dictionary(seed)
-        target.is_verified = True; target.verified_by = 'fixture-human'; target.verified_at = datetime.now(timezone.utc)
+        target.is_verified = True
+        target.verified_by = 'fixture-human'
+        target.verified_at = datetime.now(timezone.utc)
         target.verification_basis = 'Explicit synthetic initial confirmation'
         record = {'entity_type': 'Company', 'entity_name': target.canonical_data['name'], 'dict_id': target.id,
                   'source_text': 'Synthetic source', 'entity_data': {}}
@@ -872,7 +889,8 @@ def test_recorded_second_source_enqueues_existing_graph_publication(engine, chan
         if change == 'approved_hit':
             assert repo.insert_extraction_result(second, 'pubmed', [record], [], session=action)[0] == source_id
         elif change == 'pending_then_approve':
-            action.get(ExtractedEntity, source_id).review_status = 'approved'; action.flush()
+            action.get(ExtractedEntity, source_id).review_status = 'approved'
+            action.flush()
         else:
             current = action.get(EntityDict, target_id)
             set_dictionary_identity_data(action, current, canonical_data={**current.canonical_data, 'country': 'NEW'})
@@ -893,7 +911,8 @@ def test_global_merge_rollback_blocks_new_native_observation_dependencies(sessio
     keeper = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': 'Unidentified older trial'}, external_ids={}, is_verified=False)
     absorbed = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': nct, 'trial_id': nct},
                           external_ids={'trial_id': nct}, is_verified=False)
-    session.add_all([keeper, absorbed]); session.flush()
+    session.add_all([keeper, absorbed])
+    session.flush()
     if reuse_existing:
         session.add(ExtractedEntity(source_doc_uuid='older-' + uuid4().hex, source_site='clinicaltrials',
             entity_type='ClinicalTrial', entity_name='Unidentified older trial', dict_id=keeper.id,
@@ -903,7 +922,8 @@ def test_global_merge_rollback_blocks_new_native_observation_dependencies(sessio
     before = session.query(ExtractedEntity).count()
     raw = native_trial_original(nct)
     doc_uuid = 'post-merge-native-' + uuid4().hex
-    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw)); session.flush()
+    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw))
+    session.flush()
     projected = extract_native_entities(raw, 'clinicaltrials')
     trial = next(item for item in projected['entities'] if item['entity_type'] == 'ClinicalTrial')
     observed_id = repo.insert_extraction_result(doc_uuid, 'clinicaltrials', [trial], [], session=session)[0]
@@ -920,15 +940,19 @@ def test_single_link_rollback_blocks_added_native_evidence_without_row_change(se
     nct = 'NCT' + str(int(uuid4().hex[:8], 16) % 100000000).zfill(8)
     old = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': 'Old unidentified identity'}, external_ids={}, is_verified=False)
     target = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': nct, 'trial_id': nct}, external_ids={'trial_id': nct}, is_verified=False)
-    session.add_all([old, target]); session.flush()
+    session.add_all([old, target])
+    session.flush()
     source = ExtractedEntity(source_doc_uuid='older-' + uuid4().hex, source_site='clinicaltrials', entity_type='ClinicalTrial',
                              entity_name='Old unidentified identity', dict_id=old.id, entity_data={}, review_status='pending')
-    session.add(source); session.flush()
+    session.add(source)
+    session.flush()
     proposal_id = repo.create_identity_merge_proposal(source.id, target.id, session=session)
     repo.resolve_identity_merge_proposal(proposal_id, 'approved', '', session=session, review_context=principal)
     log_id = session.get(EntityIdentityMergeProposal, proposal_id).merge_log_id
-    raw = native_trial_original(nct); doc_uuid = 'post-link-native-' + uuid4().hex
-    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw)); session.flush()
+    raw = native_trial_original(nct)
+    doc_uuid = 'post-link-native-' + uuid4().hex
+    session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw))
+    session.flush()
     trial = next(item for item in extract_native_entities(raw, 'clinicaltrials')['entities'] if item['entity_type'] == 'ClinicalTrial')
     assert repo.insert_extraction_result(doc_uuid, 'clinicaltrials', [trial], [], session=session)[0] == source.id
     with pytest.raises(ValueError, match='dependencies changed'):
@@ -948,13 +972,15 @@ def test_pending_merges_auto_resolve_stale_rows_and_group_the_open_conflicts(eng
         live = EntityDict(entity_type='Company', is_verified=False, canonical_data={
             'name': 'D' + tag, 'empty_cur': '', 'same': 'v', 'keep': 'k', 'conf': 'old'})
         gone = EntityDict(entity_type='Company', is_verified=False, canonical_data={'name': 'G' + tag}, is_deleted=True)
-        work.add_all([live, gone]); work.flush()
+        work.add_all([live, gone])
+        work.flush()
         live_id, gone_id = live.id, gone.id
 
         def source(doc, data=None, **extra):
             row = ExtractedEntity(source_doc_uuid=doc, source_site='site-' + doc, entity_type='Company', entity_name='n',
                                   dict_id=live_id, review_status='pending', entity_data=data or {}, **extra)
-            work.add(row); work.flush()
+            work.add(row)
+            work.flush()
             return row
 
         main = source('dS' + tag, {'conf': 'new'})
@@ -967,7 +993,8 @@ def test_pending_merges_auto_resolve_stale_rows_and_group_the_open_conflicts(eng
             row = EntityMergeQueue(source_entity_id=src.id, target_dict_id=target, field_name=field,
                                    existing_value=existing, new_value=new, source_site='q-site',
                                    existing_source_doc_uuid='ex-doc', resolution='pending')
-            work.add(row); work.flush()
+            work.add(row)
+            work.flush()
             return row.id
 
         ids = {

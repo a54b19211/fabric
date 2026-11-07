@@ -1,6 +1,5 @@
 """A fresh install through the common runner has the structure the former executors (as of 7337e54) produced."""
 
-import pytest
 from integration_migration_baselines import diff, fingerprint, old_module, pg  # noqa: F401 - pg is a fixture
 from sqlalchemy import text
 

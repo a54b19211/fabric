@@ -1,5 +1,5 @@
 """db.repository 字典更新级联重算（状态陈旧修复）的单元测试。"""
-from db.models import EntityDict, EntityAlias, ExtractedEntity
+from db.models import EntityDict, ExtractedEntity
 from db.repository import (
     _is_stale_step_none,
     _refresh_step_metadata,

@@ -118,7 +118,6 @@ def test_only_the_same_full_request_and_checker_is_reused(pg, env, monkeypatch):
     version = document()
     first = FakeBioCheck()
     drain(first)
-    sent = len(first.requests)
 
     def requeue():
         with pg.begin() as conn:

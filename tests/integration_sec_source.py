@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import text
 
 from integration_history import pg, pg_engine  # noqa: F401 -- shared isolated PG fixtures
 from api.routers.history import router
@@ -67,7 +66,8 @@ def test_sec_real_fetch_adoption_dedup_restore_and_fixed_row_locators(pg, monkey
     changes = history.list_changes("sec_companyfacts", False)
     assert changes["current_version_ids"][NATIVE] == restored.version_ids[0]
     assert len(changes["items"]) == 3
-    app = FastAPI();app.include_router(router)
+    app = FastAPI()
+    app.include_router(router)
     with TestClient(app) as client:
         response = client.get("/api/history/versions/" + a.version_ids[0], params={
             "source_id": "sec_companyfacts", "source_record_id": NATIVE,

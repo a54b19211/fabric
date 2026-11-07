@@ -150,7 +150,6 @@ def test_enforcement_extra_keeps_approval_number_after_validation():
 def test_label_extra_model_registered():
     """fda_api_drug_label 之前不在 EXTRA_MODEL_MAP，extra 完全不受校验。"""
     assert "fda_api_drug_label" in EXTRA_MODEL_MAP
-    model = EXTRA_MODEL_MAP["fda_api_drug_label"]
     out = validate_extra(
         "fda_api_drug_label",
         {"approval_number": "ANDA217782", "product_ndc": ["85742-007"], "spl_set_id": "x"},

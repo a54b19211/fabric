@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from biz_rules.history_models import HistoryError, canonical, sha256
+from biz_rules.history_models import HistoryError, sha256
 from biz_rules.reviewed_graph import (
     GraphBundle,
     GraphEdge,

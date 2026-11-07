@@ -78,7 +78,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
                    "sources": {"external_archive": [{"source_record_id": native,
                                "record_kind": "document", "raw_content": raw}]}}
         path = Path(config["input_file"])
-        path.write_text(json.dumps(package)); path.chmod(0o600)
+        path.write_text(json.dumps(package))
+        path.chmod(0o600)
         return raw
 
     def start(role, arguments, env=None):
@@ -87,7 +88,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
         process = subprocess.Popen([sys.executable, *arguments], cwd=repo, env=env or environment,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
-        logs.append(log); processes.append(process)
+        logs.append(log)
+        processes.append(process)
         receipt["processes"].append({"role": role, "pid": process.pid, "started_by_this_test": True})
         return process
 
@@ -97,7 +99,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
             try:
                 process.wait(timeout=8)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=3)
         next(item for item in receipt["processes"] if item["pid"] == process.pid).update(
             stopped=True, exit_code=process.returncode)
 
@@ -171,7 +174,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
         active = client.post("/api/history/runs/" + first["id"] + "/retry", headers=admin, json={"expected_attempt": 1})
         assert active.status_code == 409
         visible("SYNTHETIC changed file must not change the accepted job")
-        stop(api_process); api_process = api_start()
+        stop(api_process)
+        api_process = api_start()
         assert fetch("initial")["id"] == first["id"]
         worker = worker_start()
         first = complete(first)
@@ -182,7 +186,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
 
         corrected_text = visible("SYNTHETIC subsequently visible correction")
         second = fetch("correction")
-        stop(api_process); api_process = api_start()
+        stop(api_process)
+        api_process = api_start()
         worker = worker_start()
         second = complete(second)
         assert second["version_ids"] != first["version_ids"] and raw(second) == corrected_text
@@ -192,7 +197,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
         recovery_text = visible("SYNTHETIC frozen input for explicit failed-worker recovery")
         recover = fetch("recovery")
         wrong_environment = environment.copy()
-        wrong_config = dict(config); wrong_config["instance_id"] = "wrong-demo-instance"
+        wrong_config = dict(config)
+        wrong_config["instance_id"] = "wrong-demo-instance"
         wrong_environment["DATAFABRIC_HISTORY_DEMO_FETCH_CONFIG"] = json.dumps(wrong_config)
         worker = worker_start(wrong_environment)
         job_id = "history-" + recover["id"] + "-1"
@@ -220,7 +226,8 @@ def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):
             stop(process)
         for log in logs:
             log.close()
-        client.close(); redis.close()
+        client.close()
+        redis.close()
         receipt["completed_at"] = datetime.now(timezone.utc).isoformat()
         with output.open("x") as saved:
             os.chmod(output, 0o600)

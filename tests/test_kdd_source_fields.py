@@ -80,7 +80,8 @@ def test_ct_persistent_continuation_keeps_native_token_scope_and_zero_failures(m
         if len(calls) == 1:
             return httpx.Response(200, json={"studies": [trial_raw()], "totalCount": 2, "nextPageToken": "opaque-next"})
         assert request.url.params["pageToken"] == "opaque-next"
-        data = trial_raw();data["protocolSection"]["identificationModule"]["nctId"] = "NCT01234568"
+        data = trial_raw()
+        data["protocolSection"]["identificationModule"]["nctId"] = "NCT01234568"
         return httpx.Response(200, json={"studies": [data], "totalCount": 2})
     monkeypatch.setattr(sources.httpx, "Client", lambda **kwargs: real(transport=httpx.MockTransport(respond), **kwargs))
     first = FetchRequest(source_id="clinicaltrials", query="SYNTHETIC fixed date window", max_records=1, max_pages=1)

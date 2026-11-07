@@ -1,7 +1,6 @@
 """The function-size gate (ops/code_metrics.py): a new violator, a stale entry and a frozen function that grew
 all fail; the checked-in exceptions file matches the sources today."""
 import importlib.util
-import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

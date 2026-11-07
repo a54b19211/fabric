@@ -1,8 +1,6 @@
 """Demo fetch must adopt frozen synthetic originals through existing History/RQ."""
 
 import json
-from contextlib import contextmanager
-from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routers import history as api
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError, RunView, canonical, sha256
+from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError, canonical, sha256
 from db import history as store
 from flows import history_fetch as flow
 

@@ -1,7 +1,9 @@
-import copy,json
+import copy
+import json
 from sqlalchemy import text
 from db import index_publication as index
-from integration_index_scheduling import (pg,pg_engine,KB,base_job,clone,lease_all,UNSENT,SENT,turn,handled)
+from integration_index_scheduling import (KB,base_job,clone,lease_all,UNSENT,SENT)
+from integration_index_scheduling import pg,pg_engine  # noqa: F401  (fixtures)
 from integration_index_publication import ready_job,rows
 
 def test_unknown_retry_cannot_reuse_a_previous_attempt_rejection_to_release_slot(pg,monkeypatch):
