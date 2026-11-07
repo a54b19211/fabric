@@ -98,39 +98,21 @@ def _source(conn, source_id, *, lock=False, _seen=None):
     return row
 
 
-def list_sources():
+def sources_receipt():
+    """The source list as published (db.source_listing): sources, retired_sources, unavailable_sources with their
+    capabilities, the two digests, and readable_source_ids (every source readable now, retired ones included)."""
+    from biz_rules.retired_sources import RETIRED
+    from db import source_listing
+
     with history_engine().begin() as conn:
-        rows = list(
-            conn.execute(
-                text("SELECT * FROM history_sources ORDER BY source_id")
-            ).mappings()
-        )
-        by_id, allowed = {row["source_id"]: row for row in rows}, allowed_sources()
+        rows = list(conn.execute(text("SELECT * FROM history_sources ORDER BY source_id")).mappings())
+        lifecycle = source_listing.lifecycle(conn, sorted(RETIRED))
+    return source_listing.listing(rows, lifecycle, allowed_sources(), _catalog_dependencies)
 
-        def enabled(source_id, seen=()):
-            row = by_id.get(source_id)
-            if (
-                row is None
-                or source_id in seen
-                or source_id not in allowed
-                or row["read_enabled"] is not True
-            ):
-                return False
-            return all(
-                enabled(value, (*seen, source_id))
-                for value in _catalog_dependencies(row)
-            )
 
-        return [
-            {
-                "source_id": row["source_id"],
-                **row["catalog"],
-                "published_seq": row["published_seq"],
-                "read_enabled": True,
-            }
-            for row in rows
-            if enabled(row["source_id"])
-        ]
+def list_sources():
+    """The readable sources that may be offered (retired ones are in sources_receipt()['retired_sources'])."""
+    return sources_receipt()["sources"]
 
 
 def _derived_mode(source_id, mode):

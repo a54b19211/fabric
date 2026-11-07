@@ -152,5 +152,5 @@ def definition_sha256() -> str:
 
 
 def receipt_sha256(receipt: dict) -> str:
-    """The digest of a receipt without its own digest field."""
-    return digest({key: value for key, value in receipt.items() if key != "receipt_sha256"})
+    """The digest of a receipt without its own digest field and without the in-process readable_source_ids list."""
+    return digest({key: value for key, value in receipt.items() if key not in ("receipt_sha256", "readable_source_ids")})

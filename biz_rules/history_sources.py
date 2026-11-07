@@ -700,9 +700,13 @@ def _read_gdelt(request):
     return read_gdelt(request)
 
 
-def require_public_fetch_enabled():
+def public_fetch_enabled() -> bool:
     """Keep the legacy default; every configured value must explicitly mean true."""
-    if os.environ.get("DATAFABRIC_HISTORY_FETCH_ENABLED", "true").strip().lower() != "true":
+    return os.environ.get("DATAFABRIC_HISTORY_FETCH_ENABLED", "true").strip().lower() == "true"
+
+
+def require_public_fetch_enabled():
+    if not public_fetch_enabled():
         raise HistoryError("public_fetch_disabled", "当前环境已关闭公开来源采集；归档与固定版本读取不受影响", 403)
 
 

@@ -1560,17 +1560,21 @@ def _publish_fixture_graph(observation, key):
 
 
 
-def test_migration_refreshes_site_source_descriptions_but_not_access(pg):
+def test_migration_leaves_a_seeded_row_alone_and_the_list_shows_the_declared_description_with_the_rows_access(
+        pg, monkeypatch):
     from biz_rules.history_sources import SOURCE_CATALOG
 
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["nmpa"]')
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET catalog=catalog || CAST(:m AS jsonb) WHERE source_id='nmpa'"),
                      {"m": json.dumps({"name": "旧说明", "acquisition_channel": "legacy_database", "access": "kept"})})
     migration.migrate_history()
     with pg.begin() as conn:
         catalog = conn.execute(text("SELECT catalog FROM history_sources WHERE source_id='nmpa'")).scalar_one()
-    assert catalog["name"] == SOURCE_CATALOG["nmpa"]["name"] and catalog["acquisition_channel"] == "site_plugin"
-    assert catalog["access"] == "kept"  # 许可字段不被迁移改动
+    assert catalog["name"] == "旧说明" and catalog["access"] == "kept"  # the row is the snapshot taken when it was seeded
+    listed = {row["source_id"]: row for row in store.list_sources()}["nmpa"]
+    assert listed["name"] == SOURCE_CATALOG["nmpa"]["name"] and listed["acquisition_channel"] == "site_plugin"
+    assert listed["access"] == "kept"  # the administrator's decision is the row's
 
 
 def test_document_full_text_correction_survives_real_storage_and_old_version_read(pg):

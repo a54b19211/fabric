@@ -94,11 +94,11 @@ def check_access(doc) -> None:
 
 
 def readable_sources() -> set[str]:
-    """当前可读的 history 来源（列表过滤用）；history 库不可用时返回空集——宁可不列，不列出撤权的。"""
+    """当前可读的 history 来源（列表过滤用；退役来源的旧版本照读，所以包括它们）；history 库不可用时返回空集——宁可不列，不列出撤权的。"""
     from db import history
 
     try:
-        return {row["source_id"] for row in history.list_sources()}
+        return set(history.sources_receipt()["readable_source_ids"])
     except Exception:  # noqa: BLE001
         return set()
 
