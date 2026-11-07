@@ -161,49 +161,18 @@ def _evidence_text(conn, row, locator):
     return derived["text"] or ""
 
 
-def _validate_derived(conn, run, item, now, proof):
-    from biz_rules.history_sources import parse_json
-    from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, StoredDocument
+def _ref_key(ref):
+    return (
+        ref.source_id,
+        ref.source_record_id,
+        ref.version_id,
+        ref.raw_sha256,
+        ref.origin_doc_uuid,
+    )
 
-    if run["source_id"] == "external_archive":
-        data = parse_json(item.raw_content)
-        if data.get("schema_version") == "datafabric.observation.v1":
-            return _validate_observation(conn, run, data, now)
-    if run["source_id"] not in DERIVED_SOURCES:
-        return set()
-    if proof.kind != "unverified" or proof.available_at is not None:
-        raise HistoryError(
-            "graph_history_unsupported", "当前图和旧文档桥不能借导入证明回填过去"
-        )
-    data = parse_json(item.raw_content)
-    if run["source_id"] == "legacy_documents":
-        if data.get("schema_version") == "datafabric.collected.document.v1":
-            from biz_rules.collected_document import CollectedDocument
 
-            original = CollectedDocument.model_validate(data)
-        else:
-            original = StoredDocument.model_validate(data)
-        _source(conn, original.source_site)
-        return {original.source_site}
-
-    bundle = GraphBundle.model_validate(data)
-    if bundle.is_demo != run["is_demo"]:
-        raise HistoryError("graph_demo_mismatch", "图包和采用请求的demo标记不一致")
-    if run["source_id"] == "primekg_graph":
-        if bundle.graph_kind != "background":
-            raise HistoryError("graph_kind_mismatch", "PrimeKG只能发布当前背景")
-        return set()
-    if bundle.graph_kind != "reviewed":
-        raise HistoryError("graph_kind_mismatch", "审核图来源不接收背景图")
-
-    if bundle.origin == "legacy_reviewed_export" and (
-        not bundle.selected_document_uuids
-        or set(bundle.selected_document_uuids)
-        != {ref.origin_doc_uuid for ref in bundle.document_refs}
-    ):
-        raise HistoryError(
-            "legacy_graph_document_scope", "旧图导出的所选UUID须全部绑定精确冻结文档"
-        )
+def _graph_documents(conn, run, bundle, now):
+    """The frozen originals a graph bundle cites (by reference key) and the sources they depend on."""
     documents, dependencies = {}, set()
     for ref in bundle.document_refs:
         _source(conn, ref.source_id)
@@ -236,38 +205,27 @@ def _validate_derived(conn, run, item, now, proof):
             _source(conn, original_source)
             dependencies.add(original_source)
         dependencies.add(ref.source_id)
-        key = (
-            ref.source_id,
-            ref.source_record_id,
-            ref.version_id,
-            ref.raw_sha256,
-            ref.origin_doc_uuid,
-        )
+        key = _ref_key(ref)
         if key in documents:
             raise HistoryError("duplicate_graph_document", "图包文档清单重复")
         documents[key] = row
-    if dependencies != set(bundle.dependency_source_ids):
-        raise HistoryError(
-            "graph_source_dependencies_mismatch",
-            "图包依赖必须等于服务器核对的原件及原站许可",
-        )
+    return documents, dependencies
+
+
+def _check_graph_times(bundle, now):
     for node in bundle.nodes:
         if node.review.reviewed_at is not None and node.review.reviewed_at > now:
             raise HistoryError("future_graph_review", "源审核时间晚于本次服务器采用")
     for edge in bundle.edges:
         if edge.review.reviewed_at is not None and edge.review.reviewed_at > now:
             raise HistoryError("future_graph_review", "源审核时间晚于本次服务器采用")
+
+
+def _check_graph_quotes(conn, bundle, documents):
     for ref in [value for node in bundle.nodes for value in node.evidence] + [
         value for edge in bundle.edges for value in edge.evidence
     ]:
-        key = (
-            ref.source_id,
-            ref.source_record_id,
-            ref.version_id,
-            ref.raw_sha256,
-            ref.origin_doc_uuid,
-        )
-        original = documents.get(key)
+        original = documents.get(_ref_key(ref))
         if original is None:
             raise HistoryError(
                 "graph_evidence_outside_manifest", "图证据不属于本包声明的文档版本"
@@ -278,6 +236,34 @@ def _validate_derived(conn, run, item, now, proof):
             raise HistoryError(
                 "graph_quote_mismatch", "图证据与冻结原文字符范围不一致，不能标记已绑定"
             )
+
+
+def _validate_graph_bundle(conn, run, bundle, now):
+    if bundle.is_demo != run["is_demo"]:
+        raise HistoryError("graph_demo_mismatch", "图包和采用请求的demo标记不一致")
+    if run["source_id"] == "primekg_graph":
+        if bundle.graph_kind != "background":
+            raise HistoryError("graph_kind_mismatch", "PrimeKG只能发布当前背景")
+        return set()
+    if bundle.graph_kind != "reviewed":
+        raise HistoryError("graph_kind_mismatch", "审核图来源不接收背景图")
+
+    if bundle.origin == "legacy_reviewed_export" and (
+        not bundle.selected_document_uuids
+        or set(bundle.selected_document_uuids)
+        != {ref.origin_doc_uuid for ref in bundle.document_refs}
+    ):
+        raise HistoryError(
+            "legacy_graph_document_scope", "旧图导出的所选UUID须全部绑定精确冻结文档"
+        )
+    documents, dependencies = _graph_documents(conn, run, bundle, now)
+    if dependencies != set(bundle.dependency_source_ids):
+        raise HistoryError(
+            "graph_source_dependencies_mismatch",
+            "图包依赖必须等于服务器核对的原件及原站许可",
+        )
+    _check_graph_times(bundle, now)
+    _check_graph_quotes(conn, bundle, documents)
     if any(
         item.merged_at is not None and item.merged_at > now for item in bundle.redirects
     ):
@@ -286,6 +272,34 @@ def _validate_derived(conn, run, item, now, proof):
 
     validate_field_bindings(bundle, documents)
     return dependencies
+
+
+def _validate_derived(conn, run, item, now, proof):
+    from biz_rules.history_sources import parse_json
+    from biz_rules.reviewed_graph import DERIVED_SOURCES, GraphBundle, StoredDocument
+
+    if run["source_id"] == "external_archive":
+        data = parse_json(item.raw_content)
+        if data.get("schema_version") == "datafabric.observation.v1":
+            return _validate_observation(conn, run, data, now)
+    if run["source_id"] not in DERIVED_SOURCES:
+        return set()
+    if proof.kind != "unverified" or proof.available_at is not None:
+        raise HistoryError(
+            "graph_history_unsupported", "当前图和旧文档桥不能借导入证明回填过去"
+        )
+    data = parse_json(item.raw_content)
+    if run["source_id"] == "legacy_documents":
+        if data.get("schema_version") == "datafabric.collected.document.v1":
+            from biz_rules.collected_document import CollectedDocument
+
+            original = CollectedDocument.model_validate(data)
+        else:
+            original = StoredDocument.model_validate(data)
+        _source(conn, original.source_site)
+        return {original.source_site}
+
+    return _validate_graph_bundle(conn, run, GraphBundle.model_validate(data), now)
 
 
 def _validate_observation(conn, run, data, now):
