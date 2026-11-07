@@ -17,10 +17,16 @@
 
 现有两种派生结果（登记差分、清洗正文——含附件解析正文）用 from_registry_change / from_clean_text 映射进来，
 说明它们满足同一契约；以后的清洗、抽取、测量都按这里的模型落表。
+
+测量有两版契约：v1 的 Measurement 不改；v2（MeasurementV2，datafabric.data_objects.v2）是加工层测量对象
+（db.measurements）落表和读取接口给出的形状：规范十进制数值与原文字面量分开，时期结构化，范围与口径模式、
+分母状态显式，带业务维度及其核验结果、核验身份、清洗产物和对象身份。对象身份只来自已确认的图谱身份
+（confirmed / rule_confirmed）；同名只是记录内隔离的临时候选（provisional），不能据此跨记录合并。
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -28,6 +34,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 VERSION_ID = r"^[0-9a-f]{64}$"
 CONTRACT_VERSION = "datafabric.data_objects.v1"
+CONTRACT_VERSION_V2 = "datafabric.data_objects.v2"
+# a canonical decimal string, the same form BioCheck's contract v2+ checks (no float on the way)
+DECIMAL = r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?$"
+PERIOD_FORMS = {"day": r"^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$",
+                "month": r"^[0-9]{4}-(?:0[1-9]|1[0-2])$", "quarter": r"^[0-9]{4}Q[1-4]$",
+                "half": r"^[0-9]{4}H[12]$", "year": r"^[0-9]{4}$"}
 
 
 class Strict(BaseModel):
@@ -250,6 +262,137 @@ class Measurement(Derived):
             raise ValueError("测量必须写时期（period 或起止）")
         if self.measure_kind == "rate" and self.denominator == "not_applicable":
             raise ValueError("比例必须有分母或明确写 unknown")
+        return self
+
+
+class PeriodV2(Strict):
+    """结构化时期（与 BioCheck 契约 v2+ 的 PeriodValue 同形）：某精度的一个值，或日/月精度的起止区间。"""
+
+    type: Literal["point", "interval"]
+    precision: Literal["day", "month", "quarter", "half", "year"]
+    value: str | None = None
+    start: str | None = None
+    end: str | None = None
+
+    @model_validator(mode="after")
+    def one_form(self):
+        form = PERIOD_FORMS[self.precision]
+        if self.value is not None:
+            if self.start is not None or self.end is not None or not re.match(form, self.value):
+                raise ValueError("时期要么是该精度的一个值，要么是起止，不能两者都有")
+        elif (self.start is None or self.end is None or self.type != "interval" or self.precision not in ("day", "month")
+              or not re.match(form, self.start) or not re.match(form, self.end)):
+            raise ValueError("时期区间只能是日或月精度的 interval，起止都要有")
+        return self
+
+
+class MeasureDim(Strict):
+    """测量所属的一个业务维度：原文写法、在清洗正文里的位置、核验器对它的结论（unchecked = 没有核验结论）。"""
+
+    kind: Literal["disease", "population", "date_basis", "indication", "product_or_class", "milestone_definition",
+                  "entity", "stage", "denominator_definition"]
+    value: str = Field(min_length=1, max_length=300)
+    start: int = Field(ge=0)
+    end: int = Field(ge=1)
+    check: Literal["match", "mismatch", "not_found", "unsupported", "unchecked"]
+
+
+class UnlocatedDim(Strict):
+    """抽取写明了、但不能定位而没有送核的维度：保留并写明原因，不当作没写过。"""
+
+    kind: str | None = Field(default=None, max_length=60)
+    text: str = Field(max_length=300)
+    reason: str = Field(min_length=1, max_length=80)
+
+
+class CheckRef(Strict):
+    checker_version: str = Field(min_length=1, max_length=80)
+    contract_version: str = Field(min_length=1, max_length=80)
+    run_id: str = Field(min_length=1, max_length=80)
+    status: Literal["consistent", "inconsistent", "unchecked"]
+
+
+class ArtifactRef(Strict):
+    """测量读自的那份清洗产物：固定版本 + 清洗器版本 + 正文哈希。"""
+
+    text_processor_version: str = Field(min_length=3, max_length=120)
+    text_sha256: str = Field(pattern=VERSION_ID)
+
+
+class GraphRef(Strict):
+    source_id: str = Field(min_length=1, max_length=80)
+    record_id: str = Field(min_length=1, max_length=400)
+    version_id: str = Field(pattern=VERSION_ID)
+
+
+class MeasureIdentity(Strict):
+    """测量对象（object）是谁。confirmed / rule_confirmed：唐图里已确认的身份（namespace|id），绑定到这条测量所在
+    固定版本里的那处提及；provisional：没有已确认身份，key 是 literal:<来源>|<记录>|<规范化字面>——只在同一来源记录
+    内成组，同名不等于同一对象。"""
+
+    state: Literal["confirmed", "rule_confirmed", "provisional"]
+    key: str = Field(min_length=3, max_length=900)
+    graph: GraphRef | None = None
+    reason: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def confirmed_comes_from_the_graph(self):
+        literal = self.key.startswith("literal:")
+        if self.state == "provisional":
+            if not literal or self.graph is not None:
+                raise ValueError("临时身份只能是记录内的字面键，不能挂图谱身份")
+        elif literal or self.graph is None or self.key.count("|") != 1:
+            raise ValueError("已确认身份必须是 namespace|id 并写明来自哪个固定图包")
+        return self
+
+
+class MeasurementV2(Derived):
+    """加工层的一个已核验测量对象（datafabric.data_objects.v2）。值是规范十进制字符串，原文写法另存；单位不知道写
+    unknown；时期必须结构化写出；分母状态显式（比例不能是 not_applicable）；至少一个 char_span 定位落在 artifact
+    指认的清洗正文上。"""
+
+    contract_version: Literal["datafabric.data_objects.v2"] = CONTRACT_VERSION_V2
+    kind: Literal["measurement"] = "measurement"
+    artifact: ArtifactRef
+    object: str = Field(min_length=1, max_length=300)
+    metric: str = Field(min_length=1, max_length=200)
+    value_text: str = Field(pattern=DECIMAL, max_length=40)
+    value_literal: str = Field(min_length=1, max_length=60)
+    unit: str = Field(min_length=1, max_length=40)
+    period: PeriodV2
+    period_literal: str | None = Field(default=None, max_length=200)
+    scope: str | None = Field(default=None, max_length=200)
+    scope_mode: Literal["stated", "object_metric_total", "unknown"]
+    numerator_text: str | None = Field(default=None, pattern=DECIMAL, max_length=40)
+    denominator_text: str | None = Field(default=None, pattern=DECIMAL, max_length=40)
+    denominator_state: Literal["stated", "unknown", "not_applicable"]
+    measure_kind: Literal["stock", "flow", "cumulative", "rate"]
+    qualifier: Literal["exact", "approximate", "at_least", "at_most", "more_than", "less_than"]
+    modality: Literal["actual", "planned", "projected"]
+    family: Literal["case_count", "milestone_count", "capacity", "efficacy", ""]
+    dims: list[MeasureDim] = Field(default_factory=list, max_length=9)
+    dims_unlocated: list[UnlocatedDim] = Field(default_factory=list, max_length=9)
+    check: CheckRef
+    quote: str = Field(min_length=1, max_length=1000)
+    identity: MeasureIdentity
+
+    @model_validator(mode="after")
+    def states_are_explicit(self):
+        if (self.scope_mode == "stated") != bool(self.scope):
+            raise ValueError("scope_mode=stated 当且仅当写出了范围")
+        if (self.denominator_state == "stated") != (self.denominator_text is not None):
+            raise ValueError("denominator_state=stated 当且仅当写出了分母")
+        if self.measure_kind == "rate" and self.denominator_state == "not_applicable":
+            raise ValueError("比例必须有分母或明确写 unknown")
+        if len({d.kind for d in self.dims}) != len(self.dims):
+            raise ValueError("每种维度只能一项")
+        return self
+
+    @model_validator(mode="after")
+    def located_on_its_artifact(self):
+        if not any(loc.kind == "char_span" and loc.derived_text_sha256 == self.artifact.text_sha256
+                   for loc in self.locators):
+            raise ValueError("测量必须有一个落在其清洗正文上的 char_span 定位")
         return self
 
 

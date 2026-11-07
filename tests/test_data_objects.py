@@ -217,3 +217,78 @@ def test_entity_resolution_belongs_to_the_disambiguation_owner():
     assert do.EntityCandidate.model_validate(cand).resolution == "candidate"
     with pytest.raises(ValidationError):
         do.EntityCandidate.model_validate({**cand, "resolution": "resolved"})
+
+
+# ——测量 v2（加工层测量对象，合成样例：WHO 疫情通报的累计确诊数）——
+
+
+def who_measurement(**change):
+    sha = "e" * 64
+    body = {
+        "inputs": [{"source_id": "who_don", "record_id": "2026-DON512", "version_id": A}],
+        "processing": {"processor_version": "datafabric.measure_extract.v1", "config_sha256": B},
+        "locators": [{"kind": "char_span", "version_id": A, "start": 120, "end": 168, "derived_text_sha256": sha}],
+        "permission_sources": ["who_don"],
+        "visibility": {"first_seen_at": "2026-10-30T08:12:44Z"},
+        "status": {"state": "ok"},
+        "artifact": {"text_processor_version": "datafabric.clean_text.v12", "text_sha256": sha},
+        "object": "Marburg virus disease", "metric": "confirmed cases", "value_text": "1444", "value_literal": "1 444",
+        "unit": "cases", "period": {"type": "point", "precision": "day", "value": "2026-10-28"},
+        "period_literal": "28 October 2026", "scope": "Rwanda", "scope_mode": "stated",
+        "denominator_state": "not_applicable", "measure_kind": "cumulative", "qualifier": "exact",
+        "modality": "actual", "family": "case_count",
+        "dims": [{"kind": "disease", "value": "Marburg virus disease", "start": 120, "end": 141, "check": "match"}],
+        "check": {"checker_version": "biocheck.extraction_rules.v16", "contract_version": "extraction_consistency.v3",
+                  "run_id": "r-77", "status": "consistent"},
+        "quote": "As of 28 October 2026, 1 444 confirmed cases of Marburg virus disease were reported in Rwanda",
+        "identity": {"state": "provisional", "key": "literal:who_don|2026-DON512|marburg virus disease"},
+    }
+    body.update(change)
+    return body
+
+
+def test_measurement_v2_keeps_the_canonical_value_apart_from_the_literal():
+    ok = do.MeasurementV2.model_validate(who_measurement())
+    assert ok.contract_version == "datafabric.data_objects.v2" and ok.value_text == "1444"
+    assert ok.value_literal == "1 444" and ok.period.precision == "day"
+    with pytest.raises(ValidationError):  # the literal is not a canonical decimal
+        do.MeasurementV2.model_validate(who_measurement(value_text="1 444"))
+    # the v1 measurement is unchanged
+    assert do.Measurement.model_fields["contract_version"].default == "datafabric.data_objects.v1"
+
+
+@pytest.mark.parametrize("change", [
+    {"unit": None},  # the unit is stated or "unknown", never left out
+    {"period": None},  # a measurement says its period
+    {"period": {"type": "point", "precision": "day", "value": "28 October"}},  # not a structured period
+    {"period": {"type": "point", "precision": "month", "start": "2026-01", "end": "2026-02"}},  # a range is an interval
+    {"measure_kind": "rate"},  # a rate with denominator not_applicable
+    {"denominator_state": "stated"},  # stated without the denominator
+    {"scope": None},  # scope_mode stated without a scope
+    {"dims": [{"kind": "disease", "value": "x", "start": 1, "end": 2, "check": "match"}] * 2},  # one per kind
+    {"locators": [{"kind": "char_span", "version_id": A, "start": 1, "end": 5}]},  # not on its artifact
+    {"check": {"checker_version": "v", "contract_version": "c", "run_id": "r", "status": "passed"}},
+])
+def test_measurement_v2_refuses_what_it_cannot_state(change):
+    with pytest.raises(ValidationError):
+        do.MeasurementV2.model_validate(who_measurement(**change))
+
+
+def test_a_rate_may_have_an_unknown_denominator():
+    rate = do.MeasurementV2.model_validate(who_measurement(measure_kind="rate", denominator_state="unknown"))
+    assert rate.denominator_text is None
+
+
+def test_identity_is_confirmed_only_from_a_fixed_graph_package():
+    graph = {"source_id": "reviewed_graph", "record_id": "bundle-17", "version_id": C}
+    confirmed = do.MeasurementV2.model_validate(who_measurement(
+        identity={"state": "confirmed", "key": "MESH|D008379", "graph": graph}))
+    assert confirmed.identity.graph.version_id == C
+    for identity in (
+        {"state": "confirmed", "key": "MESH|D008379"},  # no graph package behind it
+        {"state": "confirmed", "key": "literal:who_don|2026-DON512|marburg", "graph": graph},
+        {"state": "provisional", "key": "MESH|D008379"},  # the same name is a record-local candidate only
+        {"state": "provisional", "key": "literal:who_don|x|marburg", "graph": graph},
+    ):
+        with pytest.raises(ValidationError):
+            do.MeasurementV2.model_validate(who_measurement(identity=identity))
