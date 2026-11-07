@@ -14,10 +14,15 @@ status 的三种取值如实区分：
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from contracts.evidence_types import COVERAGE, FINE_TYPES
+
+# 来源真实支持的读取方式（FetchRequest 的哪些字段起作用）：
+# query 检索词；ids 明确的原生编号清单；list_pages 站点列表入口续页；window 来源更新时间窗；upload 管理员上传/收件目录
+ReadMode = Literal["query", "ids", "list_pages", "window", "upload"]
+READ_MODES = ("query", "ids", "list_pages", "window", "upload")
 
 IncrementalKind = Literal[
     "source_updated_window",  # 来源自己的“更新日期”字段按窗口过滤
@@ -69,6 +74,8 @@ class CollectionSpec:
     may_include: tuple[str, ...] = ()
     # 这个来源编号实际覆盖的数据集/端点
     datasets: tuple[str, ...] = ()
+    # 来源真实支持的读取方式；由插件注册的读取方式和下面的收窄表决定（见 _with_read_modes），不在各条目里手写
+    read_modes: tuple[ReadMode, ...] = ()
 
     @property
     def fetchable(self) -> bool:
@@ -403,6 +410,29 @@ SPECS = SPECS + tuple(
     for sid, name, evidence, decisions, group in _DECLARED
 )
 
+# 读取插件注册时声明的读取方式（按代码现状：每种方式都对应插件里真正读取的 FetchRequest 字段）；
+# 同一插件下某个来源不支持其中一种时，在 SOURCE_READ_MODES 里收窄。biz_rules.history_sources.PLUGINS 的插件名须与此一一对应
+PLUGIN_READ_MODES: dict[str, tuple[ReadMode, ...]] = {
+    "public_api_reader": ("query", "ids"),
+    "who_don": ("query", "ids", "window"),
+    "sec_xbrl": ("ids",),
+    "gdelt_doc": ("query", "window"),
+    "site_crawler": ("ids", "list_pages"),
+    "local_file_import": ("upload",),
+}
+SOURCE_READ_MODES: dict[str, tuple[ReadMode, ...]] = {
+    "fda_crl": ("query",),  # 复合键歧义：不支持精确 by-ID 重采
+}
+
+
+def _with_read_modes(item: CollectionSpec) -> CollectionSpec:
+    if not item.fetchable:
+        return item
+    return replace(item, read_modes=SOURCE_READ_MODES.get(item.source_id, PLUGIN_READ_MODES.get(item.plugin, ())))
+
+
+SPECS = tuple(_with_read_modes(item) for item in SPECS)
+
 CATALOG: dict[str, CollectionSpec] = {s.source_id: s for s in SPECS}
 FETCHABLE = frozenset(s.source_id for s in SPECS if s.fetchable)
 WATCHABLE = frozenset(s.source_id for s in SPECS if s.watchable)
@@ -430,6 +460,25 @@ def _check_evidence_registry() -> None:
 
 
 _check_evidence_registry()
+
+def _check_read_modes() -> None:
+    """可采集的来源至少声明一种读取方式，且不超出所用插件注册的范围；未接通的来源不声明。"""
+    errors = []
+    for s in SPECS:
+        if s.fetchable:
+            if not s.read_modes:
+                errors.append(f"{s.source_id} 已接通但没有读取方式")
+            wide = PLUGIN_READ_MODES.get(s.plugin or "", ())
+            if not set(s.read_modes) <= set(wide):
+                errors.append(f"{s.source_id} 的读取方式 {list(s.read_modes)} 超出插件 {s.plugin} 注册的 {list(wide)}")
+        elif s.read_modes:
+            errors.append(f"{s.source_id} 未接通却声明了读取方式")
+    errors += [f"SOURCE_READ_MODES 指向不在目录里的来源 {k}" for k in SOURCE_READ_MODES if k not in {s.source_id for s in SPECS}]
+    if errors:
+        raise ValueError("；".join(errors))
+
+
+_check_read_modes()
 # 有附件版本的来源（加工层 db.derived_text 只解析这些来源的 role=attachment 版本）：站点插件，加上目录里
 # 声明了附件覆盖的已接通来源（PubMed 全文、本地导入）
 ATTACHMENT_SOURCES = SITE_SOURCES | frozenset(
