@@ -78,6 +78,8 @@ HISTORY_FILES_AFTER_COMPAT: tuple[str, ...] = (
     # the measurement extraction of the processing layer and its checked objects (structure only, no rows)
     "V037__measure_extraction.sql",
     "V038__measurement_objects.sql",
+    # the corrections sources state, as links measurement objects follow (structure only, no rows)
+    "V039__measure_correction_links.sql",
 )
 
 # The original collection library: the publication outbox (V019) and the history subject columns on documents (V026).
