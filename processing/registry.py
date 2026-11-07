@@ -11,12 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from processing import attachment_parse, clean_text, profile, registry_diff
+from processing import attachment_parse, clean_text, measure_extract, profile, registry_diff
 
 # graph packages are not cleaned: they are read through the graph interface, not as text
 UNCLEANED_SOURCES = ("reviewed_graph", "primekg_graph")
 # registry records whose versions are compared field by field (registry_diff)
 REGISTRY_DIFF_SOURCES = frozenset({"clinicaltrials"})
+# narrative sources whose cleaned text is read for measurements (datafabric.measure_extract); one at a time, each
+# behind its acceptance slice (WHO DON case counts first)
+MEASURE_SOURCES = ("who_don",)
 # who says what kind of material a record is: Fabric's document evidence (biz_rules.document_evidence), not the reader
 MATERIAL_KIND_SOURCE = "fabric_document_evidence"
 
@@ -42,6 +45,8 @@ PROCESSORS = (
     Processor("registry_diff", registry_diff.PROCESSOR_VERSION, "derived_registry_changes",
               lambda s: s in REGISTRY_DIFF_SOURCES),
     Processor("profile", profile.PROCESSOR_VERSION, "derived_profiles", lambda s: s not in UNCLEANED_SOURCES),
+    Processor("measure_extract", measure_extract.PROCESSOR_VERSION, "derived_measurements",
+              lambda s: s in MEASURE_SOURCES),
 )
 
 

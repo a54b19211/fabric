@@ -92,3 +92,17 @@ def test_the_capabilities_are_plain_data_and_the_definition_digest_is_stable():
 def test_an_unavailable_entry_names_the_source_with_every_flag_false():
     item = caps.unavailable("pubmed")
     assert item["source_id"] == "pubmed" and item["capabilities"]["readable"] is False
+
+
+def test_measurements_are_a_capability_of_the_declared_original_sources_only(monkeypatch):
+    from processing import registry
+
+    who = flags("who_don")["measurements"]
+    assert who == {"processor": "datafabric.measure_extract.v1", "contract": "datafabric.data_objects.v2",
+                   "checker": "biocheck.extraction_rules.v16", "check_contract": "extraction_consistency.v3",
+                   "history_modes": ["current", "operational_replay", "public_history_reconstruction"]}
+    assert flags("who_don", readable=False)["measurements"] is None  # the permission first
+    assert flags("pubmed")["measurements"] is None
+    # a derived source (a graph package) never gets measurements, even if it were declared
+    monkeypatch.setattr(registry, "MEASURE_SOURCES", ("who_don", "reviewed_graph"))
+    assert flags("reviewed_graph")["measurements"] is None

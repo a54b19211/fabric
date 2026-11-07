@@ -2,13 +2,14 @@
 
 from collection.catalog import ATTACHMENT_SOURCES, CATALOG
 from db import clean_stage, registry_changes
-from processing import attachment_parse, clean_text, profile, registry, registry_diff
+from processing import attachment_parse, clean_text, measure_extract, profile, registry, registry_diff
 
 
 def test_versions_are_the_modules_versions():
     assert {p.name: p.version for p in registry.PROCESSORS} == {
         "clean_text": clean_text.PROCESSOR_VERSION, "attachment_parse": attachment_parse.PROCESSOR_VERSION,
-        "registry_diff": registry_diff.PROCESSOR_VERSION, "profile": profile.PROCESSOR_VERSION}
+        "registry_diff": registry_diff.PROCESSOR_VERSION, "profile": profile.PROCESSOR_VERSION,
+        "measure_extract": measure_extract.PROCESSOR_VERSION}
 
 
 def test_applicability_is_a_predicate_over_the_source_not_a_second_list():
@@ -37,3 +38,12 @@ def test_the_definition_lists_each_processor_with_the_sources_it_applies_to():
     assert definition["registry_diff"]["sources"] == ["clinicaltrials"]
     assert "reviewed_graph" not in definition["clean_text"]["sources"]
     assert set(definition["attachment_parse"]["sources"]) >= {"pubmed", "local_files", "nmpa"}
+
+
+def test_measurements_are_read_from_the_declared_sources_only():
+    assert registry.MEASURE_SOURCES == ("who_don",)
+    assert registry.applicable("who_don")["measure_extract"] == "datafabric.measure_extract.v1"
+    assert "measure_extract" not in registry.applicable("clinicaltrials")
+    assert "measure_extract" not in registry.applicable("reviewed_graph")
+    definition = {item["name"]: item for item in registry.definition()}
+    assert definition["measure_extract"]["sources"] == ["who_don"]

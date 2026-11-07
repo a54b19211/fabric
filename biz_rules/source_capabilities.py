@@ -72,7 +72,21 @@ def _processors(source_id: str) -> dict:
                         if "attachment_parse" in applied else None),
         "clean_text": {"processor": applied["clean_text"]} if "clean_text" in applied else None,
         "registry_diff": {"processor": applied["registry_diff"]} if "registry_diff" in applied else None,
+        "measurements": _measurements(applied, source_id),
     }
+
+
+def _measurements(applied, source_id):
+    """The measurement objects a source's fixed originals get (only originals: a derived product is never read
+    for measurements), with the contract they are served under and the checker that checks them."""
+    if "measure_extract" not in applied or record_kind(source_id) != "original":
+        return None
+    from contracts.data_objects import CONTRACT_VERSION_V2
+    from extraction_contract import CHECKER_V16, CONTRACT_V3
+
+    return {"processor": applied["measure_extract"], "contract": CONTRACT_VERSION_V2,
+            "checker": CHECKER_V16, "check_contract": CONTRACT_V3,
+            "history_modes": ["current", "operational_replay", "public_history_reconstruction"]}
 
 
 def capabilities(facts: SourceFacts) -> dict:
@@ -86,7 +100,7 @@ def capabilities(facts: SourceFacts) -> dict:
 
     declared = CATALOG.get(source_id)
     processors = _processors(source_id) if readable else {"attachments": None, "clean_text": None,
-                                                           "registry_diff": None}
+                                                           "registry_diff": None, "measurements": None}
     return {
         "readable": readable,
         "read": readable and facts.published_seq > 0,
