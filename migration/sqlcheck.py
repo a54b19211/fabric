@@ -79,6 +79,29 @@ def mask(sql: str) -> tuple[str, str | None]:
     return "".join(out), None
 
 
+_CONTROL_LINE = re.compile(r"(?im)^[ \t]*(?:BEGIN|COMMIT)[ \t]*;")
+
+
+def neutralise_transaction_control(sql: str) -> str:
+    """The text to execute for a file that carries its own top-level `BEGIN;` / `COMMIT;` (four object-library files from
+    before the ledger): exactly those statements are blanked (same length, the rest byte for byte), so the file runs inside
+    the runner's transaction together with its post-condition and its ledger row. The file on disk and its recorded checksum
+    are the published ones; this is applied at execution time only. Raises ValueError if anything else of the kind
+    remains (ROLLBACK, a second kind of control, one that is not alone on its line)."""
+    masked, open_at = mask(sql)
+    if open_at:
+        raise ValueError("unclosed " + open_at)
+    out = list(sql)
+    for found in _CONTROL_LINE.finditer(masked):
+        for position in range(found.start(), found.end()):
+            if out[position] != "\n":
+                out[position] = " "
+    result = "".join(out)
+    if any("top-level" in problem for problem in inspect_sql(result).problems):
+        raise ValueError("transaction control remains after neutralising BEGIN/COMMIT")
+    return result
+
+
 @dataclass(frozen=True)
 class FileReport:
     statements: int

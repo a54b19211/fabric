@@ -69,8 +69,18 @@ def digest(fingerprint) -> str:
     return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
 
 
+# facts that belong to a table: key[1] is "table.name"
+_OF_TABLE = frozenset({"column", "constraint", "index", "trigger", "rule"})
+
+
 def project(facts: Facts, keys) -> Fingerprint:
-    return frozenset((key, facts[key]) for key in keys if key in facts)
+    """The facts the role is answerable for: its own keys, and EVERY column, constraint, index, trigger and rule of a table
+    the role creates - so a column or index nobody declared on such a table shows up as a difference instead of being
+    ignored. The tables of other roles (documents, entity tables ...) are compared only on the keys this role adds to them;
+    what else sits on them is theirs. Functions and sequences are compared by the names the role declares."""
+    tables = {key[1] for key in keys if key[0] == "table"}
+    return frozenset((key, definition) for key, definition in facts.items()
+                     if key in keys or (key[0] in _OF_TABLE and key[1].split(".", 1)[0] in tables))
 
 
 def run_files(conn, names) -> None:

@@ -54,3 +54,37 @@ def test_mask_keeps_the_length_and_the_line_structure():
     masked, open_at = mask(sql)
     assert open_at is None and len(masked) == len(sql) and masked.count("\n") == sql.count("\n")
     assert ";" not in masked[:-1]
+
+
+def test_neutralising_blanks_exactly_the_begin_and_commit_lines_and_nothing_else():
+    from migration.sqlcheck import neutralise_transaction_control
+
+    sql = "-- x\nBEGIN;\nCREATE TABLE t(a int);\nCOMMENT ON TABLE t IS 'BEGIN;';\nCOMMIT;\n"
+    out = neutralise_transaction_control(sql)
+    assert len(out) == len(sql) and out.count("\n") == sql.count("\n")
+    assert inspect_sql(out).problems == ()
+    assert "".join(x for x, y in zip(sql, out) if x != y) == "BEGIN;COMMIT;"
+    assert all(y == " " for x, y in zip(sql, out) if x != y)
+    assert "COMMENT ON TABLE t IS 'BEGIN;'" in out  # a literal is not control
+
+
+def test_neutralising_leaves_function_bodies_alone_and_refuses_what_it_cannot_make_safe():
+    from migration.sqlcheck import neutralise_transaction_control
+
+    body = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; END; $$ LANGUAGE plpgsql;"
+    assert neutralise_transaction_control(body) == body
+    with pytest.raises(ValueError, match="remains"):
+        neutralise_transaction_control("BEGIN;\nCREATE TABLE t(a int);\nROLLBACK;\n")
+    with pytest.raises(ValueError, match="unclosed"):
+        neutralise_transaction_control("BEGIN; SELECT 'open")
+
+
+def test_the_four_legacy_files_neutralise_to_text_without_control_and_otherwise_identical():
+    from migration import manifests
+    from migration.sqlcheck import neutralise_transaction_control
+
+    for name in manifests.TRANSACTION_CONTROL_ALLOWED:
+        original = (manifests.VERSIONS_DIR / name).read_text(encoding="utf-8")
+        out = neutralise_transaction_control(original)
+        assert inspect_sql(out).problems == () and len(out) == len(original)
+        assert "".join(x for x, y in zip(original, out) if x != y) == "BEGIN;COMMIT;", name

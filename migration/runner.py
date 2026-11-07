@@ -8,9 +8,11 @@
 
 Each database role keeps its own ledger (the object library: schema_migrations as before, plus the sha256 in the
 event table; History and publication: the append-only event table). A file is handed to PostgreSQL whole, in one
-transaction together with its ledger row; the statement splitter only reads it first (migration.sqlcheck). Anything
+transaction together with its post-condition and its ledger row (the four object-library files that carry their own
+BEGIN/COMMIT run with exactly those two statements blanked, execution time only); the statement splitter only reads it first (migration.sqlcheck). Anything
 the ledger or the database shows that this repository cannot explain is reported and nothing is run or written.
-One advisory lock per physical database covers a whole run, from before the ledger tables exist.
+One advisory lock per physical database covers a whole run, from before the ledger tables exist; it is held on the
+connection that runs the transactions and asserted right before each commit.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from sqlalchemy import text
 from migration import ledger
 from migration.app_ledger import MigrationStateError
 from migration.manifests import MANIFESTS, POSTCONDITIONS, TRANSACTION_CONTROL_ALLOWED, VERSIONS_DIR, Manifest
-from migration.sqlcheck import FileReport, inspect_sql
+from migration.sqlcheck import FileReport, inspect_sql, neutralise_transaction_control
 
 RUNNER_VERSION = "fabric.migration.runner.v1"
 # "FabricMg" in ASCII: one constant, not a runtime hash, so every runner and every role contends for the same lock
@@ -47,11 +49,16 @@ class MigrationBusy(MigrationStateError):
     """Another migration holds the database lock; nothing was read or written."""
 
 
+class MigrationLockLost(MigrationStateError):
+    """The session advisory lock is no longer held by this run's connection; the open transaction was not committed."""
+
+
 @dataclass
 class Pending:
     file: str
-    sql: str
+    sql: str  # the file as published: what the checksum and the ledger are about
     report: FileReport
+    execute: str = ""  # what is sent to PostgreSQL (the same text, except for BEGIN/COMMIT of the four legacy files)
 
     def describe(self) -> dict:
         return {"version": self.file.split("__", 1)[0], "file": self.file, "md5": ledger.md5(self.sql),
@@ -87,22 +94,48 @@ def file_text(name: str) -> str:
 
 @contextmanager
 def migration_lock(engine):
-    """A session advisory lock on a connection of its own (never returned to the pool), held for a whole run."""
-    conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    """A session advisory lock held for a whole run, on the connection that also runs every transaction of the run
+    (taken from the engine, never returned to the pool). Yields that connection. If the lock is lost - the backend is
+    terminated, the lock is released - the connection is gone or `assert_lock_held` fails, so nothing more is committed."""
+    conn = engine.connect()
     try:
         if not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_KEY}).scalar_one():
+            conn.rollback()
             raise MigrationBusy("another migration is running on this database (advisory lock held); "
                                 "nothing was read or written")
+        conn.commit()  # a session lock survives the transaction that took it
         try:
-            yield
+            yield conn
         finally:
             try:
+                conn.rollback()
                 conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LOCK_KEY})
-            except Exception:  # noqa: BLE001 - the connection is closed below, which releases a session lock
+                conn.commit()
+            except Exception:  # noqa: BLE001 - invalidating the connection below releases a session lock
                 logger.warning("[Migration] advisory unlock failed; closing the connection releases it")
     finally:
         conn.invalidate()
         conn.close()
+
+
+def assert_lock_held(conn) -> None:
+    """Called inside the open transaction, right before it commits: this session must still hold the lock."""
+    held = conn.execute(text(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() "
+        "AND ((classid::bigint << 32) | objid::bigint) = :k)"), {"k": LOCK_KEY}).scalar_one()
+    if not held:
+        raise MigrationLockLost("the migration lock is no longer held by this run; the open transaction was not "
+                                "committed")
+
+
+def commit(conn) -> None:
+    """Commit only while the lock is held; otherwise roll back and say so."""
+    try:
+        assert_lock_held(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 # ---- what the ledger and the database show ----
@@ -169,7 +202,8 @@ def pending_files(role: str, applied: dict) -> tuple[list[Pending], str | None]:
         report = inspect_sql(sql, allow_transaction_control=name in TRANSACTION_CONTROL_ALLOWED)
         if report.problems:
             return runnable, f"{name}: " + "; ".join(report.problems)
-        runnable.append(Pending(name, sql, report))
+        runnable.append(Pending(name, sql, report, neutralise_transaction_control(sql)
+                                if name in TRANSACTION_CONTROL_ALLOWED else sql))
     return runnable, None
 
 
@@ -237,66 +271,81 @@ def check_postconditions(conn, name: str) -> None:
             raise MigrationStateError(f"{name}: postcondition not met after the file ran, rolled back: {sql}")
 
 
-def _run_file(engine, role: str, obs: Observation, item: Pending, actor: str) -> None:
+def _run_file(conn, role: str, obs: Observation, item: Pending, actor: str) -> None:
     manifest = MANIFESTS[role]
     logger.info(f"[Migration] 执行: {item.file}")
-    with engine.connect() as conn:
+    try:
         conn.exec_driver_sql(f"SET LOCAL lock_timeout='{manifest.lock_timeout}'")
         if manifest.statement_timeout:
             conn.exec_driver_sql(f"SET LOCAL statement_timeout='{manifest.statement_timeout}'")
-        # PostgreSQL parses the whole file (function bodies, comments, quoting); the driver does not rebind colons
-        conn.exec_driver_sql(item.sql)
+        # PostgreSQL parses the whole file (function bodies, comments, quoting); the driver does not rebind colons.
+        # item.execute is the published text, except that the four legacy files lose their own BEGIN/COMMIT so that the
+        # file, its post-condition and its ledger row are one transaction.
+        conn.exec_driver_sql(item.execute)
         check_postconditions(conn, item.file)
         if role == "app":
             _record_app_row(conn, obs, item)
         ledger.append(conn, role, item.file, "applied", item.sql, actor=actor,
                       evidence={"runner": RUNNER_VERSION, "checks": list(item.report.checks)})
-        conn.commit()
+        commit(conn)
+    except BaseException:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - the connection may be gone; the transaction died with it
+            pass
+        raise
     logger.info(f"[Migration] 完成: {item.file}")
 
 
 def apply(role: str, engine, *, actor: str | None = None) -> dict:
-    """Run what is pending, one file per transaction with its ledger row. Raises MigrationStateError (and has written
-    nothing for the refused file) on anything unexplained; files before a refused one are recorded."""
+    """Run what is pending, one file per transaction with its ledger row, all on the connection that holds the lock.
+    Raises MigrationStateError (and has written nothing for the refused file) on anything unexplained; files before a
+    refused one are recorded."""
     actor = actor or default_actor()
-    with migration_lock(engine):
-        with engine.connect() as conn:
-            obs = observe(conn, role)
-            conn.rollback()
-            if obs.error is not None:
-                raise obs.error
-            if obs.problems:
-                raise MigrationStateError("没有执行也没有写入任何内容：\n- " + "\n- ".join(obs.problems))
-            pending, refused = pending_files(role, obs.applied)
-            if pending or role == "app":  # the object library always recorded renumbered rows it recognised
-                _prepare_ledger(conn, role, obs)
+    with migration_lock(engine) as conn:
+        obs = observe(conn, role)
+        conn.rollback()
+        if obs.error is not None:
+            raise obs.error
+        if obs.problems:
+            raise MigrationStateError("没有执行也没有写入任何内容：\n- " + "\n- ".join(obs.problems))
+        pending, refused = pending_files(role, obs.applied)
+        if pending or role == "app":  # the object library always recorded renumbered rows it recognised
+            _prepare_ledger(conn, role, obs)
         for item in pending:
-            _run_file(engine, role, obs, item, actor)
+            _run_file(conn, role, obs, item, actor)
         if refused:
             raise MigrationStateError(f"{refused}; the files before it were run and recorded, it and the later "
                                       "ones were not")
         if not pending:
             logger.info("[Migration] 所有迁移已是最新")
-        steps = run_reference_steps(role, engine, actor)
+        steps = run_reference_steps(role, conn, actor)
     receipt = _receipt(role, "apply", obs, [], None)
     receipt.update({"state": "applied" if pending else "up_to_date", "ran": [p.describe() for p in pending],
                     "reference_data": steps})
     return receipt
 
 
-def run_reference_steps(role: str, engine, actor: str) -> list[dict]:
+def run_reference_steps(role: str, conn, actor: str) -> list[dict]:
     from migration.reference_data import REFERENCE_STEPS
 
     results = []
     for name, step in REFERENCE_STEPS.get(role, ()):
-        with engine.begin() as conn:
+        try:
             conn.exec_driver_sql("SET LOCAL lock_timeout='3s'")
             result = step(conn)
             if result:
                 conn.execute(text(f"INSERT INTO {ledger.REFERENCE_LOG}(db_role, step, result, actor) "
                                   "VALUES (:r, :s, CAST(:x AS jsonb), :a)"),
                              {"r": role, "s": name, "x": json.dumps(result, sort_keys=True), "a": actor})
-            results.append({"step": name, "result": result})
+            commit(conn)
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        results.append({"step": name, "result": result})
     return results
 
 
@@ -309,13 +358,14 @@ def revoke_baseline(role: str, engine, version: str, *, reason: str, actor: str 
     names = [name for name in manifest.files if name.startswith(version + "__")]
     if role == "app" or len(names) != 1:
         raise MigrationStateError(f"no {role} file {version} whose baseline can be revoked")
-    with migration_lock(engine):
-        with engine.begin() as conn:
-            state = ledger.read_current(conn, role)
-            entry = state.present.get(names[0])
-            if entry is None or entry.event == "applied":
-                raise MigrationStateError(f"{names[0]} has no observed_baseline/compat_mapped record to revoke")
-            ledger.append_revocation(conn, role, names[0], file_text(names[0]), reason=reason, actor=actor)
+    with migration_lock(engine) as conn:
+        state = ledger.read_current(conn, role)
+        entry = state.present.get(names[0])
+        if entry is None or entry.event == "applied":
+            conn.rollback()
+            raise MigrationStateError(f"{names[0]} has no observed_baseline/compat_mapped record to revoke")
+        ledger.append_revocation(conn, role, names[0], file_text(names[0]), reason=reason, actor=actor)
+        commit(conn)
     return {"runner": RUNNER_VERSION, "db_role": role, "action": "revoke-baseline", "file": names[0],
             "state": "revoked", "reason": reason}
 

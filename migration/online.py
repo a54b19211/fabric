@@ -34,7 +34,11 @@ def run(role: str, engine, operation: str, *, drop: bool = False) -> dict:
     op = ONLINE_OPS.get(role, {}).get(operation)
     if op is None:
         raise MigrationStateError(f"no online operation {operation!r} for the {role} role")
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+    from migration import runner
+
+    with runner.migration_lock(engine) as lock:
+        conn = lock.execution_options(isolation_level="AUTOCOMMIT")  # the lock connection runs it, outside a transaction
+        runner.assert_lock_held(conn)
         conn.exec_driver_sql(f"SET lock_timeout='{op.lock_timeout}'")
         conn.exec_driver_sql(f"SET statement_timeout='{op.statement_timeout}'")
         if drop:
@@ -45,4 +49,5 @@ def run(role: str, engine, operation: str, *, drop: bool = False) -> dict:
                 f"SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass('{op.index}')").scalar_one()
             if valid is not True:
                 raise RuntimeError("来源游标索引未完成，须先按回退命令删除无效索引后重建")
+        runner.assert_lock_held(conn)  # the operation ran while this run still held the lock
     return {"db_role": role, "online": operation, "action": "drop" if drop else "create", "state": "done"}

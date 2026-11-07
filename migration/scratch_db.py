@@ -63,9 +63,13 @@ class ScratchPostgres:
     def start(self) -> str:
         """Start the container; returns the SQLAlchemy URL of its empty database."""
         port = self._free_port()
-        self.container_id = self._docker(
-            "run", "-d", "--label", f"{LABEL}={self.run_id}", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
-            "-e", "POSTGRES_DB=scratch", "-p", f"127.0.0.1:{port}:5432", self.image)
+        try:
+            self.container_id = self._docker(
+                "create", "--label", f"{LABEL}={self.run_id}", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+                "-e", "POSTGRES_DB=scratch", "-p", f"127.0.0.1:{port}:5432", self.image)
+        except BaseException:
+            self._adopt_leftover()  # a failed create may still have left something: found by this run's label
+            raise
         self._record(event="created", id=self.container_id, image=self.image, label=f"{LABEL}={self.run_id}",
                      port=port)
         try:
@@ -74,11 +78,24 @@ class ScratchPostgres:
                                    self.container_id)
             self.volumes = volumes.split()
             self._record(event="volumes", id=self.container_id, volumes=self.volumes)
+            self._docker("start", self.container_id)  # a port taken meanwhile fails here, after the ID is registered
             self._wait_ready()
         except BaseException:
             self.stop()  # the container exists now: tear it down by its ID before the error leaves
             raise
         return f"postgresql://postgres@127.0.0.1:{port}/scratch"
+
+    def _adopt_leftover(self) -> None:
+        """After a failed create: containers carrying this run's (unique) label are this run's; register and remove them."""
+        found = self._run(["docker", "ps", "-aq", "--no-trunc", "--filter", f"label={LABEL}={self.run_id}"]).stdout.split()
+        if found:
+            self.container_id = found[0]
+            self._record(event="created", id=self.container_id, image=self.image, label=f"{LABEL}={self.run_id}",
+                         note="found after a failed create")
+            volumes = self._run(["docker", "inspect", "-f", '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}',
+                                 self.container_id]).stdout.split()
+            self.volumes = volumes
+            self.stop()
 
     def _wait_ready(self) -> None:
         for _ in range(90):
