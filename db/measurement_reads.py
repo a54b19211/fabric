@@ -6,7 +6,10 @@ Modes:
 - current: every event; an object counts as current when its checker is the one expected now for measurements and
   it is not superseded (an object of an older checker is history until the current one re-checked its reading).
 - operational_replay: what the system actually showed at the cutoff - objects produced by then, events produced by
-  then whose material was visible by then; no later processor or checker result.
+  then whose material was visible by then; no later processor or checker result. An object whose reading had, by
+  the cutoff, a check task for another checker (the deployment expected a newer checker) and no visible re-check is
+  not current at that cutoff (pending_recheck_by:<checker>). The time the task was registered stands for the
+  checker switch - an approximation: the stricter follow-up records the switch itself as an event.
 - public_history_reconstruction: today's processors and checker over material proven public by the cutoff - the
   version's proof, and corrections only from their own proof; the receipt says reconstruction: true and names the
   producer and checker versions used.
@@ -107,21 +110,40 @@ def _version_visible(obj, mode, cutoff):
     return obj["first_seen_at"] <= cutoff and (mode != "operational_replay" or obj["produced_at"] <= cutoff)
 
 
-def _not_current(obj, status, mode, checker):
+def _not_current(obj, status, mode, checker, pending=None):
     if status["state"] == "superseded":
         return status["reason"]
     if mode != "operational_replay" and obj["checker_version"] != checker:
         return "checker_not_current"  # history until the current checker re-checked its reading
+    if mode == "operational_replay" and pending and pending != obj["checker_version"]:
+        return "pending_recheck_by:" + pending  # at the cutoff the deployment already expected another checker
     return None
 
 
-def receipt(conn, obj, events, mode, cutoff, readable, checker):
+def expected_at(conn, objs, cutoff):
+    """measurement_id -> the checker the latest measures check task registered by the cutoff for the object's
+    reading set (version, producer identity, clean-text processor) waited for."""
+    if not objs:
+        return {}
+    rows = conn.execute(text("""
+        SELECT DISTINCT ON (version_id, producer_version, text_processor_version)
+               version_id, producer_version, text_processor_version, checker_version
+          FROM derived_extraction_check_tasks
+         WHERE producer = 'measures' AND version_id = ANY(:v) AND created_at <= :cutoff
+         ORDER BY version_id, producer_version, text_processor_version, created_at DESC"""),
+        {"v": sorted({o["version_id"] for o in objs}), "cutoff": cutoff}).all()
+    latest = {(r[0], r[1], r[2]): r[3] for r in rows}
+    return {o["measurement_id"]: latest.get((o["version_id"], o["producer_identity"], o["text_processor_version"]))
+            for o in objs}
+
+
+def receipt(conn, obj, events, mode, cutoff, readable, checker, pending=None):
     """One object as the reader may see it: the MeasurementV2 body with its folded status and identity, and how the
     state at the cutoff came about."""
     status, applied, after, withheld = fold(events, mode, cutoff, readable)
     body = dict(obj["body"], status=status, identity=identity.of(conn, obj, mode, cutoff, readable))
     do.MeasurementV2.model_validate(body)  # what is served is the contract, never a looser shape
-    why = _not_current(obj, status, mode, checker)
+    why = _not_current(obj, status, mode, checker, pending)
     return {"measurement_id": obj["measurement_id"].strip(), "reading_id": obj["reading_id"].strip(), **body,
             "mode": mode, "cutoff": cutoff.isoformat(), "state_at_cutoff": status["state"],
             "events_applied": applied, "events_after_cutoff": after, "events_withheld": withheld,
@@ -165,9 +187,11 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, *, include_histo
             {"s": source_id, "d": is_demo, "ids": list(version_ids), "n": MAX_OBJECTS}).mappings()]
         objs = [o for o in objs if _version_visible(o, mode, cutoff)]
         events, readable, checker = _events(conn, [o["measurement_id"] for o in objs]), Readable(conn), expected_checker()
+        pending = expected_at(conn, objs, cutoff) if mode == "operational_replay" else {}
         items, excluded = [], {}
         for obj in objs:
-            r = receipt(conn, obj, events.get(obj["measurement_id"], []), mode, cutoff, readable, checker)
+            r = receipt(conn, obj, events.get(obj["measurement_id"], []), mode, cutoff, readable, checker,
+                        pending.get(obj["measurement_id"]))
             if r["current"] or include_history:
                 items.append(r)
             else:
@@ -194,8 +218,9 @@ def read_one(measurement_id, is_demo, mode, cutoff):
         history._source(conn, obj["source_id"])
         if not _version_visible(obj, mode, cutoff):
             raise HistoryError("version_not_found", "该测量对象在此截止时间不可见", 404)
+        pending = expected_at(conn, [obj], cutoff).get(measurement_id) if mode == "operational_replay" else None
         return receipt(conn, obj, _events(conn, [measurement_id]).get(obj["measurement_id"], []), mode, cutoff,
-                       Readable(conn), expected_checker())
+                       Readable(conn), expected_checker(), pending)
 
 
 def changes(is_demo, *, after_seq=0, limit=50):

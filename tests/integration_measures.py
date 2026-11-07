@@ -859,3 +859,36 @@ def test_the_feed_lets_a_consumer_link_in_either_arrival_order(db, fake):
         assert set(item["versions"]) == set(contract["feed"]["version_keys"]) and item["kind"] in contract["feed"]["kinds"]
     for receipt in items:
         assert set(contract["pull"]["receipt_keys"]) <= set(receipt)
+
+
+# ---- the checker-upgrade gap in replay, corrections without a target version -----------------------------------
+
+
+@real_checker
+def test_replay_between_a_checker_upgrade_and_the_recheck_shows_the_old_object_pending(db, fake, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", "biocheck.extraction_rules.v15")
+    version = who_version()
+    runs.plan(model=fake.model())
+    read_all(fake)
+    check_all(RealBioCheck(answer=as_checker("biocheck.extraction_rules.v15")))
+    old = by_value(listing(version)["measurements"])["66"]
+    before_upgrade = NOW()
+    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")
+    assert checks.backfill_measures() == 1  # the deployment expects v16 from here on
+    between = NOW()
+    replay = listing(version, "operational_replay", between)
+    assert replay["measurements"] == []
+    assert replay["excluded"] == {"pending_recheck_by:biocheck.extraction_rules.v16": 3}
+    one = measurement_reads.read_one(old["measurement_id"], True, "operational_replay", between)
+    assert one["current"] is False and one["not_current_reason"] == "pending_recheck_by:biocheck.extraction_rules.v16"
+    assert one["state_at_cutoff"] == "ok"  # nothing happened to it: it was waiting for the new checker
+    assert len(listing(version, "operational_replay", before_upgrade)["measurements"]) == 3  # before: current
+    check_all(RealBioCheck())
+    # the past stays as it was: still pending at `between`; superseded by the re-check afterwards
+    assert listing(version, "operational_replay", between)["excluded"] == {
+        "pending_recheck_by:biocheck.extraction_rules.v16": 3}
+    later = by_value(listing(version, "operational_replay", NOW())["measurements"])
+    assert later["66"]["check"]["checker_version"] == "biocheck.extraction_rules.v16"
+    assert measurement_reads.read_one(old["measurement_id"], True, "operational_replay", NOW())[
+        "not_current_reason"] == "rechecked_by_checker"
+
