@@ -14,7 +14,6 @@
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
 processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
 processing/index_pieces.py:plan  38/24  index piece planner with the split rules inline
-processing/mineru_cloud.py:parse  52/24  MinerU cloud parse polling/parsing loop
 processing/registry_diff.py:_detail  27/22  registry detail diff, one branch per field
 
 # ---- (b) The team's older shared code ----
