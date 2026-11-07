@@ -1390,6 +1390,131 @@ LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥已退役（v3 6.3）：�
                   "旧版本按旧编号仍可读")
 
 
+def _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit):
+    """Cursor binding: a cursor is only valid for the exact read it was issued for."""
+    return sha256(
+        canonical(
+            {
+                "source": source_id,
+                "demo": is_demo,
+                "mode": mode,
+                "cutoff": _cutoff(cutoff).isoformat(),
+                "run": run_id,
+                "ids": sorted(set(source_record_ids)),
+                "terms": sorted(set(terms)),
+                "kind": record_kind,
+                "limit": limit,
+            }
+        )
+    )
+
+
+def _take_page(conn, rows, limit, mode, cutoff):
+    """The records of one page within the response byte budget, and whether more follow."""
+    items, used_bytes = [], 0
+    for row in rows[:limit]:
+        record = HistoryRecord.model_validate(row["payload"])
+        _check_observation_visibility(conn, record, mode, cutoff)
+        record_bytes = len(record.model_dump_json().encode())
+        if used_bytes + record_bytes > MAX_RESPONSE_BYTES:
+            break
+        items.append(record)
+        used_bytes += record_bytes
+    more = len(rows) > len(items)
+    if more and not items:
+        raise HistoryError(
+            "response_budget", "单条来源记录超过响应预算，请联系维护者", 413
+        )
+    return items, more
+
+
+def _list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered):
+    """What the page does and does not prove about the source; `filtered` = ids/terms/kind narrowed the read."""
+    run_coverage = run["coverage"] if run else {}
+    declared_count = len(set(params.get("declared_ids", []))) if run else None
+    # 对声明包再筛ID/词/类型属于条件子集，不能继承原队列完整性。
+    complete = bool(
+        run
+        and run_coverage.get("complete")
+        and not filtered
+        and eligible_count == declared_count
+    )
+    return {
+        "mode": run_coverage.get("mode", "adopted_records"),
+        "scope_description": run["scope_description"]
+        if run
+        else "本应用已采用版本；不是原站全量",
+        "complete": complete,
+        "upstream_pagination_exhausted": run_coverage.get(
+            "upstream_pagination_exhausted"
+        ),
+        "as_of": _cutoff(cutoff),
+        "run_id": str(run["id"]) if run else None,
+        "max_seq": max_seq,
+        "declared_count": run_coverage.get("declared_count"),
+        "declared_scope_count": declared_count,
+        "time_eligible_count": eligible_count,
+        "not_visible_in_scope": max(0, declared_count - eligible_count)
+        if declared_count is not None
+        else 0,
+        "adopted_count": run_coverage.get("adopted_count", 0),
+        "stop_reason": "page_has_more" if more else "end_of_frozen_selection",
+        "limitations": list(run_coverage.get("limitations", []))
+        + [
+            "一页结束不证明来源全量；候选词/ID筛选不构成完整同期队列",
+            "截止资格先筛后选latest；补录和身份补充不倒填首次可见时间",
+        ],
+    }
+
+
+def _count_ineligible(conn, base, eligible, params):
+    return (
+        conn.execute(
+            text(
+                "SELECT count(*) FILTER (WHERE NOT ("
+                + eligible
+                + ")) AS excluded FROM ("
+                + base
+                + ") b"
+            ),
+            params,
+        )
+        .mappings()
+        .one()["excluded"]
+    )
+
+
+def _page_rows(conn, where, mode, term_filter, params):
+    return (
+        conn.execute(
+            text(
+                _ranked(where, mode)
+                + """
+          SELECT payload FROM ranked WHERE n=1 AND source_record_id>:last AND """
+                + term_filter
+                + """ ORDER BY source_record_id LIMIT :limit
+        """
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
+
+
+def _count_eligible_records(conn, base, eligible, params):
+    return conn.execute(
+        text(
+            "SELECT count(DISTINCT source_record_id) FROM ("
+            + base
+            + " AND "
+            + eligible
+            + ") b"
+        ),
+        params,
+    ).scalar_one()
+
+
 def list_records(
     source_id,
     is_demo,
@@ -1408,21 +1533,7 @@ def list_records(
     _derived_mode(source_id, mode)
     if not 1 <= limit <= 100:
         raise HistoryError("query_budget", "每页条数须为1至100")
-    binding = sha256(
-        canonical(
-            {
-                "source": source_id,
-                "demo": is_demo,
-                "mode": mode,
-                "cutoff": _cutoff(cutoff).isoformat(),
-                "run": run_id,
-                "ids": sorted(set(source_record_ids)),
-                "terms": sorted(set(terms)),
-                "kind": record_kind,
-                "limit": limit,
-            }
-        )
-    )
+    binding = _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit)
     position = _decode_cursor(cursor, binding) if cursor else None
     with history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
@@ -1454,50 +1565,10 @@ def list_records(
             + _ROLE
             + "!='context_reference'"
         )
-        counts = (
-            conn.execute(
-                text(
-                    "SELECT count(*) FILTER (WHERE NOT ("
-                    + eligible
-                    + ")) AS excluded FROM ("
-                    + base
-                    + ") b"
-                ),
-                params,
-            )
-            .mappings()
-            .one()
-        )
+        excluded = _count_ineligible(conn, base, eligible, params)
         params.update(last=position["last"] if position else "", limit=limit + 1)
-        rows = (
-            conn.execute(
-                text(
-                    _ranked(where, mode)
-                    + """
-          SELECT payload FROM ranked WHERE n=1 AND source_record_id>:last AND """
-                    + term_filter
-                    + """ ORDER BY source_record_id LIMIT :limit
-        """
-                ),
-                params,
-            )
-            .mappings()
-            .all()
-        )
-        items, used_bytes = [], 0
-        for row in rows[:limit]:
-            record = HistoryRecord.model_validate(row["payload"])
-            _check_observation_visibility(conn, record, mode, cutoff)
-            record_bytes = len(record.model_dump_json().encode())
-            if used_bytes + record_bytes > MAX_RESPONSE_BYTES:
-                break
-            items.append(record)
-            used_bytes += record_bytes
-        more = len(rows) > len(items)
-        if more and not items:
-            raise HistoryError(
-                "response_budget", "单条来源记录超过响应预算，请联系维护者", 413
-            )
+        rows = _page_rows(conn, where, mode, term_filter, params)
+        items, more = _take_page(conn, rows, limit, mode, cutoff)
         next_cursor = (
             _cursor(
                 {
@@ -1510,58 +1581,13 @@ def list_records(
             if more
             else None
         )
-        run_coverage = run["coverage"] if run else {}
-        # 对声明包再筛ID/词/类型属于条件子集，不能继承原队列完整性。
-        eligible_count = conn.execute(
-            text(
-                "SELECT count(DISTINCT source_record_id) FROM ("
-                + base
-                + " AND "
-                + eligible
-                + ") b"
-            ),
-            params,
-        ).scalar_one()
-        declared_count = len(set(params.get("declared_ids", []))) if run else None
-        complete = bool(
-            run
-            and run_coverage.get("complete")
-            and not source_record_ids
-            and not terms
-            and not record_kind
-            and eligible_count == declared_count
-        )
-        coverage = {
-            "mode": run_coverage.get("mode", "adopted_records"),
-            "scope_description": run["scope_description"]
-            if run
-            else "本应用已采用版本；不是原站全量",
-            "complete": complete,
-            "upstream_pagination_exhausted": run_coverage.get(
-                "upstream_pagination_exhausted"
-            ),
-            "as_of": _cutoff(cutoff),
-            "run_id": str(run["id"]) if run else None,
-            "max_seq": max_seq,
-            "declared_count": run_coverage.get("declared_count"),
-            "declared_scope_count": declared_count,
-            "time_eligible_count": eligible_count,
-            "not_visible_in_scope": max(0, declared_count - eligible_count)
-            if declared_count is not None
-            else 0,
-            "adopted_count": run_coverage.get("adopted_count", 0),
-            "stop_reason": "page_has_more" if more else "end_of_frozen_selection",
-            "limitations": list(run_coverage.get("limitations", []))
-            + [
-                "一页结束不证明来源全量；候选词/ID筛选不构成完整同期队列",
-                "截止资格先筛后选latest；补录和身份补充不倒填首次可见时间",
-            ],
-        }
+        eligible_count = _count_eligible_records(conn, base, eligible, params)
+        filtered = bool(source_record_ids or terms or record_kind)
         return RecordCollection(
             items=items,
             next_cursor=next_cursor,
-            excluded_counts={"ineligible_version_count": counts["excluded"]},
-            coverage=coverage,
+            excluded_counts={"ineligible_version_count": excluded},
+            coverage=_list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered),
         )
 
 
