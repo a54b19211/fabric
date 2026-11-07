@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routers import documents, extraction, review, weknora, agent, research, history
+from api.routers import documents, extraction, review, weknora, agent, research, history, measurements
 from core_engine.exception_logger import ExceptionLogger
 
 app = FastAPI(
@@ -45,6 +45,7 @@ app.include_router(weknora.router)
 app.include_router(agent.router)
 app.include_router(research.router)
 app.include_router(history.router)
+app.include_router(measurements.router)
 
 
 # ── 统一错误处理 ────────────────────────────────────────────────────────
