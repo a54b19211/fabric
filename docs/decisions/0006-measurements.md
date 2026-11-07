@@ -40,6 +40,14 @@
 - `derived_measure_runs.state` 没有 `planned`：run 建立时窗口一起建立，直接是 `reading`。
 - `/extraction-checks` 回执对编号、画像两个产物逐字不变（S1 固定点），测量的核验结果经 `/measurements`、
   `/measure-coverage` 读，不并入该回执。
-- 只带记录编号、不带目标版本的更正关系不应用（记录不到具体版本），留作后续。
-- 回放里“核验器已升级但尚未重核”的那段时间仍显示旧对象 ok（升级本身不是事件）；当前模式下它不是当前。
+- 只带记录编号、不带目标版本的更正关系记为对目标记录的声明（V040）：未撤回、未落到版本之前，该记录的所有对象
+  `status.state=unknown`（`correction_target_version_unknown`）、不是当前、默认列表排除并计数、覆盖回执列出；
+  `resolve_correction()` 追加落版本的记录后照常产生 corrected / retracted 事件；`rescan_corrections()` 显式重扫。
+- 回放里哪个核验器在截止时生效没有记录：operational_replay 下，核验器不是当前配置的那个的对象一律
+  `current=false`、`not_current_reason=checker_history_unknown`，从不显示为当前的 ok。
+
+## 后续（未实现）
+
+- **核验器启用历史**：新迁移里一张只追加的表（每个 producer 的核验器启用，写入时用数据库时钟，绝不倒填，不从任务表推断）；回放取截止时生效的那一条：对象核验器不同且截止时看不到重核 → `pending_recheck_by:<checker>`；截止时还没有任何启用记录 → `policy_history_missing`。一次启用覆盖该 producer 的全部对象，不为每个对象写事件。有了它，`checker_history_unknown` 才能换成确定的答案。
+- **重读替代的匹配**：`supersede_run` / `relocate` 现在按（引文、值、指标）匹配新旧对象；两个完整候选只差单位、维度、类型时会被当成同一个（核对发现，单元测试复现，证据 `out/r2-fabric-s1-evidence/candidates-red.log`）。应改为按去掉位置和 producer 的完整候选匹配，且只在一一对应时替代，歧义记 owed。按本轮范围未合入。
 - V037–V039 在本分支内由规则改为触发器（规则会禁止 `INSERT … ON CONFLICT`）；这三个文件从未合并或部署。
