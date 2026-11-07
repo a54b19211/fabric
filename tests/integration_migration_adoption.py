@@ -10,6 +10,9 @@ from migration.manifests import MANIFESTS, Manifest
 
 BEFORE = "7337e54"
 HISTORY_FILES = MANIFESTS["history"].files
+# what the former runners installed: the library a ledger-less deployment has; later files are pending after adoption
+COMPAT = manifests.HISTORY_COMPAT_FILES
+AFTER = tuple(n for n in HISTORY_FILES if n not in COMPAT)
 
 
 def old_history(pg, tmp_path, monkeypatch, label="old"):
@@ -50,15 +53,16 @@ def test_a_library_built_by_the_former_runners_is_adopted_with_its_rows_untouche
     _, reference = pg("ref")
     receipt = baseline.adopt("history", engine, reference_engine=reference, actor="test")
     assert receipt["state"] == "adopted" and receipt["event"] == "observed_baseline"
-    assert receipt["prefix_length"] == len(HISTORY_FILES) and receipt["pending"] == []
-    assert events(engine) == [(name, "observed_baseline") for name in HISTORY_FILES]
+    assert receipt["prefix_length"] == len(COMPAT) and receipt["pending"] == list(AFTER)
+    assert events(engine) == [(name, "observed_baseline") for name in COMPAT]
     with engine.begin() as conn:
         assert [tuple(r) for r in conn.execute(text("SELECT source_id, catalog FROM history_sources ORDER BY 1"))] \
             == seeded
         evidence = conn.execute(text(f"SELECT evidence FROM {ledger.CURRENT} WHERE version='V028'")).scalar_one()
-    assert evidence["prefix_length"] == len(HISTORY_FILES) and evidence["fingerprint_sha256"]
+    assert evidence["prefix_length"] == len(COMPAT) and evidence["fingerprint_sha256"]
     plan = runner.plan("history", engine)
-    assert plan["state"] == "up_to_date" and {a["how"] for a in plan["applied"]} == {"observed_baseline"}
+    assert plan["state"] == "ready" and [p["file"] for p in plan["pending"]] == list(AFTER)
+    assert {a["how"] for a in plan["applied"]} == {"observed_baseline"}
     assert all("never" in a["meaning"] or "not say" in a["meaning"] for a in plan["applied"])
 
 
@@ -68,9 +72,10 @@ def test_after_adoption_a_new_file_is_the_only_thing_the_runner_runs(pg, tmp_pat
     baseline.adopt("history", engine, reference_engine=reference, actor="test")
     files = {**{n: (manifests.VERSIONS_DIR / n).read_text(encoding="utf-8") for n in HISTORY_FILES},
              "V990__after.sql": "CREATE TABLE after_adoption(x int);"}
+    monkeypatch.setattr(runner, "run_reference_steps", lambda *a, **k: [])
     synthetic(monkeypatch, tmp_path, files)
     receipt = runner.apply("history", engine, actor="test")
-    assert [r["file"] for r in receipt["ran"]] == ["V990__after.sql"]
+    assert [r["file"] for r in receipt["ran"]] == [*AFTER, "V990__after.sql"]
     assert events(engine)[-1] == ("V990__after.sql", "applied")
 
 
@@ -249,12 +254,12 @@ def test_a_mapping_that_requires_a_fix_migration_names_it_and_writes_nothing(pg,
 def test_a_revoked_adoption_can_be_adopted_again_by_a_new_observation(pg, tmp_path, monkeypatch):
     _, engine = old_history(pg, tmp_path, monkeypatch)
     baseline.adopt("history", engine, reference_engine=pg("ref")[1], actor="test")
-    for name in HISTORY_FILES:
+    for name in COMPAT:
         runner.revoke_baseline("history", engine, name.split("__")[0], reason="wrong library", actor="test")
     assert runner.plan("history", engine)["state"] == "refused"
     receipt = baseline.adopt("history", engine, reference_engine=pg("ref2")[1], actor="test")
     assert receipt["state"] == "adopted"
-    assert runner.plan("history", engine)["state"] == "up_to_date"
+    assert [p["file"] for p in runner.plan("history", engine)["pending"]] == list(AFTER)
     with engine.begin() as conn:
         kinds = [e for (e,) in conn.execute(text(
             f"SELECT event FROM {ledger.EVENTS} WHERE version='V017' ORDER BY event_id"))]

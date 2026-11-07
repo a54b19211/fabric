@@ -9,9 +9,14 @@ from migration import manifests, runner
 BEFORE = "7337e54"
 
 
+# added after 7337e54: the runner's own ledger, and the lifecycle log of V036
+NEWER = ("fabric_", "history_source_lifecycle")
+
+
 def without_ledger(fp):
-    """The structure, minus the tables, view, sequence and function the runner's ledger adds."""
-    return {kind: [row for row in rows if "fabric_" not in " ".join(str(v) for v in row)] for kind, rows in fp.items()}
+    """The structure, minus what the runner and the files after V035 add to a library of 7337e54."""
+    return {kind: [row for row in rows if not any(n in " ".join(str(v) for v in row) for n in NEWER)]
+            for kind, rows in fp.items()}
 
 
 def test_the_history_role_equals_history_then_index_of_the_former_runners(pg, tmp_path, monkeypatch):

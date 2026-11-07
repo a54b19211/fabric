@@ -73,7 +73,7 @@ HISTORY_COMPAT_FILES = (
     "V031__index_scheduling.sql",
     "V032__extraction_checks.sql",
 )
-HISTORY_FILES_AFTER_COMPAT: tuple[str, ...] = ()
+HISTORY_FILES_AFTER_COMPAT: tuple[str, ...] = ("V036__history_source_lifecycle.sql",)
 
 # The original collection library: the publication outbox (V019) and the history subject columns on documents (V026).
 PUBLICATION_FILES = ("V019__publication_outbox.sql", "V026__history_extraction_subjects.sql")
@@ -124,6 +124,10 @@ POSTCONDITIONS = {
         "ON c.version_id = p.version_id AND c.status = 'parsed' "
         "AND c.processor_version || ':' || c.text_sha256 = p.artifact_key "
         "WHERE p.sent_chars IS NULL AND p.piece IS NULL)",
+    ),
+    "V036__history_source_lifecycle.sql": (
+        "SELECT EXISTS (SELECT 1 FROM history_source_lifecycle WHERE source_id = 'legacy_documents' "
+        "AND event = 'retirement_decided')",
     ),
 }
 
