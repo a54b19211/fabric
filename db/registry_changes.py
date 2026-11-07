@@ -8,8 +8,9 @@ from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError, canonical
 from processing import registry_diff
+from processing.registry import REGISTRY_DIFF_SOURCES
 
-DIFF_SOURCES = frozenset({"clinicaltrials"})
+DIFF_SOURCES = REGISTRY_DIFF_SOURCES
 
 
 def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, facts, locators, pairing,

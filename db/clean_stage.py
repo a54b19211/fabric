@@ -37,8 +37,9 @@ from sqlalchemy import text
 from biz_rules.history_models import HistoryError
 from db.lease import LeaseQueue
 from processing import attachment_parse, clean_text, identifiers, profile
+from processing.registry import UNCLEANED_SOURCES
 
-SKIP_SOURCES = ("reviewed_graph", "primekg_graph")
+SKIP_SOURCES = UNCLEANED_SOURCES
 from collection.catalog import SITE_SOURCES  # noqa: E402  站点插件采集的来源
 REGISTRY_IDS = {"nct", "ctr", "chictr"}
 REGISTRY_SOURCES = {"clinicaltrials", "chictr", "cde_ctr"}
