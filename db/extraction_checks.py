@@ -17,7 +17,10 @@ corresponds to the fixed text it was extracted from - never whether a fact is tr
   batches completed; its items are all batches' items (plus unbuildable items as unchecked). Anything else -
   incomplete, failed, older checker - is "unchecked" with its reason; earlier runs stay as history.
 Producers checked: identifiers (identifier items: the producer's value at its offsets) and profile annotations
-(experiment-type locators; BioCheck v3 checks their locator and quote, the type judgement stays unsupported)."""
+(experiment-type locators; BioCheck v3 checks their locator and quote, the type judgement stays unsupported).
+Each producer is checked under its own contract by its own checker (CHECKS_BY_PRODUCER): identifiers and profile
+annotations by BioCheck /v1 (contract v1, checker v3), measurements by BioCheck /v3 (contract v3, checker v16). A
+task waits for its producer's expected checker; a result is recorded under its producer's contract."""
 
 import hashlib
 import json
@@ -30,7 +33,7 @@ import httpx
 from sqlalchemy import text
 
 from biz_rules.history_models import HistoryError
-from extraction_contract import CONTRACT, canonical, verdict
+from extraction_contract import CHECKER_V3, CHECKER_V16, CONTRACT, CONTRACT_V3, canonical, verdict
 from extraction_contract import derived_status as _derived_status
 from db import history
 from db.lease import LeaseQueue
@@ -38,6 +41,26 @@ from db.lease import LeaseQueue
 LEASE_SECONDS = 120
 WINDOW, MAX_ITEMS, MAX_PASSAGES, MAX_CHARS = 200, 50, 8, 20000
 PRODUCERS = ("identifiers", "profile")
+
+
+@dataclass(frozen=True)
+class Check:
+    """How one producer's products are checked: the contract, the BioCheck endpoint, and the checker expected
+    (the environment variable that may name another one, and the default)."""
+
+    contract: str
+    path: str
+    checker_env: str
+    default_checker: str
+
+
+_V1 = Check(CONTRACT, "/v1/extraction-consistency", "DATAFABRIC_EXTRACTION_CHECKER", CHECKER_V3)
+# the explicit table: identifiers and annotations go to /v1, measurements to /v3 - never one for the other
+CHECKS_BY_PRODUCER = {
+    "identifiers": _V1,
+    "profile": _V1,
+    "measures": Check(CONTRACT_V3, "/v3/extraction-consistency", "DATAFABRIC_MEASURE_CHECKER", CHECKER_V16),
+}
 # Contract lengths (extraction_consistency.v1). A product longer than these is not sent cut to fit: a prefix of the
 # producer's value is a different value, so the item is unbuildable and reads back unchecked.
 LIMITS = {"quote": 300, "value": 300, "scheme": 40, "label": 80, "producer_version": 80,
@@ -50,8 +73,13 @@ def producer_version(name):
     return {"identifiers": identifiers.PROCESSOR_VERSION, "profile": profile.PROCESSOR_VERSION}[name]
 
 
-def expected_checker():
-    return os.environ.get("DATAFABRIC_EXTRACTION_CHECKER", "biocheck.extraction_rules.v3")
+def expected_checker(producer="identifiers"):
+    check = CHECKS_BY_PRODUCER[producer]
+    return os.environ.get(check.checker_env, check.default_checker)
+
+
+def contract_of(producer):
+    return CHECKS_BY_PRODUCER[producer].contract
 
 
 def configured():
@@ -104,9 +132,14 @@ _WHERE = ("version_id=:version_id AND producer=:producer AND producer_version=:p
 
 
 def _claim():
+    """The next due task waiting for its own producer's expected checker."""
+    params, wanted = {}, []
+    for n, producer in enumerate(CHECKS_BY_PRODUCER):
+        params[f"p{n}"], params[f"c{n}"] = producer, expected_checker(producer)
+        wanted.append(f"(q.producer=:p{n} AND q.checker_version=:c{n})")
     with history.history_engine().begin() as conn:
-        return TASKS.claim(conn, lease_seconds=LEASE_SECONDS, params={"c": expected_checker()},
-                           where="q.state IN ('queued','waiting') AND q.checker_version=:c "
+        return TASKS.claim(conn, lease_seconds=LEASE_SECONDS, params=params,
+                           where="q.state IN ('queued','waiting') AND (" + " OR ".join(wanted) + ") "
                                  "AND q.next_check_at<=clock_timestamp()",
                            order_by="q.next_check_at,q.version_id", also_set="updated_at=clock_timestamp()")
 
@@ -151,7 +184,7 @@ def _record(conn, task, version, run, artifact_sha, request_sha, status, *, item
                 CAST(:counts AS jsonb),CAST(:calls AS jsonb),:run,:batches,:index,:reused)
     """), {"v": task["version_id"], "source": version["source_id"], "demo": version["is_demo"],
            "p": task["producer"], "pv": task["producer_version"], "tpv": task["text_processor_version"],
-           "sha": artifact_sha or "", "contract": CONTRACT, "checker": checker, "req": request_sha, "status": status,
+           "sha": artifact_sha or "", "contract": contract_of(task["producer"]), "checker": checker, "req": request_sha, "status": status,
            "err": error_code, "items": json.dumps(list(items), ensure_ascii=False),
            "counts": json.dumps(counts) if counts is not None else None,
            "calls": json.dumps(calls) if calls is not None else None,
@@ -274,10 +307,10 @@ def _requests(subject, full, items):
     return out, unbuildable
 
 
-def _verdict(body, request):
+def _verdict(body, request, producer="identifiers"):
     """None when the response may be adopted, else the reason it may not (the shared contract's strict rules
-    for the checker this deployment expects)."""
-    return verdict(body, request, expected_checker())
+    for the checker this deployment expects for the producer)."""
+    return verdict(body, request, expected_checker(producer))
 
 
 LEASE_LOST = "lease_lost"
@@ -336,8 +369,8 @@ def _record_unsent(work, requests, unbuildable):
         with history.history_engine().begin() as conn:
             if not _own(conn, task):
                 return {"state": LEASE_LOST}
-            _record(conn, task, work.version, work.run, sha, "0" * 64, "no_items", checker=expected_checker(),
-                    error_code="no_items")
+            _record(conn, task, work.version, work.run, sha, "0" * 64, "no_items",
+                    checker=expected_checker(task["producer"]), error_code="no_items")
         return {"state": _finish(task, "done")}  # nothing to check: read back as "no_items", never as checked
     if unbuildable:
         with history.history_engine().begin() as conn:
@@ -365,7 +398,8 @@ def _before_batch(work, request_sha):
         prior = conn.execute(text(
             "SELECT id,items,counts,checker_version FROM derived_extraction_checks WHERE request_sha256=:r "
             "AND checker_version=:c AND is_demo=:d AND status='completed' ORDER BY id LIMIT 1"),
-            {"r": request_sha, "c": expected_checker(), "d": bool(work.version["is_demo"])}).mappings().first()
+            {"r": request_sha, "c": expected_checker(task["producer"]),
+             "d": bool(work.version["is_demo"])}).mappings().first()
         if prior:  # the same full request answered by this checker: this run's batch points at it
             _record(conn, task, work.version, work.run, work.art["text_sha256"], request_sha, "completed",
                     items=prior["items"], counts=prior["counts"], checker=prior["checker_version"],
@@ -374,11 +408,12 @@ def _before_batch(work, request_sha):
     return None
 
 
-def _post(client, request):
-    """One call to BioCheck, outside any transaction: (body or None, call facts, verdict or None)."""
+def _post(client, request, producer):
+    """One call to BioCheck at the producer's endpoint, outside any transaction: (body or None, call facts,
+    verdict or None)."""
     started = time.monotonic()
     try:
-        response = client.post(os.environ["DATAFABRIC_BIOCHECK_URL"].rstrip("/") + "/v1/extraction-consistency",
+        response = client.post(os.environ["DATAFABRIC_BIOCHECK_URL"].rstrip("/") + CHECKS_BY_PRODUCER[producer].path,
                                json=request, headers={"Authorization": "Bearer " + os.environ["DATAFABRIC_BIOCHECK_TOKEN"]})
         status = response.status_code
         try:
@@ -388,7 +423,7 @@ def _post(client, request):
     except httpx.HTTPError:
         status, body = None, None
     calls = {"seconds": round(time.monotonic() - started, 3), "http_status": status}
-    verdict = (_verdict(body, request) if status == 200 else
+    verdict = (_verdict(body, request, producer) if status == 200 else
                "contract_rejected" if status == 400 else "service_unavailable")
     return body, calls, verdict
 
@@ -422,7 +457,7 @@ def _send_batches(client, work, requests):
             continue
         if before is not None:
             return before
-        body, calls, verdict = _post(client, request)
+        body, calls, verdict = _post(client, request, work.task["producer"])
         after = _after_batch(work, request_sha, body, calls, verdict)
         if after is not None:
             return after
