@@ -1018,6 +1018,14 @@ def _reported_coverage(batch):
     return reported
 
 
+def background_version_ids(conn) -> list[str]:
+    """The versions an explicit backfill created: the receipts in the coverage of its runs (flows.who_backfill) list
+    them as background. Material that is not new activity; a version an earlier run had adopted is not in them."""
+    return [r[0] for r in conn.execute(text(
+        "SELECT DISTINCT jsonb_array_elements_text(coverage->'backfill'->'background_version_ids') FROM history_runs "
+        "WHERE jsonb_typeof(coverage->'backfill'->'background_version_ids') = 'array'"))]
+
+
 def finish_fetch(run_id, attempt, batch):
     with history_engine().begin() as conn:
         run = (

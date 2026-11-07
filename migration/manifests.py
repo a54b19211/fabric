@@ -82,6 +82,8 @@ HISTORY_FILES_AFTER_COMPAT: tuple[str, ...] = (
     "V039__measure_correction_links.sql",
     # corrections that name a record but no version, kept as claims until resolved (structure only, no rows)
     "V040__measure_correction_claims.sql",
+    # how a measurement run was selected: by the standing queue or by an explicit list (structure only, no rows)
+    "V041__measure_run_selection.sql",
 )
 
 # The original collection library: the publication outbox (V019) and the history subject columns on documents (V026).

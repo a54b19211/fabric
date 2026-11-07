@@ -1002,3 +1002,99 @@ def test_a_reread_never_merges_two_full_candidates_into_one_successor(db, fake):
     successors = rows(db, "SELECT superseded_by, count(*) AS n FROM derived_measurement_events "
                           "WHERE kind='superseded_by_producer' GROUP BY superseded_by")
     assert all(r["n"] == 1 for r in successors)  # one to one
+
+
+# ---- the two routes and an explicit scope (task book 01, 2.7) ----------------------------------------------------
+
+EN_SENTENCE = "As of 28 October 2026, Rwanda has reported 66 cumulative confirmed cases of Marburg virus disease."
+EN_MODEL = {"object_text": "Marburg virus disease", "metric_text": "cumulative confirmed cases of Marburg virus disease",
+            "value_text": "66", "unit_text": "cases", "period_text": "As of 28 October 2026", "period": "2026-10-28",
+            "period_type": "point", "scope_text": "Rwanda", "kind": "cumulative", "family": "case_count",
+            "quote": EN_SENTENCE, "dims": [{"kind": "disease", "text": "Marburg virus disease"}]}
+
+
+def en_raw(uid):
+    return {"Id": uid, "Title": "Marburg virus disease - Rwanda", "Summary": f"<p>{EN_SENTENCE}</p>"}
+
+
+def mark_background(pg, version):
+    """What the receipt of a bounded backfill does: list the version as one its run created."""
+    receipt = {"backfill": {"background": True, "background_version_ids": [version]}}
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE history_runs SET coverage = coverage || CAST(:c AS jsonb) "
+                          "WHERE version_ids @> CAST(:v AS jsonb)"), {"c": json.dumps(receipt), "v": json.dumps([version])})
+
+
+def read_routes(fake, scope=None):
+    for _ in range(100):
+        if runs.process_once(model=fake.model(), scope=scope, with_rules=True)["state"] == "idle":
+            return
+    raise AssertionError("windows never ran out")
+
+
+def test_a_backfill_version_is_measured_only_when_a_list_names_it_and_the_routes_share_one_entry(db):
+    fake = FakeModel([EN_MODEL])
+    try:
+        live = who_version(en_raw(WHO_ID), "who-live")
+        background = who_version(en_raw(OTHER_ID), "who-background")
+        mark_background(db, background)
+        assert runs.plan(model=fake.model(), with_rules=True) == 2  # the live version: one run per route
+        assert {r["version_id"].strip() for r in rows(db, "SELECT version_id FROM derived_measure_runs")} == {live}
+        scope = runs.Scope.parse({"versions": [background]})
+        receipt = runs.plan_scope(scope, model=fake.model(), with_rules=True)
+        assert {name: list(route["planned"]) for name, route in receipt["routes"].items()} == {
+            "model": [background], "rules": [background]}
+        selected = rows(db, "SELECT producer_identity, selection FROM derived_measure_runs WHERE version_id=:v",
+                        v=background)
+        assert [mx.route_of(r["producer_identity"]) for r in selected].count(mx.RULES) == 1
+        assert all(r["selection"] == scope.selection(background) for r in selected)
+        again = runs.plan_scope(scope, model=fake.model(), with_rules=True)
+        assert all(r["planned"] == {} and r["already_planned"] == [background] for r in again["routes"].values())
+        read_routes(fake, scope)  # through the list: the listed version only, the live version waits
+        assert len(fake.requests) == 1 and rows(db, "SELECT count(*) AS n FROM derived_measure_window_attempts "
+                                                    "WHERE run_id IN (SELECT run_id FROM derived_measure_runs "
+                                                    "WHERE version_id=:v)", v=live)[0]["n"] == 0
+        read_routes(fake)
+        assert len(fake.requests) == 2  # the rules route sends no request
+        readings = rows(db, "SELECT version_id, producer_identity FROM derived_measure_readings")
+        assert sorted((r["version_id"].strip(), mx.route_of(r["producer_identity"])) for r in readings) == sorted(
+            [(background, "model"), (background, "rules"), (live, "model"), (live, "rules")])
+        covered = runs.coverage("who_don", True, [background], "current", NOW())["versions"][background]
+        assert set(covered["routes"]) == {"model", "rules"} and covered["routes"]["rules"]["selection"] is not None
+        agreed = covered["route_agreement"]  # one reading made twice: here the metric differs, so both stay
+        assert agreed["independent_evidence"] is False and [p["verdict"] for p in agreed["pairs"]] == ["conflict"]
+    finally:
+        fake.close()
+
+
+def test_a_list_that_names_windows_leaves_the_others_out_of_scope_and_reports_what_it_could_not_plan(db, fake):
+    from flows import measure_extract as worker
+
+    version, ghost = who_version(), "f" * 64
+    assert runs.plan_scope(runs.Scope.parse({"versions": [{"version_id": version, "windows": [999]}, ghost]}),
+                           model=fake.model())["routes"]["model"]["not_planned"] == {
+        version: "window_out_of_range", ghost: "version_unknown"}
+    assert rows(db, "SELECT count(*) AS n FROM derived_measure_runs")[0]["n"] == 0
+    scope = runs.Scope.parse({"versions": [{"version_id": version, "windows": [1]}]})
+    done = worker.run_scope(scope, model=fake.model(), with_rules=False)
+    states = {r["window_index"]: r["state"] for r in rows(db, "SELECT window_index, state FROM derived_measure_windows")}
+    assert states.pop(1) == "sent" and set(states.values()) == {"skipped"}
+    assert len(fake.requests) == done["requests"] == 1
+    covered = runs.coverage("who_don", True, [version], "current", NOW())["versions"][version]
+    assert covered["state"] == "complete" and covered["read"] == 1 and covered["owed"] == []
+    assert covered["out_of_scope"] == covered["windows_total"] - 1 and covered["selection"]["windows"] == [1]
+
+
+@real_checker
+def test_the_rules_route_alone_gives_a_checked_object_that_names_its_route(db):
+    version = who_version(en_raw(WHO_ID), "who-rules")
+    assert runs.plan(with_rules=True) == 1 and rows(db, "SELECT model_config_sha256 FROM derived_measure_runs") == [
+        {"model_config_sha256": None}]  # no model is configured: only the rules route has a run
+    for _ in range(100):
+        if runs.process_once(with_rules=True)["state"] == "idle":
+            break
+    check_all(RealBioCheck())
+    (item,) = listing(version)["measurements"]
+    assert item["value_text"] == "66" and item["metric"] == "cumulative confirmed cases" and item["scope"] == "Rwanda"
+    assert item["check"]["status"] == "consistent" and item["state_at_cutoff"] == "ok" and item["current"] is True
+    assert item["versions"]["producer"] == mx.rules_identity("who.explicit-count.v1")

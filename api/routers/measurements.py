@@ -59,7 +59,8 @@ def measure_coverage_route(
     cutoff: datetime,
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
 ):
-    """Per version: the reading run's state, the windows read and every owed window (partial = a coverage gap)."""
+    """Per version and route: the reading run's state, the windows read, the windows its list left out and every owed
+    window (partial = a coverage gap); where both routes read the same artifact, whether their readings agree."""
     from db.measure_runs import coverage
 
     return _call(coverage, source_id, is_demo, version_ids, mode, cutoff)
