@@ -57,9 +57,9 @@ db/history.py:_read_filters  79/22  history store queries and validators with ma
 db/history.py:finish_fetch  81/18  history store queries and validators with many optional filters inline
 db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation
 db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:merge_dictionary_identities  62/40  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:resolve_link_proposal  42/28  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:rollback_identity_merge  54/39  identity merge/rollback/review SQL with one branch per case; split by operation
+db/identity.py:merge_dictionary_identities  64/40  identity merge/rollback/review SQL with one branch per case; split by operation
+db/identity.py:resolve_link_proposal  44/28  identity merge/rollback/review SQL with one branch per case; split by operation
+db/identity.py:rollback_identity_merge  57/39  identity merge/rollback/review SQL with one branch per case; split by operation
 db/index_publication.py:process_once  105/55  index publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_graph_input  85/18  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_prepare  103/12  graph publication worker: lease, plan, write and mark in one pass; split per step
@@ -69,7 +69,7 @@ db/publication.py:publish_once  101/21  graph publication worker: lease, plan, w
 db/registry_changes.py:for_versions  84/13  registry-change detection over versions, one branch per change kind
 db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
 db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
-db/repository/review_relations.py:approve_relation  52/25  multi-step write/review function of the legacy graph repository; split per step
+db/repository/review_relations.py:approve_relation  54/25  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
 db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
 db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step

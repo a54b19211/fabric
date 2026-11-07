@@ -40,6 +40,8 @@
 make venv              # .venv：只按 requirements.lock 安装（含契约 wheel），每个包都校验 sha256
 make test              # 单元测试 tests/test_*.py（不连数据库）
 make test-integration  # tests/integration_*.py：临时 PostgreSQL（paradedb）和 Redis 容器，跑完按名字删除
+make lint              # ruff（pyproject.toml）
+make metrics          # 函数长度 80 行 / 圈复杂度 20 的门槛（ops/code_metrics.py；例外清单 ops/metrics_exceptions.txt 只许变短）
 make check-install     # 一个用完即删的新环境：按锁文件安装，再逐个导入全部模块
 make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致（要访问包索引）
 ```
@@ -50,7 +52,7 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 - 抽取一致性的共享契约 `extraction-contract`（BioCheck 协议的字段集合、严格回执校验、规范序列化）当前固定 **1.13.1**，与 BioRadar 相同；Fabric 用到的是 `CONTRACT`、`canonical`、`verdict`、`derived_status`，默认核对器 `biocheck.extraction_rules.v3` 在 1.0.0 到 1.13.0 之间没有变化。它不在包索引上：先在旁边的 extraction-contract 检出里执行 `bash scripts/build_and_verify.sh`（离线构建可复现的 wheel，并校验同一哈希），`make venv` 从 `../extraction-contract/dist`（或 `EXTRACTION_CONTRACT_WHEELS=<目录>`）取它，哈希和 `requirements-contract.txt`、`requirements.lock` 里的相同。
 - 模型调用的共享传输层 `zk-llm-transport`（导入名 `llm_transport`）固定 **0.1.1**（wheel sha256 `7ef33b72…`）：加工层的测量抽取经它发每一次 HTTP 请求，请求前、结果后各有一个回调，由 Fabric 自己落库（db.measure_runs）。它同样不在包索引上：在旁边的 llm-transport 检出里 `make build`，`make venv` 从 `../llm-transport/dist`（或 `LLM_TRANSPORT_WHEELS=<目录>`）取它。
 - `make test-integration` 由 `ops/run_integration_tests.sh` 执行：容器名 `fabric-itest-<角色>-<随机>`（`ITEST_PREFIX` 可改），带本次运行的标签 `fabric-itest.run=<随机>`；只登记 docker 实际为本次运行创建的容器 ID（连同镜像和匿名卷）到清单 `/tmp/fabric-itest-<随机>.containers.jsonl`（`ITEST_MANIFEST` 可改，跑完保留），结束、失败或被中断时都按清单逐个核对标签后停止并 `docker rm -v`（连匿名卷一起删，不扫描、不清理别的卷），不碰不是本次创建的容器；只绑定 127.0.0.1 上 19871 以上的空闲端口；要求固定端口（18436、18636、18736、18737）的几组测试在私有网络命名空间（`unshare -rn`）里跑，经 unix socket 转发到容器，不占用主机上的这些端口。真实 BioCheck 规则的测试用 `BIOCHECK_SRC`（默认 `../clean-biocheck`，先在那里 `make venv`）；找不到检出时这些测试显示为跳过。也可以只跑其中几个文件：`bash ops/run_integration_tests.sh tests/integration_lease.py`。
-- 已验证的组合：uv 0.13.0、CPython 3.10.12：单元 1490 个通过，集成 319 个通过（260 + 47 + 9 + 3）。
+- 已验证的组合：uv 0.13.0、CPython 3.10.12；通过数量以 `make check` 的输出为准，这里不写数字。
 - 已有环境里只做导入检查：`python ops/check_imports.py`。
 
 ## 运行

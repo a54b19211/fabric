@@ -63,7 +63,7 @@ V020/V021/V022/V023 被认作今天的 V033/V034/V020/V035，原记录不删不�
 
 - 目录 api/biz_rules/collection/contracts/db/flows/processing/migration/ops 里还有 31 个超过 100 行的函数（`_publish`、
   `_project_record` 已拆）；合并带进来的 `native_graph.validate_field_bindings` cc 98。
-- 测试代码里还有约 45 处评审编号，`tests/integration_codex_*.py` 两个文件名没改。
+- 测试代码里还有评审编号（注释和少数测试函数名）；两个 `integration_codex_*` 文件已按行为改名。
 - `ops/check_clean_install.sh` 没有端到端跑过（要从软件源下载依赖）；只在现有环境里跑过 `ops/check_imports.py`。
-- Fabric 没有 ruff 配置；默认规则下存量告警很多。
+- ruff 配置在 `pyproject.toml`，`make lint` 是 `make check` 的一部分（E4/E7/E9/F；不检查行宽、导入顺序和空白）。
 - index、clean_stage 的统计查询里还有几处直接写的租约判断（不是队列实现）。
