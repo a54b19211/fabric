@@ -21,8 +21,9 @@ CREATE TABLE IF NOT EXISTS derived_measure_correction_links (
 CREATE INDEX IF NOT EXISTS derived_measure_correction_links_target ON derived_measure_correction_links (target_version_id);
 CREATE INDEX IF NOT EXISTS derived_measure_correction_links_record
  ON derived_measure_correction_links (source_id, source_record_id, is_demo);
-CREATE OR REPLACE RULE derived_measure_correction_links_no_update AS ON UPDATE TO derived_measure_correction_links DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measure_correction_links_no_delete AS ON DELETE TO derived_measure_correction_links DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measure_correction_links_append_only ON derived_measure_correction_links;
+CREATE TRIGGER derived_measure_correction_links_append_only BEFORE UPDATE OR DELETE ON derived_measure_correction_links
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();
 
 -- published_seq is per source (demo and real versions share it), so is the cursor
 CREATE TABLE IF NOT EXISTS derived_measure_correction_cursor (

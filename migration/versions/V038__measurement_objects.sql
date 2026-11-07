@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS derived_measurements (
 );
 CREATE INDEX IF NOT EXISTS derived_measurements_version ON derived_measurements (version_id, is_demo);
 CREATE INDEX IF NOT EXISTS derived_measurements_run ON derived_measurements (run_id);
-CREATE OR REPLACE RULE derived_measurements_no_update AS ON UPDATE TO derived_measurements DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measurements_no_delete AS ON DELETE TO derived_measurements DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measurements_append_only ON derived_measurements;
+CREATE TRIGGER derived_measurements_append_only BEFORE UPDATE OR DELETE ON derived_measurements
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();
 
 CREATE TABLE IF NOT EXISTS derived_measurement_feed (
  is_demo boolean PRIMARY KEY,
@@ -59,8 +60,9 @@ CREATE TABLE IF NOT EXISTS derived_measurement_events (
  UNIQUE (measurement_id, kind, cause_key)
 );
 CREATE INDEX IF NOT EXISTS derived_measurement_events_object ON derived_measurement_events (measurement_id, event_id);
-CREATE OR REPLACE RULE derived_measurement_events_no_update AS ON UPDATE TO derived_measurement_events DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measurement_events_no_delete AS ON DELETE TO derived_measurement_events DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measurement_events_append_only ON derived_measurement_events;
+CREATE TRIGGER derived_measurement_events_append_only BEFORE UPDATE OR DELETE ON derived_measurement_events
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();
 
 -- who a measurement's object is, only from an identity confirmed in a fixed graph package (confirmed by audited
 -- review, or rule_confirmed by a native-id rule) whose evidence points at this measurement's mention: same version,
@@ -81,5 +83,6 @@ CREATE TABLE IF NOT EXISTS derived_measurement_identities (
  produced_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  UNIQUE (measurement_id, role, graph_version_id, namespace, identity_id)
 );
-CREATE OR REPLACE RULE derived_measurement_identities_no_update AS ON UPDATE TO derived_measurement_identities DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measurement_identities_no_delete AS ON DELETE TO derived_measurement_identities DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measurement_identities_append_only ON derived_measurement_identities;
+CREATE TRIGGER derived_measurement_identities_append_only BEFORE UPDATE OR DELETE ON derived_measurement_identities
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();

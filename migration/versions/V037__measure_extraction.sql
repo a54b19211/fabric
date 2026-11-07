@@ -5,6 +5,14 @@
 -- registered before it is sent and settled exactly once after it, and every reading is the strict candidate it is
 -- checked with. A failed window is owed (failed / failed_final) until it is explicitly retried; a spent budget is
 -- not a failure. No foreign key to history_versions (test fixtures truncate it): ids come from the artifacts' rows.
+-- append-only tables of the measurement layer: a row is never changed or deleted (a trigger, not a rule: a rule
+-- would forbid INSERT ... ON CONFLICT, which the idempotent writers use; no percent sign: the runner hands the
+-- whole file to the driver)
+CREATE OR REPLACE FUNCTION derived_measure_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ RAISE EXCEPTION USING MESSAGE = TG_TABLE_NAME || ' is append-only';
+END
+$$;
 CREATE TABLE IF NOT EXISTS derived_measure_runs (
  run_id char(64) PRIMARY KEY,
  version_id char(64) NOT NULL,
@@ -66,8 +74,9 @@ CREATE TABLE IF NOT EXISTS derived_measure_window_attempts (
  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX IF NOT EXISTS derived_measure_window_attempts_window ON derived_measure_window_attempts (run_id, window_index);
-CREATE OR REPLACE RULE derived_measure_window_attempts_no_update AS ON UPDATE TO derived_measure_window_attempts DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measure_window_attempts_no_delete AS ON DELETE TO derived_measure_window_attempts DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measure_window_attempts_append_only ON derived_measure_window_attempts;
+CREATE TRIGGER derived_measure_window_attempts_append_only BEFORE UPDATE OR DELETE ON derived_measure_window_attempts
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();
 
 -- one row per model HTTP request: registered (before it is sent) in its own committed transaction, settled once
 -- (after its outcome) with the raw response; a registration without an outcome is an unknown outcome, never zero
@@ -133,8 +142,9 @@ CREATE TABLE IF NOT EXISTS derived_measure_readings (
 CREATE INDEX IF NOT EXISTS derived_measure_readings_task
  ON derived_measure_readings (version_id, producer_identity, text_processor_version);
 CREATE INDEX IF NOT EXISTS derived_measure_readings_run ON derived_measure_readings (run_id);
-CREATE OR REPLACE RULE derived_measure_readings_no_update AS ON UPDATE TO derived_measure_readings DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measure_readings_no_delete AS ON DELETE TO derived_measure_readings DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measure_readings_append_only ON derived_measure_readings;
+CREATE TRIGGER derived_measure_readings_append_only BEFORE UPDATE OR DELETE ON derived_measure_readings
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();
 
 -- after a clean-text upgrade: where each reading of the superseded run went in the new run - read again, relocated
 -- (its quote once in the new text: a reading checked without a model call), owed (quote several times, or its
@@ -149,5 +159,6 @@ CREATE TABLE IF NOT EXISTS derived_measure_relocations (
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY (old_reading_id, new_run_id)
 );
-CREATE OR REPLACE RULE derived_measure_relocations_no_update AS ON UPDATE TO derived_measure_relocations DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE derived_measure_relocations_no_delete AS ON DELETE TO derived_measure_relocations DO INSTEAD NOTHING;
+DROP TRIGGER IF EXISTS derived_measure_relocations_append_only ON derived_measure_relocations;
+CREATE TRIGGER derived_measure_relocations_append_only BEFORE UPDATE OR DELETE ON derived_measure_relocations
+ FOR EACH ROW EXECUTE FUNCTION derived_measure_append_only();
