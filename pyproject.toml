@@ -12,3 +12,20 @@ select = ["E4", "E7", "E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 # pytest fixtures are imported and then taken as arguments, which pyflakes reads as a redefinition
 "tests/**" = ["F811"]
+
+[tool.code-metrics]
+# what ops/code_metrics.py measures (that script is the same file in every repository)
+paths = [
+    "api",
+    "biz_rules",
+    "collection",
+    "config",
+    "contracts",
+    "core_engine",
+    "db",
+    "disambiguation",
+    "flows",
+    "migration",
+    "ops",
+    "processing",
+]
