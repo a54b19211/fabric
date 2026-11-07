@@ -345,6 +345,32 @@ def test_changes_freeze_commit_boundary_and_concurrent_publish(pg):
     assert [item["source_record_id"] for item in following["items"]] == ["C"]
 
 
+def test_two_imports_of_one_source_that_both_registered_their_run_publish_one_after_the_other(pg, monkeypatch):
+    """Two archive imports of one source, each past its run insert (which takes FOR KEY SHARE on the source row
+    through the foreign key) before either publishes: publishing locks the row against the other publisher only,
+    so both complete in turn - no deadlock (the interleaving is forced by a barrier, not by timing)."""
+    import threading
+
+    barrier = threading.Barrier(2, timeout=30)
+    publish = store._publish
+
+    def both_registered_first(*args, **kwargs):
+        barrier.wait()  # each transaction holds its run insert's key-share lock here
+        return publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_publish", both_registered_first)
+
+    def submit(native):
+        return store.import_archive(archive([raw_record(native)]), "barrier-" + native)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        runs = list(pool.map(submit, ["A", "B"]))
+    assert [r.state for r in runs] == ["completed", "completed"]
+    with pg.begin() as conn:
+        seqs = sorted(conn.execute(text(
+            "SELECT published_seq FROM history_versions WHERE source_id='external_archive'")).scalars())
+    assert seqs == [1, 2]
+
 def test_fetch_attempt_cas_prevents_stale_publish(pg):
     run, _fresh = store.create_fetch(
         FetchRequest(source_id="europe_pmc", query="obesity"), "fetch-cas"

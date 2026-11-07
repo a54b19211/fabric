@@ -84,7 +84,11 @@ def _source(conn, source_id, *, lock=False, _seen=None):
         conn.execute(
             text(
                 "SELECT * FROM history_sources WHERE source_id=:id"
-                + (" FOR UPDATE" if lock else "")
+                # a publisher excludes other publishers of the source only: it changes published_seq and catalog,
+                # never the key, so it must not wait on (or upgrade past) the FOR KEY SHARE locks that inserting a
+                # run or a version of the source takes through the foreign key - FOR UPDATE would, and two imports
+                # that both inserted their run before publishing deadlock
+                + (" FOR NO KEY UPDATE" if lock else "")
             ),
             {"id": source_id},
         )
