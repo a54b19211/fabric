@@ -1,6 +1,7 @@
 """processing.measure_rules against BioRadar's own rules (measure.v10 at b452279) on the same cleaned WHO DON texts
 and the same model outputs: windows, contexts, quote placement and the strict request body of every (window,
-measure) pair, field by field (tests/fixtures/measure_golden.json, made by tests/fixtures/measure_golden_make.py)."""
+measure) pair, field by field (tests/fixtures/measure_golden.json, made by tests/fixtures/measure_golden_make.py).
+The one deliberate difference: window 0 of a longer text ends at a boundary, where BioRadar cuts it at WINDOW."""
 
 import json
 from pathlib import Path
@@ -59,10 +60,23 @@ def test_the_model_output_schema_is_bioradars():
 
 @pytest.mark.parametrize("case", GOLDEN["cases"], ids=[c["name"] for c in GOLDEN["cases"]])
 def test_windows_and_contexts_are_bioradars(case):
-    assert [list(w) for w in rules.windows_of(case["text"], GOLDEN["overlap"])] == [w["window"] for w in case["windows"]]
+    if len(case["text"]) <= rules.WINDOW:  # a longer text differs from the golden's windows from window 0 on
+        assert [list(w) for w in rules.windows_of(case["text"], GOLDEN["overlap"])] == [
+            w["window"] for w in case["windows"]]
     for w in case["windows"]:
         got = rules.contexts_of(case["text"], w["window"][0])
         assert {k: ([list(v)] if v else None) for k, v in got.items()} == w["contexts"]
+
+
+def test_the_first_window_ends_at_a_boundary_and_no_window_cuts_a_number():
+    lead = "Cases were reported in the district. " * 40  # 1480 characters, whole sentences
+    text = lead + "w" * (rules.WINDOW - 2 - len(lead)) + " 75% of them were children. " + "Contacts are followed. " * 20
+    start = text.index("75%")
+    assert text[rules.WINDOW - 1:rules.WINDOW + 1] == "75"  # a cut at WINDOW would fall between the 7 and the 5
+    windows = rules.windows_of(text)
+    assert text[windows[0][1] - 1] == "." and windows[0][1] < rules.WINDOW
+    assert all(not (start < edge < start + len("75%")) for window in windows for edge in window)
+    assert any(a <= start and start + len("75%") <= b for a, b in windows)  # the number is read whole in a window
 
 
 @pytest.mark.parametrize("case", GOLDEN["cases"], ids=[c["name"] for c in GOLDEN["cases"]])

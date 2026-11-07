@@ -9,7 +9,9 @@
 
 - **规则搬家不改规则**：`processing/measure_rules.py` 是 BioRadar measure.v10（b452279 的 `measure_checks.py`、
   `continuation.py`、`material.py`）的窗口切分、上下文、引文定位、字面量定位与严格请求构建；只把“引用来源”换成本处理器
-  自己发给模型的窗口和上下文。`tests/test_measure_rules.py` 用 BioRadar 自己的函数生成的 golden 逐字段比对。
+  自己发给模型的窗口和上下文。`tests/test_measure_rules.py` 用 BioRadar 自己的函数生成的 golden 逐字段比对。唯一的
+  有意差别：第 0 个阅读窗口也在行或句子的边界结束（BioRadar 在 1500 字处硬切；D1 的 421 个 WHO DON 版本里有 4 个把数字
+  切成两半），所以超过一个窗口的长文本不再比对窗口范围，其余字段照旧比对。
 - **键**：run = 固定原件（来源、记录、版本、raw sha256）+ 清洗产物（清洗器版本、正文哈希）+ 处理器（版本 + 模型配置
   canonical 哈希：kind、model、endpoint_id、thinking、temperature、max_tokens；不含 URL 和密钥）；读数 id = 完整候选
   （送 BioCheck 的严格请求项去掉调用方 id + passages + 三段键）；对象 id = 读数 + 核验器版本。同一跨度两种解释是两个读数。

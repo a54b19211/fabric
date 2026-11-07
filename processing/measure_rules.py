@@ -6,7 +6,8 @@ These rules were moved from BioRadar (measure.v10: research/measure_checks.py, r
 material.py at b452279) without changing them; tests/test_measure_rules.py compares them with BioRadar's output on
 the same artifacts and the same model outputs (tests/fixtures/measure_golden.json, docs/decisions/0006). Only the
 places that read BioRadar's own tables changed: a measure's cited sources are the window and the contexts this
-processor itself sent with it (`Sent`), never a workspace's records.
+processor itself sent with it (`Sent`), never a workspace's records. The one other change is the end of window 0
+(see windows_of).
 """
 
 from __future__ import annotations
@@ -64,19 +65,21 @@ def _cut_start(text, lo, hi):
     return lo
 
 
+def _window_end(text, a, window):
+    """The end of the window that starts at a: the end of the text when the rest fits, else the last boundary of its
+    `window` characters (keeping at least two thirds of them). A cut at a fixed length would split a number."""
+    b = min(a + window, len(text))
+    return _cut_end(text, a + window * 2 // 3, b) if b < len(text) else b
+
+
 def windows_of(text, overlap=OVERLAP, window=WINDOW):
-    """[(start, end)]: window 0 is [0, window); each later one starts at a boundary inside the last `overlap`
-    characters of the one before and ends at the last boundary of its `window` characters (keeping at least two
-    thirds of them)."""
-    n = len(text)
-    out = [(0, min(window, n))]
-    while out[-1][1] < n:
+    """[(start, end)]: window 0 starts at 0; each later one starts at a boundary inside the last `overlap`
+    characters of the one before. Every window, the first included, ends at a boundary."""
+    out = [(0, _window_end(text, 0, window))]
+    while out[-1][1] < len(text):
         a_prev, b_prev = out[-1]
         a = _cut_start(text, max(b_prev - overlap, a_prev + 1), b_prev)
-        b = min(a + window, n)
-        if b < n:
-            b = _cut_end(text, a + window * 2 // 3, b)
-        out.append((a, b))
+        out.append((a, _window_end(text, a, window)))
     return out
 
 
