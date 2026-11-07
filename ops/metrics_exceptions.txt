@@ -11,7 +11,6 @@
 # A function is in this section when at least 40% of its lines come from the rebuild line's own commits
 # (git rev-list ebe7c17 ^82bad7b ^d316aad: the rebuild branch since it left the team's 82bad7b, without what
 # came in from feat/server_fix). Code in this section is split, not frozen: the section is to be empty.
-collection/legacy_migration.py:plan  74/28  legacy migration planner, retires with the legacy source (audit 1.2)
 collection/pubmed_fulltext.py:_unpaywall  53/21  full-text access resolver with one branch per publisher/licence case
 collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with one branch per publisher/licence case
 contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
