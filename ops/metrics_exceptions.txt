@@ -1,8 +1,45 @@
 # Functions allowed over 80 lines or complexity 20 (ops/code_metrics.py --check). Format:
 #   <path>:<qualified name>  <lines>/<cc>  <reason>
-# <lines>/<cc> is the size when this list was frozen (2026-11-07, integration/rebuild-2026-11 @ 7337e54): a listed
-# function may not grow past it. The check fails on a new violator, on an entry that is within the limits
-# now, and on a listed function that got bigger, so the list only shrinks. No refactor was done when it was frozen.
+# <lines>/<cc> is the size the function had when it was listed: a listed function may not grow past it. The check
+# fails on a new violator, on an entry that is within the limits now, and on a listed function that got bigger,
+# so the list only shrinks.
+#
+# The entries are in two sections, by who wrote the code (git blame -w -M -C -C -C of each function's lines at
+# ebe7c17; pure moves and lint-only commits are not counted as writing it).
+
+# ---- (a) Written or substantially changed in the 2026-11 rebuild round ----
+# A function is in this section when at least 40% of its lines come from the rebuild line's own commits
+# (git rev-list ebe7c17 ^82bad7b ^d316aad: the rebuild branch since it left the team's 82bad7b, without what
+# came in from feat/server_fix). Code in this section is split, not frozen: the section is to be empty.
+collection/legacy_migration.py:plan  74/28  legacy migration planner, retires with the legacy source (audit 1.2)
+collection/pubmed_fulltext.py:_unpaywall  53/21  full-text access resolver with one branch per publisher/licence case
+collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with one branch per publisher/licence case
+collection/site_crawler.py:_read  81/32  crawler capture projection, one branch per page element
+collection/site_crawler.py:project_capture  65/38  crawler capture projection, one branch per page element
+contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
+db/clean_stage.py:_process_rows  116/35  clean-text stage worker: lease, read, process and write in one pass; split per step
+db/clean_stage.py:for_versions  63/27  clean-text stage worker: lease, read, process and write in one pass; split per step
+db/extraction_checks.py:_requests  54/24  extraction-check worker: lease, build request, call BioCheck, store in one pass; split per step
+db/extraction_checks.py:for_versions  63/55  extraction-check worker: lease, build request, call BioCheck, store in one pass; split per step
+db/index_publication.py:process_once  105/55  index publication worker: lease, plan, write and mark in one pass; split per step
+db/registry_changes.py:for_versions  84/13  registry-change detection over versions, one branch per change kind
+db/retrieval.py:search  89/43  retrieval search/verify with the filter and ranking logic inline
+db/retrieval.py:verify  103/39  retrieval search/verify with the filter and ranking logic inline
+processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
+processing/clean_text.py:_apply_templates  34/22  text cleaners, one branch per markup pattern; table-driven rewrite
+processing/clean_text.py:_readable  22/23  text cleaners, one branch per markup pattern; table-driven rewrite
+processing/clean_text.py:_who_blocks  72/30  text cleaners, one branch per markup pattern; table-driven rewrite
+processing/clean_text.py:_who_blocks.walk  55/29  text cleaners, one branch per markup pattern; table-driven rewrite
+processing/clean_text.py:clean_markdown  88/31  text cleaners, one branch per markup pattern; table-driven rewrite
+processing/identifiers.py:_doi_hits  39/24  identifier scanners, one branch per identifier form
+processing/identifiers.py:_scan  53/22  identifier scanners, one branch per identifier form
+processing/index_pieces.py:plan  38/24  index piece planner with the split rules inline
+processing/mineru_cloud.py:parse  52/24  MinerU cloud parse polling/parsing loop
+processing/registry_diff.py:_detail  27/22  registry detail diff, one branch per field
+
+# ---- (b) The team's older shared code ----
+# Code the team wrote before this round: under 40% of each function's lines come from the rebuild line (under
+# 10% for all but five of them). Each entry names the split it needs.
 api/routers/agent.py:get_pipeline_overview  133/27  review-console endpoint that assembles one response from several queries; split by response section
 api/routers/agent.py:list_merge_candidates  85/18  review-console endpoint that assembles one response from several queries; split by response section
 api/routers/documents.py:get_document  73/24  document endpoint with many optional filters and joins in one query builder; split filter parsing from the query
@@ -35,24 +72,14 @@ biz_rules/reviewed_graph.py:primekg_bundle  102/16  reviewed-graph neighbourhood
 biz_rules/sec_xbrl.py:financial_rows  50/31  XBRL fact projection with one branch per statement item
 biz_rules/who_don.py:project_who  75/27  WHO disease-outbreak page reader/projection, one branch per page section
 biz_rules/who_don.py:read_who  120/32  WHO disease-outbreak page reader/projection, one branch per page section
-collection/legacy_migration.py:plan  74/28  legacy migration planner, retires with the legacy source (audit 1.2)
-collection/pubmed_fulltext.py:_unpaywall  53/21  full-text access resolver with one branch per publisher/licence case
-collection/pubmed_fulltext.py:jats_access  34/27  full-text access resolver with one branch per publisher/licence case
-collection/site_crawler.py:_read  81/32  crawler capture projection, one branch per page element
-collection/site_crawler.py:project_capture  65/38  crawler capture projection, one branch per page element
-contracts/acceptance.py:validate_case_set  36/23  acceptance-case validator, one check per business rule; keep the rules in one place
 core_engine/agent_runner.py:AgentRunner.run_document_review  122/31  legacy graph agent runner (AgentRunner is a god class, audit 2.1); split with the legacy graph feature
 core_engine/agent_runner.py:AgentRunner.run_entity_merge_stream  190/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
 core_engine/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merge agent graph assembly
 core_engine/api_router.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
 core_engine/authority_client.py:resolve_identifier  102/21  authority-service identifier resolution with fallbacks inline
-core_engine/cloud_api_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop
+core_engine/cloud_api_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
 core_engine/pagination_driver.py:JsClickDriver._playwright_crawl_tables  115/21  browser pagination driver, long because of the page-interaction steps
 core_engine/router.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
-db/clean_stage.py:_process_rows  116/35  clean-text stage worker: lease, read, process and write in one pass; split per step
-db/clean_stage.py:for_versions  63/27  clean-text stage worker: lease, read, process and write in one pass; split per step
-db/extraction_checks.py:_requests  54/24  extraction-check worker: lease, build request, call BioCheck, store in one pass; split per step
-db/extraction_checks.py:for_versions  63/55  extraction-check worker: lease, build request, call BioCheck, store in one pass; split per step
 db/history.py:_read_filters  79/22  history store queries and validators with many optional filters inline
 db/history.py:finish_fetch  81/18  history store queries and validators with many optional filters inline
 db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation
@@ -60,21 +87,17 @@ db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/revie
 db/identity.py:merge_dictionary_identities  64/40  identity merge/rollback/review SQL with one branch per case; split by operation
 db/identity.py:resolve_link_proposal  44/28  identity merge/rollback/review SQL with one branch per case; split by operation
 db/identity.py:rollback_identity_merge  57/39  identity merge/rollback/review SQL with one branch per case; split by operation
-db/index_publication.py:process_once  105/55  index publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_graph_input  85/18  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_prepare  103/12  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_publish_graph  84/5  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:backfill_once  166/23  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:publish_once  101/21  graph publication worker: lease, plan, write and mark in one pass; split per step
-db/registry_changes.py:for_versions  84/13  registry-change detection over versions, one branch per change kind
 db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
 db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_relations.py:approve_relation  54/25  multi-step write/review function of the legacy graph repository; split per step
 db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
 db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
 db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step
-db/retrieval.py:search  89/43  retrieval search/verify with the filter and ranking logic inline
-db/retrieval.py:verify  103/39  retrieval search/verify with the filter and ranking logic inline
 db/source_refresh.py:refresh_once  152/31  source refresh/health worker: schedule, fetch and report in one pass; split per step
 db/source_refresh.py:source_health  174/34  source refresh/health worker: schedule, fetch and report in one pass; split per step
 disambiguation/llm_ranker.py:rank_with_llm  101/21  LLM/reranker call with prompt, parse and fallback inline
@@ -88,14 +111,3 @@ flows/history_fetch.py:freeze_demo_fetch  42/27  demo-fetch guard with one check
 flows/history_fetch.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
 flows/history_publish.py:main  100/18  command-line entry with its argument handling and run loop inline
 migration/sqltext.py:split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case
-processing/attachment_parse.py:parse_file  44/21  attachment parser dispatch, one branch per file type
-processing/clean_text.py:_apply_templates  34/22  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:_readable  22/23  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:_who_blocks  72/30  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:_who_blocks.walk  55/29  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/clean_text.py:clean_markdown  88/31  text cleaners, one branch per markup pattern; table-driven rewrite
-processing/identifiers.py:_doi_hits  39/24  identifier scanners, one branch per identifier form
-processing/identifiers.py:_scan  53/22  identifier scanners, one branch per identifier form
-processing/index_pieces.py:plan  38/24  index piece planner with the split rules inline
-processing/mineru_cloud.py:parse  52/24  MinerU cloud parse polling/parsing loop
-processing/registry_diff.py:_detail  27/22  registry detail diff, one branch per field
