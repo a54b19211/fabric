@@ -81,7 +81,6 @@ db/repository/review_relations.py:approve_relation  52/25  multi-step write/revi
 db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
 db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
 db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step
-db/repository/merges.py:get_pending_merges  208/49  pending-merge listing with all review filters and joins inline
 db/repository/canonical.py:process_entity_merge  161/39  multi-step write/review function of the legacy graph repository; split per step
 db/repository/documents.py:upsert_document  97/44  multi-step write/review function of the legacy graph repository; split per step
 db/retrieval.py:search  89/43  retrieval search/verify with the filter and ranking logic inline

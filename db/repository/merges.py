@@ -82,6 +82,145 @@ def resolve_identity_merge_proposal(proposal_id, status, reviewer='', note='', s
     return resolve_link_proposal(proposal_id, status, reviewer, note, session=session, review_context=review_context)
 
 
+def _unwrap_val(value):
+    """Queue values are stored as {"_val": x} when x is not a dict/list."""
+    return value.get("_val") if isinstance(value, dict) and list(value.keys()) == ["_val"] else value
+
+
+def _log_auto_resolve(session, r, description, details):
+    _write_operation_log(
+        session, "update", "entity_merge_queue", r.id,
+        business_action="auto_resolve", description=description, details=details,
+        trigger_source="get_pending_merges",
+    )
+
+
+def _auto_resolve_stale_conflict(session, r, entity, source_ent) -> bool:
+    """Close a queue row that no longer needs a human decision. True when it was resolved here."""
+    if entity is None:
+        r.resolution = "resolved_dict_deleted"
+        r.reviewed_at = datetime.now(timezone.utc)
+        _log_auto_resolve(session, r, f"dict 已删除: dict_id={r.target_dict_id} field={r.field_name}",
+                          {"reason": "dict_deleted", "dict_id": r.target_dict_id})
+        return True
+    if source_ent is None:
+        r.resolution = "resolved_source_deleted"
+        r.reviewed_at = datetime.now(timezone.utc)
+        _log_auto_resolve(session, r, f"source 实体已删除: entity_id={r.source_entity_id} field={r.field_name}",
+                          {"reason": "source_deleted", "source_entity_id": r.source_entity_id})
+        return True
+    # 值相等 / 一侧语义为空 → 自动 resolve
+    current_val = (entity.canonical_data or {}).get(r.field_name)
+    new_val = _unwrap_val(r.new_value)
+    cur_empty = _is_empty_value(current_val)
+    new_empty = _is_empty_value(new_val)
+    if cur_empty and new_empty:
+        r.resolution = "resolved_both_empty"
+        r.reviewed_at = datetime.now(timezone.utc)
+        return True
+    if cur_empty and not new_empty:
+        r.resolution = "accept_new"
+        r.reviewed_at = datetime.now(timezone.utc)
+        cd = dict(entity.canonical_data or {})
+        cd[r.field_name] = r.new_value
+        from db.identity import set_dictionary_identity_data
+        set_dictionary_identity_data(session, entity, canonical_data=cd)
+        entity.canonical_updated_at = datetime.now(timezone.utc)
+        return True
+    if new_empty and not cur_empty:
+        r.resolution = "keep_existing"
+        r.reviewed_at = datetime.now(timezone.utc)
+        return True
+    if current_val == new_val:
+        r.resolution = "resolved_already_merged"
+        r.reviewed_at = datetime.now(timezone.utc)
+        _log_auto_resolve(session, r, f"值已通过其他途径合并: dict_id={r.target_dict_id} field={r.field_name}",
+                          {"reason": "already_merged", "current_value": current_val})
+        return True
+    return False
+
+
+def _conflict_group(r, entity) -> dict:
+    cd = entity.canonical_data or {}
+    return {
+        "dict_id": r.target_dict_id,
+        "entity_type": entity.entity_type,
+        "entity_name": cd.get("name", ""),
+        "canonical_data": cd,
+        "canonical_source": entity.canonical_source or "",
+        "conflicts": [],
+    }
+
+
+def _conflict_entry(r, source_ent) -> dict:
+    return {
+        "merge_id": r.id,
+        "field_name": r.field_name,
+        "existing_value": _unwrap_val(r.existing_value),
+        "new_value": _unwrap_val(r.new_value),
+        "source_entity_id": r.source_entity_id,
+        "source_site": r.source_site,
+        "source_doc_uuid": source_ent.source_doc_uuid,
+        "existing_source_doc_uuid": r.existing_source_doc_uuid or "",
+    }
+
+
+def _group_pending_conflicts(session, rows, dict_map, source_ent_map):
+    """Freshness-check each queue row; return the open conflicts grouped by dictionary and the auto-resolved count."""
+    groups: dict[int, dict] = {}
+    auto_resolved = 0
+    for r in rows:
+        entity = dict_map.get(r.target_dict_id)
+        source_ent = source_ent_map.get(r.source_entity_id)
+        if _auto_resolve_stale_conflict(session, r, entity, source_ent):
+            auto_resolved += 1
+            continue
+        # 刷新过期的 existing_value
+        current_val = (entity.canonical_data or {}).get(r.field_name)
+        existing_val = _unwrap_val(r.existing_value)
+        if existing_val != current_val and current_val is not None:
+            r.existing_value = current_val if isinstance(current_val, (dict, list)) else {"_val": current_val}
+        if r.target_dict_id not in groups:
+            groups[r.target_dict_id] = _conflict_group(r, entity)
+        groups[r.target_dict_id]["conflicts"].append(_conflict_entry(r, source_ent))
+    return groups, auto_resolved
+
+
+def _attach_conflict_sources(session, groups) -> None:
+    """补全来源文档列表：查出所有关联实体，按字段值分组"""
+    group_dict_ids = list(groups.keys())
+    if not group_dict_ids:
+        return
+    all_related_entities = session.query(ExtractedEntity).filter(ExtractedEntity.dict_id.in_(group_dict_ids)).all()
+    from collections import defaultdict
+    entities_by_dict: dict[int, list] = defaultdict(list)
+    for ent in all_related_entities:
+        entities_by_dict[ent.dict_id].append(ent)
+    for g in groups.values():
+        dict_entities = entities_by_dict.get(g["dict_id"], [])
+        for c in g["conflicts"]:
+            ev = c["existing_value"]
+            nv = c["new_value"]
+            existing_sources: list[dict] = []
+            new_sources: list[dict] = []
+            seen_existing: set[str] = set()
+            seen_new: set[str] = set()
+            for ent in dict_entities:
+                ent_val = (ent.entity_data or {}).get(c["field_name"])
+                if ent_val is None:
+                    continue
+                doc = ent.source_doc_uuid or ""
+                src = {"entity_id": ent.id, "source_doc_uuid": doc, "source_site": ent.source_site or ""}
+                if ent_val == ev and doc not in seen_existing:
+                    existing_sources.append(src)
+                    seen_existing.add(doc)
+                elif ent_val == nv and doc not in seen_new:
+                    new_sources.append(src)
+                    seen_new.add(doc)
+            c["existing_sources"] = existing_sources
+            c["new_sources"] = new_sources
+
+
 def get_pending_merges(limit: int = 50) -> dict:
     """
     查询待处理合并冲突，按 dict_id 聚合。
@@ -138,155 +277,13 @@ def get_pending_merges(limit: int = 50) -> dict:
         }
 
         # 4. 逐条校验新鲜度
-        groups: dict[int, dict] = {}
-        auto_resolved = 0
-
-        for r in rows:
-            entity = dict_map.get(r.target_dict_id)
-            if entity is None:
-                r.resolution = "resolved_dict_deleted"
-                r.reviewed_at = datetime.now(timezone.utc)
-                auto_resolved += 1
-                _write_operation_log(
-                    session, "update", "entity_merge_queue", r.id,
-                    business_action="auto_resolve",
-                    description=f"dict 已删除: dict_id={r.target_dict_id} field={r.field_name}",
-                    details={"reason": "dict_deleted", "dict_id": r.target_dict_id},
-                    trigger_source="get_pending_merges",
-                )
-                continue
-
-            source_ent = source_ent_map.get(r.source_entity_id)
-            if source_ent is None:
-                r.resolution = "resolved_source_deleted"
-                r.reviewed_at = datetime.now(timezone.utc)
-                auto_resolved += 1
-                _write_operation_log(
-                    session, "update", "entity_merge_queue", r.id,
-                    business_action="auto_resolve",
-                    description=f"source 实体已删除: entity_id={r.source_entity_id} field={r.field_name}",
-                    details={"reason": "source_deleted", "source_entity_id": r.source_entity_id},
-                    trigger_source="get_pending_merges",
-                )
-                continue
-
-            # 值相等 / 一侧语义为空 → 自动 resolve
-            canonical = entity.canonical_data or {}
-            current_val = canonical.get(r.field_name)
-            new_val = r.new_value.get("_val") if isinstance(r.new_value, dict) and list(r.new_value.keys()) == ["_val"] else r.new_value
-            cur_empty = _is_empty_value(current_val)
-            new_empty = _is_empty_value(new_val)
-            if cur_empty and new_empty:
-                r.resolution = "resolved_both_empty"
-                r.reviewed_at = datetime.now(timezone.utc)
-                auto_resolved += 1
-                continue
-            if cur_empty and not new_empty:
-                r.resolution = "accept_new"
-                r.reviewed_at = datetime.now(timezone.utc)
-                auto_resolved += 1
-                cd = dict(entity.canonical_data or {})
-                cd[r.field_name] = r.new_value
-                from db.identity import set_dictionary_identity_data
-                set_dictionary_identity_data(session, entity, canonical_data=cd)
-                entity.canonical_updated_at = datetime.now(timezone.utc)
-                continue
-            if new_empty and not cur_empty:
-                r.resolution = "keep_existing"
-                r.reviewed_at = datetime.now(timezone.utc)
-                auto_resolved += 1
-                continue
-            if current_val == new_val:
-                r.resolution = "resolved_already_merged"
-                r.reviewed_at = datetime.now(timezone.utc)
-                auto_resolved += 1
-                _write_operation_log(
-                    session, "update", "entity_merge_queue", r.id,
-                    business_action="auto_resolve",
-                    description=f"值已通过其他途径合并: dict_id={r.target_dict_id} field={r.field_name}",
-                    details={"reason": "already_merged", "current_value": current_val},
-                    trigger_source="get_pending_merges",
-                )
-                continue
-
-            # 刷新过期的 existing_value
-            existing_val = r.existing_value.get("_val") if isinstance(r.existing_value, dict) and list(r.existing_value.keys()) == ["_val"] else r.existing_value
-            if existing_val != current_val and current_val is not None:
-                r.existing_value = current_val if isinstance(current_val, (dict, list)) else {"_val": current_val}
-
-            # 组装分组
-            if r.target_dict_id not in groups:
-                cd = entity.canonical_data or {}
-                groups[r.target_dict_id] = {
-                    "dict_id": r.target_dict_id,
-                    "entity_type": entity.entity_type,
-                    "entity_name": cd.get("name", ""),
-                    "canonical_data": cd,
-                    "canonical_source": entity.canonical_source or "",
-                    "conflicts": [],
-                }
-
-            existing_val_out = r.existing_value
-            new_val_out = r.new_value
-            groups[r.target_dict_id]["conflicts"].append({
-                "merge_id": r.id,
-                "field_name": r.field_name,
-                "existing_value": existing_val_out.get("_val") if isinstance(existing_val_out, dict) and list(existing_val_out.keys()) == ["_val"] else existing_val_out,
-                "new_value": new_val_out.get("_val") if isinstance(new_val_out, dict) and list(new_val_out.keys()) == ["_val"] else new_val_out,
-                "source_entity_id": r.source_entity_id,
-                "source_site": r.source_site,
-                "source_doc_uuid": source_ent.source_doc_uuid,
-                "existing_source_doc_uuid": r.existing_source_doc_uuid or "",
-            })
-
+        groups, auto_resolved = _group_pending_conflicts(session, rows, dict_map, source_ent_map)
         if auto_resolved:
             session.commit()
             logger.info(f"[DB] get_pending_merges: auto resolved {auto_resolved} 条过期冲突")
 
-        # 5. 补全来源文档列表：查出所有关联实体，按字段值分组
-        group_dict_ids = list(groups.keys())
-        if group_dict_ids:
-            all_related_entities = (
-                session.query(ExtractedEntity)
-                .filter(
-                    ExtractedEntity.dict_id.in_(group_dict_ids),
-                )
-                .all()
-            )
-            # entities_by_dict[dict_id] = [entity, ...]
-            from collections import defaultdict
-            entities_by_dict: dict[int, list] = defaultdict(list)
-            for ent in all_related_entities:
-                entities_by_dict[ent.dict_id].append(ent)
-
-            for g in groups.values():
-                dict_entities = entities_by_dict.get(g["dict_id"], [])
-                for c in g["conflicts"]:
-                    ev = c["existing_value"]
-                    nv = c["new_value"]
-                    existing_sources: list[dict] = []
-                    new_sources: list[dict] = []
-                    seen_existing: set[str] = set()
-                    seen_new: set[str] = set()
-                    for ent in dict_entities:
-                        ed = ent.entity_data or {}
-                        ent_val = ed.get(c["field_name"])
-                        if ent_val is None:
-                            continue
-                        doc = ent.source_doc_uuid or ""
-                        src = {
-                            "entity_id": ent.id,
-                            "source_doc_uuid": doc,
-                            "source_site": ent.source_site or "",
-                        }
-                        if ent_val == ev and doc not in seen_existing:
-                            existing_sources.append(src)
-                            seen_existing.add(doc)
-                        elif ent_val == nv and doc not in seen_new:
-                            new_sources.append(src)
-                            seen_new.add(doc)
-                    c["existing_sources"] = existing_sources
-                    c["new_sources"] = new_sources
+        # 5. 补全来源文档列表
+        _attach_conflict_sources(session, groups)
 
         sorted_groups = sorted(groups.values(), key=lambda g: g["dict_id"], reverse=True)
         return {"total_groups": len(sorted_groups), "groups": sorted_groups}
