@@ -73,7 +73,12 @@ HISTORY_COMPAT_FILES = (
     "V031__index_scheduling.sql",
     "V032__extraction_checks.sql",
 )
-HISTORY_FILES_AFTER_COMPAT: tuple[str, ...] = ("V036__history_source_lifecycle.sql",)
+HISTORY_FILES_AFTER_COMPAT: tuple[str, ...] = (
+    "V036__history_source_lifecycle.sql",
+    # the measurement extraction of the processing layer and its checked objects (structure only, no rows)
+    "V037__measure_extraction.sql",
+    "V038__measurement_objects.sql",
+)
 
 # The original collection library: the publication outbox (V019) and the history subject columns on documents (V026).
 PUBLICATION_FILES = ("V019__publication_outbox.sql", "V026__history_extraction_subjects.sql")

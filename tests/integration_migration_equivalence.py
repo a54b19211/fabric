@@ -9,8 +9,8 @@ from migration import manifests, runner
 BEFORE = "7337e54"
 
 
-# added after 7337e54: the runner's own ledger, and the lifecycle log of V036
-NEWER = ("fabric_", "history_source_lifecycle")
+# added after 7337e54: the runner's own ledger, the lifecycle log of V036, the measurement tables of V037/V038
+NEWER = ("fabric_", "history_source_lifecycle", "derived_measure")
 
 
 def without_ledger(fp):
