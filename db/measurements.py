@@ -5,8 +5,8 @@
   measurement_id = digest of reading and checker version) with a "created" event. The same reading checked by a
   newer checker gets a new object; the older one gets "rechecked_by_checker" (until then it is not current, see
   db.measurement_reads). A run that supersedes another (a clean-text upgrade, or an explicit producer upgrade)
-  supersedes each old object it read again - same quote, value and metric - with "superseded_by_processor" /
-  "superseded_by_producer". Corrections already known for the version are applied to the new objects.
+  supersedes each old object it read again - the same full candidate, one to one - with "superseded_by_processor"
+  / "superseded_by_producer". Corrections already known for the version are applied to the new objects.
 - relocate(): when a clean-text upgrade's run is read, each old reading that has an object and was not read again is
   relocated (its quote once in the new text: a reading built from the old measure, checked without a model call),
   owed (several places, or literals no longer located) or gone (quote not in the new text); the old object stays.
@@ -205,8 +205,27 @@ def _rechecked(conn, obj):
               superseded_by=obj["measurement_id"])
 
 
+def _unplaced(value):
+    if isinstance(value, dict):
+        return {k: _unplaced(v) for k, v in value.items() if k not in ("span", "locator", "passage")}
+    if isinstance(value, list):
+        return [_unplaced(v) for v in value]
+    return value
+
+
 def _match_key(item):
-    return item["quote"], item["fields"]["value"].get("value"), item["fields"]["metric"].get("value")
+    """The whole canonical candidate without its positions (offsets move with another clean text) or its producer:
+    the quote, every field's state and final value, scope mode, kind, qualifier, modality, family and each stated
+    dimension. Two candidates differing in any of these (another unit, period, scope ...) never stand for each other."""
+    return mx.canonical(_unplaced({k: item.get(k) for k in ("quote", "fields", "family", "dims")}))
+
+
+def _unique(rows):
+    """{candidate key: row} of the keys held by exactly one row - an ambiguous key supersedes nothing."""
+    seen = {}
+    for row in rows:
+        seen.setdefault(_match_key(row["item"]), []).append(row)
+    return {k: v[0] for k, v in seen.items() if len(v) == 1}
 
 
 def supersede_run(conn, run_id):
@@ -221,11 +240,9 @@ def supersede_run(conn, run_id):
             (run["text_processor_version"], run["text_sha256"]) else "superseded_by_producer")
     objects = """SELECT m.*, r.item FROM derived_measurements m JOIN derived_measure_readings r
                    ON r.reading_id = m.reading_id WHERE m.run_id = :r"""
-    new = {}
-    for row in conn.execute(text(objects), {"r": run_id}).mappings():
-        new.setdefault(_match_key(row["item"]), dict(row))
+    new = _unique([dict(r) for r in conn.execute(text(objects), {"r": run_id}).mappings()])
     n = 0
-    for row in conn.execute(text(objects), {"r": old["run_id"]}).mappings():
+    for row in _unique([dict(r) for r in conn.execute(text(objects), {"r": old["run_id"]}).mappings()]).values():
         by = new.get(_match_key(row["item"]))
         if by is not None and event(conn, dict(row), kind, "run:" + run_id, {"run_id": run_id},
                                     visible_at=row["first_seen_at"], proof_at=row["proof_available_at"],
@@ -277,8 +294,10 @@ def relocate(conn, run):
         {"v": run["version_id"], "tpv": run["text_processor_version"], "sha": run["text_sha256"]}).scalar()
     if full is None:
         return 0
-    reread = {_match_key(r["item"]): r["reading_id"] for r in conn.execute(text(
-        "SELECT reading_id,item FROM derived_measure_readings WHERE run_id=:r"), {"r": run["run_id"]}).mappings()}
+    readings = [dict(r) for r in conn.execute(text(
+        "SELECT reading_id,item FROM derived_measure_readings WHERE run_id=:r"), {"r": run["run_id"]}).mappings()]
+    reread = {k: r["reading_id"] for k, r in _unique(readings).items()}
+    ambiguous = {_match_key(r["item"]) for r in readings} - set(reread)
     windows = conn.execute(text("SELECT window_index,start_char,end_char FROM derived_measure_windows WHERE run_id=:r "
                                 "ORDER BY window_index"), {"r": run["run_id"]}).mappings().all()
     olds = conn.execute(text("""
@@ -288,8 +307,14 @@ def relocate(conn, run):
                              AND x.new_run_id=:new)"""), {"old": old_run["run_id"], "new": run["run_id"]}).mappings()
     n = 0
     for old in [dict(r) for r in olds]:
-        again = reread.get(_match_key(old["item"]))
-        outcome = ("reread", None, again, 1) if again else _relocated(conn, run, full, windows, old)
+        key = _match_key(old["item"])
+        again = reread.get(key)
+        if again:
+            outcome = ("reread", None, again, 1)
+        elif key in ambiguous:  # read again more than once: which one stands for it is not known
+            outcome = ("owed", "ambiguous_candidate", None, 1)
+        else:
+            outcome = _relocated(conn, run, full, windows, old)
         conn.execute(text("INSERT INTO derived_measure_relocations(old_reading_id,new_run_id,outcome,reason,"
                           "new_reading_id,quote_occurrences) VALUES (:o,:r,:out,:why,:new,:n) ON CONFLICT DO NOTHING"),
                      {"o": old["reading_id"], "r": run["run_id"], "out": outcome[0], "why": outcome[1],

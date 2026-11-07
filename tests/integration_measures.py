@@ -948,3 +948,22 @@ def test_an_unresolved_correction_that_its_record_withdraws_no_longer_holds(db, 
     assert len(listing(version)["measurements"]) == 3
     assert {r["kind"] for r in rows(db, "SELECT kind FROM derived_measure_correction_claims")} == {
         "asserted", "withdrawn"}
+
+
+@real_checker
+def test_a_reread_never_merges_two_full_candidates_into_one_successor(db, fake):
+    version, items = chain(fake)
+    old = by_value(items)["66"]
+    unitless = dict(CASES, dims=[{"kind": "disease", "text": "马尔堡病毒病"}])  # same quote, value, metric; other dims
+    fake.measures = [unitless, CASES, DEATHS, RECOVERED]
+    newer = fake.model("fake-measure-model-2")
+    runs.plan(model=newer, producer_upgrade=True)
+    read_all(fake, model=newer)
+    check_all(RealBioCheck())
+    (ev,) = rows(db, "SELECT superseded_by FROM derived_measurement_events WHERE measurement_id=:m "
+                     "AND kind='superseded_by_producer'", m=old["measurement_id"])
+    successor = measurement_reads.read_one(ev["superseded_by"].strip(), True, "current", NOW())
+    assert successor["dims"] == old["dims"] and successor["unit"] == old["unit"]  # the same full candidate
+    successors = rows(db, "SELECT superseded_by, count(*) AS n FROM derived_measurement_events "
+                          "WHERE kind='superseded_by_producer' GROUP BY superseded_by")
+    assert all(r["n"] == 1 for r in successors)  # one to one
