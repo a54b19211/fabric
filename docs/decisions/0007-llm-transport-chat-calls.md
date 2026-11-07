@@ -1,6 +1,6 @@
 # 0007 对话调用走 llm_transport；流式输出、embedding 和 Agent 仍走 SDK
 
-- 状态：已实现（分支 `r2/fabric-transport`），待评审。
+- 状态：已实现，评审通过并合入 `integration/rebuild-2026-11`（2026-11-07；原分支 `r2/fabric-transport`）。
 - 日期：2026-11-07
 
 ## 决定
