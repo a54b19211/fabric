@@ -1115,6 +1115,30 @@ def test_a_list_claims_only_the_windows_it_names_of_a_run_the_standing_queue_alr
     assert len(fake.requests) == len(states)
 
 
+def test_a_list_plans_a_run_over_an_older_producers_only_when_asked_to_upgrade(db, fake, monkeypatch):
+    listed = who_version()
+    who_version(who_raw(uid=OTHER_ID), "who-other")  # a second version, not on the list
+    with monkeypatch.context() as earlier:  # both versions were planned by an earlier processor version
+        earlier.setattr(mx, "PROCESSOR_VERSION", "datafabric.measure_extract.v1")
+        assert runs.plan(model=fake.model()) == 2
+    sql = "SELECT * FROM derived_measure_runs ORDER BY run_id"
+    before = rows(db, sql)
+    old = next(r["run_id"] for r in before if r["version_id"].strip() == listed)
+    scope = runs.Scope.parse({"versions": [{"version_id": listed, "windows": [0]}]})
+    held = runs.plan_scope(scope, model=fake.model())["routes"]["model"]
+    assert held["planned"] == {} and held["already_planned"] == [listed] and rows(db, sql) == before
+    upgraded = runs.plan_scope(scope, model=fake.model(), producer_upgrade=True)["routes"]["model"]
+    assert list(upgraded["planned"]) == [listed] and upgraded["already_planned"] == []
+    after = rows(db, sql)
+    assert [r for r in after if r in before] == before  # the old runs keep their identity, state and windows
+    (new,) = [r for r in after if r not in before]  # one new run only: the version outside the list got none
+    assert new["version_id"].strip() == listed and new["supersedes_run_id"] == old
+    assert new["producer_identity"] == runs.producer_key(fake.model())["identity"]
+    assert new["selection"] == scope.selection(listed)
+    again = runs.plan_scope(scope, model=fake.model(), producer_upgrade=True)["routes"]["model"]
+    assert again["planned"] == {} and again["already_planned"] == [listed]
+
+
 @real_checker
 def test_the_rules_route_alone_gives_a_checked_object_that_names_its_route(db):
     version = who_version(en_raw(WHO_ID), "who-rules")

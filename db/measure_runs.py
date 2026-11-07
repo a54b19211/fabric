@@ -12,7 +12,9 @@
 - plan_scope(): the one entry that plans an explicit list (Scope) of versions, each with all its reading windows or
   only the listed ones. The list's digest and the windows chosen are written on the run (selection); a window the
   list did not name is 'skipped' (out_of_scope), never owed. Its receipt says what was planned, what a run already
-  held and why any version was left out. process_once(scope=...) reads nothing outside the list.
+  held and why any version was left out. process_once(scope=...) reads nothing outside the list. With
+  producer_upgrade=True only a run by the current producer counts as held: a listed version that older producers
+  read gets a new run by this one (background versions included, nothing outside the list), and the old runs stay.
 - two candidate routes, one queue (processing.measure_extract): a model route and a rules route (the explicit counts
   of who.explicit-count.v1, no model, no request). Both plan runs, read windows, store readings and queue their
   BioCheck check through the same tables; the producer identity names the route and a route supersedes only itself.
@@ -153,7 +155,12 @@ def measurable(conn, source_id) -> bool:
     return _readable(conn, source_id)
 
 
-# The clean artifacts that have no run by `route`; a producer upgrade asks for none by this producer instead.
+# The runs that count as planned already for a route: any run of the route or, on a producer upgrade, only a run by
+# this producer (its identity: processor version and model configuration digest).
+_HELD_BY = (f"CASE WHEN CAST(:upgrade AS boolean) THEN r.producer_identity = :identity "
+            f"ELSE ({_is_rules('r')}) = CAST(:rules AS boolean) END")
+
+# The clean artifacts that have no run held by `route` (see _HELD_BY).
 # {pick} is what the call selects by: the standing queue (all but the bounded backfill's versions) or a listed scope.
 _CANDIDATES = """
     SELECT DISTINCT ON (c.version_id) c.version_id, c.processor_version, c.text_sha256, c.status, c.text,
@@ -162,8 +169,7 @@ _CANDIDATES = """
      WHERE c.processor_version = :tpv AND v.source_id = ANY(:sources) AND v.record_kind <> 'graph' AND {pick}
        AND NOT EXISTS (SELECT 1 FROM derived_measure_runs r WHERE r.version_id = c.version_id
                          AND r.text_processor_version = c.processor_version AND r.text_sha256 = c.text_sha256
-                         AND CASE WHEN CAST(:upgrade AS boolean) THEN r.producer_identity = :identity
-                                  ELSE ({is_rules}) = CAST(:rules AS boolean) END)
+                         AND {held_by})
      ORDER BY c.version_id, c.attempt DESC
      LIMIT :n
 """
@@ -174,7 +180,7 @@ _LISTED = "v.version_id = ANY(CAST(:ids AS text[]))"
 def _candidates(conn, route, pick, params, *, upgrade=False, n=100):
     from processing import clean_text
 
-    sql = _CANDIDATES.format(pick=pick, is_rules=_is_rules("r"))
+    sql = _CANDIDATES.format(pick=pick, held_by=_HELD_BY)
     return conn.execute(text(sql), {**params, "tpv": clean_text.PROCESSOR_VERSION, "upgrade": upgrade,
                                     "identity": route.key["identity"], "rules": route.name == mx.RULES,
                                     "n": n}).mappings().all()
@@ -252,17 +258,21 @@ def _entry(entry):
     return version, windows
 
 
-def plan_scope(scope: Scope, *, model: Model | None = None, with_rules=False) -> dict:
+def plan_scope(scope: Scope, *, model: Model | None = None, with_rules=False, producer_upgrade=False) -> dict:
     """Runs for the versions of an explicit list only, by every route this call has. The receipt says per route what
     was planned (version -> run), which versions a run already held and why any other was left out: a listed version
-    that cannot be planned (no clean artifact yet, a window that does not exist) is reported, never skipped silently."""
+    that cannot be planned (no clean artifact yet, a window that does not exist) is reported, never skipped silently.
+    A run of the route on the same artifact is held (already_planned) and left as it is; with producer_upgrade only
+    a run by the current producer is, so a version an older producer read gets a new run that supersedes the old one
+    of its route, which keeps its identity."""
     ids = list(scope.versions)
     receipt = {"schema": "datafabric.measure_plan.v1", "scope_sha256": scope.sha256, "requested": len(ids),
                "routes": {}}
     with history.history_engine().begin() as conn:
         for route in routes_of(model or model_from_env(), with_rules):
             sources = _sources(conn, route)
-            rows = _candidates(conn, route, _LISTED, {"sources": sources, "ids": ids}, n=len(ids)) if sources else []
+            rows = _candidates(conn, route, _LISTED, {"sources": sources, "ids": ids}, upgrade=producer_upgrade,
+                               n=len(ids)) if sources else []
             planned, left_out = {}, {}
             for row in rows:
                 version = row["version_id"].strip()
@@ -273,7 +283,7 @@ def plan_scope(scope: Scope, *, model: Model | None = None, with_rules=False) ->
                     left_out[version] = why
             for version in ids:
                 if version not in planned and version not in left_out:
-                    left_out[version] = _why_not(conn, route, version, sources)
+                    left_out[version] = _why_not(conn, route, version, sources, producer_upgrade)
             receipt["routes"][route.name] = {
                 "planned": planned, "already_planned": [v for v, why in left_out.items() if why == "already_planned"],
                 "not_planned": {v: why for v, why in left_out.items() if why != "already_planned"}}
@@ -293,8 +303,9 @@ def _refusal(row, windows):
     return None
 
 
-def _why_not(conn, route, version, sources):
-    """Why a listed version has no new run by this route: one it already has, or the first condition it fails."""
+def _why_not(conn, route, version, sources, upgrade=False):
+    """Why a listed version has no new run by this route: one it already has (by this producer, on an upgrade), or
+    the first condition it fails."""
     from processing import clean_text
 
     known = conn.execute(text("SELECT source_id, record_kind FROM history_versions WHERE version_id=:v"),
@@ -303,8 +314,9 @@ def _why_not(conn, route, version, sources):
         return "version_unknown"
     held = conn.execute(text(
         f"SELECT 1 FROM derived_measure_runs r WHERE r.version_id=:v AND r.text_processor_version=:tpv "
-        f"AND ({_is_rules('r')}) = CAST(:rules AS boolean) LIMIT 1"),
-        {"v": version, "tpv": clean_text.PROCESSOR_VERSION, "rules": route.name == mx.RULES}).first()
+        f"AND {_HELD_BY} LIMIT 1"),
+        {"v": version, "tpv": clean_text.PROCESSOR_VERSION, "rules": route.name == mx.RULES, "upgrade": upgrade,
+         "identity": route.key["identity"]}).first()
     if held:
         return "already_planned"
     if known[0] not in sources:
