@@ -345,10 +345,10 @@ def _unit_span(text, m, spans):
         m0, m1 = spans.get("metric", (0, 0))
         if m0 <= u < u + len(unit) <= m1 and not norm.unit_subject_head_v4(text, v_end, u, u + len(unit), m0, m1):
             # right after the value but a word of the metric phrase that is not its head counting noun ("close" of
-            # "23 close contacts"): not the unit (extraction_normalize.v3)
+            # "23 close contacts"): not the unit (extraction_normalize.v4)
             return None, "unit_literal_not_at_the_value"
         return (u, u + len(unit)), None
-    if "metric" in spans:  # the head of the bound metric phrase's subject (extraction_normalize.v3)
+    if "metric" in spans:  # the head of the bound metric phrase's subject (extraction_normalize.v4)
         m0, m1 = spans["metric"]
         u = text.find(unit, m0, m1)
         if u < 0 or not norm.unit_subject_head_v4(text, v_end, u, u + len(unit), m0, m1):

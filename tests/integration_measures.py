@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import extraction_contract as ec
 import httpx
 import llm_transport as lt
 import pytest
@@ -174,6 +175,24 @@ def as_checker(version):
     def answer(_request, response):
         response["checker_version"] = version
     return answer
+
+
+OLDER_CHECKER = "biocheck.extraction_rules.v15"
+
+
+def older_checker_answers(monkeypatch):
+    """Make the older checker (v15) the expected one, to leave its results behind. extraction_contract no longer
+    describes v15, so a live answer of it would be "checker_mismatch"; v15 and v17 give the same field sets, so
+    its answer is judged by the v17 rules and recorded under its own version, as it was when v15 was current."""
+    real = checks.verdict
+    monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", OLDER_CHECKER)
+
+    def judge(body, request, checker):
+        if checker == OLDER_CHECKER:
+            return real(dict(body, checker_version=ec.CHECKER_V17), request, ec.CHECKER_V17)
+        return real(body, request, checker)
+
+    monkeypatch.setattr(checks, "verdict", judge)
 
 
 # ---- fixtures and helpers -------------------------------------------------------------------------------------
@@ -529,13 +548,13 @@ def test_a_revocation_between_read_and_send_sends_nothing(db, fake, monkeypatch)
 
 @real_checker
 def test_a_checker_change_leaves_objects_not_current_until_rechecked(db, fake, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", "biocheck.extraction_rules.v15")
+    older_checker_answers(monkeypatch)
     version = who_version()
     runs.plan(model=fake.model())
     read_all(fake)
-    check_all(RealBioCheck(answer=as_checker("biocheck.extraction_rules.v15")))
+    check_all(RealBioCheck(answer=as_checker(OLDER_CHECKER)))
     old = by_value(listing(version)["measurements"])["66"]
-    assert old["check"]["checker_version"] == "biocheck.extraction_rules.v15"
+    assert old["check"]["checker_version"] == OLDER_CHECKER
     monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is expected now
     now = listing(version)
     # (the three placeholders the answers of the old checker replaced are history too)
@@ -1004,11 +1023,11 @@ def test_the_feed_lets_a_consumer_link_in_either_arrival_order(db, fake):
 
 @real_checker
 def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", "biocheck.extraction_rules.v15")
+    older_checker_answers(monkeypatch)
     version = who_version()
     runs.plan(model=fake.model())
     read_all(fake)
-    check_all(RealBioCheck(answer=as_checker("biocheck.extraction_rules.v15")))
+    check_all(RealBioCheck(answer=as_checker(OLDER_CHECKER)))
     old = by_value(listing(version)["measurements"])["66"]
     produced = NOW()
     assert len(listing(version, "operational_replay", produced)["measurements"]) == 3  # the configured checker
