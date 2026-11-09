@@ -35,7 +35,7 @@
 1. 停现役 Fabric 三个服务（API、publisher、抽取 worker），按已核实 PID。
 2. documents 库：`python -m migration.runner --db publication --apply`（V019 原样 + V026：加列、替换触发器函数）。
 3. history 库：`migration.history`（V017…V025，全部 IF NOT EXISTS / 新增表）。
-   索引作业表：`migration.index_publication`（V020、V024 原样 + V027 两个索引）。
+   索引作业表：同一条 history 迁移已装（V020、V024 原样 + V027 两个索引）。
 4. 许可目录：已存在的来源行说明文字不会被 `ON CONFLICT DO NOTHING` 更新，另跑一条 UPDATE 写入新的站点来源说明（nmpa/cde/chictr/cde_xxgk/fda_api_* 现在是 site_plugin 来源兼库存许可）。
 5. 部署分支固定提交，启动三个服务；allowlist 按现役原值，**新增来源（local_files、新站点）默认不放开**。
 

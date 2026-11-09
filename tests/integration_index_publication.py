@@ -54,9 +54,7 @@ def pg(pg_engine, monkeypatch):
     legacy_bridge.open_old_writer(monkeypatch)  # withdrawal fixtures are legacy versions (cutover mode)
     monkeypatch.setattr(history, "history_engine", lambda: pg_engine)
     monkeypatch.setattr(history_migration, "history_engine", lambda: pg_engine)
-    monkeypatch.setattr(index_migration, "history_engine", lambda: pg_engine)
     history_migration.migrate_history()
-    index_migration.migrate_index()
     with pg_engine.begin() as conn:
         assert conn.execute(text("SELECT current_schema()")).scalar_one().startswith("test_index_")
         conn.execute(text("TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,index_claim_cursor,index_send_bucket,index_gate_stats,derived_extraction_check_tasks,derived_extraction_checks,history_versions,history_runs"))

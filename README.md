@@ -605,7 +605,7 @@ WHO 有界回填是显式触发的一次性操作，不在 `DATAFABRIC_HISTORY_W
 
 常驻队列不计划有界回填新建的版本（回执里的 `background_version_ids`）：补产 v12 不会让它们隐式吃掉测量。要测它们，给一份清单：`python -m flows.measure_extract --scope list.json`，清单是 `{"versions": ["<版本号>", {"version_id": "<版本号>", "windows": [0, 3]}]}`。只计划、只读清单里的版本；写了 `windows` 的只读这些阅读窗口，其余窗口存为 `skipped`（`out_of_scope`），不算欠账、不事后删。清单摘要和所选窗口写在每个运行的 `selection` 上（V041，常驻队列的运行为空），`/measure-coverage` 带出它和 `out_of_scope`；打印的回执写明计划了什么、哪些版本已有运行、哪些没计划成及原因（例如清洗正文 v12 还没产出、窗口号不存在）。窗口号按生成这个运行的处理器版本的切法计：v2 起第 0 个窗口也在行或句子的边界结束，同一个窗口号在 v1 与 v2 下对应的原文范围可能不同。一次调用最多 20 轮，每轮模型请求数仍受 `DATAFABRIC_MEASURE_ROUND_REQUESTS` 约束，窗口失败仍是 3 次封顶，回执记本次发出的请求数。同一产物同一路线已有运行的版本不再计划；加 `--upgrade` 则只认当前 producer（处理器版本和模型配置）的运行：旧 producer 读过的版本另起新运行，旧运行原样保留，清单以外的版本不动。`--upgrade` 只能和 `--scope` 一起用。
 
-新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。发表库如果就是对象库，`migrate` 已经装了 V019 和 V026，不再另跑；只有发表库是另一个没跑过 app 角色的原采集库时，才多一步 `python -m migration.runner --db publication --apply`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
+新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、独立历史库 `python -m migration.history`（索引表也在这一步装好）。发表库如果就是对象库，`migrate` 已经装了 V019 和 V026，不再另跑；只有发表库是另一个没跑过 app 角色的原采集库时，才多一步 `python -m migration.runner --db publication --apply`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
 
 历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。
 
@@ -698,9 +698,9 @@ WHO 有界回填是显式触发的一次性操作，不在 `DATAFABRIC_HISTORY_W
 
 ## 迁移执行器与来源能力（r2）
 
-迁移统一走 `python -m migration.runner --db {app|history|publication}`；旧命令（`migration.migrate`、`migration.history`、
-`migration.index_publication`）是它的包装，输出和退出码语义不变。`migration.publication` 这个包装已经删除，
-原采集库的迁移和站点索引直接用 `--db publication`。
+迁移统一走 `python -m migration.runner --db {app|history|publication}`；旧命令（`migration.migrate`、`migration.history`）是它的包装，输出和退出码语义不变。`migration.publication` 这个包装已经删除，
+原采集库的迁移和站点索引直接用 `--db publication`；`migration.index_publication` 只剩 `worker`，
+索引表在 history 角色里，迁移走 `--db history`。
 
 ```
 python -m migration.runner --db history --plan              # 只读：已记录什么、待执行什么、为什么拒绝；不建任何表

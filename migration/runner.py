@@ -181,9 +181,12 @@ def _observe_events(conn, role: str, manifest: Manifest) -> Observation:
         obs.applied[name] = {"how": entry.event, "at": str(entry.at), "evidence": entry.evidence}
     if (not obs.problems and not state.present and not state.revoked and manifest.sentinel_table
             and ledger.table_exists(conn, manifest.sentinel_table)):
-        obs.problems.append(f"{manifest.sentinel_table} exists but the ledger has no record for the {role} role: the "
-                            "database was migrated before the ledger; take it over with --adopt-baseline, do not "
-                            "run the files again")
+        reason = (f"{manifest.sentinel_table} exists but the ledger has no record for the {role} role: the "
+                  "database was migrated before the ledger; take it over with --adopt-baseline, do not "
+                  "run the files again")
+        if role == "publication":
+            reason += "; if this database was installed by the app role, the publication role is not needed here"
+        obs.problems.append(reason)
     return obs
 
 

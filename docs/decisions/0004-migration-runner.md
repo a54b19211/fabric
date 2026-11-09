@@ -5,7 +5,7 @@
 
 ## 决定
 
-- 四个旧执行器（`migrate.py`、`history.py`、`index_publication.py`、`publication.py`）合并为 `migration/runner.py`，旧命令和函数名保留为薄包装。（r4：`publication.py` 这个包装已删，原采集库的迁移和站点索引直接用 `runner --db publication`；其余三个包装保留。）
+- 四个旧执行器（`migrate.py`、`history.py`、`index_publication.py`、`publication.py`）合并为 `migration/runner.py`，旧命令和函数名保留为薄包装。（r4：`publication.py` 这个包装已删，原采集库的迁移和站点索引直接用 `runner --db publication`；`index_publication.py` 的迁移入口也已删（等同 `history --apply`），只留 worker；`migrate.py`、`history.py` 保留。）
   整个文件一次交给 PostgreSQL 执行（函数体、注释、引号由 PostgreSQL 解析）；`migration/sqlcheck.py` 只在执行前读一遍文件，
   拒绝顶层事务控制、`CONCURRENTLY`、未闭合引号。`CONCURRENTLY` 走 `migration/online.py`。
 - 清单是代码（`migration/manifests.py`）：对象库兼容清单是 V001-V035 的显式元组，之后每个新文件必须声明且只属于一个角色
