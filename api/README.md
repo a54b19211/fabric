@@ -186,7 +186,7 @@ WHO v0.2 的 `count_statements` 与 `count_extraction` 是派生 facts，不能�
 
 | 接口 | 用途 |
 |---|---|
-| `GET /api/history/measurements?source_id=&is_demo=&mode=&cutoff=&version_ids=` | 可见版本的已核验测量对象（`datafabric.data_objects.v2`），每个带截止时的状态（由事件折叠）、身份、维度核验结果和所用版本；默认只给该模式下当前的，`include_history=true` 连历史一起 |
+| `GET /api/history/measurements?source_id=&is_demo=&mode=&cutoff=&version_ids=` | 可见版本的测量对象（`datafabric.data_objects.v2`），每个带核验状态 `check.status`（`consistent` 已核一致 / `inconsistent` 有冲突 / `unchecked` 未核；未核的也在列，读的人看标记）、截止时的状态（由事件折叠，与核验状态是两件事）、身份、维度核验结果和所用版本；默认只给该模式下当前的，`include_history=true` 连历史一起（含被核验回答取代的未核占位对象） |
 | `GET /api/history/measurements/{measurement_id}?is_demo=&mode=&cutoff=` | 一个固定对象（含已替代、非当前的）；截止时不可见返回 404 `version_not_found` |
 | `GET /api/history/measurements/changes?is_demo=&after_seq=&limit=` | 事件变更流，按提交顺序；`next_after` 是看过的最后一个序号；当前不可读来源的事件只计入 `withheld` |
 | `GET /api/history/measure-coverage?source_id=&is_demo=&mode=&cutoff=&version_ids=` | 每个版本的阅读 run：状态、已读窗口、欠着的窗口及原因（`partial` 是覆盖缺口，不等于没有数字） |

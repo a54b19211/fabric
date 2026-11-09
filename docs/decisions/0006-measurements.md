@@ -14,22 +14,30 @@
   切成两半），所以超过一个窗口的长文本不再比对窗口范围，其余字段照旧比对。
 - **键**：run = 固定原件（来源、记录、版本、raw sha256）+ 清洗产物（清洗器版本、正文哈希）+ 处理器（版本 + 模型配置
   canonical 哈希：kind、model、endpoint_id、thinking、temperature、max_tokens；不含 URL 和密钥）；读数 id = 完整候选
-  （送 BioCheck 的严格请求项去掉调用方 id + passages + 三段键）；对象 id = 读数 + 核验器版本。同一跨度两种解释是两个读数。
+  （送 BioCheck 的严格请求项去掉调用方 id + passages + 三段键）；对象 id = 读数 + 核验器版本（未核的占位对象写
+  `unchecked`）。同一跨度两种解释是两个读数。
 - **模型调用**经共享包 `zk-llm-transport` 0.1.1：每次 HTTP 前 `before_attempt` 现查租约和来源许可并在自己的已提交事务里
   登记请求（撤权则一个请求也不发），之后 `after_attempt` 一次性结算并存原始响应（触发器只允许结算一次）。
 - **欠账**：窗口失败退避重试，3 次后 `failed_final`，run `partial`，覆盖回执列出；只有显式 `retry_failed()` 重新排队。
   预算用完（本轮额度或 429/503）是 `budget_spent`，不计失败次数。撤权 → `source_unreadable`、run `paused_unreadable`，
   恢复后 `resume()`。
 - **核验按产物选契约**：`CHECKS_BY_PRODUCER`：编号、画像注释 → `/v1`（v1 契约、checker v3）；测量 → `/v3`（v3 契约、
-  checker v17）。测量一读数一请求，复用 `derived_extraction_check_tasks`；全部批次完成、租约和许可仍在时才发布对象。
-  未被采纳的晚到回答（核验期间撤权、租约已失）把回答条目存进 unchecked 行作审计；已被替代的 run 晚到的回答产生的对象
-  立即被替代，从不成为当前。
+  checker v17）。测量一读数一请求，复用 `derived_extraction_check_tasks`。未被采纳的晚到回答（核验期间撤权、租约已失）
+  把回答条目存进 unchecked 行作审计；已被替代的 run 晚到的回答产生的对象立即被替代，从不成为当前。
+- **核验只给对象打标记，不决定有没有对象**（r4）：数值、逐字回原文的定位、时期形式成立的读数（且精确、实际、写明时期；
+  期间没写就没有对象，不补造时间轴）在核验任务开始时就成为对象，`check.status=unchecked`（未核；`checker_version` 写
+  `unchecked`，表示还没有核验器回答过）。某批次回答后，该回答的对象取代它，占位对象得 `rechecked_by_checker`：已核一致
+  `consistent` / 有冲突 `inconsistent` / 未核 `unchecked`（核验器判不了，例如原文没写单位，这时单位写 `unknown`，数值不补）。
+  判不了的回答不取代已有的结论，已判 inconsistent 的读数不会被改写成未核；批次失败的读数留着未核对象，已完成批次的回答
+  照常写入。写入前仍现查租约和来源许可。核验状态（`check.status`）与对象的生命周期（`status.state`：更正、撤回、被替代）
+  是两件事，分开管。
 - **对象只追加，状态来自事件**：`derived_measurement_events` 记 created / superseded_by_processor / superseded_by_producer /
   rechecked_by_checker / corrected / retracted / correction_withdrawn，各带三个时间（材料可见、结果产生、状态生效）；
   feed 序号在同一行锁下取，顺序即提交顺序。
 - **两种回放分开**：`operational_replay` 只折叠截止时已产生且材料已可见的事件，只给截止时已产生的对象；
   `public_history_reconstruction` 用今天的处理器和核验器，材料（含更正）按其历史证明时间，回执写 `reconstruction: true`
-  并列出所用版本。`current` 下旧核验器的对象在重核前不是当前。
+  并列出所用版本。`current` 下旧核验器的对象在重核前不是当前；还没有核验器回答过的未核对象没有核验器可过期，
+  在被回答的对象取代前是当前。
 - **更正**：按来源和 published_seq 的有界扫描（游标）把 `document_relations` 里有目标版本的 corrects / retracts 记成链接；
   同一更正记录的后续版本不再声明则记撤回。目标版本的对象按链接追加事件——更正先到或测量先到都一样。
 - **身份**只来自已确认的图谱身份（`graph_tools.confirmed_identity`），且该节点自己的证据就是这条测量的对象提及（同版本、

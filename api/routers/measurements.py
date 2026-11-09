@@ -23,8 +23,9 @@ def measurements_route(
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
     include_history: bool = False,
 ):
-    """The checked measurement objects of visible versions (datafabric.data_objects.v2), each with its state at the
-    cutoff folded from its events; by default only those current for the mode."""
+    """The measurement objects of visible versions (datafabric.data_objects.v2), each with what its check found
+    (check.status: consistent, inconsistent or unchecked) and its state at the cutoff folded from its events; by
+    default only those current for the mode."""
     from db.measurement_reads import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, include_history=include_history)

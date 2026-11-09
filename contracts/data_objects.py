@@ -307,6 +307,9 @@ class UnlocatedDim(Strict):
 
 
 class CheckRef(Strict):
+    """核验核对了什么、结论是什么：已核一致 consistent / 有冲突 inconsistent / 未核 unchecked（还没有核验回答，或核验器
+    判不了，例如原文没写单位）。checker_version 写 unchecked 表示还没有任何核验器回答过。"""
+
     checker_version: str = Field(min_length=1, max_length=80)
     contract_version: str = Field(min_length=1, max_length=80)
     run_id: str = Field(min_length=1, max_length=80)
@@ -348,9 +351,10 @@ class MeasureIdentity(Strict):
 
 
 class MeasurementV2(Derived):
-    """加工层的一个已核验测量对象（datafabric.data_objects.v2）。值是规范十进制字符串，原文写法另存；单位不知道写
+    """加工层的一个测量对象（datafabric.data_objects.v2）。值是规范十进制字符串，原文写法另存；单位不知道写
     unknown；时期必须结构化写出；分母状态显式（比例不能是 not_applicable）；至少一个 char_span 定位落在 artifact
-    指认的清洗正文上。"""
+    指认的清洗正文上。核验状态写在 check.status（consistent 已核一致 / inconsistent 有冲突 / unchecked 未核），
+    未核的对象照样发布，由读的人看标记；它和对象自己的生命周期 status.state（更正、撤回、被替代）是两件事。"""
 
     contract_version: Literal["datafabric.data_objects.v2"] = CONTRACT_VERSION_V2
     kind: Literal["measurement"] = "measurement"
