@@ -1,10 +1,14 @@
-"""Reading checked measurement objects: permission first, then visibility for the history mode, then the state at
+"""Reading measurement objects: permission first, then visibility for the history mode, then the state at
 the cutoff folded from the object's events. Every read checks the current permission of the object's source and of
 each event's cause source (a correction from a revoked source is withheld, not applied); nothing is cached.
+An object says on its own what its check found (check.status: consistent, inconsistent, unchecked); that is not its
+state, which is folded from the events (ok, corrected, retracted, superseded, unknown).
 
 Modes:
 - current: every event; an object counts as current when its checker is the one expected now for measurements and
-  it is not superseded (an object of an older checker is history until the current one re-checked its reading).
+  it is not superseded (an object of an older checker is history until the current one re-checked its reading). An
+  object no check has answered yet (checker "unchecked") has no checker to be out of date: it is current until
+  the object of its check's answer supersedes it.
 - operational_replay: what the system actually showed at the cutoff - objects produced by then, events produced by
   then whose material was visible by then; no later processor or checker result. Which checker was in force at the
   cutoff is not recorded (docs/decisions/0006: an append-only activation history is the follow-up), so an object
@@ -25,7 +29,7 @@ from biz_rules.history_models import HistoryError
 from contracts import data_objects as do
 from db import history
 from db import measurement_identity as identity
-from db.measurements import CORRECTING, SUPERSEDING
+from db.measurements import CORRECTING, NOT_CHECKED, SUPERSEDING
 
 SCHEMA = "datafabric.measurements.v1"
 CHANGES_SCHEMA = "datafabric.measurement_changes.v1"
@@ -149,6 +153,8 @@ def _not_current(obj, status, mode, checker):
         return status["reason"]
     if status.get("reason") == UNKNOWN_TARGET:
         return UNKNOWN_TARGET
+    if obj["checker_version"] == NOT_CHECKED:
+        return None  # no checker has looked at it: nothing to be out of date
     if mode != "operational_replay" and obj["checker_version"] != checker:
         return "checker_not_current"  # history until the current checker re-checked its reading
     if mode == "operational_replay" and obj["checker_version"] != checker:

@@ -1,12 +1,19 @@
-"""Checked measurement objects of the processing layer and their append-only history.
+"""Measurement objects of the processing layer and their append-only history.
 
-- publish(): after every batch of a measures check run completed, each reading the checker found consistent, whose
-  values are exact and actual and whose period is stated, becomes one object (contracts.data_objects.MeasurementV2;
-  measurement_id = digest of reading and checker version) with a "created" event. The same reading checked by a
-  newer checker gets a new object; the older one gets "rechecked_by_checker" (until then it is not current, see
-  db.measurement_reads). A run that supersedes another (a clean-text upgrade, or an explicit producer upgrade)
-  supersedes each old object it read again - the same full candidate, one to one - with "superseded_by_processor"
-  / "superseded_by_producer". Corrections already known for the version are applied to the new objects.
+- publish(): every reading whose values are exact and actual and whose period is stated (its number, its place in the
+  text and its period form already hold: that is what makes a reading) becomes one object
+  (contracts.data_objects.MeasurementV2; measurement_id = digest of reading and checker version) with a "created"
+  event, whatever the check says: the check is carried on the object (check.status: consistent = 已核一致,
+  inconsistent = 有冲突, unchecked = 未核), it does not decide whether the object is shown. Before any check answered,
+  the object is a placeholder ("unchecked", checker_version "unchecked"); the object of the check's answer replaces
+  it - the placeholder gets "rechecked_by_checker" - and that object may say "unchecked" too, when the checker could
+  not decide (a unit the text does not give: unit "unknown"). An answer that could not decide never replaces a
+  verdict, and nothing is made up: no period, no object. The same reading checked by a newer checker gets a new
+  object; the older one gets "rechecked_by_checker" (until then it is not current, see db.measurement_reads). A run
+  that supersedes another (a clean-text upgrade, or an explicit producer upgrade) supersedes each old object it read
+  again - the same full candidate, one to one - with "superseded_by_processor" / "superseded_by_producer".
+  Corrections already known for the version are applied to the new objects. The check status (check.status) and the
+  life of the object (status.state: corrected, retracted, superseded) are two things and are kept apart.
 - relocate(): when a clean-text upgrade's run is read, each old reading that has an object and was not read again is
   relocated (its quote once in the new text: a reading built from the old measure, checked without a model call),
   owed (several places, or literals no longer located) or gone (quote not in the new text); the old object stays.
@@ -35,6 +42,9 @@ SUPERSEDING = ("superseded_by_processor", "superseded_by_producer", "rechecked_b
 CORRECTING = ("corrected", "retracted", "correction_withdrawn")
 CORRECTION_EVENT = {"corrects": "corrected", "retracts": "retracted"}
 SCAN_BATCH = 500
+NOT_CHECKED = "unchecked"  # the checker_version of an object no check has answered yet (the placeholder)
+NO_CHECK_ROW = 0  # its check_row_id
+VERDICTS = ("consistent", "inconsistent")  # what a check can find; "unchecked" is none
 
 
 def literal_key(source_id, record_id, value):
@@ -80,11 +90,10 @@ def event(conn, obj, kind, cause_key, cause, *, visible_at, proof_at=None, cause
 # ---- objects ----------------------------------------------------------------------------------------------------
 
 
-def _gate(reading, answer):
-    """Why a checked reading is not an object (None when it is one)."""
+def _gate(reading):
+    """Why a reading is not an object (None when it is one). The check is not asked: it says what the object is
+    (check.status), not whether there is one."""
     final = reading["final"]
-    if answer.get("status") != "consistent":
-        return "not_consistent"
     if final["qualifier"] != "exact" or final["modality"] != "actual":
         return "approximate_or_not_actual"
     if not final.get("period"):
@@ -93,9 +102,10 @@ def _gate(reading, answer):
 
 
 def body_of(reading, answer, version, check):
-    """The MeasurementV2 body of a checked reading (status ok, record-local identity: both are read, not stored)."""
+    """The MeasurementV2 body of a reading (status ok, record-local identity: both are read, not stored). answer: the
+    check's item for it, or None while no check has answered: its check status and its dimensions' are "unchecked"."""
     final, item, measure = reading["final"], reading["item"], reading["measure"]
-    dims_answer = answer.get("dims") or {}
+    dims_answer = (answer or {}).get("dims") or {}
     sha, vid = reading["text_sha256"], reading["version_id"].strip()
     inputs = [do.VersionRef(source_id=version["source_id"], record_id=version["source_record_id"], version_id=vid)]
     denominator = final.get("denominator")
@@ -121,7 +131,7 @@ def body_of(reading, answer, version, check):
               for d in item.get("dims") or []],
         dims_unlocated=[do.UnlocatedDim(kind=d.get("kind"), text=d.get("text") or "", reason=d["reason"])
                         for d in final.get("dims_unlocated") or []],
-        check=do.CheckRef(status=answer["status"], **check),
+        check=do.CheckRef(status=(answer or {}).get("status", "unchecked"), **check),
         quote=item["quote"],
         identity=do.MeasureIdentity(state="provisional",
                                     key=literal_key(version["source_id"], version["source_record_id"], final["object"])))
@@ -140,10 +150,22 @@ def _version(conn, version_id):
         "WHERE version_id=:v"), {"v": version_id}).mappings().first()
 
 
+def _known(conn, reading_id, answer):
+    """Whether the reading already has what this would only take back: any object, for the placeholder (no answer);
+    an object with a verdict, for an answer that could not decide - a check that found something stays found."""
+    sql, params = "SELECT 1 FROM derived_measurements WHERE reading_id=:r", {"r": reading_id}
+    if answer is not None:
+        if answer["status"] != "unchecked":
+            return False
+        sql, params["verdicts"] = sql + " AND body->'check'->>'status' = ANY(:verdicts)", list(VERDICTS)
+    return conn.execute(text(sql), params).first() is not None
+
+
 def _insert(conn, reading, check_row, version, check):
-    """The object of one checked reading; (object row, created now) or (None, False) when it is not one."""
-    answer = check_row["items"][0]
-    if _gate(reading, answer):
+    """The object of one reading, with the answer of its check row (None: the placeholder); (object row, created now)
+    or (None, False) when the reading is no object, or one is there already that this would only take back."""
+    answer = check_row["items"][0] if check_row else None
+    if _gate(reading) or _known(conn, reading["reading_id"], answer):
         return None, False
     mid = measurement_id(reading["reading_id"], check["checker_version"])
     body = body_of(reading, answer, version, check)
@@ -156,7 +178,8 @@ def _insert(conn, reading, check_row, version, check):
         {"m": mid, "r": reading["reading_id"], "run": reading["run_id"], "v": reading["version_id"],
          "s": version["source_id"], "rec": version["source_record_id"], "d": version["is_demo"],
          "tpv": reading["text_processor_version"], "sha": reading["text_sha256"], "pi": reading["producer_identity"],
-         "c": check["checker_version"], "cv": check["contract_version"], "cr": check["run_id"], "row": check_row["id"],
+         "c": check["checker_version"], "cv": check["contract_version"], "cr": check["run_id"],
+         "row": check_row["id"] if check_row else NO_CHECK_ROW,
          "body": json.dumps(body, ensure_ascii=False), "seen": version["first_seen_at"],
          "proof": version["proof_available_at"]}).rowcount
     obj = conn.execute(text("SELECT * FROM derived_measurements WHERE measurement_id=:m"), {"m": mid}).mappings().first()
@@ -164,25 +187,33 @@ def _insert(conn, reading, check_row, version, check):
 
 
 def publish(conn, task, check_run_id, reading_ids):
-    """Objects for the readings of one completed measures check run (batch i checked reading_ids[i]). Returns the
-    ids of the objects created now."""
+    """The objects of the readings of one measures check run (batch i checks reading_ids[i]); called before its batches
+    are sent (every reading without an object becomes a placeholder, "unchecked") and again after them (the
+    completed batches' answers: the object of each takes the placeholder's place). Returns the ids of the objects
+    created now."""
+    from db import extraction_checks
+
     rows = conn.execute(text(
         "SELECT id,batch_index,items,checker_version,contract_version FROM derived_extraction_checks "
         "WHERE run_id=:r AND batch_index>=0 AND status='completed' ORDER BY batch_index"),
         {"r": check_run_id}).mappings().all()
+    answers = {reading_ids[row["batch_index"]]: row for row in rows}
     readings = {r["reading_id"]: dict(r) for r in conn.execute(text(_READINGS), {"ids": list(reading_ids)}).mappings()}
     version = _version(conn, task["version_id"])
+    waiting = {"checker_version": NOT_CHECKED, "contract_version": extraction_checks.contract_of("measures"),
+               "run_id": check_run_id}
     made = []
-    for row in rows:
-        reading = readings[reading_ids[row["batch_index"]]]
-        check = {"checker_version": row["checker_version"], "contract_version": row["contract_version"],
-                 "run_id": check_run_id}
-        obj, created = _insert(conn, reading, row, version, check)
+    for reading_id in reading_ids:
+        row = answers.get(reading_id)
+        check = waiting if row is None else {"checker_version": row["checker_version"],
+                                             "contract_version": row["contract_version"], "run_id": check_run_id}
+        obj, created = _insert(conn, readings[reading_id], row, version, check)
         if obj is None or not created:
             continue
         event(conn, obj, "created", "created", {"check_run_id": check_run_id}, visible_at=version["first_seen_at"],
               proof_at=version["proof_available_at"])
-        _rechecked(conn, obj)
+        if row is not None:
+            _rechecked(conn, obj)
         made.append(obj["measurement_id"])
     for run_id in {r["run_id"] for r in readings.values()}:
         supersede_run(conn, run_id)
@@ -228,9 +259,20 @@ def _unique(rows):
     return {k: v[0] for k, v in seen.items() if len(v) == 1}
 
 
+def _latest(conn, run_id, answered=False):
+    """The latest object of each reading of the run (a reading's placeholder and the object of its check's answer
+    are one reading); answered: only objects a check answered."""
+    where = " AND m.checker_version <> :waiting" if answered else ""
+    sql = ("SELECT DISTINCT ON (m.reading_id) m.*, r.item FROM derived_measurements m JOIN derived_measure_readings r "
+           "ON r.reading_id = m.reading_id WHERE m.run_id = :r" + where + " ORDER BY m.reading_id, m.produced_at DESC")
+    params = {"r": run_id, **({"waiting": NOT_CHECKED} if answered else {})}
+    return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+
 def supersede_run(conn, run_id):
     """Each object of the superseded run that this run read again (same quote, value, metric) is superseded by this
-    run's object: by processor when the clean artifact differs, by producer when only the producer does."""
+    run's object once a check answered it (a placeholder supersedes nothing): by processor when the clean artifact
+    differs, by producer when only the producer does."""
     run = conn.execute(text("SELECT * FROM derived_measure_runs WHERE run_id=:r"), {"r": run_id}).mappings().first()
     if run is None or not run["supersedes_run_id"]:
         return 0
@@ -238,11 +280,9 @@ def supersede_run(conn, run_id):
                        {"r": run["supersedes_run_id"]}).mappings().first()
     kind = ("superseded_by_processor" if (old["text_processor_version"], old["text_sha256"]) !=
             (run["text_processor_version"], run["text_sha256"]) else "superseded_by_producer")
-    objects = """SELECT m.*, r.item FROM derived_measurements m JOIN derived_measure_readings r
-                   ON r.reading_id = m.reading_id WHERE m.run_id = :r"""
-    new = _unique([dict(r) for r in conn.execute(text(objects), {"r": run_id}).mappings()])
+    new = _unique(_latest(conn, run_id, answered=True))
     n = 0
-    for row in _unique([dict(r) for r in conn.execute(text(objects), {"r": old["run_id"]}).mappings()]).values():
+    for row in _unique(_latest(conn, old["run_id"])).values():
         by = new.get(_match_key(row["item"]))
         if by is not None and event(conn, dict(row), kind, "run:" + run_id, {"run_id": run_id},
                                     visible_at=row["first_seen_at"], proof_at=row["proof_available_at"],

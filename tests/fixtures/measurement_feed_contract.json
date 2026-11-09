@@ -22,6 +22,7 @@
   "orders": ["measurement_before_topic", "topic_before_measurement"],
   "rule": "both orders end with the same (topic, measurement_id) links, each once; replaying the feed from 0 or pulling again adds nothing",
   "series_key": "(topic, family, dims_key, object_key): object_key is identity.key only when identity.state is confirmed or rule_confirmed; a provisional key is record-local and never merges two records",
-  "who_marburg_fixture": {"objects": 3, "links": 3, "created_events": 3}
+  "unchecked_first": "a reading is an object as soon as it is read, check.status unchecked and versions.checker 'unchecked' (no checker has answered); the object of its check's answer - consistent, inconsistent or unchecked - is created next and the first gets rechecked_by_checker with superseded_by the second: per reading two created events and one rechecked_by_checker. Only objects that are current when pulled are linked; check.status is a mark to read, not a reason to leave an object out",
+  "who_marburg_fixture": {"objects": 3, "links": 3, "created_events": 6}
  }
 }

@@ -20,7 +20,10 @@ Producers checked: identifiers (identifier items: the producer's value at its of
 (experiment-type locators; BioCheck v3 checks their locator and quote, the type judgement stays unsupported).
 Each producer is checked under its own contract by its own checker (CHECKS_BY_PRODUCER): identifiers and profile
 annotations by BioCheck /v1 (contract v1, checker v3), measurements by BioCheck /v3 (contract v3, checker v17). A
-task waits for its producer's expected checker; a result is recorded under its producer's contract."""
+task waits for its producer's expected checker; a result is recorded under its producer's contract.
+A measurement is an object before its check answers (db.measurements.publish): marked "unchecked" from the moment its
+run starts, then the object of its batch's answer takes its place - consistent, inconsistent or unchecked (the
+checker could not decide) - whatever the answer is; a batch that fails leaves its reading marked unchecked."""
 
 import hashlib
 import json
@@ -366,8 +369,9 @@ def _build(work):
 
 
 def _publish(work):
-    """After every batch of a measures run completed: its objects, while the lease is still this worker's and the
-    permission still holds. None, LEASE_LOST or "source_unreadable"."""
+    """A measures run's objects (db.measurements.publish), while the lease is still this worker's and the permission
+    still holds: before its batches are sent (every reading is an object, "unchecked", from then on) and after them
+    (what the completed batches answered, also when a later one failed). None, LEASE_LOST or "source_unreadable"."""
     from db import measurements
 
     with history.history_engine().begin() as conn:
@@ -575,6 +579,11 @@ def process_once(*, client=None):
     stop = _record_unsent(work, requests, unbuildable)
     if stop is not None:
         return stop
+    measures = task["producer"] == "measures"
+    if measures:  # the readings are objects before the check answers, marked unchecked, however the check goes
+        failed = _publish(work)
+        if failed:
+            return _conclude(task, failed)
     owned = client is None
     client = client or httpx.Client(timeout=20, follow_redirects=False, trust_env=False)
     try:
@@ -582,8 +591,9 @@ def process_once(*, client=None):
     finally:
         if owned:
             client.close()
-    if failed is None and task["producer"] == "measures":
-        failed = _publish(work)
+    if measures and failed not in (LEASE_LOST, "source_unreadable"):
+        lost = _publish(work)  # what the completed batches answered stands, also when a later batch failed
+        failed = failed or lost
     return _conclude(task, failed)
 
 

@@ -1,4 +1,5 @@
-"""Slice S1 on real PostgreSQL: WHO DON case counts from a fixed clean artifact to checked measurement objects.
+"""Slice S1 on real PostgreSQL: WHO DON case counts from a fixed clean artifact to measurement objects, each marked
+by its check (unchecked until it answers; then consistent, inconsistent or still unchecked).
 
 The model is a loopback OpenAI-compatible server in this process (no model, no network beyond 127.0.0.1); the
 checker is the real BioCheck /v3 rules (checker v17) run from a BioCheck checkout through its own app (TestClient,
@@ -244,6 +245,26 @@ def check_all(bio):
     raise AssertionError("check tasks never ran out")
 
 
+class BioCheckDown:
+    """BioCheck unreachable: every request is answered 503, nothing is adopted and the task waits."""
+
+    def client(self):
+        return httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(503)))
+
+
+def cannot_decide(_request, response):
+    """A checker that cannot tell the unit (it leaves it to the investigation): the item is unchecked."""
+    for item in response["items"]:
+        item["fields"]["unit"] = {"result": "unsupported", "reason": "unrecognized_text_after_value"}
+        item["status"] = "unchecked"
+
+
+def check_again(pg):
+    """The measures check task due again now, whatever came of it before."""
+    with pg.begin() as conn:
+        conn.execute(text("UPDATE derived_extraction_check_tasks SET state='queued',next_check_at=clock_timestamp()"))
+
+
 def listing(version, mode="current", cutoff=None, source_id="who_don", **kw):
     return measurement_reads.for_versions(source_id, True, [version], mode, cutoff or NOW(), **kw)
 
@@ -336,6 +357,92 @@ def test_a_rerun_changes_nothing(db, fake):
     after = {t: rows(db, f"SELECT count(*) AS n FROM {t}")[0]["n"] for t in before}
     assert after == before
     assert [i["measurement_id"] for i in listing(version)["measurements"]] == [i["measurement_id"] for i in items]
+
+
+# ---- a reading is an object before its check answers, and whatever the check finds ------------------------------
+
+UNITLESS = measure("确诊病例", 66, unit_text="")  # the text writes 例 right at the number; the model left it out
+
+
+@real_checker
+def test_a_reading_without_a_unit_is_published_unchecked_and_can_be_read(db):
+    fake = FakeModel([UNITLESS])
+    try:
+        version = who_version()
+        runs.plan(model=fake.model())
+        read_all(fake)
+        check_all(BioCheckDown())  # no check answers at all: the reading is an object all the same
+        (waiting,) = listing(version)["measurements"]
+        assert waiting["value_text"] == "66" and waiting["unit"] == "unknown"  # the unit is not made up
+        assert waiting["period"]["value"] == "2026-10-28"  # nor is the period: it is the text's own
+        assert waiting["check"]["status"] == "unchecked"
+        assert waiting["check"]["checker_version"] == measurements.NOT_CHECKED  # no checker has answered yet
+        assert waiting["state_at_cutoff"] == "ok" and waiting["current"] is True
+        check_again(db)
+        check_all(RealBioCheck(answer=cannot_decide))  # a checker looks and cannot tell: unchecked, and by whom
+        (looked,) = listing(version)["measurements"]
+        assert looked["check"]["status"] == "unchecked" and looked["unit"] == "unknown"
+        assert looked["check"]["checker_version"] == "biocheck.extraction_rules.v17"
+        assert looked["reading_id"] == waiting["reading_id"] and looked["measurement_id"] != waiting["measurement_id"]
+    finally:
+        fake.close()
+
+
+@real_checker
+def test_the_answer_of_the_check_updates_a_reading_that_was_published_unchecked(db, fake):
+    version = who_version()
+    runs.plan(model=fake.model())
+    read_all(fake)
+    check_all(BioCheckDown())
+    waiting = by_value(listing(version)["measurements"])
+    assert set(waiting) == {"66", "15", "40"} and {i["check"]["status"] for i in waiting.values()} == {"unchecked"}
+    check_again(db)
+    check_all(RealBioCheck())
+    answered = by_value(listing(version)["measurements"])
+    assert {i["check"]["status"] for i in answered.values()} == {"consistent"}
+    for value, before in waiting.items():  # the same reading, now with what the check found
+        after = answered[value]
+        assert after["reading_id"] == before["reading_id"] and after["check"]["checker_version"].endswith(".v17")
+        assert events_of(db, before["measurement_id"]) == ["created", "rechecked_by_checker"]
+        was = measurement_reads.read_one(before["measurement_id"], True, "current", NOW())
+        assert was["current"] is False and was["status"]["superseded_by"] == after["measurement_id"]
+        assert was["check"]["status"] == "unchecked"  # what it said then is kept
+    # replay from before the answer: the reading as it was shown then, unchecked
+    first = rows(db, "SELECT min(produced_at) AS t FROM derived_measurements WHERE checker_version<>:w",
+                 w=measurements.NOT_CHECKED)[0]["t"]
+    replay = by_value(listing(version, "operational_replay", first - timedelta(microseconds=1))["measurements"])
+    assert {i["check"]["status"] for i in replay.values()} == {"unchecked"}
+
+
+@real_checker
+def test_a_reading_judged_inconsistent_keeps_showing_the_conflict(db):
+    fake = FakeModel([UNITLESS])
+    try:
+        version = who_version()
+        runs.plan(model=fake.model())
+        read_all(fake)
+        check_all(RealBioCheck())  # the unit is written at the number and the reading says none: the checker finds it
+        (found,) = listing(version)["measurements"]
+        assert found["check"]["status"] == "inconsistent" and found["current"] is True  # 有冲突: shown, not hidden
+        assert found["unit"] == "unknown" and found["value_text"] == "66"
+        check_again(db)
+        check_all(BioCheckDown())  # a later check that gets no answer writes nothing over it
+        # nor does an answer that cannot decide (here a newer checker's): a finding is not taken back
+        reading_id = found["reading_id"]
+        with store.history_engine().begin() as conn:
+            reading = dict(conn.execute(text(measurements._READINGS), {"ids": [reading_id]}).mappings().first())
+            newer = {"checker_version": "biocheck.extraction_rules.v99", "contract_version": "extraction_consistency.v3",
+                     "run_id": "r-late"}
+            undecided = {"id": 1, "items": [{"status": "unchecked"}]}
+            assert measurements._insert(conn, reading, undecided, measurements._version(conn, version), newer) == (
+                None, False)
+        again = listing(version)["measurements"]
+        assert [(i["measurement_id"], i["check"]["status"]) for i in again] == [
+            (found["measurement_id"], "inconsistent")]
+        # the finding and the placeholder it replaced: no unchecked object was written over the finding
+        assert rows(db, "SELECT count(*) AS n FROM derived_measurements")[0]["n"] == 2
+    finally:
+        fake.close()
 
 
 # ---- debt, budget, permission ------------------------------------------------------------------------------
@@ -431,7 +538,8 @@ def test_a_checker_change_leaves_objects_not_current_until_rechecked(db, fake, m
     assert old["check"]["checker_version"] == "biocheck.extraction_rules.v15"
     monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is expected now
     now = listing(version)
-    assert now["measurements"] == [] and now["excluded"] == {"checker_not_current": 3}
+    # (the three placeholders the answers of the old checker replaced are history too)
+    assert now["measurements"] == [] and now["excluded"] == {"checker_not_current": 3, "rechecked_by_checker": 3}
     one = measurement_reads.read_one(old["measurement_id"], True, "current", NOW())
     assert one["current"] is False and one["not_current_reason"] == "checker_not_current"
     assert events_of(db, old["measurement_id"]) == ["created"]  # nothing deleted, nothing rewritten
@@ -647,13 +755,17 @@ def test_the_change_feed_is_in_commit_order_and_withholds_revoked_sources(db, fa
     assert first["more"] is True and len(first["items"]) == 2
     rest = measurement_reads.changes(True, after_seq=first["next_after"], limit=200)
     seqs = [i["seq"] for i in first["items"] + rest["items"]]
-    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)) == 3
-    assert {i["kind"] for i in first["items"] + rest["items"]} == {"created"}
-    assert all(i["versions"]["checker"] == "biocheck.extraction_rules.v17" for i in rest["items"])
+    # per reading: the unchecked object created, the object of the check's answer created, the first one rechecked
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)) == 9
+    feed = first["items"] + rest["items"]
+    assert {i["kind"] for i in feed} == {"created", "rechecked_by_checker"}
+    assert [i["kind"] for i in first["items"]] == ["created", "created"]  # the unchecked ones come first
+    assert {i["versions"]["checker"] for i in feed} == {"biocheck.extraction_rules.v17", measurements.NOT_CHECKED}
+    assert sum(i["kind"] == "created" and i["versions"]["checker"].endswith(".v17") for i in feed) == 3
     assert measurement_reads.changes(True, after_seq=rest["next_after"])["items"] == []
     revoke(db)
     hidden = measurement_reads.changes(True, after_seq=0)
-    assert hidden["items"] == [] and hidden["withheld"] == {"who_don": 3}
+    assert hidden["items"] == [] and hidden["withheld"] == {"who_don": 9}
 
 
 def test_a_graph_package_or_undeclared_source_is_never_read_for_measurements(db, fake, monkeypatch):
@@ -681,10 +793,12 @@ def test_a_wrong_checker_or_subject_is_never_adopted(db, fake):
 
     check_all(RealBioCheck(answer=as_checker("biocheck.extraction_rules.v3")))
     check_all(RealBioCheck(answer=wrong_subject))
-    assert rows(db, "SELECT count(*) AS n FROM derived_measurements")[0]["n"] == 0
+    # nothing of a wrong answer is adopted: the readings stay the unchecked objects they were made as
+    assert rows(db, "SELECT count(*) AS n FROM derived_measurements WHERE checker_version<>:w",
+                w=measurements.NOT_CHECKED)[0]["n"] == 0
     codes = {r["error_code"] for r in rows(db, "SELECT error_code FROM derived_extraction_checks")}
     assert "checker_mismatch" in codes
-    assert listing(version)["measurements"] == []
+    assert {i["check"]["status"] for i in listing(version)["measurements"]} == {"unchecked"}
 
 
 def test_two_workers_never_take_the_same_window(db, fake):
@@ -728,7 +842,7 @@ def test_the_routes_serve_the_receipts_to_a_reader(db, fake):
                      params={"is_demo": True, "mode": "current", "cutoff": cutoff})
     assert one.status_code == 200 and one.json()["measurement_id"] == items[0]["measurement_id"]
     feed = client.get("/api/history/measurements/changes", headers=auth, params={"is_demo": True})
-    assert feed.status_code == 200 and len(feed.json()["items"]) == 3
+    assert feed.status_code == 200 and len(feed.json()["items"]) == 9  # per reading: created x2, rechecked
     cov = client.get("/api/history/measure-coverage", headers=auth, params={
         "source_id": "who_don", "is_demo": True, "mode": "current", "cutoff": cutoff, "version_ids": [version]})
     assert cov.json()["versions"][version]["state"] == "complete"
@@ -753,7 +867,8 @@ def test_a_late_verification_answer_is_audited_and_not_adopted(db, fake):
     late = rows(db, "SELECT status,error_code,items FROM derived_extraction_checks")
     assert late and late[0]["status"] == "unchecked" and late[0]["error_code"] == "source_unreadable"
     assert late[0]["items"] and late[0]["items"][0]["status"] == "consistent"  # the answer kept as audit
-    assert rows(db, "SELECT count(*) AS n FROM derived_measurements")[0]["n"] == 0
+    answered = "SELECT count(*) AS n FROM derived_measurements WHERE checker_version<>'unchecked'"
+    assert rows(db, answered)[0]["n"] == 0  # no object of it: the readings are still the unchecked ones
     revoke(db, enabled=True)
 
     def lease_taken(_request, _response):
@@ -765,7 +880,7 @@ def test_a_late_verification_answer_is_audited_and_not_adopted(db, fake):
     check_all(RealBioCheck(answer=lease_taken))
     stale = rows(db, "SELECT error_code,items FROM derived_extraction_checks WHERE error_code='lease_lost'")
     assert len(stale) == 1 and stale[0]["items"]
-    assert rows(db, "SELECT count(*) AS n FROM derived_measurements")[0]["n"] == 0
+    assert rows(db, answered)[0]["n"] == 0
     with db.begin() as conn:  # the other worker's lease runs out: the task is checked once more, normally
         conn.execute(text("UPDATE derived_extraction_check_tasks SET lease_until=clock_timestamp()-interval '1 s',"
                           "next_check_at=clock_timestamp()"))
@@ -792,7 +907,7 @@ def test_an_answer_for_a_superseded_run_is_history_at_once(db, fake, monkeypatch
     check_all(RealBioCheck())  # the v12 answer arrives after the supersession
     old = rows(db, "SELECT measurement_id FROM derived_measurements WHERE text_processor_version=:t",
                t="datafabric.clean_text.v12")
-    assert len(old) == 3  # recorded ...
+    assert len(old) == 6  # recorded (each reading's unchecked object and the object of its answer) ...
     for row in old:
         got = measurement_reads.read_one(row["measurement_id"], True, "current", NOW())
         assert got["current"] is False and got["state_at_cutoff"] == "superseded"  # ... never current
@@ -810,11 +925,11 @@ def test_a_regranted_permission_is_checked_afresh_for_every_reader(db, fake):
         with pytest.raises(HistoryError) as error:
             read()
         assert error.value.status == 403
-    assert measurement_reads.changes(True)["withheld"] == {"who_don": 3}
+    assert measurement_reads.changes(True)["withheld"] == {"who_don": 9}  # per reading: created x2, rechecked
     revoke(db, enabled=True)
     # a new reader (another workspace) and the old one both read again with the permission of now
     assert len(listing(version)["measurements"]) == 3
-    assert len(measurement_reads.changes(True, after_seq=0)["items"]) == 3
+    assert len(measurement_reads.changes(True, after_seq=0)["items"]) == 9
     revoke(db)
     with pytest.raises(HistoryError):  # nothing of the earlier answer is kept for the next reader
         listing(version)
@@ -844,10 +959,15 @@ class ReferenceConsumer:
         self._link()
 
     def _link(self):
+        """Only an object that is current when it is pulled is linked: the unchecked object a check's answer has
+        replaced is in the feed (created, then rechecked_by_checker) but is not a point of anything."""
         for mid, version in self.inbox.items():
             link = (self.topics.get(version), mid)
-            if link[0] is not None and link not in self.links:
+            if link[0] is not None and link not in self.links and self._current(mid):
                 self.links.append(link)
+
+    def _current(self, mid):
+        return measurement_reads.read_one(mid, True, "current", NOW())["current"]
 
 
 @real_checker
@@ -894,7 +1014,8 @@ def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeyp
     assert len(listing(version, "operational_replay", produced)["measurements"]) == 3  # the configured checker
     monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is configured now; when it took over is not recorded
     replay = listing(version, "operational_replay", produced)
-    assert replay["measurements"] == [] and replay["excluded"] == {"checker_history_unknown": 3}
+    assert replay["measurements"] == [] and replay["excluded"] == {"checker_history_unknown": 3,
+                                                                    "rechecked_by_checker": 3}  # + the unchecked ones
     one = measurement_reads.read_one(old["measurement_id"], True, "operational_replay", produced)
     assert one["current"] is False and one["not_current_reason"] == "checker_history_unknown"
     assert one["state_at_cutoff"] == "ok"  # its own events say nothing happened to it - but it is not current
@@ -928,7 +1049,8 @@ def test_a_correction_without_a_target_version_leaves_the_record_unknown_until_i
     scan()
     # no version known: every object of the corrected record is unknown, not current, out of the default list
     got = listing(version)
-    assert got["measurements"] == [] and got["excluded"] == {"correction_target_version_unknown": 3}
+    assert got["measurements"] == [] and got["excluded"] == {"correction_target_version_unknown": 3,
+                                                              "rechecked_by_checker": 3}  # + the unchecked ones
     one = measurement_reads.read_one(cases["measurement_id"], True, "current", NOW())
     assert one["status"] == {"state": "unknown", "reason": "correction_target_version_unknown"}
     assert one["current"] is False and one["not_current_reason"] == "correction_target_version_unknown"
