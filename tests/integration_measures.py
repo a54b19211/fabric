@@ -180,19 +180,30 @@ def as_checker(version):
 OLDER_CHECKER = "biocheck.extraction_rules.v15"
 
 
-def older_checker_answers(monkeypatch):
-    """Make the older checker (v15) the expected one, to leave its results behind. extraction_contract no longer
-    describes v15, so a live answer of it would be "checker_mismatch"; v15 and v17 give the same field sets, so
-    its answer is judged by the v17 rules and recorded under its own version, as it was when v15 was current."""
-    real = checks.verdict
-    monkeypatch.setenv("DATAFABRIC_MEASURE_CHECKER", OLDER_CHECKER)
+class OlderChecker:
+    """The time an older checker (v15) was the expected one, as a stand-in: the code has no switch for it. While it
+    lasts, v15 is the expected checker of the measures. extraction_contract no longer describes v15, so a live
+    answer of it would be "checker_mismatch"; v15 and v17 give the same field sets, so the answer is judged by
+    the v17 rules and recorded under its own version, as it was when v15 was current. retire() makes v17 the
+    expected one again, with the results of v15 left behind."""
 
-    def judge(body, request, checker):
-        if checker == OLDER_CHECKER:
-            return real(dict(body, checker_version=ec.CHECKER_V17), request, ec.CHECKER_V17)
-        return real(body, request, checker)
+    def __init__(self, monkeypatch):
+        self.expected = OLDER_CHECKER
+        real_expected, real_verdict = checks.expected_checker, checks.verdict
 
-    monkeypatch.setattr(checks, "verdict", judge)
+        def expected_checker(producer="identifiers"):
+            return self.expected if producer == "measures" and self.expected else real_expected(producer)
+
+        def judge(body, request, checker):
+            if checker == OLDER_CHECKER:
+                return real_verdict(dict(body, checker_version=ec.CHECKER_V17), request, ec.CHECKER_V17)
+            return real_verdict(body, request, checker)
+
+        monkeypatch.setattr(checks, "expected_checker", expected_checker)
+        monkeypatch.setattr(checks, "verdict", judge)
+
+    def retire(self):
+        self.expected = None
 
 
 # ---- fixtures and helpers -------------------------------------------------------------------------------------
@@ -210,7 +221,6 @@ def db(pg, monkeypatch):
                        '["who_don","external_archive","reviewed_graph","clinicaltrials"]')
     monkeypatch.setenv("DATAFABRIC_BIOCHECK_URL", "http://biocheck.invalid")
     monkeypatch.setenv("DATAFABRIC_BIOCHECK_TOKEN", "test-token")
-    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER", raising=False)
     with pg.begin() as conn:
         conn.execute(text("TRUNCATE " + MEASURE_TABLES))
     return pg
@@ -548,14 +558,14 @@ def test_a_revocation_between_read_and_send_sends_nothing(db, fake, monkeypatch)
 
 @real_checker
 def test_a_checker_change_leaves_objects_not_current_until_rechecked(db, fake, monkeypatch):
-    older_checker_answers(monkeypatch)
+    older = OlderChecker(monkeypatch)
     version = who_version()
     runs.plan(model=fake.model())
     read_all(fake)
     check_all(RealBioCheck(answer=as_checker(OLDER_CHECKER)))
     old = by_value(listing(version)["measurements"])["66"]
     assert old["check"]["checker_version"] == OLDER_CHECKER
-    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is expected now
+    older.retire()  # v17 is expected now
     now = listing(version)
     # (the three placeholders the answers of the old checker replaced are history too)
     assert now["measurements"] == [] and now["excluded"] == {"checker_not_current": 3, "rechecked_by_checker": 3}
@@ -1023,7 +1033,7 @@ def test_the_feed_lets_a_consumer_link_in_either_arrival_order(db, fake):
 
 @real_checker
 def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeypatch):
-    older_checker_answers(monkeypatch)
+    older = OlderChecker(monkeypatch)
     version = who_version()
     runs.plan(model=fake.model())
     read_all(fake)
@@ -1031,7 +1041,7 @@ def test_replay_never_shows_an_object_of_another_checker_as_ok(db, fake, monkeyp
     old = by_value(listing(version)["measurements"])["66"]
     produced = NOW()
     assert len(listing(version, "operational_replay", produced)["measurements"]) == 3  # the configured checker
-    monkeypatch.delenv("DATAFABRIC_MEASURE_CHECKER")  # v17 is configured now; when it took over is not recorded
+    older.retire()  # v17 is configured now; when it took over is not recorded
     replay = listing(version, "operational_replay", produced)
     assert replay["measurements"] == [] and replay["excluded"] == {"checker_history_unknown": 3,
                                                                     "rechecked_by_checker": 3}  # + the unchecked ones

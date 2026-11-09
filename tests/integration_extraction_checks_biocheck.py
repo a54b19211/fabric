@@ -106,7 +106,7 @@ def test_readback_holds_every_batch_not_only_the_last(pg, env):
 
 def test_an_answer_of_another_checker_is_never_completed(pg, env, monkeypatch):
     version = document()
-    monkeypatch.setenv("DATAFABRIC_EXTRACTION_CHECKER", "biocheck.extraction_rules.v4")
+    monkeypatch.setattr(checks, "expected_checker", lambda producer="identifiers": "biocheck.extraction_rules.v4")
     drain(RealBioCheck())
     assert not [r for r in stored(pg, version) if r["status"] == "completed"], stored(pg, version)
 
@@ -114,7 +114,7 @@ def test_an_answer_of_another_checker_is_never_completed(pg, env, monkeypatch):
 def test_a_checker_upgrade_invalidates_old_results_and_queues_work(pg, env, monkeypatch):
     version = document()
     drain(RealBioCheck())
-    monkeypatch.setenv("DATAFABRIC_EXTRACTION_CHECKER", "biocheck.extraction_rules.v4")
+    monkeypatch.setattr(checks, "expected_checker", lambda producer="identifiers": "biocheck.extraction_rules.v4")
     checks.backfill()
     got = view(version)["identifiers"]
     pending = rows(pg, "SELECT count(*) AS n FROM derived_extraction_check_tasks WHERE state IN ('queued','waiting')")[0]["n"]
@@ -257,11 +257,10 @@ def _item(kind):
 
 
 @pytest.mark.parametrize("kind", ["identifier", "annotation", "claim", "measurement"])
-def test_the_verdict_follows_the_real_v3_answer_of_each_kind(kind, monkeypatch):
+def test_the_verdict_follows_the_real_v3_answer_of_each_kind(kind):
     """For every kind: the located answer of v3 is adoptable; its no-location negative (quote not at the locator)
     is adoptable and inconsistent; the negative with a located-looking status, or a located answer missing one of
     the kind's fields, is not."""
-    monkeypatch.delenv("DATAFABRIC_EXTRACTION_CHECKER", raising=False)
     passages = [{"id": "p1", "role": "primary", "start": 0, "end": len(TEXT), "text": TEXT}]
     located = {"subject": SUBJECT, "passages": passages, "items": [_item(kind)]}
     answer = biocheck(located)

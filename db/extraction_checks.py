@@ -47,21 +47,19 @@ PRODUCERS = ("identifiers", "profile")
 
 @dataclass(frozen=True)
 class Check:
-    """How one producer's products are checked: the contract, the BioCheck endpoint, and the checker expected
-    (the environment variable that may name another one, and the default)."""
+    """How one producer's products are checked: the contract, the BioCheck endpoint, and the checker expected."""
 
     contract: str
     path: str
-    checker_env: str
-    default_checker: str
+    checker: str
 
 
-_V1 = Check(CONTRACT, "/v1/extraction-consistency", "DATAFABRIC_EXTRACTION_CHECKER", CHECKER_V3)
+_V1 = Check(CONTRACT, "/v1/extraction-consistency", CHECKER_V3)
 # the explicit table: identifiers and annotations go to /v1, measurements to /v3 - never one for the other
 CHECKS_BY_PRODUCER = {
     "identifiers": _V1,
     "profile": _V1,
-    "measures": Check(CONTRACT_V3, "/v3/extraction-consistency", "DATAFABRIC_MEASURE_CHECKER", CHECKER_V17),
+    "measures": Check(CONTRACT_V3, "/v3/extraction-consistency", CHECKER_V17),
 }
 # Contract lengths (extraction_consistency.v1). A product longer than these is not sent cut to fit: a prefix of the
 # producer's value is a different value, so the item is unbuildable and reads back unchecked.
@@ -76,8 +74,7 @@ def producer_version(name):
 
 
 def expected_checker(producer="identifiers"):
-    check = CHECKS_BY_PRODUCER[producer]
-    return os.environ.get(check.checker_env, check.default_checker)
+    return CHECKS_BY_PRODUCER[producer].checker
 
 
 def contract_of(producer):

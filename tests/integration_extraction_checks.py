@@ -125,15 +125,15 @@ def test_only_the_same_full_request_and_checker_is_reused(pg, env, monkeypatch):
     again = FakeBioCheck()
     drain(again)
     assert again.requests == []  # same request, same checker: reused, nothing sent
-    monkeypatch.setenv("DATAFABRIC_EXTRACTION_CHECKER", "biocheck.extraction_rules.v4")
-    assert checks.backfill() == 2  # an upgrade queues every product again
-    newer = FakeBioCheck()
-    drain(newer)
-    assert len(newer.requests) >= 1  # another checker version: asked again (the v3 answer is not adopted)
-    got = checks.for_versions("external_archive", True, [version], "current", datetime.now(timezone.utc))
-    assert got["versions"][version]["identifiers"]["state"] == "unchecked"
+    with monkeypatch.context() as upgraded:  # another checker is expected for a while: a stand-in, no switch in the code
+        upgraded.setattr(checks, "expected_checker", lambda producer="identifiers": "biocheck.extraction_rules.v4")
+        assert checks.backfill() == 2  # an upgrade queues every product again
+        newer = FakeBioCheck()
+        drain(newer)
+        assert len(newer.requests) >= 1  # another checker version: asked again (the v3 answer is not adopted)
+        got = checks.for_versions("external_archive", True, [version], "current", datetime.now(timezone.utc))
+        assert got["versions"][version]["identifiers"]["state"] == "unchecked"
     # another product content (one more identifier) changes the request: never served by the old answer
-    monkeypatch.delenv("DATAFABRIC_EXTRACTION_CHECKER")
     with pg.begin() as conn:
         row = conn.execute(text("SELECT * FROM derived_identifiers WHERE version_id=:v LIMIT 1"), {"v": version}).mappings().one()
         conn.execute(text("INSERT INTO derived_identifiers(version_id,processor_version,text_processor_version,kind,value,"
