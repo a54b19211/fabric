@@ -17,7 +17,7 @@ from biz_rules.schemas import ConfidenceInfo, MetadataEnvelope, ProvenanceInfo
 from db import history, publication
 from db.models import Base, Document, EntityDict, EntityRelation, ExtractedEntity
 from migration import history as history_migration
-from migration import publication as publication_migration
+from migration import runner
 
 
 @pytest.fixture
@@ -44,7 +44,6 @@ def databases(monkeypatch):
     source, target = engines
     Base.metadata.create_all(source)
     monkeypatch.setattr(publication, "publication_engine", lambda: source)
-    monkeypatch.setattr(publication_migration, "publication_engine", lambda: source)
     monkeypatch.setattr(history, "history_engine", lambda: target)
     monkeypatch.setattr(history_migration, "history_engine", lambda: target)
     monkeypatch.setenv(
@@ -57,7 +56,7 @@ def databases(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_NAMESPACE", "synthetic.publication")
     history_migration.migrate_history()
-    publication_migration.migrate_publication()
+    assert runner.main(["--db", "publication", "--apply"]) == 0
     import db.session
 
     @contextmanager

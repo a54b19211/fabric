@@ -77,7 +77,7 @@ def test_the_history_manifest_is_the_union_of_the_two_former_runners():
     first = {"V017", "V018", "V021", "V022", "V023", "V025", "V029", "V030", "V032"}  # migration/history.py
     second = {"V020", "V024", "V027", "V028", "V031"}  # migration/index_publication.py
     assert {name[:4] for name in MANIFESTS["history"].files if number(name) <= LAST_COMPAT_VERSION} == first | second
-    assert {name[:4] for name in MANIFESTS["publication"].files} == {"V019", "V026"}  # migration/publication.py
+    assert {name[:4] for name in MANIFESTS["publication"].files} == {"V019", "V026"}  # the publication role
 
 
 def test_only_the_four_object_library_files_carry_their_own_transaction_control():

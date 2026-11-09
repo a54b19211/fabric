@@ -470,7 +470,7 @@ python -m flows.graph_publish capture-primekg --node-type gene/protein \
 - 原DATAFABRIC_HISTORY_*：仍指独立历史库、来源许可和独立凭据。
 
 ~~~bash
-python -m migration.publication
+python -m migration.runner --db publication --apply   # 只在发表库不是 app 角色建过的库时才跑，见“迁移执行器与来源能力”
 python -m migration.history
 python -m flows.history_publish --poll-seconds 30 --batch-size 20 --backfill-batch-size 1
 ~~~
@@ -541,9 +541,9 @@ python -m pytest -q tests/integration_publication.py tests/integration_history.p
 百万级源表先独立建立 keyset 索引，不能在应用启动或大事务里做。必须提供原先显式的 DATAFABRIC_PUBLICATION_DATABASE_URL；命令不读取默认 APP 数据库：
 
 ~~~bash
-python -m migration.publication --site-index
+python -m migration.runner --db publication --online site-index
 # 仅回退本次索引，保留资料、待办和已捕获版本
-python -m migration.publication --drop-site-index
+python -m migration.runner --db publication --online site-index --drop
 ~~~
 
 GET /api/history/source-health?source_id=clinicaltrials 使用原读取令牌及当前来源许可，分别返回：真实 crawl_log 中的 scoped 检查/成功/失败（没有记录就是 unknown）、发表器心跳和该源未完成待办数、按站库存进度、固定刷新任务。不会返回原配置或异常正文。日志里的 success、空 changes、发表器 idle、库存 EOF 都不证明原站完整或领域平静。
@@ -605,7 +605,7 @@ WHO 有界回填是显式触发的一次性操作，不在 `DATAFABRIC_HISTORY_W
 
 常驻队列不计划有界回填新建的版本（回执里的 `background_version_ids`）：补产 v12 不会让它们隐式吃掉测量。要测它们，给一份清单：`python -m flows.measure_extract --scope list.json`，清单是 `{"versions": ["<版本号>", {"version_id": "<版本号>", "windows": [0, 3]}]}`。只计划、只读清单里的版本；写了 `windows` 的只读这些阅读窗口，其余窗口存为 `skipped`（`out_of_scope`），不算欠账、不事后删。清单摘要和所选窗口写在每个运行的 `selection` 上（V041，常驻队列的运行为空），`/measure-coverage` 带出它和 `out_of_scope`；打印的回执写明计划了什么、哪些版本已有运行、哪些没计划成及原因（例如清洗正文 v12 还没产出、窗口号不存在）。窗口号按生成这个运行的处理器版本的切法计：v2 起第 0 个窗口也在行或句子的边界结束，同一个窗口号在 v1 与 v2 下对应的原文范围可能不同。一次调用最多 20 轮，每轮模型请求数仍受 `DATAFABRIC_MEASURE_ROUND_REQUESTS` 约束，窗口失败仍是 3 次封顶，回执记本次发出的请求数。同一产物同一路线已有运行的版本不再计划；加 `--upgrade` 则只认当前 producer（处理器版本和模型配置）的运行：旧 producer 读过的版本另起新运行，旧运行原样保留，清单以外的版本不动。`--upgrade` 只能和 `--scope` 一起用。
 
-新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、对象发布 `python -m migration.publication`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
+新增身份结构使用 `V035__identity_evidence.sql`（团队分支上的原编号是 V023，合并时改号，原因见 docs/decisions/0001）。已按团队编号迁移过的库直接运行 `python -m migration.migrate` 即可：迁移器按版本号、描述和校验和认出改号的迁移，原记录不删不改；认不出的记录会报错并停止（先用 `--list` 只读查看）。测试初始化顺序是：对象库 `python -m migration.migrate`、独立历史库 `python -m migration.history`、历史索引 `python -m migration.index_publication`。发表库如果就是对象库，`migrate` 已经装了 V019 和 V026，不再另跑；只有发表库是另一个没跑过 app 角色的原采集库时，才多一步 `python -m migration.runner --db publication --apply`。先注入并核实测试环境配置，再执行；迁移命令本身不负责选择安全的数据库。回退代码时保留新表和历史数据，不把新产生的数据覆盖成旧备份。
 
 历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。
 
@@ -699,16 +699,22 @@ WHO 有界回填是显式触发的一次性操作，不在 `DATAFABRIC_HISTORY_W
 ## 迁移执行器与来源能力（r2）
 
 迁移统一走 `python -m migration.runner --db {app|history|publication}`；旧命令（`migration.migrate`、`migration.history`、
-`migration.index_publication`、`migration.publication`）是它的包装，输出和退出码语义不变。
+`migration.index_publication`）是它的包装，输出和退出码语义不变。`migration.publication` 这个包装已经删除，
+原采集库的迁移和站点索引直接用 `--db publication`。
 
 ```
 python -m migration.runner --db history --plan              # 只读：已记录什么、待执行什么、为什么拒绝；不建任何表
 python -m migration.runner --db history --apply             # 执行待办（整文件、每文件一个事务、同事务写账本）
 python -m migration.runner --db history --adopt-baseline    # 没有账本的旧库：先证明结构，再建账（observed_baseline）
 python -m migration.runner --db history --revoke-baseline V020 --reason ...   # 追加一条更正事件
+python -m migration.runner --db publication --apply          # 只装 V019、V026；什么时候需要见下
 python -m migration.runner --db publication --online site-index [--drop]     # CONCURRENTLY 操作
 python -m migration.source_lifecycle effective legacy_documents --actor NAME  # 退役在本次部署生效（写部署时刻）
 ```
+
+**三个角色什么时候跑。** `app` 是对象库（V001–V035 兼容清单，其中已有 V019 的 `publication_outbox` 和写入触发器、V026 的加列）；`history` 是独立历史库；`publication` 只装 V019 和 V026，给一个没跑过 `app` 角色的原采集库用。
+D1 和普通部署只跑 `app` 和 `history`：发表器读的库就是 `app` 建过的那个库时，V019 已经在里面，不要再跑 `publication`。在这样的库上跑 `publication`，runner 会拒绝（`publication_outbox` 已经存在，账本里却没有 publication 角色的记录）。这是入口选错，不是业务数据出了问题：这个库不需要 publication 角色，不用为它建账。
+只有发表库是另一个、没跑过 `app` 的原采集库，才用同一个 runner 跑一次 `--db publication --apply`（`DATAFABRIC_PUBLICATION_DATABASE_URL` 必须显式给出，不读默认 APP 库）；建按来源补录索引用 `--db publication --online site-index`。这个库如果早先已用旧的单独命令迁移过、还没有账本，先用 `--db publication --adopt-baseline` 建账，不要重跑文件。
 
 现役库第一次：先 `--plan`（会提示“库在账本之前已迁移”），再 `--adopt-baseline`（会在一次性容器里取各前缀的结构指纹，
 按记录的容器 ID 拆除），结构不等于任何前缀就只出差异报告，不写任何东西；没有 `--accept-diff`。设计和限制见

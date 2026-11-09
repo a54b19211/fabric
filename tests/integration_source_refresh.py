@@ -576,16 +576,16 @@ def test_old_watch_lease_cannot_overwrite_new_owner(databases, monkeypatch):
 
 
 def test_independent_keyset_index_creation_and_rollback_in_real_schema(databases):
-    from migration import publication as migration
+    from migration import runner
 
     source, _ = databases
-    migration.site_index()
+    assert runner.main(["--db", "publication", "--online", "site-index"]) == 0
     definition = rows(
         source,
         "SELECT indexdef FROM pg_indexes WHERE indexname='idx_documents_publication_site_id'",
     )[0]["indexdef"]
     assert "(source_site, id)" in definition
-    migration.site_index(drop=True)
+    assert runner.main(["--db", "publication", "--online", "site-index", "--drop"]) == 0
     with source.begin() as conn:
         assert (
             conn.execute(
