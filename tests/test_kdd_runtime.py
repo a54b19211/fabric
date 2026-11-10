@@ -7,7 +7,7 @@ import pytest
 
 from biz_rules.history_models import HistoryError
 from db.source_refresh import SourceWatch, watches
-from flows import history_publish
+from flows import scheduler
 
 
 def sec_watch(**overrides):
@@ -35,30 +35,30 @@ def test_sec_watch_explicit_scope_survives_config_round_trip(monkeypatch):
 
 def test_publish_loop_no_longer_runs_indexing():
     # v3 3.6：索引由独立 worker 执行（migration.index_publication worker），发表循环不再碰索引
-    assert not hasattr(history_publish, "index_tick")
+    assert not hasattr(scheduler, "index_tick")
 
 
 def test_source_failure_exits_nonzero(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["publisher", "--once", "--backfill-batch-size", "0"])
-    monkeypatch.setattr(history_publish, "publisher_heartbeat", lambda *_: None)
+    monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda *_: None)
 
     def unavailable():
         raise HistoryError("synthetic_source_failure", "explicit fault", 503)
 
-    monkeypatch.setattr(history_publish, "refresh_once", unavailable)
+    monkeypatch.setattr(scheduler, "refresh_once", unavailable)
     with pytest.raises(SystemExit) as exc:
-        history_publish.main()
+        scheduler.main()
     assert exc.value.code == 1
 
 
 @pytest.mark.parametrize("state", ["failed", "blocked"])
 def test_reported_source_failure_exits_nonzero(monkeypatch, state):
     monkeypatch.setattr(sys, "argv", ["publisher", "--once", "--backfill-batch-size", "0"])
-    monkeypatch.setattr(history_publish, "publisher_heartbeat", lambda *_: None)
-    monkeypatch.setattr(history_publish, "refresh_once", lambda: [{"state": state}])
-    monkeypatch.setattr(history_publish, "publish_once", lambda: {"state": "idle"})
+    monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda *_: None)
+    monkeypatch.setattr(scheduler, "refresh_once", lambda: [{"state": state}])
+    monkeypatch.setattr(scheduler, "publish_once", lambda: {"state": "idle"})
     with pytest.raises(SystemExit) as exc:
-        history_publish.main()
+        scheduler.main()
     assert exc.value.code == 1
 
 

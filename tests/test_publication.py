@@ -127,26 +127,26 @@ def test_publisher_backfill_budget_is_separate_and_zero_keeps_consuming(
 ):
     import sys
 
-    from flows import history_publish
+    from flows import scheduler
 
-    monkeypatch.setattr(history_publish, "refresh_once", lambda: [])
+    monkeypatch.setattr(scheduler, "refresh_once", lambda: [])
     calls = []
-    argv = ["history_publish", "--once", "--poll-seconds", "30", "--batch-size", "20"]
+    argv = ["scheduler", "--once", "--poll-seconds", "30", "--batch-size", "20"]
     if backfill is not None:
         argv.extend(["--backfill-batch-size", str(backfill)])
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(history_publish, "publisher_heartbeat", lambda state: None)
+    monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda state: None)
     monkeypatch.setattr(
-        history_publish,
+        scheduler,
         "backfill_once",
         lambda *, limit: calls.append(("backfill", limit)) or {"seeded": limit},
     )
     monkeypatch.setattr(
-        history_publish,
+        scheduler,
         "publish_once",
         lambda: calls.append(("publish", None)) or {"state": "idle"},
     )
-    history_publish.main()
+    scheduler.main()
     assert ("publish", None) in calls
     expected = (
         [] if backfill == 0 else [("backfill", 1 if backfill is None else backfill)]

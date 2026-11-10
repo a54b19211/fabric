@@ -27,7 +27,7 @@
 
 ### 2. 最终追平（只读核对）
 - 现役 publisher 继续跑到 backfill 完成。
-- 运行对账：`python -m flows.history_publish --reconcile <HW>`（只读、按 id 分批、单个快照）。
+- 运行对账：`python -m flows.scheduler --reconcile <HW>`（只读、按 id 分批、单个快照）。
 - 通过条件：`switchable=true`，即 HW 以内每一行 `matched`（当前内容指纹 = 最后一次成功发表的指纹），unpublished / stale / in_flight 都是 0，outbox 没有未完成的 document/graph 待办。
 - 不用“某时刻 pending=0”当依据：还有写入者时它会骗人。
 
