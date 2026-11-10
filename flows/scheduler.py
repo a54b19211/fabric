@@ -24,7 +24,7 @@ from db.source_refresh import refresh_once
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--reconcile", type=int, metavar="HIGH_WATERMARK",
                         help="只读对账：documents id≤高水位的每一行都已按当前内容发表，打印结果后退出")
