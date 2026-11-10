@@ -40,7 +40,7 @@
   这里把同样的函数按顺序串起来，为的是读懂和对单个站点试跑；线上仍以后台程序为准。
 
   先要有一个建好表的历史库：python -m migration.runner --db history --apply（指向临时库）。
-    运行前要设的环境变量（线上放在 ~/.config/datafabric-publication/runtime.env）。这里会写库，请指向临时库，别连线上库：
+  运行前要设的环境变量（线上放在 ~/.config/datafabric-publication/runtime.env）。这里会写库，请指向临时库，别连线上库：
     DATAFABRIC_HISTORY_DATABASE_URL      必设。历史资料数据库
     DATAFABRIC_HISTORY_SOURCE_ALLOWLIST  必设。允许处理的来源，逗号分隔，如 nmpa,fda_api_drug_label；
                                          没列进去的站点会报"当前许可不允许该来源"（抓取、清洗、测量都按这份名单）
@@ -59,7 +59,7 @@
   --site 只认 config/sites 里配置的网页、接口站点键（填错时报错会列出全部）。来源目录里的 clinicaltrials、pubmed、
   who_don 等走别的插件，这里抓不了。网页站点一页常要 30 秒，所以 --deadline（抓取截止秒数）默认给到上限 120。
   这里不下载附件（附件会记成"未尝试"），线上由采集工人处理。
-    抓到 0 个版本时 fetch 会醒目地说明原因并以非 0 退出，后面各步不再跑。
+  抓到 0 个版本时 fetch 会醒目地说明原因并以非 0 退出，后面各步不再跑。
 """
 
 import argparse
