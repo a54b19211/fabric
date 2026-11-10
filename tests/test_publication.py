@@ -121,39 +121,6 @@ def test_collected_old_wrappers_are_not_rewritten():
     assert "publication_state" not in old.model_dump()
 
 
-@pytest.mark.parametrize("backfill", [None, 0, 3])
-def test_publisher_backfill_budget_is_separate_and_zero_keeps_consuming(
-    monkeypatch, backfill
-):
-    import sys
-
-    from flows import scheduler
-
-    monkeypatch.setattr(scheduler, "refresh_once", lambda: [])
-    calls = []
-    argv = ["scheduler", "--once", "--poll-seconds", "30", "--batch-size", "20"]
-    if backfill is not None:
-        argv.extend(["--backfill-batch-size", str(backfill)])
-    monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda state: None)
-    monkeypatch.setattr(
-        scheduler,
-        "backfill_once",
-        lambda *, limit: calls.append(("backfill", limit)) or {"seeded": limit},
-    )
-    monkeypatch.setattr(
-        scheduler,
-        "publish_once",
-        lambda: calls.append(("publish", None)) or {"state": "idle"},
-    )
-    scheduler.main()
-    assert ("publish", None) in calls
-    expected = (
-        [] if backfill == 0 else [("backfill", 1 if backfill is None else backfill)]
-    )
-    assert [call for call in calls if call[0] == "backfill"] == expected
-
-
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_real_nmpa_collector_headers_are_not_narrative_and_originals_stay_exact(
     newline,

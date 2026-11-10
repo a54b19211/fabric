@@ -213,7 +213,6 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
     """Codex r92: retirement is real - with the switch off (the default) nothing new is written to
     legacy_documents (archive import, the publisher's inventory seeding), no new query chooses it, and an old id
     still reads its version (with its alias). Nothing is deleted."""
-    from db import publication
 
     page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page")  # written in cutover mode (fixture)
     migrate(is_demo=False, apply=True)
@@ -223,7 +222,6 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
     with pytest.raises(HistoryError) as error:
         legacy("nmpa", u5(NMPA_URL + "?2"), NMPA_URL + "?2", PAGE, "new-after-retirement")
     assert (error.value.code, error.value.status) == ("legacy_retired", 410)
-    assert publication.backfill_once(limit=5)["state"] == "legacy_retired"  # a state, the loop goes on
     with pytest.raises(HistoryError) as error:  # a new query does not choose legacy
         store.list_records("legacy_documents", False, "current", now, terms=["公告"])
     assert error.value.code == "legacy_retired"

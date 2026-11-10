@@ -39,7 +39,7 @@ def test_publish_loop_no_longer_runs_indexing():
 
 
 def test_source_failure_exits_nonzero(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["publisher", "--once", "--backfill-batch-size", "0"])
+    monkeypatch.setattr(sys, "argv", ["publisher", "--once"])
     monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda *_: None)
 
     def unavailable():
@@ -53,7 +53,7 @@ def test_source_failure_exits_nonzero(monkeypatch):
 
 @pytest.mark.parametrize("state", ["failed", "blocked"])
 def test_reported_source_failure_exits_nonzero(monkeypatch, state):
-    monkeypatch.setattr(sys, "argv", ["publisher", "--once", "--backfill-batch-size", "0"])
+    monkeypatch.setattr(sys, "argv", ["publisher", "--once"])
     monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda *_: None)
     monkeypatch.setattr(scheduler, "refresh_once", lambda: [{"state": state}])
     monkeypatch.setattr(scheduler, "publish_once", lambda: {"state": "idle"})

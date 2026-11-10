@@ -213,31 +213,6 @@ def test_failed_head_and_expired_lease_do_not_skip_newer_versions(databases):
     assert version_count(target) == 2
 
 
-def test_bounded_backfill_is_resumable_and_does_not_label_inventory_as_new(databases):
-    source, target = databases
-    for i in range(4):
-        insert_document(source, snapshot("backfill-" + str(i)))
-    # Existing stock before trigger installation is emulated by removing these pending rows.
-    with source.begin() as conn:
-        conn.execute(text("DELETE FROM publication_outbox"))
-    first = publication.backfill_once(limit=2)
-    assert first["seeded"] == 2 and not first["complete"]
-    assert publication.publish_once()["state"] == "published"
-    waiting = publication.backfill_once(limit=2)
-    assert waiting["state"] == "pending_first" and waiting["seeded"] == 0
-    assert publication.publish_once()["state"] == "published"
-    second = publication.backfill_once(limit=2)
-    assert second["seeded"] == 2 and second["complete"]
-    for _ in range(2):
-        assert publication.publish_once()["state"] == "published"
-    assert publication.backfill_once(limit=2)["seeded"] == 0
-    assert version_count(target) == 4
-    assert all(
-        item["facts"]["capture_reason"] == "backfill"
-        for item in history.list_changes("legacy_documents", True)["items"]
-    )
-
-
 def test_unknown_source_and_disk_pause_are_visible_and_preserve_pending(
     databases, monkeypatch
 ):
@@ -248,7 +223,6 @@ def test_unknown_source_and_disk_pause_are_visible_and_preserve_pending(
     assert publication.publish_once()["state"] == "blocked"
     assert version_count(target) == 0
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", str(2**62))
-    assert publication.backfill_once()["state"] == "paused_disk_low"
     assert publication.publish_once()["state"] == "resource_blocked"
     publication.publisher_heartbeat("resource_blocked")
     status = publication.publication_status("legacy_documents")
@@ -465,7 +439,7 @@ def test_body_a_b_a_and_withdraw_then_restore_are_real_observations(databases):
     assert restored["facts"]["publication_state"] == "active"
 
 
-def test_backfill_and_old_graph_reference_never_replace_newer_cleaned_candidate(
+def test_old_graph_reference_never_replaces_newer_cleaned_candidate(
     databases,
 ):
     from db.repository import upsert_document
@@ -489,7 +463,6 @@ def test_backfill_and_old_graph_reference_never_replace_newer_cleaned_candidate(
     )
     current = publication.publish_once()
     assert current["state"] == "published"
-    assert publication.backfill_once(limit=2)["seeded"] == 0
     with Session(source) as session, session.begin():
         session.add(
             ExtractedEntity(
@@ -640,100 +613,6 @@ def test_restart_cannot_relabel_frozen_real_and_demo_scope(databases, monkeypatc
         and result["error"]["code"] == "publication_demo_scope_changed"
     )
     assert version_count(target) == 0
-
-
-@pytest.mark.parametrize("change", ["update", "delete"])
-def test_backfill_waits_for_concurrent_candidate_then_never_republishes_old_cache(
-    databases, change
-):
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    from sqlalchemy import event
-
-    source, _target = databases
-    value = snapshot("SYNTHETIC-concurrent-stock")
-    insert_document(source, value)
-    with source.begin() as conn:
-        conn.execute(text("DELETE FROM publication_outbox"))
-    waiting = Event()
-
-    def before_cursor(_conn, _cursor, statement, _params, _context, _many):
-        if (
-            "pg_advisory_xact_lock" in statement
-            or "SELECT publication_record_document" in statement
-        ):
-            waiting.set()
-
-    event.listen(source, "before_cursor_execute", before_cursor)
-    pool = ThreadPoolExecutor(max_workers=1)
-    with source.connect() as writer:
-        transaction = writer.begin()
-        try:
-            if change == "update":
-                newer = snapshot(status="TERMINATED")
-                writer.execute(
-                    text("UPDATE documents SET raw_content=:body WHERE uuid=:uuid"),
-                    {"body": newer["raw_content"], "uuid": value["uuid"]},
-                )
-            else:
-                writer.execute(
-                    text("DELETE FROM documents WHERE uuid=:uuid"),
-                    {"uuid": value["uuid"]},
-                )
-            future = pool.submit(publication.backfill_once, source, limit=1)
-            assert waiting.wait(3), (
-                "Backfill did not reach the old-row/new-candidate lock boundary"
-            )
-            transaction.commit()
-            result = future.result(timeout=10)
-        finally:
-            if transaction.is_active:
-                transaction.rollback()
-            pool.shutdown(wait=True)
-            event.remove(source, "before_cursor_execute", before_cursor)
-    assert result["seeded"] == 0
-    captured = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE kind='document' ORDER BY id",
-    )
-    assert len(captured) == 1
-    if change == "update":
-        assert (
-            captured[0]["snapshot"]["document"]["raw_content"] == newer["raw_content"]
-        )
-    else:
-        assert captured[0]["snapshot"]["document"]["is_deleted"] is True
-
-
-def test_quarantined_source_and_its_waiting_successor_do_not_stop_authorized_stock(
-    databases,
-):
-    source, target = databases
-    stock = snapshot("SYNTHETIC-authorized-stock")
-    insert_document(source, stock)
-    with source.begin() as conn:
-        conn.execute(text("DELETE FROM publication_outbox"))
-    unknown = snapshot("SYNTHETIC-quarantined")
-    unknown["source_site"] = "unknown"
-    insert_document(source, unknown)
-    assert publication.publish_once()["state"] == "blocked"
-    with source.begin() as conn:
-        conn.execute(
-            text(
-                "UPDATE documents SET raw_content=raw_content || ' later source revision' WHERE uuid=:uuid"
-            ),
-            {"uuid": unknown["uuid"]},
-        )
-    result = publication.backfill_once(limit=1)
-    assert result["seeded"] == 1
-    assert publication.publish_once()["state"] == "published"
-    assert version_count(target) == 1
-    waiting = rows(
-        source,
-        "SELECT state FROM publication_outbox WHERE source_doc_uuid='SYNTHETIC-quarantined' ORDER BY id",
-    )
-    assert [item["state"] for item in waiting] == ["blocked", "pending"]
 
 
 def test_reprojection_same_original_makes_new_version_and_keeps_old_immutable(

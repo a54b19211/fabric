@@ -62,7 +62,6 @@ db/identity.py:rollback_identity_merge  57/39  identity merge/rollback/review SQ
 db/publication.py:_graph_input  86/18  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_prepare  103/12  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:_publish_graph  84/5  graph publication worker: lease, plan, write and mark in one pass; split per step
-db/publication.py:backfill_once  166/23  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/publication.py:publish_once  101/21  graph publication worker: lease, plan, write and mark in one pass; split per step
 db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
 db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
@@ -79,5 +78,4 @@ flows/graph_publish.py:capture_primekg  137/31  graph publication flow: capture 
 flows/graph_publish.py:main  94/8  graph publication flow: capture and bundle build in long functions; split per step
 flows/history_fetch.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place
 flows/history_fetch.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
-flows/scheduler.py:main  100/18  command-line entry with its argument handling and run loop inline
 migration/sqltext.py:split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case

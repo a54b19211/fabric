@@ -8,7 +8,7 @@ import time
 from sqlalchemy.exc import SQLAlchemyError
 
 from biz_rules.history_models import HistoryError
-from db.publication import backfill_once, publish_once, publisher_heartbeat
+from db.publication import publish_once, publisher_heartbeat
 from db.source_refresh import refresh_once
 
 
@@ -19,24 +19,14 @@ def main():
                         help="只读对账：documents id≤高水位的每一行都已按当前内容发表，打印结果后退出")
     parser.add_argument("--poll-seconds", type=float, default=5)
     parser.add_argument("--batch-size", type=int, default=20)
-    parser.add_argument(
-        "--backfill-batch-size",
-        type=int,
-        default=1,
-        help="每轮存量最多补录数；0只处理已捕获待办",
-    )
     args = parser.parse_args()
     if args.reconcile is not None:
         from db.publication import reconcile
 
         print(json.dumps(reconcile(args.reconcile), ensure_ascii=False))
         return
-    if (
-        not 1 <= args.poll_seconds <= 60
-        or not 1 <= args.batch_size <= 100
-        or not 0 <= args.backfill_batch_size <= 100
-    ):
-        parser.error("poll 1..60秒、batch 1..100、backfill-batch 0..100")
+    if not 1 <= args.poll_seconds <= 60 or not 1 <= args.batch_size <= 100:
+        parser.error("poll 1..60秒、batch 1..100")
     stopping = False
 
     def stop(*_):
@@ -51,16 +41,6 @@ def main():
             publisher_heartbeat("running")
             refresh = refresh_once()
             failed = any(item.get("state") in {"failed", "blocked"} for item in refresh)
-            seeded = (
-                backfill_once(limit=args.backfill_batch_size)
-                if args.backfill_batch_size
-                else {
-                    "seeded": 0,
-                    "complete": False,
-                    "state": "disabled",
-                    "scope": "initial_inventory_not_completed",
-                }
-            )
             states = []
             for _ in range(args.batch_size):
                 if stopping:
@@ -80,7 +60,6 @@ def main():
             print(
                 json.dumps(
                     {
-                        "backfill": seeded,
                         "processed": states,
                         "source_refresh": refresh,
                     },

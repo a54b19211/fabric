@@ -67,7 +67,7 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 | 附件 | `flows/process_attachments.py` | 附件是独立版本，正文由 `processing/attachment_parse.py`（MinerU）产出 |
 | 清洗 | `flows/clean_stage.py` | `processing/clean_text.py`、`identifiers.py`、`profile.py`，分块租约并行 |
 | 索引 | `db/index_publication.py` | 唯一的进 WeKnora 路径；操作入口见下 |
-| 派活 | `flows/scheduler.py` | 审核图发布与 documents 库存冻结 |
+| 派活 | `flows/scheduler.py` | 定时派采集任务（`db/source_refresh.py`）、发表审核图（`db/publication.py`） |
 
 本地导入文件（原 `--mode local`）用 `POST /api/history/archives`；重抓页面用 `query=by_url` 的读取请求。
 
@@ -472,9 +472,9 @@ python -m flows.graph_publish capture-primekg --node-type gene/protein \
 ~~~bash
 python -m migration.runner --db publication --apply   # 只在发表库不是 app 角色建过的库时才跑，见“迁移执行器与来源能力”
 python -m migration.history
-python -m flows.scheduler --poll-seconds 30 --batch-size 20 --backfill-batch-size 1
+python -m flows.scheduler --poll-seconds 30 --batch-size 20
 ~~~
-存量补录与发表预算分开：初期每30秒至多新增1篇存量待办，同时最多消化20项已有待办；有可处理的pending/processing待办时先处理新提交和积压，不继续复制旧库存。失败/隔离行保留并按原规则核对重试，不作其它库存的永久全局闸门；同一文档仍不能越过未完成版本。持续繁忙时存量会延后，不能报告完成。改成 --backfill-batch-size 0 可暂停补录并继续处理已捕获资料；恢复同一清单会从原游标继续。调速需先看 pending、磁盘和单条复制体积，不按百万库存一次启动全量。
+每一轮先做来源刷新，再最多发表 --batch-size 项已捕获的待办。补录旧库存的功能已删除（旧文档冻结桥已退役，它每轮都直接返回“已退役”，从不做事）。失败/隔离行保留并按原规则核对重试，不作其它文档的永久全局闸门；同一文档仍不能越过未完成版本。调速需先看 pending、磁盘和单条复制体积，不按百万库存一次启动全量。
 
 
 V019只在显式源库新增publication_outbox和固定写入触发器，不在迁移里扫描百万库存。
@@ -536,7 +536,7 @@ python -m pytest -q tests/integration_publication.py tests/integration_history.p
 
 ## 长期专题所需的连续来源与健康信息
 
-原采集写入仍通过原事务待办发表，雷达不用读源数据库。库存补录在原控制记录内按已许可的 source_site 轮转，各站保留固定 max_id、独立游标和完成状态；每轮总预算由 --backfill-batch-size 限制，不乘来源数。旧全局水位只在同一许可站点清单内迁移。这里的完成只表示最初冻结库存已遍历，不代表原站全量或持续抓取正常。
+原采集写入仍通过原事务待办发表，雷达不用读源数据库。库存补录（按 source_site 轮转冻结库存）已删除；库里留下的 kind='backfill' 控制行只读保留，仍出现在发表状态的 backfill 字段里。
 
 百万级源表先独立建立 keyset 索引，不能在应用启动或大事务里做。必须提供原先显式的 DATAFABRIC_PUBLICATION_DATABASE_URL；命令不读取默认 APP 数据库：
 
@@ -609,7 +609,7 @@ WHO 有界回填是显式触发的一次性操作，不在 `DATAFABRIC_HISTORY_W
 
 历史演练如果只准使用已经归档的材料，设置 DATAFABRIC_HISTORY_FETCH_ENABLED=false，同时不启采集 Worker；API 和实际公开读取都会拒绝外采。DATAFABRIC_HISTORY_WATCHES=[] 关闭自动刷新。不开索引时使用空 DATAFABRIC_INDEX_TARGETS，且不启发布循环；既有索引的撤回仍应按原管理流程核对，不能把删配置当已撤回。
 
-仅做模拟资料归档与检索联调时，archives 请求同步落入 History；随后用同一隔离配置运行 python -m flows.scheduler --poll-seconds 5 --batch-size 5 --backfill-batch-size 0，由后台自动建索引并核对回执。归档不需要另造导入队列。结束时给测试发布进程发 SIGTERM，保留持久待办，不能清空队列或数据库。
+仅做模拟资料归档与检索联调时，archives 请求同步落入 History；随后用同一隔离配置运行 python -m flows.scheduler --poll-seconds 5 --batch-size 5，由后台自动建索引并核对回执。归档不需要另造导入队列。结束时给测试发布进程发 SIGTERM，保留持久待办，不能清空队列或数据库。
 
 ## 隔离补采与字段交接（2026-10-31）
 

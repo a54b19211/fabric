@@ -1,4 +1,4 @@
-"""真实隔离PG：逐站回填、不可变观测绑定、固定watch续页及源健康；不碰现役。"""
+"""真实隔离PG：不可变观测绑定、固定watch续页及源健康；不碰现役。"""
 
 import copy
 import json
@@ -7,19 +7,15 @@ from unittest.mock import Mock
 
 import integration_publication as publication_fixtures
 import pytest
-from integration_publication import insert_document, rows
-from sqlalchemy import event, text
-from sqlalchemy.exc import SQLAlchemyError
+from integration_publication import rows
+from sqlalchemy import text
 from sqlalchemy.orm import Session
-from test_publication import snapshot
 from test_source_refresh import metric, who_value
 
 from biz_rules.history_models import (
     ArchiveImport,
     ArchiveRecord,
     HistoryError,
-    canonical,
-    sha256,
 )
 from db import history, publication, source_refresh
 from db.models import CrawlLog
@@ -44,92 +40,6 @@ def allow(monkeypatch, sites):
             ]
         ),
     )
-
-
-def clean_inventory(source, sites, count=3):
-    for site in sites:
-        for index in range(count):
-            value = snapshot(site + "-" + str(index))
-            value["source_site"] = site
-            insert_document(source, value)
-    with source.begin() as conn:
-        conn.execute(text("DELETE FROM publication_outbox"))
-
-
-def test_per_site_round_robin_total_budget_and_restart_progress(databases, monkeypatch):
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials", "nmpa", "cde"])
-    clean_inventory(source, ["clinicaltrials", "nmpa", "cde"], 3)
-    first = publication.backfill_once(limit=2)
-    assert first["scanned"] == 2 and first["seeded"] == 2
-    progressed = {site for site, state in first["sites"].items() if state["last_id"]}
-    assert progressed == {"cde", "clinicaltrials"}
-    assert first["sites"]["nmpa"]["last_id"] == 0 and not first["complete"]
-    with source.begin() as conn:
-        conn.execute(
-            text(
-                "UPDATE publication_outbox SET state='published' WHERE kind='document'"
-            )
-        )
-    second = publication.backfill_once(limit=2)
-    assert second["sites"]["nmpa"]["last_id"] > 0 and second["scanned"] == 2
-    assert second["max_id"] == first["max_id"]
-    # Later inserts are captured by triggers, never silently included in old inventory scope.
-    insert_document(source, {**snapshot("after-inventory"), "source_site": "nmpa"})
-    saved = rows(
-        source, "SELECT snapshot FROM publication_outbox WHERE kind='backfill'"
-    )[0]["snapshot"]
-    assert saved["max_id"] == first["max_id"]
-
-
-def test_old_global_scope_migrates_only_same_sites_and_fixed_upper(
-    databases, monkeypatch
-):
-    source, _ = databases
-    sites = ["clinicaltrials", "nmpa"]
-    allow(monkeypatch, sites)
-    clean_inventory(source, sites, 2)
-    with source.begin() as conn:
-        upper = conn.execute(text("SELECT max(id) FROM documents")).scalar_one()
-        key = "backfill:" + sha256(canonical(sites))
-        conn.execute(
-            text("""
-          INSERT INTO publication_outbox(event_key,kind,source_doc_uuid,snapshot)
-          VALUES (:key,'backfill',:key,CAST(:scope AS jsonb))
-        """),
-            {
-                "key": key,
-                "scope": canonical(
-                    {"source_sites": sites, "last_id": 1, "max_id": upper}
-                ),
-            },
-        )
-    result = publication.backfill_once(limit=1)
-    assert result["max_id"] == upper
-    assert result["sites"]["nmpa"]["last_id"] == 1
-    assert result["sites"]["clinicaltrials"]["last_id"] >= 1
-
-
-def test_site_query_failure_rotates_and_preserves_failed_cursor(databases, monkeypatch):
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials", "nmpa"])
-    clean_inventory(source, ["clinicaltrials", "nmpa"], 1)
-
-    def fail_one(conn, cursor, statement, parameters, context, executemany):
-        if (
-            "FROM documents d" in statement
-            and parameters.get("site") == "clinicaltrials"
-        ):
-            raise SQLAlchemyError("SYNTHETIC source query failure")
-
-    event.listen(source, "before_cursor_execute", fail_one)
-    try:
-        result = publication.backfill_once(limit=1)
-    finally:
-        event.remove(source, "before_cursor_execute", fail_one)
-    assert result["sites"]["clinicaltrials"]["last_id"] == 0
-    assert result["sites"]["clinicaltrials"]["last_error"]["code"] == "seed_read_failed"
-    assert result["sites"]["nmpa"]["complete"] and result["seeded"] == 1
 
 
 def archive_one(native, data, *, proof=None):
