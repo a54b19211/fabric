@@ -1,4 +1,16 @@
-"""v3 3.3 清洗段的运行入口：每个版本一次，确定性、可重跑、只追加；按块认领，可多进程并行。
+"""清洗段：每个版本只处理一次，写出干净正文、编号和画像。结果只追加、可重跑，同样的输入得到同样的结果。
+工作按块认领，带租约，可多进程并行。
+
+从哪读起：process()。它认领一块版本（_claim），一块的活在 _process_rows 里：_prepare_rows 选出清洗的输入，_version_text 清洗
+（见过的输入直接复用），_write_rows 批量写入。process_versions() 只处理指定的几个版本，给 pipeline.py 单次调试用；
+stage_status() 给出各来源的进度；for_versions() 把一页版本的产物读给 API。命令行入口是 flows/clean_stage.py。
+
+读写的表：读 history_versions 和 history_sources；用 derived_stage_chunks（按来源和发表序号分块的认领与结果）和
+derived_stage_waiting（附件还没解析完的等待表）做工作队列；写 derived_clean_text（清洗正文）、derived_identifiers（编号）、
+derived_profiles（画像）。写画像的同一个事务里还会给 index_publications（建索引待办）和 derived_extraction_check_tasks
+（编号、画像的核验任务）排活。
+
+原有说明里的事实：
 
 规模（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）决定了运行方式：
 - 工作队列：按（阶段键, 来源, published_seq 分块）认领，带租约；完成的块标 done，中断的块租约过期后重领，
@@ -8,7 +20,6 @@
 - 一块一次读（只取所需字段，原件只在 EPMC 和网页版本上读）、一次事务批量写。
 - 附件没解析完记 derived_stage_waiting，不卡住块；之后每次运行先补做。
 - stage_status() 给出每个来源的水位、落后数、在处理/失败的块、吞吐。
-以下为原说明：
 
 每个还没有画像（derived_profiles，当前画像处理器版本）的版本，在一个事务里写：
 1. 清洗正文（derived_clean_text，processor_version=datafabric.clean_text.v1）：

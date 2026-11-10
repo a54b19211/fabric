@@ -1,4 +1,12 @@
-"""v3 3.3 清洗段的运行入口：清洗正文、编号、画像。确定性、可重跑、只追加。
+"""清洗段的命令行入口：给新抓到的版本写出干净正文、编号和画像。线上用 --loop 常驻
+（ops/systemd/datafabric-clean.service）。每个版本只处理一次，结果只追加、可以重跑。
+
+从哪读起：main()，它按参数做三件事之一：清洗（调用 db/clean_stage.py 的 process，真正的工作都在那里）、
+看进度（stage_status）、把死信块重置（retry_failed）。接着读 db/clean_stage.py。
+
+读写的表：本文件自己不碰表，都经 db/clean_stage.py：读 history_versions 和 history_sources；用 derived_stage_chunks 和
+derived_stage_waiting 做工作队列；写 derived_clean_text、derived_identifiers、derived_profiles，并在同一事务里给
+index_publications 和 derived_extraction_check_tasks 排活。
 
 用法：python -m flows.clean_stage --once
       python -m flows.clean_stage --loop --poll-seconds 60

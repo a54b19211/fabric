@@ -1,4 +1,15 @@
-"""持续发表原采集待办；普通循环，不新建RQ任务类型或第二个队列。"""
+"""派活程序：常驻循环，每隔几秒一轮，让到期的来源去抓取，把待办发表出去，并写一次心跳。
+它是普通循环，不新建 RQ 任务类型，也没有第二个队列。
+
+从哪读起：main() 里的 while 循环。一轮依次调用 db/source_refresh.py 的 refresh_once（按各来源的刷新计划建采集任务、放进队列，
+由 flows/history_fetch.py 的采集工人去抓）、db/publication.py 的 publish_once（发表原采集库里的待办，最多 --batch-size 项；
+现在实际发表的是审核图，旧文档库存的事件因旧文档冻结桥已退役而标为阻塞）和 publisher_heartbeat（写心跳），然后打印这一轮的结果。
+--once 只跑一轮，有来源失败、发表失败或被阻塞时以非零状态退出；--reconcile <高水位> 只读对账后退出。
+
+读写的表：publication_outbox（原采集库里的待办表：发表待办是 kind 为 document 或 graph 的行；各来源的刷新计划和本程序的心跳是
+kind='control' 的行）；history_runs（刷新时新建采集任务、读任务状态）；history_versions 和 history_sources（发表时写入固定版本）。
+对账只读 documents 和 history_versions。
+"""
 
 import argparse
 import json

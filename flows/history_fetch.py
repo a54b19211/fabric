@@ -1,4 +1,16 @@
-"""一个固定的公开读取RQ作业；沿用extraction队列，但连接必须显式独立配置。"""
+"""采集任务的后台作业：按一条采集任务（history_runs 里的一行）去读公开来源，把读到的原件存成固定版本。
+本文件没有自己的进程：history_fetch_job 是放在 extraction 队列里的一个 RQ 作业，由采集工人
+（rq worker ... extraction，见 ops/systemd/datafabric-history-worker.service）取出来执行。
+
+从哪读起：先读 history_fetch_job（作业本身：取任务、读来源、存版本），再读 enqueue_fetch（建好任务后放进队列）和 retry_inactive
+（原作业已经停了就重新放进队列）。读来源在 biz_rules/history_sources.py 的 read_public，网站和站点接口由 collection/site_crawler.py
+读；存版本在 db/history.py 的 finish_fetch。freeze_demo_fetch、read_demo_fetch 是隔离模拟补采，只读本地的模拟原件包，不碰外网。
+队列沿用 extraction 队列，但 Redis 连接必须显式独立配置（DATAFABRIC_HISTORY_REDIS_URL）。
+
+读写的表：本文件自己不写 SQL，都经 db/history.py：读写 history_runs（任务状态、版本号列表、覆盖情况），写 history_versions
+（固定版本，原件原样、只追加）、history_attachment_links（附件和父页面的关系）、history_version_rank，并在同一事务里写
+derived_registry_diff_runs 和 derived_registry_changes（登记差分），更新 history_sources 的 published_seq。
+"""
 
 import json
 import os

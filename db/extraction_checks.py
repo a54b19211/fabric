@@ -1,29 +1,34 @@
-"""Extraction consistency of processing products (v3 6.2, T-29 P2): BioCheck checks whether what Fabric extracted
-corresponds to the fixed text it was extracted from - never whether a fact is true.
+"""抽取一致性核验：请 BioCheck 核对“Fabric 抽出来的东西”和“它所依据的固定原文”是否对得上。只核对对应关系，
+不核对事实本身对不对。没配置 BioCheck（DATAFABRIC_BIOCHECK_URL 和 DATAFABRIC_BIOCHECK_TOKEN）时，程序打印 disabled 就退出。
 
-- A task per (version, producer, producer version, clean-text processor, checker version) is registered in the
-  same transaction as the products it checks (db.clean_stage); backfill() registers what is missing, including
-  every product when the expected checker version changes (an upgrade queues new work, old results stop counting).
-- The worker runs one task as one run (run_id) of bounded batches, outside any transaction around the HTTP calls.
-  Before every batch it renews its lease and re-checks the source permission (a revoked source gets no further
-  material); each result is written only while the lease is still its own and the permission still holds,
-  checked in the same transaction as the write - a late or orphaned response never publishes a result.
-- A response is adopted only when its contract, checker version (the expected one), subject (exactly the request's),
-  items (same ids and kinds, in order) and every item's status (derived from its own field results by the contract
-  rule) all agree; anything else is unchecked "invalid_response" / "checker_mismatch", never completed, never a crash.
-- A batch already answered for the same full canonical request, checker and demo kind is reused: a new completed
-  row of this run points at it (reused_from), so a run always has one row per batch.
-- Readback: per producer, the latest run for the current checker counts as checked only when every one of its
-  batches completed; its items are all batches' items (plus unbuildable items as unchecked). Anything else -
-  incomplete, failed, older checker - is "unchecked" with its reason; earlier runs stay as history.
-Producers checked: identifiers (identifier items: the producer's value at its offsets) and profile annotations
-(experiment-type locators; BioCheck v3 checks their locator and quote, the type judgement stays unsupported).
-Each producer is checked under its own contract by its own checker (CHECKS_BY_PRODUCER): identifiers and profile
-annotations by BioCheck /v1 (contract v1, checker v3), measurements by BioCheck /v3 (contract v3, checker v17). A
-task waits for its producer's expected checker; a result is recorded under its producer's contract.
-A measurement is an object before its check answers (db.measurements.publish): marked "unchecked" from the moment its
-run starts, then the object of its batch's answer takes its place - consistent, inconsistent or unchecked (the
-checker could not decide) - whatever the answer is; a batch that fails leaves its reading marked unchecked."""
+从哪读起：文件末尾的 run_worker()（也是 python -m db.extraction_checks 的入口）：每隔一段时间 backfill 补登记，其余时间
+反复调用 process_once。process_once 认领一个核验任务（_claim），把产物拼成请求（_build），分批发给 BioCheck（_send_batches），
+逐批记下结果（_after_batch），最后收尾（_conclude）。enqueue 是清洗段写产物时登记任务的入口，for_versions 是把一页版本的
+核验结果读给 API。
+
+读写的表：读 derived_clean_text、derived_identifiers、derived_profiles、derived_measure_readings（被核对的产物和原文）和
+history_versions；读写 derived_extraction_check_tasks（核验任务）；写 derived_extraction_checks（每一批的核验结果）。
+测量读数的核验结果出来后，经 db/measurements.py 写 derived_measurements（测量对象）和它的事件。
+
+原有说明里的事实：
+- 每个（版本、producer、producer 版本、清洗处理器、核验器版本）一个任务，和它要核对的产物在同一个事务里登记（db/clean_stage.py）；
+  backfill() 补登记缺的，核验器的预期版本升级时给全部产物重新登记（升级就是排新活，旧结果不再算数）。
+- worker 把一个任务当作一次运行（run_id），分成有上限的批，发请求时不开着事务。每批之前先续租、重查来源权限（被撤权的来源
+  不再拿到材料）；每个结果只在租约仍是自己的、权限仍然有效时才写，检查和写入在同一个事务里，迟到的或没人认领的回复不会发布结果。
+- 回复只有在契约、核验器版本（预期的那个）、主体（与请求完全一致）、条目（编号和类型相同、顺序相同）以及每个条目的状态
+  （由它自己的字段结果按契约规则推出）全部一致时才采纳；否则记为未核验（invalid_response 或 checker_mismatch），
+  不算完成，也不会崩。
+- 同一份完整规范请求、同一个核验器、是否模拟数据也相同的批，已经有过回复就复用：这次运行新增一行 completed，指向旧结果（reused_from），
+  所以一次运行的每一批总有一行。
+- 读回：每个 producer 取当前核验器下最新的一次运行，只有它的每一批都完成才算已核验；条目是所有批的条目（加上没法拼成请求的条目，
+  记为未核验）。其他情况（没跑完、失败、核验器是旧的）都是“未核验”并写明原因；更早的运行留作历史。
+- 核验的产物：编号（编号条目：producer 给的值和它的偏移）和画像注释（实验类型的定位；BioCheck v3 核它们的位置和引文，
+  类型判断本身仍是“不支持”）。每种 producer 用自己的契约、由自己的核验器核（CHECKS_BY_PRODUCER）：编号和画像注释走
+  BioCheck /v1（契约 v1，核验器 v3），测量走 BioCheck /v3（契约 v3，核验器 v17）。任务等它的 producer 预期的核验器；
+  结果记在它的 producer 的契约名下。
+- 测量在核验回复之前就已经是一个对象（db.measurements.publish）：从它的运行开始起标为“未核验”，之后被这一批回复对应的对象替换——
+  一致、不一致，或核验器没法判断时的未核验——不论回复是什么；一批失败时，它的读数仍标为未核验。
+"""
 
 import hashlib
 import json

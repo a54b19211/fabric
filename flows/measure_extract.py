@@ -1,26 +1,33 @@
-"""The measurement worker of the processing layer: per round, plan runs for new clean artifacts, read due windows
-within the round's model request budget (a spent budget ends the round; the windows wait as budget_spent), resume
-runs whose source is readable again and follow the corrections sources state. The BioCheck checks of the readings
-are the extraction-check worker's (db.extraction_checks, producer "measures").
+"""测量抽取程序：从清洗正文里读出数字读数（样本量、百分比、人数等），连同它在正文里的位置存起来。
+两条路线读同一批窗口（正文切成的小段）：模型路线（设了 DATAFABRIC_MEASURE_LLM_* 才有）和规则路线
+（who.explicit-count.v1 的明确计数规则，不调模型、不发请求；DATAFABRIC_MEASURE_RULES_ROUTE=false 关掉）。两条都没有时什么也不做。
 
-Two candidate routes read the windows through this one entry: the model (when DATAFABRIC_MEASURE_LLM_* is set) and the
-rules (the explicit counts of who.explicit-count.v1; no model, no request; off with DATAFABRIC_MEASURE_RULES_ROUTE=
-false). The standing queue plans every current clean artifact of a measurable source except the versions a bounded
-backfill created (flows.who_backfill): background material is measured only when it is listed.
+从哪读起：run_round()，它是一轮的全部步骤：给每份新的清洗正文排一个抽取运行（run）；在本轮模型请求预算内读到期的窗口
+（预算用完本轮就结束，没读的窗口标 budget_spent，留给下一轮）；把来源恢复可读后的运行接着读完；再跟进各来源声明的更正。
+run_worker() 是不停转轮的循环，run_scope() 只测一份清单，main() 是命令行。每一步的实现在 db/measure_runs.py（plan、
+process_once、settle）和 db/measurements.py（scan_corrections）。
 
-    python -m flows.measure_extract                      # rounds until SIGTERM; disabled without a route
-    python -m flows.measure_extract --scope list.json    # once, for the versions of an explicit list only
-    python -m flows.measure_extract --scope list.json --upgrade    # the same, for versions older producers read
+读写的表：读 derived_clean_text（清洗正文）、history_versions、history_sources；写 derived_measure_runs、derived_measure_windows、
+derived_measure_window_attempts、derived_measure_requests、derived_measure_readings（运行、窗口、每次尝试、模型请求、读到的读数），
+以及 derived_measure_relocations（清洗器升级后，旧读数在新正文里重新定位）；跟进更正时写 derived_measure_correction_cursor、
+_claims、_links、_resolutions，并给已有的测量对象加事件（derived_measurement_events）。读数变成对象（derived_measurements）、
+交核验服务核对，是 db/extraction_checks.py 那个程序的事，不在这里。
 
-The list is {"versions": ["<version id>", {"version_id": "<version id>", "windows": [0, 3]}]}: a version alone is read
-in all its windows, with "windows" only those reading windows (the others are out_of_scope, not owed). Planning the
-list and reading it write the list's digest on every run; the receipt printed says what was planned, what a run
-already held and why any version could not be planned. A call reads at most MAX_SCOPE_ROUNDS rounds; a window that
-waits out a backoff or a spent provider budget is read by the next call.
+原有说明里的事实：
 
-A version that already has a run of a route on its artifact is not planned again (the list never enlarges a run). With
---upgrade only a run by the current producer (processor version and model configuration) counts: a listed version that
-an older producer read gets a new run by this one, and the old run stays as it was.
+常驻队列会给每个可测来源的每份当前清洗正文排运行，但有界回填（flows/who_backfill）新建的版本除外：背景材料只有在清单里点名时才测。
+
+    python -m flows.measure_extract                      # 一轮接一轮，直到收到 SIGTERM；没有任何路线时只打印 disabled
+    python -m flows.measure_extract --scope list.json    # 只测一份明确的清单，测一次
+    python -m flows.measure_extract --scope list.json --upgrade    # 同上，也重测旧 producer 读过的版本
+
+清单的格式是 {"versions": ["<版本号>", {"version_id": "<版本号>", "windows": [0, 3]}]}：只写版本号就读它的所有窗口，
+带 "windows" 的只读这些窗口（其余窗口标为 out_of_scope，不算欠账）。排计划和读都会把清单的摘要写在每个运行上；
+打印的回执写明计划了什么、哪些版本已经有运行、哪些没排成以及原因。一次调用最多读 MAX_SCOPE_ROUNDS 轮；
+还在退避中或供应商预算用完的窗口，留给下一次调用。
+
+同一份正文、同一条路线已经有运行的版本不会再排（清单不会让已有的运行变大）。加 --upgrade 时只认当前 producer
+（处理器版本和模型配置）的运行：旧 producer 读过的版本会另起一个新运行，旧运行原样保留。
 """
 
 from __future__ import annotations

@@ -1,8 +1,16 @@
-"""独立的索引 worker（v3 3.6：执行不挂在发表循环上）。必须使用独立 History 连接。
+"""索引 worker 的启动入口：把清洗好的正文送进知识库（WeKnora），供语义检索。
+它是独立的进程，不挂在派活程序（flows/scheduler.py）的循环上，必须使用独立的 History 数据库连接。
+没有配置任何索引目标时，只打印 disabled 就退出。
 
-    python -m migration.index_publication worker -c 4     # 跑 worker（4 个线程），Ctrl-C 停
+从哪读起：这个文件只有 main() 一个入口，几行就读完；真正的工作在 db/index_publication.py：run_worker 开若干线程（-c），
+每个线程反复调用 process_once 取一个到期的索引作业、上传清洗正文并核对回执；线程 0 每隔 --scan-every 秒用 scan_committed
+补扫“已有画像却还没有待办”的版本。新作业平时由清洗段写画像时登记（enqueue_versions）。
 
-索引表由 History 角色安装：python -m migration.history（= python -m migration.runner --db history --apply）。
+读写的表：读 derived_clean_text、derived_profiles、derived_identifiers、history_versions（取正文和检索元数据）；
+读写 index_publications（索引作业和状态）、index_targets（索引目标）以及领取轮转、发送限速、闸门统计用的 index_claim_cursor、
+index_send_bucket、index_gate_stats。索引表由 History 角色安装：python -m migration.history（= python -m migration.runner --db history --apply）。
+
+用法：python -m migration.index_publication worker -c 4     # 跑 worker（4 个线程），Ctrl-C 停
 """
 
 import argparse
