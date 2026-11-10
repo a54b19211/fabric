@@ -24,7 +24,7 @@
 
     1. fetch    按站点配置抓网页或接口      → history_runs（这次抓取的记录）、history_versions（原件原样存下，只追加）
     2. clean    出干净正文、找编号、做画像   → derived_clean_text、derived_identifiers、derived_profiles；
-                                              还会登记建索引的待办 index_publications 和核验任务 derived_extraction_check_tasks
+                                              配置了知识库时还会登记建索引的待办 index_publications；另登记核验任务 derived_extraction_check_tasks
     3. align    药名对到标准编号（徐子雯）   → （接入后才有）
     4. score    五维质量分和等级（徐子雯）   → （接入后才有）
     5. index    清洗正文送进知识库           → 处理 index_publications 的待办，正文进 WeKnora
@@ -39,7 +39,8 @@
     核验读数：db/extraction_checks.py
   这里把同样的函数按顺序串起来，为的是读懂和对单个站点试跑；线上仍以后台程序为准。
 
-  运行前要设的环境变量（线上放在 ~/.config/datafabric-publication/runtime.env）。这里会写库，请指向临时库，别连线上库：
+  先要有一个建好表的历史库：python -m migration.runner --db history --apply（指向临时库）。
+    运行前要设的环境变量（线上放在 ~/.config/datafabric-publication/runtime.env）。这里会写库，请指向临时库，别连线上库：
     DATAFABRIC_HISTORY_DATABASE_URL      必设。历史资料数据库
     DATAFABRIC_HISTORY_SOURCE_ALLOWLIST  必设。允许处理的来源，逗号分隔，如 nmpa,fda_api_drug_label；
                                          没列进去的站点会报"当前许可不允许该来源"（抓取、清洗、测量都按这份名单）
@@ -57,7 +58,8 @@
     SELECT id, source_id, state, created_at FROM history_runs WHERE kind = 'fetch' ORDER BY created_at DESC LIMIT 5;
   --site 只认 config/sites 里配置的网页、接口站点键（填错时报错会列出全部）。来源目录里的 clinicaltrials、pubmed、
   who_don 等走别的插件，这里抓不了。网页站点一页常要 30 秒，所以 --deadline（抓取截止秒数）默认给到上限 120。
-  抓到 0 个版本时 fetch 会醒目地说明原因并以非 0 退出，后面各步不再跑。
+  这里不下载附件（附件会记成"未尝试"），线上由采集工人处理。
+    抓到 0 个版本时 fetch 会醒目地说明原因并以非 0 退出，后面各步不再跑。
 """
 
 import argparse
@@ -71,7 +73,7 @@ from flows import measure_extract
 from flows.history_fetch import history_fetch_job
 
 STEPS = ("fetch", "clean", "align", "score", "index", "measure")
-STATES = {"completed": "完成", "partial": "部分完成（没读完就停了）", "failed": "失败"}
+STATES = {"completed": "完成", "partial": "部分完成（读满 --max 条或到截止时间就停，来源还没读完，这是正常的）", "failed": "失败"}
 STOPS = {"upstream_exhausted": "来源读完了", "record_budget": "读满了 --max 条", "page_budget": "翻满了页数上限",
          "deadline": "到了 --deadline 截止时间", "byte_budget": "下载量到了上限", "request_budget": "请求数到了上限",
          "source_failed": "来源读取失败"}
@@ -79,6 +81,8 @@ STOPS = {"upstream_exhausted": "来源读完了", "record_budget": "读满了 --
 
 def fetch(site, max_records, deadline):
     """按站点配置抓取，原件原样存成固定版本，内容没变的不重复存。打印一行结果，返回这次抓取的运行号。"""
+    if not site:
+        raise SystemExit("跑 fetch 要指定站点：请加 --site <站点键>，如 --site nmpa")
     if site not in SITE_PROFILES:
         raise SystemExit(f"站点 {site!r} 不能用。--site 只认 config/sites 里配置的网页、接口站点键：{', '.join(sorted(SITE_PROFILES))}；"
                          "来源目录里的 clinicaltrials、who_don 等走别的插件，这里抓不了")
@@ -113,7 +117,7 @@ def clean(run_id):
         raise SystemExit("清洗要知道处理哪次抓取留下的版本：请加 --run <运行号>")
     c = clean_stage.process_versions(history.read_run(run_id).version_ids)
     return (f"新清洗 {c['cleaned']} 份正文、沿用旧结果 {c['reused']} 份、等附件正文 {c['waiting_for_attachment_text']} 份；"
-            f"做了 {c['profiled']} 份画像，登记了 {c.get('index_enqueued', 0)} 个建索引待办、{c.get('checks_enqueued', 0)} 个核验任务")
+            f"这些版本都有了画像（共 {c['profiled']} 份，已有的直接沿用），登记了 {c.get('index_enqueued', 0)} 个建索引待办、{c.get('checks_enqueued', 0)} 个核验任务")
 
 
 def align():
