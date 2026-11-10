@@ -163,6 +163,9 @@ _CHUNK_SQL = """
     WHERE source_id=:source AND published_seq BETWEEN :start AND :end
     ORDER BY published_seq
 """
+# 同一条查询，改成按版本号取（等待表补做、pipeline.py 单次调试都用它）
+_BY_VERSION_IDS_SQL = _CHUNK_SQL.replace(
+    "WHERE source_id=:source AND published_seq BETWEEN :start AND :end", "WHERE version_id=ANY(:ids)")
 
 
 def _claim(engine, key, chunk_seqs, lease_seconds):
@@ -380,9 +383,7 @@ def _process_waiting(engine, key, counts, limit=500):
         finals = _final_attachment_texts(conn, ready)
         if not finals:
             return 0
-        rows = conn.execute(text(_CHUNK_SQL.replace(
-            "WHERE source_id=:source AND published_seq BETWEEN :start AND :end", "WHERE version_id=ANY(:ids)")),
-            {"ids": list(finals)}).mappings().all()
+        rows = conn.execute(text(_BY_VERSION_IDS_SQL), {"ids": list(finals)}).mappings().all()
         _process_rows(conn, key, [dict(r) for r in rows], counts)
         conn.execute(text("DELETE FROM derived_stage_waiting WHERE stage_key=:k AND version_id=ANY(:ids)"),
                      {"k": key, "ids": list(finals)})
@@ -398,6 +399,18 @@ def retry_failed(source_id=None):
             "UPDATE derived_stage_chunks SET attempts=0, updated_at=clock_timestamp() "
             "WHERE stage_key=:k AND state='failed' AND (CAST(:s AS text) IS NULL OR source_id=:s)"),
             {"k": stage_key(), "s": source_id}).rowcount
+
+
+def process_versions(version_ids):
+    """只处理指定的这几个版本（pipeline.py 单次调试用）：每个版本做的事和 process() 一样，同样可重跑，
+    不动块队列。返回计数。"""
+    from db.history import history_engine
+
+    counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0}
+    with history_engine().begin() as conn:
+        rows = conn.execute(text(_BY_VERSION_IDS_SQL), {"ids": list(version_ids)}).mappings().all()
+        _process_rows(conn, stage_key(), [dict(r) for r in rows], counts)
+    return counts
 
 
 def process(*, batch=None, time_budget_seconds=600, chunk_seqs=CHUNK_SEQS, lease_seconds=LEASE_SECONDS,
