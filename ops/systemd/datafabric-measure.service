@@ -1,0 +1,27 @@
+[Unit]
+Description=Data-Fabric measurement worker: numbers read from clean text
+After=network.target
+StartLimitIntervalSec=0
+
+# What it does: plans a run for every new clean text of a measurable source and reads the windows of the text (with
+# a model, with rules, or both); the readings go into derived_measure_runs / _windows / _readings. Turning the readings
+# into objects (derived_measurements) and checking them is the checks worker's (datafabric-checks.service).
+# Read flows/measure_extract.py.
+# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL (the history database). Model route:
+# DATAFABRIC_MEASURE_LLM_BASE_URL and DATAFABRIC_MEASURE_LLM_MODEL (and _KEY, _KIND, _TIMEOUT, _MAX_TOKENS if needed).
+# Rules route (no model, no request): on unless DATAFABRIC_MEASURE_RULES_ROUTE=false. With neither route the worker
+# prints "disabled" and exits 0. DATAFABRIC_MEASURE_ROUND_REQUESTS caps the model requests of one round (default 50).
+
+[Service]
+WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+EnvironmentFile=%h/.config/datafabric-publication/runtime.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m flows.measure_extract
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=default.target
