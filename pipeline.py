@@ -13,12 +13,15 @@
     3. align    药名对到标准编号（徐子雯）   → （接入后才有）
     4. score    五维质量分和等级（徐子雯）   → （接入后才有）
     5. index    清洗正文送进知识库           → index_publications（待办），正文进 WeKnora
-    6. measure  从正文里抽数字读数           → derived_measure_*（读数）、derived_measurements（读数对应的对象）
-                                              核验服务对读数的核对由 db/extraction_checks.py 另一个程序做，这里不跑
+    6. measure  从正文里抽数字读数           → derived_measure_runs / _windows / _readings（读数）
+                                              读数变成对象（derived_measurements）、交核验服务核对，由
+                                              db/extraction_checks.py 另一个后台程序做，这里不跑
 
   线上不是这样跑的：每一步由常驻的后台程序分段跑，靠表里的待办衔接，互不等待——
-    fetch：flows/history_fetch.py    clean：flows/clean_stage.py
+    派活：flows/scheduler.py（到点给各来源建采集任务，放进队列）
+    fetch：flows/history_fetch.py（采集工人）    clean：flows/clean_stage.py
     index：migration/index_publication.py worker    measure：flows/measure_extract.py
+    核验读数：db/extraction_checks.py
   这里把同样的函数按顺序串起来，为的是读懂和对单个站点试跑；线上仍以后台程序为准。
 
   运行方式（仓库根目录，用本仓的 .venv；要先设好 DATAFABRIC_HISTORY_DATABASE_URL 等环境变量）：
@@ -82,7 +85,7 @@ def index(rounds=20):
 
 
 def measure():
-    """从清洗正文里抽读数，读数落进表里。没配置模型或规则路线时什么也不做。"""
+    """从清洗正文里抽读数，读数落进表里。模型路线和规则路线（默认开）都关着时什么也不做。"""
     return measure_extract.run_round()
 
 
