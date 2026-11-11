@@ -55,3 +55,17 @@ def test_cde_detail_extractor_still_reads_the_older_page_layout():
     got = extract_cde_detail(Selector(html))
     assert got["title"] == "某通告" and got["publish_date"] == "2026-04-03" and got["body_text"] == "正文一段。"
     assert got["attachment_links"] == [{"name": "附件一.pdf", "url": "https://www.cde.org.cn/main/att/download/x1"}]
+
+
+# ── FDA 新闻稿（fda_press）──────────────────────────────────────────────
+
+def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_old_heading_class():
+    """旧起始地址 /news-events/press-announcements 已 404，列表页搬到 fda-newsroom 下；页面上没有 h3.lcds-text-heading，
+    列表是 div.view-content 里的 li > a（链接文字是“日期 - 标题”），详情页地址仍在 /news-events/press-announcements/ 下。"""
+    profile = SITE_PROFILES["fda_press"]
+    assert profile["start_urls"] == ["https://www.fda.gov/news-events/fda-newsroom/press-announcements"]
+    sample = page("fda_press_list.html")
+    links = sample.css(profile["list_item_selector"])
+    assert len(links) == 10 and sample.css(profile["wait_selector"])
+    assert all(a.attrib["href"].startswith("/news-events/press-announcements/") for a in links)
+    assert links[0].get_all_text(strip=True).startswith("November 9, 2026")
