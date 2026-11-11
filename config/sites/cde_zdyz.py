@@ -13,8 +13,10 @@ CONFIG = {
     "max_pages": 100,
 
     # ── 列表页解析 ──
-    "wait_selector": "div.news_item",
-    "list_item_selector": "div.news_item a[href*='viewInfoCommon']",
+    # 列表是一张表，每行一份指导原则，标题就是详情页链接（/zdyz/domesticinfopage?zdyzIdCODE=…）；
+    # 页面上还有别的表，所以按链接地址选，不按“第几张表”选。
+    "wait_selector": "tbody a[href*='domesticinfopage']",
+    "list_item_selector": "tbody a[href*='domesticinfopage']",
 
     # ── 翻页配置 ──
     "pagination": {
@@ -23,7 +25,8 @@ CONFIG = {
     },
 
     # ── 详情页解析 ──
+    # 详情页是一张“名称 / 适用范围 / 版本状态 / 附件”的信息表（table.layui-table），指导原则正文在附件 PDF 里。
     "merge_attachments": True,
     "detail_extractor": extract_cde_detail,
-    "detail_wait_selector": "div.news_detail_box",
+    "detail_wait_selector": "table.layui-table",
 }

@@ -28,12 +28,19 @@ def extract_cde_detail(page) -> dict:
         raw = date_els[0].attrib.get("content", "").strip()
         result["publish_date"] = normalize_date(raw)
 
-    # 正文：div.new_detail_content（新版）或 div.new_detail_content_old（旧版）
+    # 正文：div.new_detail_content（新版）或 div.new_detail_content_old（旧版）。
+    # 指导原则专栏（/zdyz/）的详情页没有正文区，只有一张信息表（名称、适用范围、版本状态……），取它的各行（不含“意见留言”）。
     body_els = page.css("div.new_detail_content") or page.css("div.new_detail_content_old")
     body_el = body_els[0] if body_els else None
     if body_el:
         result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
+    else:
+        info_table = page.css("table.layui-table")
+        if info_table:
+            rows = info_table[0].css("tr:not(.adviceInput)")
+            result["body_html"] = info_table[0].html_content
+            result["body_text"] = "\n".join(row.get_all_text(separator=" ", strip=True) for row in rows)
 
     # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
     body_text = result["body_text"]
@@ -47,15 +54,14 @@ def extract_cde_detail(page) -> dict:
         ),
     }
 
-    # 附件：div.relatedNews 里的链接
+    # 附件：div.relatedNews 里的链接；指导原则专栏是信息表里指向 /zdyz/downloadAtt 的链接
     related = page.css("div.relatedNews")
-    if related:
-        for a in related[0].css("a"):
-            href = a.attrib.get("href", "")
-            name = a.get_all_text(strip=True) or "未命名附件"
-            if href:
-                if href.startswith("/"):
-                    href = "https://www.cde.org.cn" + href
-                result["attachment_links"].append({"name": name, "url": href})
+    for a in related[0].css("a") if related else page.css("a[href*='downloadAtt']"):
+        href = a.attrib.get("href", "")
+        name = a.get_all_text(strip=True) or "未命名附件"
+        if href:
+            if href.startswith("/"):
+                href = "https://www.cde.org.cn" + href
+            result["attachment_links"].append({"name": name, "url": href})
 
     return result
