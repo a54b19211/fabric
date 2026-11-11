@@ -69,3 +69,18 @@ def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_ol
     assert len(links) == 10 and sample.css(profile["wait_selector"])
     assert all(a.attrib["href"].startswith("/news-events/press-announcements/") for a in links)
     assert links[0].get_all_text(strip=True).startswith("November 9, 2026")
+
+
+# ── FDA 药品安全通讯（fda_drug_safety）───────────────────────────────────
+
+def test_fda_drug_safety_list_is_a_table_paged_by_its_next_button():
+    """列表是一张表（日期 | 标题，10 行一页，共约 44 条），标题是详情页链接；翻页只能点表下面的“下一页”
+    （地址上没有页码，?page=N 返回的还是第一页）。第一页时“上一页”是 disabled，“下一页”可点。"""
+    profile = SITE_PROFILES["fda_drug_safety"]
+    sample = page("fda_drug_safety_list.html")
+    links = sample.css(profile["list_item_selector"])
+    assert len(links) == 10 and sample.css(profile["wait_selector"])
+    assert all(a.attrib["href"].startswith("/drugs/") for a in links)
+    assert profile["pagination"]["type"] == "js_click"
+    assert len(sample.css(profile["pagination"]["next_btn_selector"])) == 1
+    assert not sample.css("li.paginate_button.previous:not(.disabled)")

@@ -10,13 +10,13 @@ CONFIG = {
     "max_pages": 10,
     "disable_resources": False,
     "solve_cloudflare": True,
-    "wait_selector": "h3.lcds-text-heading",
-    "list_item_selector": "h3.lcds-text-heading a",
+    # 列表是一张表（日期 | 标题），每行的标题是详情页链接。
+    "wait_selector": "table tbody td a",
+    "list_item_selector": "table tbody td a",
+    # 整张表（约 44 条）在浏览器里分页显示，地址上没有页码，只能点“下一页”（DataTables 的 li.next，翻到末页时变 disabled）
     "pagination": {
-        "type": "url_pattern",
-        "subtype": "query_param",
-        "param": "page",
-        "start": 0,
+        "type": "js_click",
+        "next_btn_selector": "li.paginate_button.next:not(.disabled) a",
     },
     "detail_extractor": extract_fda_drug_safety,
     "detail_wait_selector": "h1",
