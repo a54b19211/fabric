@@ -117,6 +117,13 @@ def attachment_record_id(parent_id: str, url: str) -> str:
     return rid
 
 
+def _links(parsed):
+    """The attachment links of a parse result as {"url", "text"}: the extractors name the label "name",
+    the stored-attachments table "text"."""
+    return [{"url": link["url"], "text": link.get("text") or link.get("name") or ""}
+            for link in parsed.get("attachment_links") or [] if link and link.get("url")]
+
+
 def _sha256_file(path: str) -> tuple[str, int]:
     digest, size = hashlib.sha256(), 0
     with open(path, "rb") as stream:
@@ -235,7 +242,7 @@ class _Reader:
             raise HistoryError("native_id_missing", "站点记录缺少稳定编号")
         if record_page:
             self.before_record()
-        links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
+        links = _links(parsed)
         if record_page:
             self.add(_record(record_id, {
                 "schema_version": RECORD_SCHEMA,
@@ -305,7 +312,7 @@ class _Reader:
         if record_page:
             self.add(None)  # 占位：父页面排在它的附件前面
         cookies = page_data.get("cookies") or []
-        links = [link for link in (parsed.get("attachment_links") or []) if link and link.get("url")]
+        links = _links(parsed)
         # 原件里的附件清单只有来源给出的链接和文字；每个附件这次读没读到记在 coverage
         capture["attachments"] = [
             {"record_id": attachment_record_id(url, link["url"]), "url": link["url"], "text": link.get("text", "")}
