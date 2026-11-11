@@ -54,6 +54,21 @@ class _Server:
                         self.drip(32)
                         self.wfile.write(b"\r\n0\r\n\r\n")
                         return
+                    if self.path == "/page":  # 自己站的一个 fetch，加一个别的主机（localhost）的"广告"fetch
+                        body = ("<html><body><script>fetch('/own');fetch('http://localhost:%d/ad');</script>ok"
+                                "</body></html>" % self.server.server_port).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    if self.path in ("/own", "/ad"):
+                        self.send_response(200)
+                        self.send_header("Content-Length", "2")
+                        self.end_headers()
+                        self.wfile.write(b"ok")
+                        return
                     if self.path.startswith("/hop/"):
                         n = int(self.path.rsplit("/", 1)[1])
                         body = b"" if n else b"<html><body>final page</body></html>"
@@ -99,13 +114,14 @@ class _Server:
         self.server.server_close()
 
 
-def _read(monkeypatch, fetch, deadline=DEADLINE):
+def _read(monkeypatch, fetch, deadline=DEADLINE, url_pattern=""):
     def fetcher(config):
         fetch()
         yield {"id": "one", "title": "synthetic"}
 
     monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label", {
-        "source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"}, "uid_field": "id"})
+        "source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"}, "uid_field": "id",
+        "url_pattern": url_pattern})
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     start = time.monotonic()
     batch = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
@@ -166,3 +182,34 @@ def test_browser_redirects_past_the_request_budget_stop_the_read(monkeypatch, li
     assert batch["stop_reason"] == "request_budget"
     assert not batch["upstream_pagination_exhausted"] and batch["records"] == [] and batch["error"] is None
     assert batch["next_continuation"] is not None
+
+
+@pytest.mark.parametrize("library", ["playwright", "patchright"])
+def test_browser_requests_to_other_hosts_are_aborted_and_not_counted(monkeypatch, library):
+    """目标站点是 127.0.0.1：页面自己的 fetch 过闸计数；发往 localhost（别的主机）的"广告"请求直接中止，
+    服务器看不到它，也不占请求数。"""
+    sync_api = pytest.importorskip(library + ".sync_api")
+
+    def browse():
+        with sync_api.sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True, args=["--no-proxy-server"])
+            except Exception as exc:  # noqa: BLE001
+                pytest.skip("Chromium 不可用：" + type(exc).__name__)
+            try:
+                browser.new_page().goto(server.url("/page"), wait_until="networkidle", timeout=15000)
+            finally:
+                browser.close()
+
+    with _Server() as server:
+        batch, _ = _read(monkeypatch, browse, deadline=30, url_pattern="127.0.0.1")
+    assert sorted(server.hits) == ["/own", "/page"]
+    assert batch["requests"] == 2 and batch["error"] is None
+
+
+def test_on_host_takes_the_host_and_its_subdomains():
+    from collection.transport import on_host
+
+    assert on_host("https://www.fda.gov/x", "fda.gov") and on_host("https://fda.gov/x", "fda.gov")
+    assert not on_host("https://notfda.gov/x", "fda.gov") and not on_host("https://fda.gov.evil.example/", "fda.gov")
+    assert not on_host("data:text/plain,x", "fda.gov")

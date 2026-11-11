@@ -123,10 +123,13 @@ def _sha256_file(path: str) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def _site_host(site) -> str:
+    """站点配置里 url_pattern 的主机部分（如 "fda.gov/news-events/..." 取 "fda.gov"）。"""
+    return (SITE_PROFILES[site].get("url_pattern") or "").split("/")[0].lower()
+
+
 def _on_site(site, url) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    pattern = SITE_PROFILES[site].get("url_pattern", "").split("/")[0].lower()
-    return bool(host) and (host == pattern or host.endswith("." + pattern) or host == "www." + pattern)
+    return transport.on_host(url, _site_host(site))
 
 
 def _record(record_id, data) -> ArchiveRecord:
@@ -166,6 +169,8 @@ class _Reader:
         # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_attempted ...）。放在读取结果里，
         # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本。
         self.coverage: list[dict] = []
+        # 浏览器里只放行目标站点（及其子域）的请求，第三方的广告、统计、cookie 横幅直接中止、不占请求预算
+        budget.site_host = _site_host(self.site)
 
     def before_record(self):
         self.budget.need_record()

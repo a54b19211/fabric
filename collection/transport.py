@@ -8,7 +8,8 @@
 - requests：HTTPAdapter.send，每一跳一次（requests 的重定向循环逐跳调用它）；
 - curl_cffi：Session.request，关掉库内部的自动跳转，由这里逐跳跟随、逐跳过闸；
 - 浏览器（playwright 与 patchright，scrapling 的 StealthyFetcher 用后者）：页面上的每个 document / xhr / fetch
-  请求在路由处过闸；脚本、样式等子资源计数（subrequests）和计字节，不占请求数、不单独限速。
+  请求在路由处过闸；脚本、样式等子资源计数（subrequests）和计字节，不占请求数、不单独限速。读取指定了目标站点
+  （Budget.site_host）时，不是目标站点主机（及其子域）的请求是第三方的广告、统计、cookie 横幅，直接中止，不计数。
 
 字节按实际读到的每一块计（含重定向和 429 的响应体、流式下载），用完当场停。超时和 429 在每一跳有界重试，
 每次重发都重新过闸、重新计数。预算停止是 BaseException（Stop），拉取函数里的 except Exception 吞不掉；
@@ -30,7 +31,7 @@ import os
 import socket
 import time
 from contextlib import contextmanager
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from collection import rate
 
@@ -42,6 +43,12 @@ GATED_BROWSER_TYPES = {"document", "xhr", "fetch"}
 
 def byte_budget() -> int:
     return int(os.environ.get("DATAFABRIC_READ_MAX_BYTES", str(256 * 1024 * 1024)))
+
+
+def on_host(url, host) -> bool:
+    """url 的主机是 host 本身或它的子域。"""
+    name = (urlparse(url).hostname or "").lower()
+    return bool(name) and (name == host or name.endswith("." + host))
 
 
 def _retry_settings():
@@ -67,6 +74,10 @@ class Budget:
         self.deadline = time.monotonic() + deadline_seconds
         self.requests = self.bytes = self.records = self.subrequests = self.redirect_hops = 0
         self.stopped: str | None = None
+        self.site_host: str | None = None  # 站点读取填目标站点的主机；浏览器里不属于它的请求是第三方
+
+    def third_party(self, url) -> bool:
+        return bool(self.site_host) and url.startswith(("http://", "https://")) and not on_host(url, self.site_host)
 
     @classmethod
     def for_request(cls, request):
@@ -380,6 +391,9 @@ def _route(page):
     def handle(route, request):
         budget = getattr(page, "_collection_budget", None)
         if budget is not None:
+            if budget.third_party(request.url):  # 广告、统计、cookie 横幅：不放行、不计数
+                route.abort()
+                return
             if request.resource_type in GATED_BROWSER_TYPES:
                 try:
                     budget.before_send(request.url)
