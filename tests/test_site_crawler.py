@@ -149,6 +149,26 @@ def test_list_mode_reuses_old_pagination_and_resumes(fake_web, monkeypatch):
     assert second["attachment_coverage"][0]["url"] == ATT2 and second["attachment_coverage"][0]["status"] == "stored"
 
 
+def test_full_reader_stops_asking_the_driver_for_more_list_pages(fake_web, monkeypatch):
+    """翻一页交一页：读满 max_records 就不再要下一页，并让驱动收工（浏览器随之关闭）。"""
+    seen = {"pages": 0, "closed": False}
+
+    class Driver:
+        def iter_detail_urls(self):
+            try:
+                for page in range(200):  # 站点配置翻 200 页
+                    seen["pages"] += 1
+                    yield f"https://www.nmpa.gov.cn/xxgk/ggtg/{page:04d}.html"
+            finally:
+                seen["closed"] = True
+
+    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
+    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=3))
+    assert batch["stop_reason"] == "record_budget" and len(batch["records"]) == 3
+    assert seen == {"pages": 2, "closed": True}  # 第 1 页 + 它的 2 个附件，第 2 页占满名额；第 3 页没有去要
+
+
 def test_codex_r59_record_budget_is_enforced_for_by_url(fake_web):
     """r59 探针：max_records=1、三个合法站内 URL，以前返回 9 个版本并声称读到底。"""
     urls = [PAGE, PAGE.replace("123.html", "124.html"), PAGE.replace("123.html", "125.html")]

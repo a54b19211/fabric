@@ -174,7 +174,8 @@ def test_caller_that_stops_asking_stops_the_browser(monkeypatch, method):
     assert page.context_closes == page.browser_closes == 1
 
 
-@pytest.mark.parametrize(("method", "first"), [("iter_detail_urls", "https://example.invalid/record-1"), ("iter_table_data", None)])
+@pytest.mark.parametrize(("method", "first"), [
+    ("iter_detail_urls", "https://example.invalid/record-1"), ("iter_table_data", None)])
 def test_one_page_is_handed_over_before_the_next_is_turned(monkeypatch, method, first):
     """configured for 200 pages: the first page comes out at once, the browser has not clicked, and closing the
     generator (the reader is full) closes the browser without ever asking for page two."""
