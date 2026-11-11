@@ -575,6 +575,8 @@ def _same_identity(payload, identity, *, ignore_raw=False):
     if ignore_raw:
         prior.pop("raw_sha256")
         mine.pop("raw_sha256")
+        for side in (prior, mine):  # the hash of a web capture's HTML is a fact about the raw (stable_raw)
+            side["facts"] = {k: v for k, v in (side["facts"] or {}).items() if k != "html_sha256"}
     return canonical(prior) == canonical(mine)
 
 def import_archive(request: ArchiveImport, key: str):
@@ -786,13 +788,14 @@ def _adopted_version(conn, run, item, identity):
     current = _current_version(conn, run, item) if run["kind"] == "fetch" else None
     stable = stable_raw(run["source_id"], item.raw_content) if current is not None else None
     if (
-        existing is None
-        and stable is not None
+        stable is not None
         and stable_raw(run["source_id"], current["payload"].get("raw_content")) == stable
         and _same_identity(current["payload"], identity, ignore_raw=True)
     ):
-        # 公开观察只差JSON序列化（键顺序、空白）或来源每次改写的数据日期（ClinicalTrials
-        # versionHolder）：仍是当前版本；原件、raw_sha256、first_seen 都保留首次所见。档案导入不走这里。
+        # 公开观察只差JSON序列化（键顺序、空白）、来源每次改写的数据日期（ClinicalTrials versionHolder），
+        # 或网页原件里的 HTML（解析结果和附件清单没变）：仍是当前版本；原件、raw_sha256、first_seen 都保留
+        # 首次所见。取舍：网页只有解析结果或附件清单变了才出新版本，HTML 里解析没读到的变动不记。
+        # 不看 existing：A→A'（只 HTML 不同）→A 也始终是同一个版本。档案导入不走这里。
         version_id, existing = current["version_id"], (current["version_id"],)
     elif run["kind"] == "fetch" and existing is not None and current is not None:
         # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。

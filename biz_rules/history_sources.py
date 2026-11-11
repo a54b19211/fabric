@@ -175,6 +175,13 @@ def crl_id(data: dict) -> str:
 # each study with the date of its data snapshot. Version identity ignores them; the raw is kept as seen.
 VOLATILE_RAW = {"clinicaltrials": (("derivedSection", "miscInfoModule", "versionHolder"),)}
 
+# A web capture keeps the page's HTML as it was seen, but the HTML does not identify a version: pages carry
+# generated ids (NMPA's accessibility widget) and a new download path on every request (ChiCTR). Two captures
+# are the same version when the parse result and the attachment list are the same.
+# The trade-off: a change in the HTML that the parser does not read (markup, scripts, widgets) makes no new
+# version, and the HTML kept is the first one seen. A changed parse result or attachment list still does.
+CAPTURE_HTML = ("html", "html_sha256", "html_store_path")
+
 
 class _Ambiguous(ValueError):
     """A JSON text another parser may read differently: compared by its raw hash, not as content."""
@@ -198,7 +205,8 @@ def _number(text):
 
 
 def stable_raw(source_id, raw):
-    """The raw as canonical JSON without the source's volatile fields, for comparing two observations:
+    """The raw as canonical JSON without the source's volatile fields (and a web capture's HTML), for comparing
+    two observations:
     key order and spacing are serialization, not content (live 2026-11-03: Europe PMC returned the same
     record with its keys in another order on most refreshes, 23927 versions for 8444 records; 66 sampled
     neighbouring versions parsed equal). Array order is kept. None (compare the raw hash) if the raw is not
@@ -208,6 +216,9 @@ def stable_raw(source_id, raw):
         data = json.loads(raw, object_pairs_hook=_object, parse_constant=_constant, parse_float=_number)
     except (TypeError, ValueError):  # _Ambiguous included
         return None
+    if isinstance(data, dict) and data.get("role") == "web_capture":
+        for key in CAPTURE_HTML:
+            data.pop(key, None)
     for path in VOLATILE_RAW.get(source_id, ()):
         node = data
         for key in path[:-1]:
