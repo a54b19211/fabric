@@ -50,7 +50,6 @@ core_engine/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entit
 core_engine/api_router.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
 core_engine/authority_client.py:resolve_identifier  102/21  authority-service identifier resolution with fallbacks inline
 core_engine/cloud_api_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
-core_engine/pagination_driver.py:JsClickDriver._playwright_crawl_tables  115/21  browser pagination driver, long because of the page-interaction steps
 core_engine/router.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
 db/history.py:_read_filters  79/22  history store queries and validators with many optional filters inline
 db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation

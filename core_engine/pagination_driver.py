@@ -330,49 +330,7 @@ class JsClickDriver(BasePaginationDriver):
                 while page_count < self.max_pages:
                     logger.info(f"[表格页 {page_count + 1}] 当前URL: {pw_page.url}")
 
-                    page_title = pw_page.title() or ""
-                    active_tab = pw_page.query_selector("li.is_active")
-                    tab_title = active_tab.inner_text().strip() if active_tab else ""
-
-                    # 遍历页面上所有 table，取有数据的（排除 detail_table 等非数据表）
-                    all_tables = pw_page.query_selector_all("table")
-                    page_parsed = []
-
-                    for table_el in all_tables:
-                        # 跳过明确不是数据表的 table
-                        cls = (table_el.get_attribute("class") or "").lower()
-                        if "detail_table" in cls:
-                            continue
-
-                        rows_data = self._extract_table_rows(table_el)
-                        if not rows_data or len(rows_data) < 2:
-                            continue
-
-                        md_table = _rows_to_markdown(rows_data)
-                        if not md_table:
-                            continue
-
-                        doc_title = tab_title or page_title or self.profile.get("name", "")
-                        if page_count > 0:
-                            doc_title = f"{doc_title} - 第{page_count + 1}页"
-
-                        parsed = {
-                            "uuid": make_uuid(f"{self.start_url}#page{page_count + 1}"),
-                            "title": doc_title,
-                            "publish_date": "",
-                            "markdown": f"# {doc_title}\n\n{md_table}",
-                            "structured_data": {
-                                "title": doc_title,
-                                "publish_date": "",
-                                "category": "",
-                                "summary": "",
-                            },
-                            "parse_method": "table_extract",
-                            "attachment_links": [],
-                            "source_url": self.start_url,
-                            "source_site": self.site_key,
-                        }
-                        page_parsed.append(parsed)
+                    page_parsed = self._tables_on_page(pw_page, page_count)
 
                     if not page_parsed:
                         logger.warning("  未找到有数据的表格")
@@ -418,6 +376,53 @@ class JsClickDriver(BasePaginationDriver):
                         ctx.close()
                 finally:
                     browser.close()
+
+    def _tables_on_page(self, pw_page, page_count: int) -> list[dict]:
+        """当前页面上有数据的各张表，每张提成一份 parsed dict（page_count 从 0 数起）。"""
+        page_title = pw_page.title() or ""
+        active_tab = pw_page.query_selector("li.is_active")
+        tab_title = active_tab.inner_text().strip() if active_tab else ""
+
+        # 遍历页面上所有 table，取有数据的（排除 detail_table 等非数据表）
+        all_tables = pw_page.query_selector_all("table")
+        page_parsed = []
+
+        for table_el in all_tables:
+            # 跳过明确不是数据表的 table
+            cls = (table_el.get_attribute("class") or "").lower()
+            if "detail_table" in cls:
+                continue
+
+            rows_data = self._extract_table_rows(table_el)
+            if not rows_data or len(rows_data) < 2:
+                continue
+
+            md_table = _rows_to_markdown(rows_data)
+            if not md_table:
+                continue
+
+            doc_title = tab_title or page_title or self.profile.get("name", "")
+            if page_count > 0:
+                doc_title = f"{doc_title} - 第{page_count + 1}页"
+
+            parsed = {
+                "uuid": make_uuid(f"{self.start_url}#page{page_count + 1}"),
+                "title": doc_title,
+                "publish_date": "",
+                "markdown": f"# {doc_title}\n\n{md_table}",
+                "structured_data": {
+                    "title": doc_title,
+                    "publish_date": "",
+                    "category": "",
+                    "summary": "",
+                },
+                "parse_method": "table_extract",
+                "attachment_links": [],
+                "source_url": self.start_url,
+                "source_site": self.site_key,
+            }
+            page_parsed.append(parsed)
+        return page_parsed
 
     @staticmethod
     def _extract_table_rows(table_el) -> list[list[str]]:
