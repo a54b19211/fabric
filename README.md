@@ -290,6 +290,7 @@ rq worker --url "$DATAFABRIC_HISTORY_REDIS_URL" extraction
 FDA CRL保留application_number原生数组和letter_type，按PDF+信函日期/类型/申请号复合键分开；同批歧义拒绝，不把CRL、撤稿、终止自动解释为疗效/安全失败。
 Europe PMC采用source:id、PMID/DOI、摘要、更正关系及许可字段，不把同PMID当独立研究，不自动下载全文；firstPublicationDate可能补算，只保留来源原值。
 ClinicalTrials保留实际/预计时间语义和未知人数。新PubMed链用EFetch原始XML摘要；原采集器也不再用ESummary的summary假充摘要、吞掉失败或把固定页数截断当EOF。
+PubMed全文要设环境变量 `DATAFABRIC_UNPAYWALL_EMAIL`（你们自己的联系邮箱，Unpaywall 要求请求带邮箱；系统不代填）才取得全：PMC 全文只在许可明确（CC/公共领域）时保存，PMC 取不到、文献有 DOI 时才去 Unpaywall 找开放获取 PDF，这一步没有邮箱就不做，覆盖记录里记 `unpaywall_not_configured`，这些文献只有摘要。`DATAFABRIC_PUBMED_FULLTEXT=0` 可整体关闭全文。
 
 后续连续发布改动已接住旧网页/CLI的实际落库：已安装 V019 时，同 UUID 变化正文保存为待发布的新候选，旧缓存和旧成果保留；未安装发布能力时仍拒绝覆盖。API 来源的旧 URL 重采继续明确拒绝，不能先清空唐的抽取/图谱/同步结果。
 旧网页后台线程不是新增history持久任务，不把二者混为已完成的全站重采平台。
