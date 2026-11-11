@@ -582,3 +582,29 @@ def test_drugbank_without_an_api_key_is_a_failed_read_that_says_so(monkeypatch):
     assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
     assert batch["records"] == []
 
+
+def test_failed_site_read_keeps_the_real_reason_without_secrets(fake_web, monkeypatch):
+    """The reason used to be the class name only ("站点读取失败：TimeoutError"). Now it is the first line of the
+    error message; the rest of the browser's call log, URL query strings and key=value pairs stay out."""
+    class Driver:
+        def iter_detail_urls(self):
+            raise TimeoutError("Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to "
+                               '"https://www.nmpa.gov.cn/x?api_key=SECRET123", waiting until "load"')
+            yield
+
+    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
+    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    batch = read_public(FetchRequest(source_id="nmpa", query=start))
+    assert batch["error"] == {"code": "source_read_failed",
+                              "message": "站点读取失败：TimeoutError：Page.goto: Timeout 30000ms exceeded."}
+    assert batch["stop_reason"] == "source_failed"
+
+
+@pytest.mark.parametrize(("raw", "shown"), [
+    ("GET https://api.example.org/v1/x?api_key=SECRET123 failed", "GET https://api.example.org/v1/x failed"),
+    ("bad request, token=abc123 refused", "bad request, token=*** refused"),
+    ("", ""),
+])
+def test_failure_reason_drops_secrets_and_keeps_the_class_name(raw, shown):
+    assert site_crawler._why(RuntimeError(raw)) == "RuntimeError" + ("：" + shown if shown else "")
+

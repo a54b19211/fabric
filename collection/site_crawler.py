@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
+
+from loguru import logger
 
 from biz_rules.history_models import ArchiveRecord, HistoryError, source_time
 from collection import transport
@@ -421,6 +424,15 @@ def _read_detail_pages(request, reader, start, at):
                         record_page=not (first and start_recorded))
 
 
+def _why(exc) -> str:
+    """失败原因：异常类名加信息里的关键一句（第一行，最长 200 字）。网址里的查询串和 key=值 这类写法可能带密钥，
+    先去掉。"""
+    line = next((part.strip() for part in str(exc).splitlines() if part.strip()), "")
+    line = re.sub(r"(https?://[^\s?#]+)[?#]\S*", r"\1", line)
+    line = re.sub(r"(?i)\b(\w*(?:key|token|secret|password)\w*)=\S+", r"\1=***", line)
+    return type(exc).__name__ + ("：" + line[:200] if line else "")
+
+
 def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
     续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件}。"""
@@ -446,8 +458,9 @@ def _read(request, reader) -> dict:
         if reader.budget.stopped:  # 浏览器里的请求因预算被中止，驱动随后报的错不是来源失败
             stop, resume = reader.budget.stopped, (at.position, 0, False)
         else:
-            error = {"code": "source_read_failed", "message": "站点读取失败：" + type(exc).__name__}
+            error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
             stop = "source_failed"
+            logger.error("站点 {} 读取失败：{}", reader.site, error["message"])
     return _site_read_result(request, reader, exhausted, stop, error, resume)
 
 
