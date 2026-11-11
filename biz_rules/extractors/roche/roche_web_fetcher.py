@@ -93,8 +93,11 @@ def _parse_list_page(page, collected_urls: Set[str], year: int, page_num: int) -
             item.css(".headline")[0] if item.css(".headline") else
             None
         )
-        raw_title = title_el.text if title_el else link_el.text
-        title = _clean_title(raw_title or "")
+        # 标题文字藏在 h3 > a > span 里面：.text 只取元素自己的文字，得到空串，要取里面所有文字（实际页面：
+        # <h3><a><span class="teaser__title">标题<span class="teaser__icon">…</span></span></a></h3>）
+        title_source = title_el if title_el is not None else link_el
+        raw_title = " ".join(title_source.get_all_text(strip=True).split())
+        title = _clean_title(raw_title)
 
         # 日期
         date_el = (

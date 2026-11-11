@@ -139,3 +139,20 @@ def test_hkex_skips_the_display_document_notice_rows(monkeypatch):
     assert announcements[0]["pdf_url"].endswith("/2026/1105/2026110500118_c.pdf")
     kept, _ = _hkex_read(monkeypatch, {"skip_headlines": []})
     assert len(kept) == 2
+
+
+# ── Roche 新闻稿（roche）────────────────────────────────────────────────
+
+def test_roche_list_titles_are_read_from_inside_the_nested_teaser_link():
+    """列表里每条是 <h3><a><span class="teaser__title">标题<span class="teaser__icon">…</span></span></a></h3>。
+    以前取 h3 元素自己的文字（.text），得到空串：入库的 Roche 新闻稿标题全是空的。"""
+    from biz_rules.extractors.roche.roche_web_fetcher import _parse_list_page
+
+    items = _parse_list_page(page("roche_teasers.html"), set(), 2026, 1)
+    assert [i["source_url"] for i in items] == [
+        "https://www.roche.com/media/releases/med-cor-2026-11-10",
+        "https://www.roche.com/media/releases/med-cor-2026-10-28",
+        "https://www.roche.com/media/releases/med-cor-2026-10-27"]
+    assert items[0]["title"] == ("Roche presents new data across pharmaceuticals and diagnostics from its growing "
+                                 "Alzheimer’s disease portfolio at CTAD 2026")
+    assert all(i["title"] for i in items) and items[0]["publish_date"] == "2026-11-10"
