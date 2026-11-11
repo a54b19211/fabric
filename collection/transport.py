@@ -16,8 +16,8 @@
 一旦停下，同一次读取之后的任何传输都直接停。没有活动读取时（API 服务的其他调用、索引客户端等）原样放行。
 
 停在哪里（Budget.check）：每次发出前、每读到一块、每交付一个版本，以及导航返回时。
-截止时间：每次等待（连接、读块、整次传输、限速、重试间隔）都不超过开始等待那一刻的剩余时间——读块的超时在每次
-阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的 SyncStream.read，requests 在 http.client 底下的
+截止时间：每次等待（连接、读块、整次传输、限速、重试间隔，以及浏览器里等加载、选择器、函数、睡眠）都不超过开始等待
+那一刻的剩余时间——读块的超时在每次阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的 SyncStream.read，requests 在 http.client 底下的
 SocketIO.readinto；响应头、chunk 内部、正文都从这两处读），读块因到期超时报 deadline。
 请求数：唯一先发后计的是浏览器内部跟随的重定向（发出前拦不到，Chromium 一次导航最多跟 20 跳）。照实计数，
 导航一返回就按 request_budget 停，这一页不交付，不报读到底。
@@ -454,6 +454,11 @@ def _browser_body_size(request) -> int:
         return 0
 
 
+def _within_ms(budget, wait):
+    """浏览器的超时（毫秒；None 是页面默认的 30 秒，0 是不限）收进剩余时间。"""
+    return budget.within(30.0 if wait is None else (wait / 1000 or None)) * 1000
+
+
 def _browser_goto(original):
     def goto(self, url, *args, **kwargs):
         budget = _ACTIVE.get()
@@ -461,8 +466,7 @@ def _browser_goto(original):
         if budget is None:
             return original(self, url, *args, **kwargs)
         _route(self)
-        wait = kwargs.get("timeout")  # 毫秒；None 是页面默认（30 秒），0 是不限
-        kwargs["timeout"] = budget.within(30.0 if wait is None else (wait / 1000 or None)) * 1000
+        kwargs["timeout"] = _within_ms(budget, kwargs.get("timeout"))
         try:
             response = _hop(budget, url, lambda: original(self, url, *args, **kwargs),
                             drain=lambda r: None, gated=False)  # 导航请求本身在路由处过闸
@@ -473,6 +477,36 @@ def _browser_goto(original):
         return response
 
     return goto
+
+
+def _browser_wait(original):
+    """页面上的等待（等选择器、等加载状态、等函数、等 locator）：超时收进剩余时间。恰因到期而超时报 deadline。"""
+    def wait(self, *args, **kwargs):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, *args, **kwargs)
+        budget.check()
+        kwargs["timeout"] = _within_ms(budget, kwargs.get("timeout"))
+        try:
+            return original(self, *args, **kwargs)
+        except Exception:
+            budget.check()
+            raise
+
+    return wait
+
+
+def _browser_sleep(original):
+    """wait_for_timeout：睡不过剩余时间，睡醒时已到期就报 deadline。"""
+    def sleep(self, timeout):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, timeout)
+        budget.check()
+        original(self, min(timeout, _within_ms(budget, timeout)))
+        budget.check()
+
+    return sleep
 
 
 def _patch(owner, name, wrap):
@@ -506,10 +540,15 @@ def install():
         pass
     for module in ("playwright.sync_api", "patchright.sync_api"):
         try:
-            page = __import__(module, fromlist=["Page"]).Page
+            api = __import__(module, fromlist=["Page", "Frame", "Locator"])
         except ImportError:
             continue
-        _patch(page, "goto", _browser_goto)
+        _patch(api.Page, "goto", _browser_goto)
+        for owner in (api.Page, api.Frame):
+            for name in ("wait_for_selector", "wait_for_load_state", "wait_for_function", "wait_for_url"):
+                _patch(owner, name, _browser_wait)
+            _patch(owner, "wait_for_timeout", _browser_sleep)
+        _patch(api.Locator, "wait_for", _browser_wait)
 
 
 @contextmanager

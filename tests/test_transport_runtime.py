@@ -213,3 +213,37 @@ def test_on_host_takes_the_host_and_its_subdomains():
     assert on_host("https://www.fda.gov/x", "fda.gov") and on_host("https://fda.gov/x", "fda.gov")
     assert not on_host("https://notfda.gov/x", "fda.gov") and not on_host("https://fda.gov.evil.example/", "fda.gov")
     assert not on_host("data:text/plain,x", "fda.gov")
+
+
+@pytest.mark.parametrize(("library", "wait"), [
+    ("playwright", "selector"), ("playwright", "locator"), ("playwright", "function"), ("playwright", "sleep"),
+    ("patchright", "selector"),
+])
+def test_browser_waits_stop_at_the_run_deadline(monkeypatch, library, wait):
+    """等一个永远不出现的选择器（页面默认超时 30 秒）、等 locator、等函数（60 秒）、睡 60 秒：都在期限附近停，
+    报 deadline。以前这些等待不受期限约束（scrapling 等选择器的 30 秒，nmpa / fda_drug_safety 因此超期）。"""
+    sync_api = pytest.importorskip(library + ".sync_api")
+
+    def browse():
+        with sync_api.sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True, args=["--no-proxy-server"])
+            except Exception as exc:  # noqa: BLE001
+                pytest.skip("Chromium 不可用：" + type(exc).__name__)
+            try:
+                page = browser.new_page()
+                page.goto(server.url("/hop/0"), wait_until="load", timeout=15000)
+                waits = {
+                    "selector": lambda: page.wait_for_selector("#never"),
+                    "locator": lambda: page.locator("#never").first.wait_for(),
+                    "function": lambda: page.wait_for_function("() => false", timeout=60000),
+                    "sleep": lambda: page.wait_for_timeout(60000),
+                }
+                waits[wait]()
+            finally:
+                browser.close()
+
+    with _Server() as server:
+        batch, elapsed = _read(monkeypatch, browse)
+    _assert_deadline(batch, elapsed)
+
