@@ -18,6 +18,7 @@ from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
 from biz_rules.cleaners.field.date_format import normalize_date
+from biz_rules.history_models import HistoryError
 
 
 def _make_uuid(source_url: str) -> str:
@@ -198,12 +199,13 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
                     timeout=60000,
                 )
             except Exception as e:
+                # 读不到列表页是失败，不是“这一年读完了”：原样抛出，运行记为失败并写明原因（以前 break，被当作读到底）
                 logger.error(f"[Roche] 列表页抓取失败: {target_url} | {e}")
-                break
+                raise
 
             if not page.status or not (200 <= page.status < 300):
-                logger.warning(f"[Roche] 列表页状态异常: {page.status} | {target_url}")
-                break
+                raise HistoryError("source_read_failed",
+                                   f"Roche 列表页读取失败：{year} 年第 {page_num} 页返回 HTTP {page.status}（不当作读到底）")
 
             page_articles = _parse_list_page(page, collected_urls, year, page_num)
             if not page_articles:

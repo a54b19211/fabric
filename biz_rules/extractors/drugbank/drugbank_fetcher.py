@@ -67,15 +67,17 @@ def iter_drugbank(api_cfg: dict) -> Iterator[dict]:
         if max_records > 0:
             params["per_page"] = min(page_size, max_records - fetched)
 
+        # HTTP 错误和网络异常是失败，不是“读完了”：抛出来，运行记为失败并写明原因（不带网址和 Key）
         try:
             resp = httpx.get(url, headers=headers, params=params, timeout=30)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             logger.error(f"[DrugBank] HTTP {e.response.status_code}: {e.response.text[:200]}")
-            break
-        except Exception as e:
-            logger.error(f"[DrugBank] 请求异常: {e}")
-            break
+            raise HistoryError("source_read_failed", f"DrugBank 读取失败：HTTP {e.response.status_code}"
+                                                     f"（已读 {fetched} 条，不当作读到底）") from None
+        except httpx.HTTPError as e:  # 超时、连接失败等
+            raise HistoryError("source_read_failed", f"DrugBank 读取失败：{type(e).__name__}"
+                                                     f"（已读 {fetched} 条，不当作读到底）") from None
 
         records = resp.json()
         if not isinstance(records, list) or not records:

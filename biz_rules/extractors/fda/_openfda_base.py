@@ -15,11 +15,29 @@ from typing import Iterator
 import httpx
 from loguru import logger
 
+from biz_rules.history_models import HistoryError
+
 OPENFDA_BASE = "https://api.fda.gov"
 PAGE_SIZE = 100
 MAX_SKIP = 25000
 REQUEST_DELAY = 0.5
 NEXT_LINK_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
+
+
+def _get_page(url, endpoint, fetched, *, params=None, end_on_404=False):
+    """读一页。HTTP 错误和网络异常都抛 HistoryError（写明原因），运行记为失败；以前是记一行日志、当作读到底。
+    end_on_404：skip 翻页时 openFDA 翻过最后一页回 404，这时返回 None 表示读完了。"""
+    try:
+        resp = httpx.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp
+    except httpx.HTTPStatusError as e:
+        if end_on_404 and e.response.status_code == 404:
+            return None
+        reason = f"HTTP {e.response.status_code}"
+    except httpx.HTTPError as e:  # 超时、连接失败等
+        reason = type(e).__name__
+    raise HistoryError("source_read_failed", f"openFDA 读取失败：{endpoint} {reason}（已读 {fetched} 条，不当作读到底）")
 
 
 def iter_openfda(api_cfg: dict) -> Iterator[dict]:
@@ -58,18 +76,9 @@ def _iter_search_after(api_cfg: dict) -> Iterator[dict]:
 
     while True:
         if url:
-            resp = httpx.get(url, timeout=30)
+            resp = _get_page(url, endpoint, fetched)
         else:
-            resp = httpx.get(base_url, params=params, timeout=30)
-
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            logger.error(f"[openFDA] HTTP 错误: {e}")
-            break
-        except Exception as e:
-            logger.error(f"[openFDA] 请求异常: {e}")
-            break
+            resp = _get_page(base_url, endpoint, fetched, params=params)
 
         data = resp.json()
         results = data.get("results", [])
@@ -130,17 +139,9 @@ def _iter_skip(api_cfg: dict) -> Iterator[dict]:
         if search:
             params["search"] = search
 
-        try:
-            resp = httpx.get(url, params=params, timeout=30)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info(f"[openFDA] 分页结束（404）: skip={skip}")
-                break
-            logger.error(f"[openFDA] HTTP 错误: {e}")
-            break
-        except Exception as e:
-            logger.error(f"[openFDA] 请求异常: {e}")
+        resp = _get_page(url, endpoint, fetched, params=params, end_on_404=True)
+        if resp is None:
+            logger.info(f"[openFDA] 分页结束（404）: skip={skip}")
             break
 
         data = resp.json()

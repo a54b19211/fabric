@@ -608,3 +608,121 @@ def test_failed_site_read_keeps_the_real_reason_without_secrets(fake_web, monkey
 def test_failure_reason_drops_secrets_and_keeps_the_class_name(raw, shown):
     assert site_crawler._why(RuntimeError(raw)) == "RuntimeError" + ("：" + shown if shown else "")
 
+
+
+# ── 读取中出错不能被吞：HTTP 错误和网络异常是失败（写明原因），不是“读到底了” ─────────────────
+
+def _http(status, body=None, headers=None):
+    import httpx
+
+    return httpx.Response(status, json=body if body is not None else {}, headers=headers or {},
+                          request=httpx.Request("GET", "https://api.example.invalid/x"))
+
+
+OPENFDA_RATE_LIMIT = {"error": {"code": "OVER_RATE_LIMIT",
+                                "message": "Too many requests: the limit for your IP has been reached."}}
+
+
+@pytest.mark.parametrize("source", ["fda_api_enforcement", "fda_api_drug_label"])  # skip 翻页 / search_after 翻页
+@pytest.mark.parametrize(("answer", "reason"), [
+    (lambda: _http(429, OPENFDA_RATE_LIMIT), "HTTP 429"),
+    (lambda: _http(503, {"error": {"code": "SERVER_ERROR"}}), "HTTP 503"),
+    (lambda: (_ for _ in ()).throw(__import__("httpx").ConnectTimeout("timed out")), "ConnectTimeout"),
+])
+def test_openfda_http_errors_and_timeouts_are_failed_reads_that_say_so(monkeypatch, source, answer, reason):
+    """openFDA 回 429 / 503 或连接超时，以前记一行日志就当读到底（运行记为“完成、没有数据”）。"""
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: answer())
+    batch = read_public(FetchRequest(source_id=source, query="records"))
+    assert batch["error"]["code"] == "source_read_failed"
+    assert reason in batch["error"]["message"] and "已读 0 条" in batch["error"]["message"]
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+    assert batch["records"] == []
+
+
+def test_openfda_failure_on_a_later_page_keeps_what_was_read_and_still_fails(monkeypatch):
+    """第二页出错：第一页读到的原件保留，但这次读取不是“读完了”。"""
+    import httpx
+    from biz_rules.extractors.fda import _openfda_base
+
+    record = {"set_id": "S1", "effective_time": "20261101", "openfda": {},
+              "spl_product_data_elements": ["Some Product SOME INGREDIENT"]}
+    link = '<https://api.fda.gov/drug/label.json?search_after=1&sort=effective_time:desc>; rel="next"'
+    answers = iter([_http(200, {"meta": {"results": {"total": 3}}, "results": [record]}, {"Link": link}),
+                    _http(500, {"error": {"code": "SERVER_ERROR"}})])
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: next(answers))
+    monkeypatch.setattr(_openfda_base, "REQUEST_DELAY", 0)
+    batch = read_public(FetchRequest(source_id="fda_api_drug_label", query="records", max_records=5))
+    assert len(batch["records"]) == 1
+    assert "HTTP 500" in batch["error"]["message"] and "已读 1 条" in batch["error"]["message"]
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+
+
+def test_openfda_404_past_the_last_skip_page_is_still_the_normal_end(monkeypatch):
+    """skip 翻页翻过最后一页，openFDA 回 404：这是读完了，不是失败。"""
+    import httpx
+    from biz_rules.extractors.fda import _openfda_base
+
+    record = {"recall_number": "D-1-2026", "product_description": "Some product", "report_date": "20261101"}
+    answers = iter([_http(200, {"meta": {"results": {"total": 5}}, "results": [record]}),
+                    _http(404, {"error": {"code": "NOT_FOUND", "message": "No matches found!"}})])
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: next(answers))
+    monkeypatch.setattr(_openfda_base, "REQUEST_DELAY", 0)
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=10))
+    assert len(batch["records"]) == 1 and batch["error"] is None
+    assert batch["upstream_pagination_exhausted"] and batch["stop_reason"] == "upstream_exhausted"
+
+
+@pytest.mark.parametrize(("answer", "reason"), [
+    (lambda: _http(401, {"error": "Unauthorized"}), "HTTP 401"),
+    (lambda: (_ for _ in ()).throw(__import__("httpx").ReadTimeout("read timed out")), "ReadTimeout"),
+])
+def test_drugbank_http_errors_and_timeouts_are_failed_reads_without_the_key(monkeypatch, answer, reason):
+    import httpx
+
+    monkeypatch.setitem(site_crawler.SITE_PROFILES["drugbank"]["api"], "api_key", "test-key-0000")
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: answer())
+    batch = read_public(FetchRequest(source_id="drugbank", query="records"))
+    assert batch["error"]["code"] == "source_read_failed" and f"DrugBank 读取失败：{reason}" in batch["error"]["message"]
+    assert "test-key-0000" not in batch["error"]["message"]
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+
+
+class _RochePage:
+    """Roche 列表页替身：只有状态码，页面上没有新闻条目。"""
+    def __init__(self, status):
+        self.status = status
+
+    def css(self, selector):
+        return []
+
+    def find_all(self, matcher):
+        return []
+
+
+def _roche_one_year(monkeypatch, fetch):
+    from biz_rules.extractors.roche import roche_web_fetcher
+
+    monkeypatch.setitem(site_crawler.SITE_PROFILES["roche"]["api"], "year_end", 2026)  # 只读 2026 年
+    monkeypatch.setattr(roche_web_fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
+    return read_public(FetchRequest(source_id="roche", query="records"))
+
+
+def test_roche_list_page_timeout_is_a_failed_read_with_the_real_reason(monkeypatch):
+    def fetch(url, **kwargs):
+        raise TimeoutError("Page.goto: Timeout 60000ms exceeded.")
+
+    batch = _roche_one_year(monkeypatch, fetch)
+    assert batch["error"] == {"code": "source_read_failed",
+                              "message": "站点读取失败：TimeoutError：Page.goto: Timeout 60000ms exceeded."}
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+
+
+def test_roche_list_page_http_error_is_a_failed_read_but_an_empty_page_still_ends_the_year(monkeypatch):
+    batch = _roche_one_year(monkeypatch, lambda url, **kw: _RochePage(503))
+    assert batch["error"] == {"code": "source_read_failed",
+                              "message": "Roche 列表页读取失败：2026 年第 1 页返回 HTTP 503（不当作读到底）"}
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+    ended = _roche_one_year(monkeypatch, lambda url, **kw: _RochePage(200))  # 这一年没有（更多）新闻：正常读完
+    assert ended["error"] is None and ended["upstream_pagination_exhausted"]
