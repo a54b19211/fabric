@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Dict, Iterator
 from urllib.parse import urljoin
 
@@ -37,7 +38,7 @@ def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
             "t2code": "",
             "stockId": stock_id,
             "from": api_config.get("from_date", "20240101"),
-            "to": api_config.get("to_date", "20260410"),
+            "to": api_config.get("to_date") or date.today().strftime("%Y%m%d"),  # 不填 = 今天；接口不接受空的 to
             "category": 0,
             "title": ""
         }
@@ -87,6 +88,8 @@ def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
                 doc_cell = cols[3]
                 headline = doc_cell.find('div', class_='headline')
                 headline_text = headline.get_text(strip=True) if headline else ""
+                if headline_text in api_config.get("skip_headlines", ()):  # 如“展示文件”：只是提示语，不是公告
+                    continue
 
                 doc_link = doc_cell.find('div', class_='doc-link')
                 pdf_url = ""

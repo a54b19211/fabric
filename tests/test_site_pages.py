@@ -84,3 +84,58 @@ def test_fda_drug_safety_list_is_a_table_paged_by_its_next_button():
     assert profile["pagination"]["type"] == "js_click"
     assert len(sample.css(profile["pagination"]["next_btn_selector"])) == 1
     assert not sample.css("li.paginate_button.previous:not(.disabled)")
+
+
+# ── 港交所披露易（hkex）──────────────────────────────────────────────────
+
+# 接口返回的真实两行（和黄医药 00013）：一行是普通公告，一行是“展示文件”（只是一句提示语，各公司指向同一个网址）
+HKEX_ROWS = """<table class="table"><tbody>
+<tr><td class="release-time"><span class="mobile-list-heading">發放時間: </span>05/11/2026 08:00</td>
+<td class="stock-short-code"><span class="mobile-list-heading">股份代號: </span>00013</td>
+<td class="stock-short-name"><span class="mobile-list-heading">股份簡稱: </span>和黃醫藥</td>
+<td><span class="mobile-list-heading">文件: </span><div class="headline">公告及通告 - [海外監管公告-業務發展最新情況]<br/></div>
+<div class="doc-link"><a href="/listedco/listconews/sehk/2026/1105/2026110500118_c.pdf">自願性公告 - 和黃醫藥宣佈索樂匹尼布獲FDA孤兒藥資格認定</a> (<span class="attachment_filesize">200KB</span>)</div></td></tr>
+<tr><td class="release-time"><span class="mobile-list-heading">發放時間: </span>09/04/2026 16:44</td>
+<td class="stock-short-code"><span class="mobile-list-heading">股份代號: </span>00013</td>
+<td class="stock-short-name"><span class="mobile-list-heading">股份簡稱: </span>和黃醫藥</td>
+<td><span class="mobile-list-heading">文件: </span><div class="headline">展示文件<br/></div>
+<div class="doc-link"><a href="/listedco/listconews/sehk/dod/tc.html">發行人剛在本網站英文版面發布一項公告，相應中文版本或會／或不會在本版面發布。</a> (<span class="attachment_filesize">1KB</span>, HTM)</div></td></tr>
+</tbody></table>"""
+
+
+def _hkex_read(monkeypatch, overrides=None):
+    """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告, 发出的表单参数)。"""
+    from biz_rules.extractors import hkex_fetcher
+
+    sent = []
+
+    class Reply:
+        text = HKEX_ROWS
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(hkex_fetcher.requests, "post", lambda url, data, **kw: (sent.append(data), Reply())[1])
+    api = {**SITE_PROFILES["hkex"]["api"], "companies": [{"code": "00013", "name": "和黃醫藥", "stock_id": 1000001102}]}
+    api.update(overrides or {})
+    return list(hkex_fetcher.fetch_hkex_announcements(api)), sent
+
+
+def test_hkex_end_date_defaults_to_today_and_is_sent_as_yyyymmdd(monkeypatch):
+    """截止日写死成 20260410 时，之后发布的公告全读不到。留空 = 读取当天；接口不接受空的 to（返回 0 条），所以不能原样传空。"""
+    from datetime import date
+
+    assert SITE_PROFILES["hkex"]["api"]["to_date"] == ""
+    _, sent = _hkex_read(monkeypatch)
+    assert sent[0]["to"] == date.today().strftime("%Y%m%d") and sent[0]["from"] == "20240101"
+    _, sent = _hkex_read(monkeypatch, {"to_date": "20261231"})
+    assert sent[0]["to"] == "20261231"
+
+
+def test_hkex_skips_the_display_document_notice_rows(monkeypatch):
+    """“展示文件”行只是提示语，不是公告：不读。普通公告照常读到。"""
+    announcements, _ = _hkex_read(monkeypatch)
+    assert [a["headline"] for a in announcements] == ["公告及通告 - [海外監管公告-業務發展最新情況]"]
+    assert announcements[0]["pdf_url"].endswith("/2026/1105/2026110500118_c.pdf")
+    kept, _ = _hkex_read(monkeypatch, {"skip_headlines": []})
+    assert len(kept) == 2
