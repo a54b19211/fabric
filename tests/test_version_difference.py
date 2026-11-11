@@ -40,6 +40,19 @@ def test_the_same_original_in_another_serialization_is_serialization_only():
     assert classify("who_don", old, new) == {"kind": "serialization_only", **UNCHANGED}
 
 
+def test_two_captures_of_a_page_that_differ_only_in_html_are_serialization_only():
+    def capture(html):
+        return {"schema_version": "datafabric.web_capture.v1", "role": "web_capture", "site": "nmpa",
+                "url": "https://www.nmpa.gov.cn/xxgk/ggtg/1.html", "html": html, "html_sha256": "h" + html,
+                "parsed": {"title": "T", "publish_date": "2026-11-02", "markdown": "# T", "parse_method": "css", "extra": {}},
+                "attachments": []}
+
+    url = "https://www.nmpa.gov.cn/xxgk/ggtg/1.html"
+    old, new = (stored("nmpa", capture(html), url) for html in ("<a id=aria1>", "<a id=aria2>"))
+    assert old["facts"]["html_sha256"] != new["facts"]["html_sha256"]
+    assert classify("nmpa", old, new) == {"kind": "serialization_only", **UNCHANGED}
+
+
 def test_a_parser_upgrade_on_the_same_original_is_projection_only(monkeypatch):
     old = stored("who_don", notice())
     monkeypatch.setattr(who_don, "WHO_PARSER", "datafabric.who.don.projection.v0.3")

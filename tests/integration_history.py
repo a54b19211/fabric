@@ -1164,6 +1164,44 @@ def test_the_same_europe_pmc_record_in_another_key_order_is_not_a_new_version(pg
     assert current.items[0].version_id == changed.version_ids[0]
 
 
+def _fetch_capture(html, key, markdown="# 公告"):
+    """A NMPA detail page as the site plugin stores it; the calls below change only its HTML (and the hash of it)."""
+    import hashlib
+
+    from collection.site_crawler import WEB_SCHEMA
+
+    url = "https://www.nmpa.gov.cn/xxgk/ggtg/3.html"
+    raw = json.dumps({"schema_version": WEB_SCHEMA, "role": "web_capture", "site": "nmpa", "url": url, "fetched_at": "t",
+                      "html_sha256": hashlib.sha256(html.encode()).hexdigest(), "html": html,
+                      "parsed": {"title": "公告", "publish_date": "2026-11-01", "markdown": markdown, "parse_method": "css",
+                                 "extra": {}},
+                      "attachments": []}, sort_keys=True)
+    request = FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[url])
+    run, fresh = store.create_fetch(request, key)
+    if not fresh:
+        return run
+    store.job_input(run.id, run.attempt)
+    return store.finish_fetch(run.id, run.attempt, {
+        "records": [ArchiveRecord(source_record_id=url, record_kind="document", raw_content=raw)],
+        "complete": False, "upstream_pagination_exhausted": True,
+        "stop_reason": "upstream_exhausted", "requests": 1, "bytes": len(raw.encode()), "source_total": None, "error": None,
+    })
+
+
+def test_a_web_page_whose_html_alone_changed_is_not_a_new_version(pg, monkeypatch):
+    """Live 2026-11-11: NMPA and ChiCTR made a new version on every fetch of an unchanged page."""
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc","nmpa"]')
+    a = _fetch_capture("<a id='aria1'>", "html-1")
+    other = _fetch_capture("<a id='aria2'>", "html-2")  # A': only the generated id differs
+    back = _fetch_capture("<a id='aria1'>", "html-3")  # A again
+    assert a.version_ids == other.version_ids == back.version_ids
+    with pg.begin() as conn:
+        rows = conn.execute(text("SELECT payload->>'raw_content' FROM history_versions WHERE source_id='nmpa'")).all()
+    assert len(rows) == 1 and "aria1" in rows[0][0]  # the HTML kept is the first one seen
+    changed = _fetch_capture("<a id='aria3'>", "html-4", markdown="# 公告（更正）")
+    assert changed.version_ids != a.version_ids  # a changed parse result is still a new version
+
+
 def test_a_version_stored_before_document_evidence_still_matches_its_original(pg, monkeypatch):
     """Versions first seen before biz_rules.document_evidence existed carry no document_evidence. It is derived from
     the original and the projection, so it is not part of the version identity: observing the same original again

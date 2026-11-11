@@ -373,6 +373,45 @@ def test_json_another_parser_may_read_differently_is_compared_by_its_raw():
         "europe_pmc", '{"a": 12345678901234567891}')
 
 
+def capture(html, markdown="# T\n\nbody", attachments=(), **extra):
+    """A web capture original as site_crawler stores it."""
+    data = {"schema_version": "datafabric.web_capture.v1", "role": "web_capture", "site": "nmpa", "url": "https://x/a.html",
+            "html_sha256": "h" + html, "html": html,
+            "parsed": {"title": "T", "publish_date": "2026-11-02", "markdown": markdown, "parse_method": "css_extract", "extra": {}},
+            "attachments": [{"record_id": "r" + url, "url": url, "text": ""} for url in attachments], **extra}
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def test_the_html_of_a_web_capture_is_not_what_makes_a_version():
+    """NMPA's accessibility widget writes new ids and ChiCTR new download paths into every response: the parse
+    result and the attachment list tell versions apart, the HTML does not."""
+    same = sources.stable_raw
+    assert same("nmpa", capture("<a id=aria1>")) == same("nmpa", capture("<a id=aria2>"))
+    assert same("nmpa", capture("<a>")) == same("nmpa", capture("<b>", html_store_path="/d/h.html"))
+    assert same("nmpa", capture("<a>")) != same("nmpa", capture("<a>", markdown="# T\n\nbody 2"))
+    assert same("nmpa", capture("<a>")) != same("nmpa", capture("<a>", attachments=("u1",)))
+    assert same("nmpa", capture("<a>", attachments=("u1",))) != same("nmpa", capture("<a>", attachments=("u2",)))
+    # only a web capture loses its html: another role keeps the key
+    assert same("europe_pmc", json.dumps({"role": "site_record", "html": "a"})) != same(
+        "europe_pmc", json.dumps({"role": "site_record", "html": "b"}))
+    assert same("nmpa", "<html>") is None  # not JSON: compared by its raw hash
+    holder = json.dumps({"derivedSection": {"miscInfoModule": {"versionHolder": "2026-11-02"}}})
+    assert same("clinicaltrials", holder) == same("clinicaltrials", holder.replace("11-02", "11-03"))
+
+
+def test_the_html_hash_is_left_out_when_two_versions_are_compared_by_content():
+    from db import history
+
+    def identity(html_sha256, record_ids=("r1",)):
+        return {"raw_sha256": "raw-" + html_sha256, "title": "T", "availability_proof": {"kind": "k"}, "mapping_review": None,
+                "facts": {"role": "web_capture", "html_sha256": html_sha256, "attachment_record_ids": list(record_ids)}}
+
+    stored = dict(identity("aaa"), availability_proof={"kind": "k", "verified_at": "2026-11-02T00:00:00Z"})
+    assert history._same_identity(stored, identity("bbb"), ignore_raw=True)
+    assert not history._same_identity(stored, identity("bbb"))  # compared by the raw hash: another original
+    assert not history._same_identity(stored, identity("aaa", ("r2",)), ignore_raw=True)  # the attachment list counts
+
+
 @pytest.mark.parametrize(("stop_reason", "state"), [
     ("upstream_exhausted", "completed"),
     ("record_budget", "partial"), ("page_budget", "partial"), ("deadline", "partial"),

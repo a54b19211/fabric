@@ -39,7 +39,7 @@ def fake_web(monkeypatch, tmp_path):
             "publish_date": "2026-11-01",
             "markdown": "# 关于某药品的公告\n\n正文。",
             "parse_method": "css_extract",
-            "attachment_links": [{"url": ATT1, "text": "附件1"}, {"url": ATT2, "text": "附件2"}],
+            "attachment_links": [{"url": ATT1, "name": "附件1"}, {"url": ATT2, "name": "附件2"}],  # 提取器写 name
             "extra": {"category": "公告"},
             "source_url": page_data["url"],
             "source_site": site_key,
@@ -104,8 +104,20 @@ def test_detail_page_becomes_capture_plus_one_record_per_attachment(fake_web):
     assert first["url"] == ATT1
     assert first["parent_record_id"] == PAGE and len(first["sha256"]) == 64 and first["size"] > 0
     assert first["file_ext"] == ".doc" and first["status"] == "stored"
+    assert first["file_name"] == "附件1" and atts[A2]["file_name"] == "附件2"  # 抽取器给的 name，不是网址末段
+    assert [a["text"] for a in data["attachments"]] == ["附件1", "附件2"]
     # 附件沿用页面会话（旧逻辑：CDE 等站点下载附件要带页面 cookies）
     assert fake_web["download"][0][1] == [{"name": "c"}]
+
+
+def test_links_read_the_label_from_text_or_name():
+    parsed = {"attachment_links": [
+        {"url": "u1", "name": "从 name 读"}, {"url": "u2", "text": "从 text 读"}, {"url": "u3", "text": "text", "name": "name"},
+        {"url": "u4"}, {"text": "没有网址"}, None]}
+    assert site_crawler._links(parsed) == [
+        {"url": "u1", "text": "从 name 读"}, {"url": "u2", "text": "从 text 读"}, {"url": "u3", "text": "text"},
+        {"url": "u4", "text": ""}]
+    assert site_crawler._links({}) == [] and site_crawler._links({"attachment_links": None}) == []
 
 
 def test_attachment_download_failure_is_a_gap_not_a_failed_page(fake_web):
