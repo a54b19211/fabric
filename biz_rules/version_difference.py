@@ -42,12 +42,19 @@ def _update_stamp(payload: dict) -> tuple:
     return stamp.get("value"), stamp.get("precision")
 
 
+def _without_html_hash(payload: dict) -> dict:
+    """The payload without facts.html_sha256: the hash of a web capture's HTML is a fact about the raw, and
+    stable_raw leaves that HTML out when it compares two captures."""
+    return {**payload, "facts": {k: v for k, v in (payload.get("facts") or {}).items() if k != "html_sha256"}}
+
+
 def classify(source_id: str, old: dict, new: dict) -> dict:
     """The kind of difference from `old` to `new` (stored payloads of two versions of one record) and, for every
     kind, what changed in the projection: the parser version, the body text (`clean_text`), the source's own
     update time, any other projected field (`structure_changed`: facts, locators, title and the rest). The flags say
     where to look, not how much changed; a source whose facts repeat its body text or update time (WHO) also sets
     `structure_changed` when those change."""
+    old, new = _without_html_hash(old), _without_html_hash(new)
     flags = {
         "parser_changed": old.get("parser_version") != new.get("parser_version"),
         "body_changed": old.get("clean_text") != new.get("clean_text"),
