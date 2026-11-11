@@ -11,6 +11,8 @@
 
 import concurrent.futures
 import json
+import queue
+import threading
 import time
 from abc import ABC, abstractmethod
 from urllib.parse import urljoin, urlparse
@@ -176,32 +178,56 @@ class JsClickDriver(BasePaginationDriver):
     翻页靠 Playwright 点击按钮，JS 动态渲染。
     浏览器实例跨多个列表页复用，生命周期与前两种根本不同。
 
-    iter_detail_urls 有两条路径：
-    - 传 on_page_urls 回调：直接执行，每页翻完立刻在主线程触发回调
-    - 不传：作为 generator 使用，收集完所有批次后逐条 yield
-    注意：iter_detail_urls 是 generator 函数（含 yield from），
-    必须被迭代才会执行，传回调时由 _run_with_callback 驱动执行。
+    翻一页、交一页：iter_detail_urls / iter_table_data 是 generator，调用方读满了不再要，
+    浏览器就不再翻下一页（站点配置的 max_pages 可能是 200，不能先全翻完再交）。
     """
 
     def _iter_list_pages(self):
         raise NotImplementedError
 
-    def iter_detail_urls(self, on_page_urls=None):
-        # generator 路径：调用方迭代时执行
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            batches = executor.submit(in_context(self._playwright_crawl)).result()
-        for page_urls in batches:
+    def iter_detail_urls(self):
+        """逐页产出详情页链接：翻到哪一页，就先交那一页的链接。"""
+        for page_urls in self._stream(self._playwright_crawl):
             yield from page_urls
 
-    def run_with_callback(self, on_page_urls):
-        """直接执行 Playwright 爬取，每页完成后在主线程触发回调。"""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            batches = executor.submit(in_context(self._playwright_crawl)).result()
-        for page_urls in batches:
-            on_page_urls(page_urls)
+    def iter_table_data(self):
+        """表格直提模式：翻到哪一页，就先交那一页的各张表（parsed dict 列表）。"""
+        yield from self._stream(self._playwright_crawl_tables)
 
-    def _playwright_crawl(self) -> list[list[str]]:
-        """在独立线程里运行 Playwright，返回按页分组的链接批次。"""
+    def _stream(self, crawl):
+        """浏览器在独立线程里跑（避免 asyncio 冲突）：crawl(emit) 每翻到一页调一次 emit(这一页的内容)。
+        这里把每一页交给调用方；调用方来要下一页，浏览器才翻下一页。调用方不再要了（读满、出错），
+        emit 返回 False，crawl 收工并关掉浏览器。"""
+        pages, go = queue.Queue(), queue.Queue()
+
+        def emit(page_items):
+            pages.put(("page", page_items))
+            return go.get()  # 等调用方：True = 再来一页，False = 不要了
+
+        def work():
+            try:
+                crawl(emit)
+                pages.put(("done", None))
+            except BaseException as exc:  # noqa: BLE001 -- 连预算用完的 Stop 也带回调用方线程处理
+                pages.put(("error", exc))
+
+        worker = threading.Thread(target=in_context(work), daemon=True)
+        worker.start()
+        try:
+            while True:
+                kind, value = pages.get()
+                if kind == "error":
+                    raise value
+                if kind == "done":
+                    return
+                yield value
+                go.put(True)
+        finally:
+            go.put(False)
+            worker.join()
+
+    def _playwright_crawl(self, emit) -> None:
+        """在独立线程里运行 Playwright，每翻到一页就 emit(这一页的详情页链接)。"""
         from playwright.sync_api import sync_playwright
 
         pagination = self.site_cfg.get("pagination", {})
@@ -210,7 +236,6 @@ class JsClickDriver(BasePaginationDriver):
         parsed = urlparse(self.start_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         ua = DEFAULT_HEADERS["User-Agent"]
-        batches: list[list[str]] = []
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -237,7 +262,8 @@ class JsClickDriver(BasePaginationDriver):
 
                     page_urls = [(origin + h if h.startswith("/") else h) for h in hrefs]
                     logger.info(f"  提取到 {len(page_urls)} 条详情页链接")
-                    batches.append(page_urls)
+                    if not emit(page_urls):  # 调用方读满了，不再翻
+                        break
 
                     # 配置范围内的最后一页已取得，不再请求范围外的下一页。
                     if page_count + 1 >= self.max_pages:
@@ -276,25 +302,16 @@ class JsClickDriver(BasePaginationDriver):
                         ctx.close()
                 finally:
                     browser.close()
-        return batches
 
     # ── 表格直提模式 ────────────────────────────────────────────────
 
-    def iter_table_data(self):
-        """在独立线程中运行 Playwright 表格提取，返回按页分组的 parsed dict 批次。"""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            batches = executor.submit(in_context(self._playwright_crawl_tables)).result()
-        for page_parsed_list in batches:
-            yield page_parsed_list
-
-    def _playwright_crawl_tables(self) -> list[list[dict]]:
-        """在独立线程里运行 Playwright，提取表格数据并构建 parsed dict。"""
+    def _playwright_crawl_tables(self, emit) -> None:
+        """在独立线程里运行 Playwright，每翻到一页就 emit(这一页提取出的 parsed dict 列表)。"""
         from playwright.sync_api import sync_playwright
 
         pagination = self.site_cfg.get("pagination", {})
         next_btn_selector = pagination.get("next_btn_selector", "")
         ua = DEFAULT_HEADERS["User-Agent"]
-        batches: list[list[dict]] = []
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -357,11 +374,11 @@ class JsClickDriver(BasePaginationDriver):
                         }
                         page_parsed.append(parsed)
 
-                    if page_parsed:
-                        batches.append(page_parsed)
-                        logger.info(f"  提取到 {len(page_parsed)} 张表格")
-                    else:
+                    if not page_parsed:
                         logger.warning("  未找到有数据的表格")
+                        break
+                    logger.info(f"  提取到 {len(page_parsed)} 张表格")
+                    if not emit(page_parsed):  # 调用方读满了，不再翻
                         break
 
                     # 配置范围内的最后一页已取得，不再请求范围外的下一页。
@@ -401,7 +418,6 @@ class JsClickDriver(BasePaginationDriver):
                         ctx.close()
                 finally:
                     browser.close()
-        return batches
 
     @staticmethod
     def _extract_table_rows(table_el) -> list[list[str]]:

@@ -3,7 +3,9 @@
 import ast
 import concurrent.futures
 import json
+import queue
 import sys
+import threading
 import types
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -26,8 +28,8 @@ def load_driver():
              and n.name in {"BasePaginationDriver", "JsClickDriver"}]
     namespace = {
         "ABC": ABC, "abstractmethod": abstractmethod, "urlparse": urlparse,
-        "urljoin": urljoin, "json": json, "concurrent": concurrent,
-        "SITE_PROFILES": {}, "DEFAULT_HEADERS": {"User-Agent": "synthetic"},
+        "urljoin": urljoin, "json": json, "concurrent": concurrent, "queue": queue, "threading": threading,
+        "in_context": lambda fn: fn, "SITE_PROFILES": {}, "DEFAULT_HEADERS": {"User-Agent": "synthetic"},
         "logger": Quiet(), "time": SimpleNamespace(sleep=lambda _delay: None),
         "make_uuid": lambda value: value,
         "_rows_to_markdown": lambda rows: json.dumps(rows),
@@ -116,11 +118,18 @@ def driver_for(monkeypatch, advance, pages=2):
     return driver, page
 
 
+def crawl(driver, method):
+    """Run one crawl method to the end, keeping every page it hands over."""
+    batches = []
+    getattr(driver, method)(lambda batch: batches.append(batch) or True)
+    return batches
+
+
 @pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
 def test_second_page_timeout_cannot_return_a_duplicate_success(monkeypatch, method):
     driver, page = driver_for(monkeypatch, advance=False)
     with pytest.raises(RuntimeError, match="翻页"):
-        getattr(driver, method)()
+        crawl(driver, method)
     assert page.clicks == 1 and page.waits == 1
     assert page.context_closes == page.browser_closes == 1
 
@@ -128,7 +137,7 @@ def test_second_page_timeout_cannot_return_a_duplicate_success(monkeypatch, meth
 @pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
 def test_bounded_success_does_not_request_an_unwanted_third_page(monkeypatch, method):
     driver, page = driver_for(monkeypatch, advance=True)
-    batches = getattr(driver, method)()
+    batches = crawl(driver, method)
     assert len(batches) == 2
     assert batches[0] != batches[1]
     assert page.clicks == 1
@@ -139,9 +148,9 @@ def test_bounded_success_does_not_request_an_unwanted_third_page(monkeypatch, me
 def test_interruption_can_be_explicitly_restarted_from_first_page(monkeypatch, method):
     driver, _ = driver_for(monkeypatch, advance=False)
     with pytest.raises(RuntimeError):
-        getattr(driver, method)()
+        crawl(driver, method)
     recovered, _ = driver_for(monkeypatch, advance=True)
-    assert len(getattr(recovered, method)()) == 2
+    assert len(crawl(recovered, method)) == 2
 
 
 @pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
@@ -153,7 +162,37 @@ def test_initial_read_failure_closes_browser_and_context(monkeypatch, method):
 
     page.goto = fail_goto
     with pytest.raises(TimeoutError, match="initial read"):
-        getattr(driver, method)()
+        crawl(driver, method)
+    assert page.context_closes == page.browser_closes == 1
+
+
+@pytest.mark.parametrize("method", ["_playwright_crawl", "_playwright_crawl_tables"])
+def test_caller_that_stops_asking_stops_the_browser(monkeypatch, method):
+    driver, page = driver_for(monkeypatch, advance=True, pages=200)
+    assert getattr(driver, method)(lambda batch: False) is None  # first page handed over, caller wants no more
+    assert page.clicks == 0
+    assert page.context_closes == page.browser_closes == 1
+
+
+@pytest.mark.parametrize(("method", "first"), [("iter_detail_urls", "https://example.invalid/record-1"), ("iter_table_data", None)])
+def test_one_page_is_handed_over_before_the_next_is_turned(monkeypatch, method, first):
+    """configured for 200 pages: the first page comes out at once, the browser has not clicked, and closing the
+    generator (the reader is full) closes the browser without ever asking for page two."""
+    driver, page = driver_for(monkeypatch, advance=True, pages=200)
+    pages = getattr(driver, method)()
+    got = next(pages)
+    assert (got == first) if first else (len(got) == 1)
+    assert page.clicks == 0
+    pages.close()
+    assert page.clicks == 0 and page.context_closes == page.browser_closes == 1
+
+
+def test_error_after_the_first_page_arrives_after_that_page(monkeypatch):
+    driver, page = driver_for(monkeypatch, advance=False)
+    pages = driver.iter_detail_urls()
+    assert next(pages) == "https://example.invalid/record-1"
+    with pytest.raises(RuntimeError, match="翻页"):
+        next(pages)
     assert page.context_closes == page.browser_closes == 1
 
 

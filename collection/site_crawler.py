@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -331,9 +332,10 @@ def _site_results(reader, query):
         return
     if query not in profile.get("start_urls", []):
         raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
-    for batch in _make_driver(reader.site, profile, query).iter_table_data():
-        for parsed in batch:
-            yield parsed, None
+    with closing(_make_driver(reader.site, profile, query).iter_table_data()) as pages:  # 读满不再要，浏览器就收工
+        for batch in pages:
+            for parsed in batch:
+                yield parsed, None
 
 
 def _cursor(request):
@@ -387,13 +389,14 @@ def _read_named(request, reader, start, at):
 def _read_site_records(request, reader, start, at):
     """API and table-page sites: the parents are the site's results, replayed from the start."""
     start_i, start_a, start_recorded = start
-    for position, (parsed, raw) in enumerate(_site_results(reader, request.query)):
-        at.position = position
-        if position < start_i:
-            continue
-        first = position == start_i
-        reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
-                           record_page=not (first and start_recorded))
+    with closing(_site_results(reader, request.query)) as results:
+        for position, (parsed, raw) in enumerate(results):
+            at.position = position
+            if position < start_i:
+                continue
+            first = position == start_i
+            reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
+                               record_page=not (first and start_recorded))
 
 
 def _read_detail_pages(request, reader, start, at):
@@ -402,14 +405,15 @@ def _read_detail_pages(request, reader, start, at):
     if request.query not in reader.profile.get("start_urls", []):
         raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
     seen = -1
-    for url in _make_driver(reader.site, reader.profile, request.query).iter_detail_urls():
-        seen += 1
-        if seen < start_i:
-            continue
-        at.position = seen
-        first = seen == start_i
-        reader.page(url, skip_attachments=start_a if first else 0,
-                    record_page=not (first and start_recorded))
+    with closing(_make_driver(reader.site, reader.profile, request.query).iter_detail_urls()) as urls:
+        for url in urls:  # 读满不再要，浏览器就收工，不再翻下一页
+            seen += 1
+            if seen < start_i:
+                continue
+            at.position = seen
+            first = seen == start_i
+            reader.page(url, skip_attachments=start_a if first else 0,
+                        record_page=not (first and start_recorded))
 
 
 def _read(request, reader) -> dict:
