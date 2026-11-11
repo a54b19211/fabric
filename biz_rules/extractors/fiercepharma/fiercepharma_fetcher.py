@@ -3,8 +3,9 @@ Fierce Pharma RSS + 详情页混合采集器。
 
 流程：
   1. 通过 httpx 拉取 RSS XML，解析出文章 URL 和基本元数据
-  2. 对每篇文章用 StealthyFetcher 渲染详情页，提取正文
+  2. 对每篇文章用 StealthyFetcher 渲染详情页，提取标题和正文（RSS 里的标题是空的，只有详情页有）
   3. yield 标准记录 dict（与 route_webpage 输出格式一致）
+详情页没读全（403、超时、标题或正文缺失）：重读一次，还不行就抛 HistoryError，这一篇不存版本。
 """
 
 import re
@@ -19,6 +20,7 @@ from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
 from biz_rules.extractors.fiercepharma.fiercepharma import extract_fiercepharma_detail
+from biz_rules.history_models import HistoryError
 
 # RSS 命名空间
 _DC_NS = "http://purl.org/dc/elements/1.1/"
@@ -30,6 +32,8 @@ RSS_FEEDS = [
 ]
 
 REQUEST_DELAY = 3.0  # 详情页请求间隔（秒）
+RETRY_DELAY = 10.0  # 第一次没读全，隔多久重读一次（秒）
+MIN_BODY_CHARS = 1000  # 正文比这短，当作页面没读全（整篇文章实测五千字上下）
 
 
 def _make_uuid(identifier: str) -> str:
@@ -135,6 +139,34 @@ def _fetch_rss_items(api_cfg: dict) -> list[dict]:
     return all_items[:max_articles]
 
 
+def _read_article(url: str) -> dict:
+    """读一篇详情页，返回提取结果（标题、日期、正文）。网站对同一篇偶尔回 403（反爬），或页面没读全；等一会儿重读
+    一次，两次都不行就抛 HistoryError：这一篇不存版本，原因写进这次读取的错误里。以前这里用 RSS 的摘要充数，
+    存下标题为空、正文两百字的半页，和整篇文章一样当成一个版本。"""
+    why = ""
+    for attempt in range(2):
+        time.sleep(REQUEST_DELAY if attempt == 0 else RETRY_DELAY)
+        try:
+            page = StealthyFetcher.fetch(
+                url,
+                headless=True,
+                network_idle=False,
+                disable_resources=True,
+                timeout=60000,
+            )
+        except Exception as e:  # noqa: BLE001 -- 原因写进下面的错误
+            why = type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120]
+            continue
+        if not (page.status and 200 <= page.status < 300):
+            why = f"HTTP {page.status}"
+            continue
+        extracted = extract_fiercepharma_detail(page)
+        if extracted["title"] and len(extracted["body_text"]) >= MIN_BODY_CHARS:
+            return extracted
+        why = f"页面没读全（标题 {len(extracted['title'])} 字，正文 {len(extracted['body_text'])} 字）"
+    raise HistoryError("source_read_failed", f"FiercePharma 详情页读取失败（已重读一次）：{why} | {url}")
+
+
 def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
     """
     Fierce Pharma 混合采集器（RSS 列表 + Playwright 详情页）。
@@ -147,51 +179,21 @@ def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
         url = item["url"]
         doc_uuid = _make_uuid(url)
 
-        # 用 RSS 元数据作为兜底
-        title = item["title"]
-        pub_date = item["pub_date"]
-        summary = item["description"]
-
-        markdown = ""
-        body_text = ""
-
-        try:
-            time.sleep(REQUEST_DELAY)
-            page = StealthyFetcher.fetch(
-                url,
-                headless=True,
-                network_idle=False,
-                disable_resources=True,
-                timeout=60000,
-            )
-            if page.status and 200 <= page.status < 300:
-                extracted = extract_fiercepharma_detail(page)
-                if extracted.get("title"):
-                    title = extracted["title"]
-                if extracted.get("publish_date"):
-                    pub_date = extracted["publish_date"]
-                body_text = extracted.get("body_text", "")
-                if body_text:
-                    markdown = f"# {title}\n\n{body_text}"
-                else:
-                    markdown = f"# {title}\n\n{summary}"
-            else:
-                logger.warning(f"[FiercePharma] 详情页状态异常: {page.status} | {url}")
-                markdown = f"# {title}\n\n{summary}"
-        except Exception as e:
-            logger.error(f"[FiercePharma] 详情页抓取失败: {url} | {e}")
-            markdown = f"# {title}\n\n{summary}"
+        extracted = _read_article(url)
+        title = extracted["title"]
+        pub_date = extracted["publish_date"] or item["pub_date"]  # 日期页面上没有时用 RSS 的
+        body_text = extracted["body_text"]
 
         yield {
             "uuid": doc_uuid,
             "title": title,
             "publish_date": pub_date,
-            "markdown": markdown,
+            "markdown": f"# {title}\n\n{body_text}",
             "structured_data": {
                 "title": title,
                 "publish_date": pub_date,
                 "category": "行业资讯",
-                "summary": (body_text or summary)[:500],
+                "summary": body_text[:500],
                 "drug_name": "",
                 "manufacturer": "",
             },

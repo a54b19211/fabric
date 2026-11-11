@@ -738,3 +738,70 @@ def test_roche_list_page_http_error_is_a_failed_read_but_an_empty_page_still_end
     assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
     ended = _roche_one_year(monkeypatch, lambda url, **kw: _RochePage(200))  # 这一年没有（更多）新闻：正常读完
     assert ended["error"] is None and ended["upstream_pagination_exhausted"]
+
+
+class _FierceNode:
+    attrib = {}
+
+    def __init__(self, text):
+        self.text, self.html_content = text, "<p>" + text + "</p>"
+
+    def get_all_text(self, strip=False):
+        return self.text
+
+
+class _FiercePage:
+    """Fierce Pharma 详情页替身：状态码、标题（h1.article-title）和正文（article）。"""
+    def __init__(self, status, title="", body=""):
+        self.status = status
+        self._parts = {"h1.article-title": title, "article": body}
+
+    def css(self, selector):
+        return [_FierceNode(self._parts[selector])] if self._parts.get(selector) else []
+
+
+WHOLE = _FiercePage(200, "Merck KGaA lands FDA nod", "正文。" * 400)
+
+
+def _fierce_read(monkeypatch, pages):
+    """pages：文章网址 → 依次给出的答复（页面替身，或要抛出的异常）。RSS 里的标题是空的，和真实情况一致。"""
+    from biz_rules.extractors.fiercepharma import fiercepharma_fetcher as fetcher
+
+    monkeypatch.setattr(fetcher, "REQUEST_DELAY", 0)
+    monkeypatch.setattr(fetcher, "RETRY_DELAY", 0)
+    monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: [
+        {"url": url, "guid": "", "title": "", "description": "RSS 摘要", "pub_date": "2026-11-01"} for url in pages])
+
+    def fetch(url, **kwargs):
+        answer = pages[url].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
+    return read_public(FetchRequest(source_id="fiercepharma", query="records", max_records=5))
+
+
+def test_fiercepharma_article_blocked_once_is_read_again_and_stored_whole(monkeypatch):
+    a, b = "https://www.fiercepharma.com/pharma/a", "https://www.fiercepharma.com/pharma/b"
+    batch = _fierce_read(monkeypatch, {a: [_FiercePage(403), WHOLE], b: [WHOLE]})
+    assert batch["error"] is None and batch["upstream_pagination_exhausted"]
+    stored = [json.loads(r.raw_content)["parsed"] for r in batch["records"]]
+    assert [p["title"] for p in stored] == ["Merck KGaA lands FDA nod"] * 2
+    assert all(len(p["markdown"]) > 1000 and "RSS 摘要" not in p["markdown"] for p in stored)
+
+
+@pytest.mark.parametrize("answers, reason", [
+    ([_FiercePage(403), _FiercePage(403)], "HTTP 403"),
+    ([_FiercePage(200, "", "短"), _FiercePage(200, "", "短")], "页面没读全（标题 0 字，正文 1 字）"),
+    ([TimeoutError("Page.goto: Timeout 60000ms exceeded."), _FiercePage(502)], "HTTP 502"),
+    ([_FiercePage(200), TimeoutError("Page.goto: Timeout 60000ms exceeded.")],
+     "TimeoutError：Page.goto: Timeout 60000ms exceeded."),
+])
+def test_fiercepharma_article_that_stays_unread_is_not_stored_and_fails_the_read(monkeypatch, answers, reason):
+    a, b, c = (f"https://www.fiercepharma.com/pharma/{x}" for x in "abc")
+    batch = _fierce_read(monkeypatch, {a: [WHOLE], b: answers, c: [WHOLE]})
+    assert batch["error"] == {"code": "source_read_failed",
+                              "message": f"FiercePharma 详情页读取失败（已重读一次）：{reason} | {b}"}
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]  # 前面读全的保留，坏的这篇和后面的没存
