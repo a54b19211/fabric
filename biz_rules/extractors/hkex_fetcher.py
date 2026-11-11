@@ -9,11 +9,48 @@ from loguru import logger
 from config.sites.hkex_pharma_list_auto import PHARMA_COMPANIES  # 改用带 stock_id 的版本
 
 
+def _parse_row(row, company: Dict, skip_headlines) -> Dict | None:
+    """结果表的一行 → 一条公告。不是公告的返回 None：列数不对，或文件类型栏在 skip_headlines 里（如“展示文件”，只是提示语）。"""
+    cols = row.find_all('td')
+    if len(cols) < 4:
+        return None
+
+    release_time = cols[0].get_text(strip=True).replace("發放時間: ", "")
+    extracted_code = cols[1].get_text(strip=True).replace("股份代號: ", "")  # 从页面提取的股票代码（备用）
+    extracted_name = cols[2].get_text(strip=True).replace("股份簡稱: ", "")
+
+    # 文件信息
+    doc_cell = cols[3]
+    headline = doc_cell.find('div', class_='headline')
+    headline_text = headline.get_text(strip=True) if headline else ""
+    if headline_text in skip_headlines:
+        return None
+
+    doc_link = doc_cell.find('div', class_='doc-link')
+    pdf_url = ""
+    if doc_link:
+        pdf_link = doc_link.find('a')
+        if pdf_link and pdf_link.get('href'):
+            pdf_url = urljoin("https://www1.hkexnews.hk", pdf_link['href'])
+
+    return {
+        "release_time": release_time,
+        "stock_code": company.get("code"),  # 从配置获取的股票代码
+        "stock_code_extracted": extracted_code,
+        "stock_name": extracted_name,
+        "stock_id": company.get("stock_id"),  # 从配置获取
+        "headline": headline_text,
+        "pdf_url": pdf_url,
+        "attachment_links": [{"url": pdf_url}] if pdf_url else [],
+    }
+
+
 def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
     """从港交所披露易拉取上市公司公告"""
 
     base_url = api_config.get("base_url", "https://www1.hkexnews.hk/search/titlesearch.xhtml")
     companies = api_config.get("companies", PHARMA_COMPANIES)
+    skip_headlines = api_config.get("skip_headlines", ())
 
     logger.info(f"[HKEX] 公司数量: {len(companies)}")
 
@@ -68,49 +105,9 @@ def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
             logger.info(f"[HKEX] {stock_name} 找到 {len(rows)} 条公告")
 
             for row in rows:
-                cols = row.find_all('td')
-                if len(cols) < 4:
-                    continue
-
-                # 提取时间
-                time_cell = cols[0]
-                release_time = time_cell.get_text(strip=True).replace("發放時間: ", "")
-
-                # 提取股票代码（从页面提取，备用）
-                stock_code_cell = cols[1]
-                extracted_code = stock_code_cell.get_text(strip=True).replace("股份代號: ", "")
-
-                # 提取股票名称
-                stock_name_cell = cols[2]
-                extracted_name = stock_name_cell.get_text(strip=True).replace("股份簡稱: ", "")
-
-                # 提取文件信息
-                doc_cell = cols[3]
-                headline = doc_cell.find('div', class_='headline')
-                headline_text = headline.get_text(strip=True) if headline else ""
-                if headline_text in api_config.get("skip_headlines", ()):  # 如“展示文件”：只是提示语，不是公告
-                    continue
-
-                doc_link = doc_cell.find('div', class_='doc-link')
-                pdf_url = ""
-                if doc_link:
-                    pdf_link = doc_link.find('a')
-                    if pdf_link and pdf_link.get('href'):
-                        pdf_url = urljoin("https://www1.hkexnews.hk", pdf_link['href'])
-
-                # 构造公告 - 添加 stock_code 字段
-                announcement = {
-                    "release_time": release_time,
-                    "stock_code": stock_code,  # 从配置获取的股票代码
-                    "stock_code_extracted": extracted_code,  # 从页面提取的股票代码（备用）
-                    "stock_name": extracted_name,
-                    "stock_id": stock_id,  # 添加这一行（从配置获取）
-                    "headline": headline_text,
-                    "pdf_url": pdf_url,
-                    "attachment_links": [{"url": pdf_url}] if pdf_url else [],
-                }
-
-                yield announcement
+                announcement = _parse_row(row, company, skip_headlines)
+                if announcement:
+                    yield announcement
 
         except Exception as e:
             logger.error(f"[HKEX] {stock_name} 采集失败: {e}")

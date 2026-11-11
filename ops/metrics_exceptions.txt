@@ -25,7 +25,6 @@ biz_rules/cleaners/field/date_format.py:normalize_date  109/18  date normaliser 
 biz_rules/document_evidence.py:attach_document_evidence  71/35  evidence attachment: one branch per source/material kind; split per kind
 biz_rules/extraction_prompts.py:get_pubmed_extraction_prompt  88/21  prompt text builder, long because of the embedded schema description; move the text to data
 biz_rules/extractors/chictr/chictr.py:extract_chictr_detail  79/22  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
-biz_rules/extractors/hkex_fetcher.py:fetch_hkex_announcements  103/12  paging fetcher of one site with its retry and parsing inline; split fetch from parse
 biz_rules/extractors/nccn/nccn.py:extract_nccn_detail  107/30  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
 biz_rules/extractors/nccn/nccn_fetcher.py:iter_nccn  156/19  paging fetcher of one site with its retry and parsing inline; split fetch from parse
 biz_rules/extractors/roche/roche_web_fetcher.py:_parse_list_page  55/25  list/paging parser of one site; site markup dictates the shape

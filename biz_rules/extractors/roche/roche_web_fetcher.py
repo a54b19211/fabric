@@ -29,6 +29,11 @@ def _make_uuid(source_url: str) -> str:
 # 工具函数
 # ---------------------------------------------------------------------------
 
+def _all_text(element) -> str:
+    """元素里所有文字，空白合成一个空格。（.text 只取元素自己的文字，嵌套的 <a><span> 里的取不到。）"""
+    return " ".join(element.get_all_text(strip=True).split())
+
+
 def _clean_title(title: str) -> str:
     """移除标题末尾的日期模式。"""
     if not title:
@@ -94,11 +99,8 @@ def _parse_list_page(page, collected_urls: Set[str], year: int, page_num: int) -
             item.css(".headline")[0] if item.css(".headline") else
             None
         )
-        # 标题文字藏在 h3 > a > span 里面：.text 只取元素自己的文字，得到空串，要取里面所有文字（实际页面：
-        # <h3><a><span class="teaser__title">标题<span class="teaser__icon">…</span></span></a></h3>）
-        title_source = title_el if title_el is not None else link_el
-        raw_title = " ".join(title_source.get_all_text(strip=True).split())
-        title = _clean_title(raw_title)
+        # 实际页面：<h3><a><span class="teaser__title">标题<span class="teaser__icon">…</span></span></a></h3>
+        title = _clean_title(_all_text(title_el if title_el is not None else link_el))
 
         # 日期
         date_el = (
@@ -198,8 +200,7 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
                     disable_resources=True,
                     timeout=60000,
                 )
-            except Exception as e:
-                # 读不到列表页是失败，不是“这一年读完了”：原样抛出，运行记为失败并写明原因（以前 break，被当作读到底）
+            except Exception as e:  # 读不到列表页是失败，不是“这一年读完了”：抛出去，运行记为失败（以前 break，被当作读到底）
                 logger.error(f"[Roche] 列表页抓取失败: {target_url} | {e}")
                 raise
 
