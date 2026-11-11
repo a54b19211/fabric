@@ -11,13 +11,22 @@ CONFIG = {
         "base_url": "https://api.fda.gov/drug/label.json",
         "endpoint": "/drug/label.json",
         "search": "",
-        "sort": "effective_time:asc",
+        # 新的在前。升序时最先拿到的是 2006–2010 年的老说明书，openfda 子对象几乎全是空的（实测前 100 条只有 2 条有品牌名），
+        # 标题和药名都是空；降序的前 100 条有 95 条有品牌名。
+        "sort": "effective_time:desc",
         "max_records": 0,
     },
     "api_fetcher": iter_openfda,
     "uid_field": "set_id",
     "field_map": {
-        "title":        "openfda.brand_name.0",
+        # 标题候选链：品牌名优先，再退通用名/物质名；openfda 子对象为空时退到 SPL 的产品清单
+        # spl_product_data_elements.0（产品名后面跟着成分名，一整串，较长，但每条记录都有）。
+        "title":        [
+            "openfda.brand_name.0",
+            "openfda.generic_name.0",
+            "openfda.substance_name.0",
+            "spl_product_data_elements.0",
+        ],
         "publish_date": "effective_time",
         "summary":      "purpose.0",
         # 药名候选链：通用名优先（INN，权威库命中率最高），再退品牌名/物质名。

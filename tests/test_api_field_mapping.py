@@ -121,6 +121,30 @@ def test_label_drug_name_chain_order():
     assert _get_nested({"openfda": {"substance_name": ["Y"]}}, spec) == "Y"
 
 
+# 真实记录（openFDA 药品说明书，set_id ed66d635-…，2010 年）：openfda 子对象是空的，没有任何药名，
+# spl_product_data_elements 的第一项是“产品名 + 成分名”一整串（这里截短）。早期按生效时间升序读，最先拿到的就是这类记录。
+OLD_LABEL_WITHOUT_OPENFDA = {
+    "set_id": "ed66d635-4b72-4292-b64b-744c6dbe24d7",
+    "effective_time": "201001004",
+    "openfda": {},
+    "spl_product_data_elements": ["CVS Antibacterial Foaming Kitchen Triclosan TRICLOSAN TRICLOSAN WATER"],
+    "package_label_principal_display_panel": ["Package Front and Back Labels cvs8.jpg 7.5 OZ Front and Back Labels"],
+}
+
+
+def test_label_title_chain_prefers_brand_name_and_never_ends_empty():
+    """说明书标题以前只映射 openfda.brand_name.0，openfda 为空的记录标题就是空串。
+    候选链：品牌名 → 通用名 → 物质名 → SPL 产品清单第一项。"""
+    spec = LABEL_CFG["field_map"]["title"]
+    with_names = {"openfda": {"brand_name": ["VIRACEPT"], "generic_name": ["NELFINAVIR"]},
+                  "spl_product_data_elements": ["VIRACEPT nelfinavir mesylate"]}
+    assert _get_nested(with_names, spec) == "VIRACEPT"
+    assert _get_nested({"openfda": {"generic_name": ["NELFINAVIR"]}}, spec) == "NELFINAVIR"
+    assert _get_nested(OLD_LABEL_WITHOUT_OPENFDA, spec).startswith("CVS Antibacterial Foaming Kitchen Triclosan")
+    # 并且新的在前：升序最先读到的 2006–2010 年老说明书，前 100 条只有 2 条有品牌名；降序前 100 条有 95 条
+    assert LABEL_CFG["api"]["sort"] == "effective_time:desc"
+
+
 # ── fda 站点配置：批准文号 ────────────────────────────────────────────
 
 
