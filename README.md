@@ -54,6 +54,7 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 - `make test-integration` 由 `ops/run_integration_tests.sh` 执行：容器名 `fabric-itest-<角色>-<随机>`（`ITEST_PREFIX` 可改），带本次运行的标签 `fabric-itest.run=<随机>`；只登记 docker 实际为本次运行创建的容器 ID（连同镜像和匿名卷）到清单 `.test-artifacts/fabric-itest-<随机>.containers.jsonl`（检出里，git 忽略）（`ITEST_MANIFEST` 可改，跑完保留），结束、失败或被中断时都按清单逐个核对标签后停止并 `docker rm -v`（连匿名卷一起删，不扫描、不清理别的卷），不碰不是本次创建的容器；只绑定 127.0.0.1 上 19871 以上的空闲端口；要求固定端口（18436、18636、18736、18737）的几组测试在私有网络命名空间（`unshare -rn`）里跑，经 unix socket 转发到容器，不占用主机上的这些端口。真实 BioCheck 规则的测试用 `BIOCHECK_SRC`（默认 `../clean-biocheck`，先在那里 `make venv`）；找不到检出时这些测试显示为跳过。也可以只跑其中几个文件：`bash ops/run_integration_tests.sh tests/integration_lease.py`。
 - 已验证的组合：uv 0.13.0、CPython 3.10.12；通过数量以 `make check` 的输出为准，这里不写数字。
 - 已有环境里只做导入检查：`python ops/check_imports.py`。
+- 各来源真抓一遍、打印一张表：`python ops/check_sources.py [来源…] [--twice]`（`--twice` 抓两次，查重复存版本）；它会写库，`DATAFABRIC_HISTORY_DATABASE_URL` 要指向临时库（先 `python -m migration.runner --db history --apply`），用法和环境变量见文件开头。
 
 ## 运行
 

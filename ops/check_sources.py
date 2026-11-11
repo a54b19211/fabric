@@ -1,0 +1,112 @@
+"""体检各来源：对每个来源真抓一次（或两次），打印一张表。
+
+干什么：把 collection.catalog 里能抓的来源（本地导入 local_files 除外）逐个走一遍和 pipeline.py fetch 相同的路：
+  create_fetch 建任务、history_fetch_job 抓、读回结果。看每个来源现在抓不抓得到、用多久、标题和正文是不是空的。
+  加 --twice 每个来源抓两次，第二次应该一个都不新增（"新增"列为 0），用来查"没变的内容重复存版本"。
+怎么跑（仓库根目录，用本仓的 .venv；来源一个接一个跑，不并发，不给对方网站压力）：
+  python ops/check_sources.py                          # 全部来源，各抓一次
+  python ops/check_sources.py nmpa chictr --twice      # 只测这两个，各抓两次
+  python ops/check_sources.py --max 3 --deadline 120   # 每个来源最多读几条、最多用几秒（默认就是 3 和 120）
+要设的环境变量：
+  DATAFABRIC_HISTORY_DATABASE_URL  必设。这个命令会写库（每次抓取留下运行记录和版本），一定要指向临时库，别连线上库；
+                                   库先建好表：python -m migration.runner --db history --apply
+  DATAFABRIC_HISTORY_SOURCE_ALLOWLIST  不用设，命令把它设成这次要测的来源。
+  按来源另有：DRUGBANK_API_KEY（没有就如实显示"缺 Key"）等。GDELT 有每小时请求额度，被限流也如实显示。
+有来源没抓到（失败，或一个版本都没有）时，表打完以退出码 1 结束。表打在标准输出，日志在标准错误输出（只想看表加 2>/dev/null）。
+"""
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sqlalchemy import text  # noqa: E402
+
+from biz_rules.history_models import FetchRequest  # noqa: E402
+from collection import catalog  # noqa: E402
+from config.crawler_settings import SITE_PROFILES  # noqa: E402
+from db import history  # noqa: E402
+from flows.history_fetch import history_fetch_job  # noqa: E402
+
+# 不在 config/sites 里的来源：(查询词, 指定的来源记录号)
+OTHER_QUERIES = {
+    "clinicaltrials": ("*", []),
+    "europe_pmc": ("BRCA1", []),
+    "pubmed": ("BRCA1", []),
+    "fda_crl": ("*", []),
+    "who_don": ("*", []),
+    "gdelt_doc": ("FDA approval", []),
+    "sec_companyfacts": ("*", ["CIK0000320193:us-gaap:Assets", "CIK0000078003:us-gaap:Assets",
+                               "CIK0001682852:us-gaap:Assets"]),
+}
+COLUMNS = ("来源", "第几次", "状态", "停止原因", "版本", "新增", "没变", "秒", "请求", "空标题", "空正文", "错误")
+
+
+def query_for(source):
+    """(查询词, 记录号)，规则和 pipeline.py fetch 一样：接口站点填 records，网页站点填第一个列表页网址。"""
+    if source in OTHER_QUERIES:
+        return OTHER_QUERIES[source]
+    profile = SITE_PROFILES[source]
+    return ("records" if profile.get("source_type") == "api" else profile["start_urls"][0]), []
+
+
+def blank_counts(version_ids):
+    """(标题为空的版本数, 正文为空的版本数)，读的是 history_versions 里存下的投影。"""
+    if not version_ids:
+        return 0, 0
+    with history.history_engine().connect() as conn:
+        rows = conn.execute(text("select payload->>'title', payload->>'clean_text' from history_versions "
+                                 "where version_id = any(:ids)"), {"ids": list(version_ids)}).all()
+    return sum(not (title or "").strip() for title, _ in rows), sum(not (body or "").strip() for _, body in rows)
+
+
+def fetch_once(source, attempt, max_records, deadline):
+    """抓一次，返回表里的一行（和 COLUMNS 一一对应）。抓取抛出的异常不隐藏，写进"错误"列。"""
+    query, record_ids = query_for(source)
+    request = FetchRequest(source_id=source, query=query, source_record_ids=record_ids, max_records=max_records,
+                           deadline_seconds=deadline)
+    run, _ = history.create_fetch(request, key=f"check-{source}-{attempt}-{time.time_ns()}")
+    crashed, start = "", time.monotonic()
+    try:
+        history_fetch_job(run.id, run.attempt)
+    except Exception as exc:  # noqa: BLE001 -- 体检要看到每一种失败
+        crashed = f"{type(exc).__name__}: {exc}"
+    seconds = round(time.monotonic() - start, 1)
+    result = history.read_run(run.id)
+    cover = result.coverage or {}
+    error = result.error.get("message") if isinstance(result.error, dict) else result.error
+    no_title, no_text = blank_counts(result.version_ids)
+    return (source, attempt, result.state, cover.get("stop_reason"), len(result.version_ids),
+            cover.get("new_version_count"), cover.get("same_version_count"), seconds, cover.get("requests"),
+            no_title, no_text, (crashed or error or "")[:80])
+
+
+def main():
+    parser = argparse.ArgumentParser(description="体检各来源：各抓一次或两次，打印一张表（会写库，要指向临时库）")
+    parser.add_argument("sources", nargs="*", help="只测这几个来源，默认全部")
+    parser.add_argument("--twice", action="store_true", help="每个来源抓两次，第二次应该一个都不新增")
+    parser.add_argument("--max", type=int, default=3, dest="max_records", help="每次最多读几条（默认 3）")
+    parser.add_argument("--deadline", type=int, default=120, help="每次最多用几秒（默认 120）")
+    args = parser.parse_args()
+    known = sorted(catalog.FETCHABLE - {"local_files"})  # local_files 是本地导入，不对外抓
+    chosen = args.sources or known
+    if [s for s in chosen if s not in known]:
+        parser.error("不认识的来源：" + ", ".join(s for s in chosen if s not in known) + "；能测的有：" + ", ".join(known))
+    if not os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL"):
+        parser.error("要先设 DATAFABRIC_HISTORY_DATABASE_URL，并且它必须是临时库：这个命令会写库（用法见文件开头）")
+    os.environ["DATAFABRIC_HISTORY_SOURCE_ALLOWLIST"] = ",".join(chosen)
+    print(" | ".join(COLUMNS), flush=True)
+    bad = 0
+    for source in chosen:
+        for attempt in (1, 2) if args.twice else (1,):
+            row = fetch_once(source, attempt, args.max_records, args.deadline)
+            print(" | ".join("" if value is None else str(value) for value in row), flush=True)
+            bad += row[2] == "failed" or row[4] == 0
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
