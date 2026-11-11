@@ -34,6 +34,7 @@ from biz_rules.history_models import (
 )
 from biz_rules.history_sources import project_record, stable_raw
 from biz_rules.window_coverage import MAX_RUNS, effective_receipts
+from collection import rate
 from db import registry_changes
 
 
@@ -873,13 +874,13 @@ def _insert_version(conn, run, item, projected, proof, mapping_review, version_i
         )
 
 
+# 因为预算或额度停下的读取，来源没读完：状态是 partial，不是 completed
+_LIMIT_STOPS = ("page_budget", "record_budget", "deadline", "request_budget", "byte_budget", *rate.CEILING_STOPS)
+
+
 def _close_run(conn, run, prepared, version_ids, new_ids, coverage, error, now):
     state = "partial" if error and version_ids else "failed" if error else "completed"
-    if (
-        run["kind"] == "fetch"
-        and not error
-        and coverage.get("stop_reason") in ("page_budget", "record_budget", "deadline")
-    ):
+    if run["kind"] == "fetch" and not error and coverage.get("stop_reason") in _LIMIT_STOPS:
         state = "partial"
     coverage = {
         **coverage,

@@ -571,3 +571,14 @@ def test_requests_and_curl_redirects_are_gated_per_hop(monkeypatch):
         assert curl.Session().request("GET", "https://c.invalid/a").status_code == 200
     assert calls == [("https://c.invalid/a", False), ("https://c.invalid/next", False)]
     assert budget.requests == 2 and budget.bytes == 4
+
+
+def test_drugbank_without_an_api_key_is_a_failed_read_that_says_so(monkeypatch):
+    """No key used to end the fetcher silently, which read as "source read to the end, nothing there"."""
+    monkeypatch.delenv("DRUGBANK_API_KEY", raising=False)
+    monkeypatch.setitem(site_crawler.SITE_PROFILES["drugbank"]["api"], "api_key", "")
+    batch = read_public(FetchRequest(source_id="drugbank", query="records"))
+    assert batch["error"]["code"] == "source_not_configured" and "没配 DrugBank API Key" in batch["error"]["message"]
+    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
+    assert batch["records"] == []
+

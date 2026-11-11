@@ -371,3 +371,22 @@ def test_json_another_parser_may_read_differently_is_compared_by_its_raw():
     assert sources.stable_raw("europe_pmc", '{"a": 1.0}') == sources.stable_raw("europe_pmc", '{"a": 1.00}')
     assert sources.stable_raw("europe_pmc", '{"a": 12345678901234567890}') != sources.stable_raw(
         "europe_pmc", '{"a": 12345678901234567891}')
+
+
+@pytest.mark.parametrize(("stop_reason", "state"), [
+    ("upstream_exhausted", "completed"),
+    ("record_budget", "partial"), ("page_budget", "partial"), ("deadline", "partial"),
+    ("request_budget", "partial"), ("byte_budget", "partial"),
+    ("outbound_quota_day", "partial"), ("outbound_quota_hour", "partial"),
+])
+def test_a_fetch_that_stopped_at_a_budget_or_quota_is_partial_not_completed(stop_reason, state):
+    from datetime import datetime, timezone
+
+    from db import history
+
+    written = []
+    conn = SimpleNamespace(execute=lambda statement, params: written.append(params))
+    run = {"id": "r", "attempt": 1, "kind": "fetch", "attempts": []}
+    history._close_run(conn, run, [], [], [], {"stop_reason": stop_reason}, None, datetime.now(timezone.utc))
+    assert written[0]["state"] == state
+

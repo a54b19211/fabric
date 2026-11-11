@@ -110,15 +110,17 @@ def test_gdelt_confirmed_empty_response_is_distinct_from_failure(monkeypatch):
     assert (receipt["status"], receipt["returned"], receipt["start"]) == ("read", 0, None)
 
 
-def test_gdelt_rate_limit_after_retries_is_a_budget_stop_not_zero_news(monkeypatch):
-    """The shared transport retries 429 and timeouts; when the retry wait no longer fits the deadline the read stops
-    at the budget. That is reported as the stop reason, never as an empty successful response."""
+def test_gdelt_429_is_not_retried_and_says_the_other_side_limited_us(monkeypatch):
+    """Every resend counts against the hour's quota, so a 429 stops the read at once: one request, a failed read
+    whose reason says "对方限流", never an empty successful response."""
     monkeypatch.setattr(APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 60)
-    client(monkeypatch, lambda request: httpx.Response(429))
+    seen = []
+    client(monkeypatch, lambda request: seen.append(request) or httpx.Response(429))
     result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia", deadline_seconds=5))
-    assert result["records"] == [] and result["error"] is None
-    assert result["stop_reason"] == "deadline" and not result["upstream_pagination_exhausted"]
+    assert len(seen) == 1 and result["requests"] == 1 and result["records"] == []
+    assert result["stop_reason"] == "source_failed" and not result["upstream_pagination_exhausted"]
+    assert result["error"]["code"] == "source_rate_limited" and "对方限流" in result["error"]["message"]
 
 
 def test_full_windows_are_halved_to_15_minutes_and_the_finest_ones_are_marked_truncated(monkeypatch, open_gate):

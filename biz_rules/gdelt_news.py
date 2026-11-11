@@ -150,7 +150,8 @@ class _Read:
         request = self.request
         with client.stream("GET", ENDPOINT, params=_params(request, window)) as response:
             if response.status_code == 429:
-                raise HistoryError("source_rate_limited", "GDELT限速；此次未确认结果，保留任务供有界重试", 503)
+                # 重试会把 GDELT 每小时的额度用光：不重试，直接停（collection.transport 对有出站上限的站点也不重试 429）
+                raise HistoryError("source_rate_limited", "对方限流（GDELT 返回 429），没有重试；请隔一段时间再读", 503)
             response.raise_for_status()
             body = bytearray()
             for chunk in response.iter_bytes():

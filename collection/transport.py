@@ -11,8 +11,8 @@
   请求在路由处过闸；脚本、样式等子资源计数（subrequests）和计字节，不占请求数、不单独限速。读取指定了目标站点
   （Budget.site_host）时，不是目标站点主机（及其子域）的请求是第三方的广告、统计、cookie 横幅，直接中止，不计数。
 
-字节按实际读到的每一块计（含重定向和 429 的响应体、流式下载），用完当场停。超时和 429 在每一跳有界重试，
-每次重发都重新过闸、重新计数。预算停止是 BaseException（Stop），拉取函数里的 except Exception 吞不掉；
+字节按实际读到的每一块计（含重定向和 429 的响应体、流式下载），用完当场停。超时和 429 在每一跳有界重试
+（有出站上限的站点不重试 429），每次重发都重新过闸、重新计数。预算停止是 BaseException（Stop），拉取函数里的 except Exception 吞不掉；
 一旦停下，同一次读取之后的任何传输都直接停。没有活动读取时（API 服务的其他调用、索引客户端等）原样放行。
 
 停在哪里（Budget.check）：每次发出前、每读到一块、每交付一个版本，以及导航返回时。
@@ -203,6 +203,13 @@ def is_transient(error: BaseException) -> bool:
     return False
 
 
+def _retry_on_429(url) -> bool:
+    """有出站上限的站点（GDELT、WHO）收到 429 不重试：每次重发都是一个计入上限的请求，重试会把每小时的额度用光。
+    响应原样交给读取插件，由它报"对方限流"。"""
+    declared = rate.group_for_url(url)
+    return declared is None or declared.outbound_cap is None
+
+
 def _hop(budget, url, send, *, drain, gated=True):
     """一跳：过闸 → 发送；超时和 429 有界重试，每次重发重新过闸。drain 读完并关闭 429 的响应（字节照计）。"""
     retries, delay = _retry_settings()
@@ -219,7 +226,7 @@ def _hop(budget, url, send, *, drain, gated=True):
             delay = min(delay * 2, 60.0)
             continue
         status = getattr(response, "status_code", None) or getattr(response, "status", None)
-        if status == 429 and attempt < retries:
+        if status == 429 and attempt < retries and _retry_on_429(url):
             drain(response)
             budget.pause(delay)
             delay = min(delay * 2, 60.0)

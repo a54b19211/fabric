@@ -7,7 +7,7 @@ DrugBank API 分页拉取器
 分页：Link header（RFC 5988），同时响应头含 X-Total-Count
 
 api_cfg 字段（来自 config/sites/drugbank.py 的 "api" 块）：
-  - api_key:     DrugBank API Key（必填，或从 DRUGBANK_API_KEY 环境变量读取）
+  - api_key:     DrugBank API Key（必填，或从 DRUGBANK_API_KEY 环境变量读取；都没有就报配置缺项）
   - region:      us / ca / eu，默认 us
   - q:           关键词搜索，留空拉全量
   - max_records: 最多拉取条数，0 = 全量
@@ -22,6 +22,8 @@ from typing import Iterator
 import httpx
 from loguru import logger
 
+from biz_rules.history_models import HistoryError
+
 BASE_URL = "https://api.drugbank.com/v1"
 DEFAULT_PAGE_SIZE = 50
 REQUEST_DELAY = 0.5  # 秒，避免触发限速
@@ -34,8 +36,8 @@ def iter_drugbank(api_cfg: dict) -> Iterator[dict]:
     """
     api_key = api_cfg.get("api_key") or os.getenv("DRUGBANK_API_KEY", "")
     if not api_key:
-        logger.error("[DrugBank] 未配置 API Key，请在 .env 中设置 DRUGBANK_API_KEY")
-        return
+        # 缺配置是失败，不是"读完了、没有数据"：直接报出来，运行记为失败并写明原因
+        raise HistoryError("source_not_configured", "没配 DrugBank API Key（在 .env 里设置 DRUGBANK_API_KEY）")
 
     region = api_cfg.get("region", "us")
     q = api_cfg.get("q", "")
