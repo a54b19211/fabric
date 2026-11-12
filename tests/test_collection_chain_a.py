@@ -219,7 +219,7 @@ def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the
 def test_outbound_caps_are_the_declared_ones_and_count_per_site(mid_hour_clock):
     who, gdelt = catalog.spec("who_don"), catalog.spec("gdelt_doc")
     assert (who.min_interval_seconds, who.outbound_cap) == (30, catalog.OutboundCap(per_day=200))
-    assert gdelt.min_interval_seconds == 5
+    assert gdelt.min_interval_seconds == 6
     assert gdelt.outbound_cap == catalog.OutboundCap(per_day=900, per_hour_per_query=7)
     url = "https://www.who.int/api/hubs/diseaseoutbreaknews"
     assert all(rate.take_for_url(url) is None for _ in range(200))

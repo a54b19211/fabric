@@ -39,6 +39,7 @@ _ACTIVE: contextvars.ContextVar = contextvars.ContextVar("collection_budget", de
 _MARK = "__wrapped_by_collection__"
 _REDIRECTS = {301, 302, 303, 307, 308}
 GATED_BROWSER_TYPES = {"document", "xhr", "fetch"}
+TIMEOUT_RETRY_PAUSE = 1.0  # 超时后重试前等几秒（上限；设置里的重试间隔更短就用更短的）
 
 
 def byte_budget() -> int:
@@ -196,8 +197,8 @@ def get(client, url, params=None, *, cap, timeout=20.0):
         return response.status_code, bytes(body)
 
 
-def is_transient(error: BaseException) -> bool:
-    """只重试超时和限流（429）；解析错误和其他 HTTP 错误不重试。"""
+def _transient_kind(error: BaseException) -> str | None:
+    """"timeout"（超时）、"rate_limit"（429）或 None（别的错误，不重试）。沿着异常链找。"""
     seen = set()
     while isinstance(error, BaseException) and id(error) not in seen:
         seen.add(id(error))
@@ -206,11 +207,16 @@ def is_transient(error: BaseException) -> bool:
                              "WriteTimeout", "PoolTimeout", "Timeout"}  # Timeout：curl_cffi
             for cls in type(error).__mro__
         ):
-            return True
+            return "timeout"
         if getattr(getattr(error, "response", None), "status_code", None) == 429:
-            return True
+            return "rate_limit"
         error = error.__cause__ or error.__context__
-    return False
+    return None
+
+
+def is_transient(error: BaseException) -> bool:
+    """只重试超时和限流（429）；解析错误和其他 HTTP 错误不重试。"""
+    return _transient_kind(error) is not None
 
 
 def _retry_on_429(url) -> bool:
@@ -230,10 +236,16 @@ def _hop(budget, url, send, *, drain, gated=True):
             response = send()
         except Exception as error:
             budget.check()  # 等待恰因到期而失败（超时收在剩余时间里）：报 deadline，不报来源失败
-            if attempt == retries or not is_transient(error):
+            kind = _transient_kind(error)
+            if attempt == retries or kind is None:
                 raise
-            budget.pause(delay)
-            delay = min(delay * 2, 60.0)
+            if kind == "timeout":
+                # 超时 = 这条连接没通（实测 Akamai 的个别节点会让一半的连接卡住），换一条马上重试；干等没有用，
+                # 两次发送的间隔已由限速闸门保证。只有 429 才按间隔退避。
+                budget.pause(min(delay, TIMEOUT_RETRY_PAUSE))
+            else:
+                budget.pause(delay)
+                delay = min(delay * 2, 60.0)
             continue
         status = getattr(response, "status_code", None) or getattr(response, "status", None)
         if status == 429 and attempt < retries and _retry_on_429(url):

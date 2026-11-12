@@ -5,7 +5,12 @@ A read with both bounds is cut at UTC hour marks. A window whose response is ful
 read again, down to FINEST_WINDOW; one query-hour costs at most 1 + 2 + 4 = 7 requests. A response below the cap
 only says that this system's cap was not hit, never that the window is whole. Every window leaves a receipt in the
 run's coverage; the ones still full at the finest size are marked possibly_truncated.
+
+GDELT asks for one request every 5 seconds (the catalog spaces them 6 s apart) and takes 12-20 s to answer. When it
+still answers 429, the read waits the interval the answer names and sends the request once more; a second 429, or no
+time left for the wait, ends the read as a failure that says so.
 """
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
@@ -19,6 +24,9 @@ from collection import transport
 ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
 FINEST_WINDOW = timedelta(minutes=15)
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+RESPONSE_SECONDS = 45  # GDELT needs 12-20 s to answer a query; a 20 s limit cut some of them off
+DEFAULT_429_INTERVAL = 5  # what GDELT asks for when its 429 does not name an interval
+RETRY_MARGIN = 1  # seconds added to the interval GDELT names
 
 
 def article_id(value):
@@ -67,6 +75,12 @@ class Window(NamedTuple):
     def halves(self) -> tuple["Window", "Window"]:
         middle = self.start + timedelta(seconds=int((self.end - self.start).total_seconds()) // 2)
         return Window(self.start, middle), Window(middle, self.end)
+
+
+def _interval_asked(answer: str) -> int:
+    """Seconds between requests that a 429 asks for: its text says "limit requests to one every 5 seconds"."""
+    found = re.search(r"one every (\d+) second", answer)
+    return int(found[1]) if found else DEFAULT_429_INTERVAL
 
 
 def _iso(value):
@@ -145,21 +159,36 @@ class _Read:
         self.receipts.append(_receipt(window, "read", possibly_truncated=full, reason=reason, **counts))
 
     def _fetch(self, client, window):
-        """One request for the window: its articles as (parsed, original text) pairs."""
+        """One request for the window: its articles as (parsed, original text) pairs. A 429 is answered once: wait the
+        interval GDELT names, then ask again (collection.transport does not resend a 429 for a site with a cap: every
+        resend counts against the hour's quota, so the one resend is made here)."""
+        for attempt in (1, 2):
+            with client.stream("GET", ENDPOINT, params=_params(self.request, window)) as response:
+                if response.status_code != 429:
+                    return self._articles(response)
+                response.read()
+                asked = _interval_asked(response.text)
+            if attempt == 2:
+                raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，按它要求的间隔（{asked} 秒）等过再发，"
+                                   "仍是 429；请隔一段时间再读", 503)
+            wait = asked + RETRY_MARGIN
+            if time.monotonic() - self.started + wait >= self.request.deadline_seconds:
+                raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，要求间隔 {asked} 秒，期限内等不到重试；"
+                                   "请隔一段时间再读", 503)
+            time.sleep(wait)
+
+    def _articles(self, response):
+        """The articles of one answer, as (parsed, original text) pairs."""
         from biz_rules.history_sources import _raw_array_items, parse_json
         request = self.request
-        with client.stream("GET", ENDPOINT, params=_params(request, window)) as response:
-            if response.status_code == 429:
-                # 重试会把 GDELT 每小时的额度用光：不重试，直接停（collection.transport 对有出站上限的站点也不重试 429）
-                raise HistoryError("source_rate_limited", "对方限流（GDELT 返回 429），没有重试；请隔一段时间再读", 503)
-            response.raise_for_status()
-            body = bytearray()
-            for chunk in response.iter_bytes():
-                body.extend(chunk)
-                if len(body) > MAX_RESPONSE_BYTES:
-                    raise HistoryError("source_byte_budget", "新闻索引响应超过8MiB")
-                if time.monotonic() - self.started >= request.deadline_seconds:
-                    raise HistoryError("source_deadline", "新闻索引读取超时")
+        response.raise_for_status()
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            body.extend(chunk)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise HistoryError("source_byte_budget", "新闻索引响应超过8MiB")
+            if time.monotonic() - self.started >= request.deadline_seconds:
+                raise HistoryError("source_deadline", "新闻索引读取超时")
         self.bytes += len(body)
         raw = body.decode("utf-8")
         if not isinstance(parse_json(raw).get("articles"), list):
@@ -219,7 +248,7 @@ def read_gdelt(request):
     read = _Read(request)
     error = stop = None
     try:
-        with httpx.Client(timeout=min(20, request.deadline_seconds), follow_redirects=False) as client:
+        with httpx.Client(timeout=min(RESPONSE_SECONDS, request.deadline_seconds), follow_redirects=False) as client:
             read.run(client)
     except transport.Stop as stopped:
         stop = stopped.reason

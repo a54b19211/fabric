@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from biz_rules import window_coverage
+from biz_rules import gdelt_news, window_coverage
 from biz_rules.gdelt_news import ENDPOINT, article_id
 from biz_rules.history_models import ArchiveRecord, Coverage, FetchRequest, HistoryError
 from biz_rules.history_sources import project_record, read_public
@@ -33,8 +33,16 @@ def client(monkeypatch, handler):
 
 @pytest.fixture
 def open_gate(monkeypatch):
-    """The 5 s spacing of the shared rate gate is not under test here; the windows are."""
+    """The 6 s spacing of the shared rate gate is not under test here; the windows are."""
     monkeypatch.setattr(rate, "wait_for_url", lambda url, **kw: None)
+
+
+@pytest.fixture
+def waits(monkeypatch, open_gate):
+    """The seconds a read sleeps (a 429 is answered after a wait); nothing really sleeps."""
+    slept = []
+    monkeypatch.setattr(gdelt_news.time, "sleep", slept.append)
+    return slept
 
 
 def stand_in(monkeypatch, count_for):
@@ -81,7 +89,7 @@ def test_gdelt_raw_metadata_bounded_replay_and_explicit_window(monkeypatch, open
 
 
 @pytest.mark.parametrize("failure", ["rate", "timeout", "shape", "conflict", "bad_json"])
-def test_gdelt_failure_never_becomes_zero_news(monkeypatch, failure):
+def test_gdelt_failure_never_becomes_zero_news(monkeypatch, waits, failure):
     monkeypatch.setattr(APP, "TASK_RETRIES", 0)  # one physical request; retries are covered below
     def respond(request):
         if failure == "timeout":
@@ -96,7 +104,7 @@ def test_gdelt_failure_never_becomes_zero_news(monkeypatch, failure):
     client(monkeypatch, respond)
     result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia"))
     assert result["error"] and not result["upstream_pagination_exhausted"]
-    assert result["stop_reason"] == "source_failed" and result["requests"] == 1
+    assert result["stop_reason"] == "source_failed" and result["requests"] == (2 if failure == "rate" else 1)  # a 429 is asked twice
     if failure == "conflict":
         assert result["records"] == []
 
@@ -110,17 +118,40 @@ def test_gdelt_confirmed_empty_response_is_distinct_from_failure(monkeypatch):
     assert (receipt["status"], receipt["returned"], receipt["start"]) == ("read", 0, None)
 
 
-def test_gdelt_429_is_not_retried_and_says_the_other_side_limited_us(monkeypatch):
-    """Every resend counts against the hour's quota, so a 429 stops the read at once: one request, a failed read
-    whose reason says "对方限流", never an empty successful response."""
-    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
-    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 60)
+LIMITED = "Please limit requests to one every 5 seconds or contact kalev.leetaru5@gmail.com for larger queries."
+
+
+def test_gdelt_429_waits_the_interval_it_names_and_asks_once_more(monkeypatch, waits):
+    """GDELT asks for one request every 5 seconds. A 429 is answered once: wait that interval (plus a second of
+    margin) and send the request again; the second answer is read as usual."""
+    answers = [httpx.Response(429, text=LIMITED), httpx.Response(200, json={"articles": [article()]})]
     seen = []
-    client(monkeypatch, lambda request: seen.append(request) or httpx.Response(429))
-    result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia", deadline_seconds=5))
-    assert len(seen) == 1 and result["requests"] == 1 and result["records"] == []
+    client(monkeypatch, lambda request: seen.append(request) or answers.pop(0))
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia"))
+    assert result["error"] is None and len(result["records"]) == 1
+    assert len(seen) == 2 and result["requests"] == 2 and waits == [6]
+
+
+def test_gdelt_second_429_ends_the_read_and_says_the_other_side_limited_us(monkeypatch, waits):
+    """After the one wait and resend a second 429 stops the read: a failed read whose reason says "对方限流",
+    never an empty successful response."""
+    seen = []
+    client(monkeypatch, lambda request: seen.append(request) or httpx.Response(429, text=LIMITED))
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia"))
+    assert len(seen) == 2 and result["requests"] == 2 and result["records"] == [] and waits == [6]
     assert result["stop_reason"] == "source_failed" and not result["upstream_pagination_exhausted"]
-    assert result["error"]["code"] == "source_rate_limited" and "对方限流" in result["error"]["message"]
+    assert result["error"]["code"] == "source_rate_limited"
+    assert "对方限流" in result["error"]["message"] and "仍是 429" in result["error"]["message"]
+
+
+def test_gdelt_429_with_no_time_left_to_wait_says_so_and_does_not_resend(monkeypatch, waits):
+    """The shortest deadline (5 s) cannot hold a 6 s wait: no second request, and the reason names the deadline."""
+    seen = []
+    client(monkeypatch, lambda request: seen.append(request) or httpx.Response(429, text=LIMITED))
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia", deadline_seconds=5))
+    assert len(seen) == 1 and result["requests"] == 1 and result["records"] == [] and waits == []
+    assert result["stop_reason"] == "source_failed"
+    assert result["error"]["code"] == "source_rate_limited" and "期限内等不到重试" in result["error"]["message"]
 
 
 def test_full_windows_are_halved_to_15_minutes_and_the_finest_ones_are_marked_truncated(monkeypatch, open_gate):
@@ -164,7 +195,7 @@ def test_window_below_the_cap_ends_after_one_request_without_claiming_the_whole_
     assert result["complete"] is False and result["source_total"] is None  # below the cap is not "the whole window"
 
 
-def test_failed_window_is_not_zero_news_and_the_rest_stays_unread(monkeypatch, open_gate):
+def test_failed_window_is_not_zero_news_and_the_rest_stays_unread(monkeypatch, waits):
     monkeypatch.setattr(APP, "TASK_RETRIES", 0)
     def respond(request):
         if request.url.params["enddatetime"] == "20261030003000":
