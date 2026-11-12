@@ -66,7 +66,6 @@ db/repository/review_relations.py:approve_relation  64/25  multi-step write/revi
 db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
 db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
 db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step
-db/source_refresh.py:refresh_once  120/25  source refresh/health worker: schedule, fetch and report in one pass; split per step
 db/source_refresh.py:source_health  149/34  source refresh/health worker: schedule, fetch and report in one pass; split per step
 disambiguation/llm_ranker.py:rank_with_llm  101/21  LLM/reranker call with prompt, parse and fallback inline
 disambiguation/llm_ranker.py:rank_with_reranker  69/26  LLM/reranker call with prompt, parse and fallback inline

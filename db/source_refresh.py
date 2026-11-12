@@ -215,6 +215,111 @@ def _read_all_next_time(state):
     state["request"]["known_stop"] = 0
 
 
+def _claim(engine, key, watch):
+    """短锁只保留意图和 lease，历史库/Redis 调用全部在锁外。到点要读就返回 (状态, 现在)，还没到点或别人持有 lease 返回 None。"""
+    with engine.begin() as conn:
+        now = conn.execute(text("SELECT clock_timestamp()")).scalar_one()
+        conn.execute(
+            text("""
+          INSERT INTO publication_outbox(event_key,kind,source_doc_uuid,snapshot)
+          VALUES (:key,'control',:key,'{}'::jsonb) ON CONFLICT(event_key) DO NOTHING
+        """),
+            {"key": key},
+        )
+        row = conn.execute(
+            text("SELECT snapshot FROM publication_outbox WHERE event_key=:key FOR UPDATE"),
+            {"key": key},
+        ).scalar_one()
+        state = dict(row)
+        if state.get("lease_until") and parse_timestamp(state["lease_until"]) > now:
+            return None
+        if (
+            state.get("state") in {"failed", "blocked", "idle"}
+            and state.get("next_check_at")
+            and parse_timestamp(state["next_check_at"]) > now
+        ):
+            return None
+        state.update(
+            watch_id=watch.id,
+            source_id=watch.request.source_id,
+            cadence_seconds=watch.cadence_seconds,
+            scope=watch.request.query,
+            lease_until=(now + timedelta(seconds=180)).isoformat(),
+            lease_token=uuid4().hex,
+        )
+        if "request" not in state:
+            _plan_cycle(watch, state, now)
+        if not state.get("active_run_id") and not state.get("request_key"):
+            # 先持久意图：create_fetch提交后丢回复，下轮以同key找回原run。
+            state["generation"] = int(state.get("generation", 0)) + 1
+            state["request_key"] = key + ":" + str(state["generation"])
+            state["last_check_at"] = now.isoformat()
+            state["state"] = "starting"
+        conn.execute(
+            text("UPDATE publication_outbox SET snapshot=CAST(:state AS jsonb) WHERE event_key=:key"),
+            {"key": key, "state": canonical(state)},
+        )
+    return state, now
+
+
+def _advance(engine, key, watch, state, now):
+    """这一次要做的一步：建 run 或找回 run，入队，读完的 run 交给 _page_finished。出错抛 HistoryError（由 _failed 记下）。"""
+    with history.history_engine().begin() as permit:
+        history._source(permit, watch.request.source_id)
+    if publication.disk_status()["backfill_paused"]:
+        raise HistoryError("source_watch_disk_low", "磁盘低水位暂停新增来源读取；续页意图保留", 503)
+    from flows.history_fetch import enqueue_fetch, retry_inactive
+
+    if state.get("active_run_id"):
+        run = history.read_run(state["active_run_id"])
+    else:
+        run, _ = history.create_fetch(FetchRequest.model_validate(state["request"]), state["request_key"])
+        state["active_run_id"] = run.id
+        _save(engine, key, state)
+    if run.state in {"queued", "enqueue_failed", "running"}:
+        if run.state == "queued":
+            enqueue_fetch(run)  # 固定job_id核对后入队；崩溃遗留的死job随后显式恢复。
+        try:
+            retry_inactive(run.id, run.attempt)
+        except HistoryError as exc:
+            if exc.code != "job_may_be_active":
+                raise
+        state["state"] = "running"
+    elif run.state in {"completed", "partial"} and (not run.error or run.coverage.get("stop_reason") == "items_unread"):
+        _page_finished(watch, state, run.coverage, now)  # items_unread：读到底了，只是有几条读不到，不是失败
+        state.pop("active_run_id", None)
+        state.pop("request_key", None)
+        state["error"] = None
+    else:
+        raise HistoryError("source_watch_failed", "固定来源读取失败；本页保留，下周期重试", 503)
+
+
+def _failed(watch, state, exc, now):
+    """这一步出错：记下原因，按间隔重试；已读完的失败页换新 run 重试相同范围/续页，连续失败多次就放弃这一周期。"""
+    state["state"] = "blocked" if exc.status == 403 else "failed"
+    state["error"] = {"code": exc.code, "message": exc.message}
+    state["last_failure_at"] = now.isoformat()
+    state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
+    # 未知 create/入队结果保留固定 key。只有运行本身失败（failed，或带着错误的 partial）才换新 run；正常的 partial
+    # （只是预算用完）不是失败。续读位置没前进的那一段读完了也没错，同样要换新 run 重读（否则每个间隔都取回同一个结果）。
+    if state.get("active_run_id"):
+        try:
+            saved = history.read_run(state["active_run_id"])
+            if saved.state == "failed" or saved.error or exc.code == "source_watch_no_progress":
+                state.pop("active_run_id", None)
+                state.pop("request_key", None)
+                _read_all_next_time(state)
+        except HistoryError:
+            pass
+    state["fail_streak"] = int(state.get("fail_streak", 0)) + 1
+    if state["fail_streak"] >= GIVE_UP_AFTER and "active_run_id" not in state:
+        # 同一周期连续失败这么多次：放弃这一周期，下个间隔从头（窗口来源从检查点）重新规划，不永远卡在同一个位置
+        state.pop("request", None)
+        state["fail_streak"] = 0
+        state["read_all"] = True  # 这一周期没读完，下一周期别在“遇到已存的”就停
+        state.pop("unclean", None)
+
+
 def refresh_once(engine=None):
     """仅协调已配置的固定抓取；没有配置时不联网、不启动采集。"""
     configured = watches()
@@ -224,121 +329,14 @@ def refresh_once(engine=None):
     results = []
     for watch in configured:
         key = _key(watch)
-        # 短锁只保留意图和lease，历史库/Redis调用全部在锁外。
-        with engine.begin() as conn:
-            now = conn.execute(text("SELECT clock_timestamp()")).scalar_one()
-            conn.execute(
-                text("""
-              INSERT INTO publication_outbox(event_key,kind,source_doc_uuid,snapshot)
-              VALUES (:key,'control',:key,'{}'::jsonb) ON CONFLICT(event_key) DO NOTHING
-            """),
-                {"key": key},
-            )
-            row = conn.execute(
-                text(
-                    "SELECT snapshot FROM publication_outbox WHERE event_key=:key FOR UPDATE"
-                ),
-                {"key": key},
-            ).scalar_one()
-            state = dict(row)
-            if (
-                state.get("lease_until")
-                and parse_timestamp(state["lease_until"]) > now
-            ):
-                continue
-            if (
-                state.get("state") in {"failed", "blocked", "idle"}
-                and state.get("next_check_at")
-                and parse_timestamp(state["next_check_at"]) > now
-            ):
-                continue
-            state.update(
-                watch_id=watch.id,
-                source_id=watch.request.source_id,
-                cadence_seconds=watch.cadence_seconds,
-                scope=watch.request.query,
-                lease_until=(now + timedelta(seconds=180)).isoformat(),
-                lease_token=uuid4().hex,
-            )
-            if "request" not in state:
-                _plan_cycle(watch, state, now)
-            if not state.get("active_run_id") and not state.get("request_key"):
-                # 先持久意图：create_fetch提交后丢回复，下轮以同key找回原run。
-                state["generation"] = int(state.get("generation", 0)) + 1
-                state["request_key"] = key + ":" + str(state["generation"])
-                state["last_check_at"] = now.isoformat()
-                state["state"] = "starting"
-            conn.execute(
-                text(
-                    "UPDATE publication_outbox SET snapshot=CAST(:state AS jsonb) WHERE event_key=:key"
-                ),
-                {"key": key, "state": canonical(state)},
-            )
+        claimed = _claim(engine, key, watch)
+        if claimed is None:
+            continue
+        state, now = claimed
         try:
-            with history.history_engine().begin() as permit:
-                history._source(permit, watch.request.source_id)
-            if publication.disk_status()["backfill_paused"]:
-                raise HistoryError(
-                    "source_watch_disk_low",
-                    "磁盘低水位暂停新增来源读取；续页意图保留",
-                    503,
-                )
-            from flows.history_fetch import enqueue_fetch, retry_inactive
-
-            if state.get("active_run_id"):
-                run = history.read_run(state["active_run_id"])
-            else:
-                run, _ = history.create_fetch(
-                    FetchRequest.model_validate(state["request"]), state["request_key"]
-                )
-                state["active_run_id"] = run.id
-                _save(engine, key, state)
-            if run.state in {"queued", "enqueue_failed", "running"}:
-                if run.state == "queued":
-                    enqueue_fetch(
-                        run
-                    )  # 固定job_id核对后入队；崩溃遗留的死job随后显式恢复。
-                try:
-                    retry_inactive(run.id, run.attempt)
-                except HistoryError as exc:
-                    if exc.code != "job_may_be_active":
-                        raise
-                state["state"] = "running"
-            elif run.state in {"completed", "partial"} and (not run.error or run.coverage.get("stop_reason") == "items_unread"):
-                _page_finished(watch, state, run.coverage, now)  # items_unread：读到底了，只是有几条读不到，不是失败
-                state.pop("active_run_id", None)
-                state.pop("request_key", None)
-                state["error"] = None
-            else:
-                raise HistoryError(
-                    "source_watch_failed", "固定来源读取失败；本页保留，下周期重试", 503
-                )
+            _advance(engine, key, watch, state, now)
         except HistoryError as exc:
-            state["state"] = "blocked" if exc.status == 403 else "failed"
-            state["error"] = {"code": exc.code, "message": exc.message}
-            state["last_failure_at"] = now.isoformat()
-            state["next_check_at"] = (
-                now + timedelta(seconds=watch.cadence_seconds)
-            ).isoformat()
-            # 已完成失败页用新run重试相同范围/续页；未知create/入队结果保留固定key。
-            # 只有运行本身失败（failed，或带着错误的 partial）才换新 run；正常的 partial（只是预算用完）不是失败。
-            # 续读位置没前进的那一段读完了也没错，同样要换新 run 重读（否则每个间隔都取回同一个结果）。
-            if state.get("active_run_id"):
-                try:
-                    saved = history.read_run(state["active_run_id"])
-                    if saved.state == "failed" or saved.error or exc.code == "source_watch_no_progress":
-                        state.pop("active_run_id", None)
-                        state.pop("request_key", None)
-                        _read_all_next_time(state)
-                except HistoryError:
-                    pass
-            state["fail_streak"] = int(state.get("fail_streak", 0)) + 1
-            if state["fail_streak"] >= GIVE_UP_AFTER and "active_run_id" not in state:
-                # 同一周期连续失败这么多次：放弃这一周期，下个间隔从头（窗口来源从检查点）重新规划，不永远卡在同一个位置
-                state.pop("request", None)
-                state["fail_streak"] = 0
-                state["read_all"] = True  # 这一周期没读完，下一周期别在“遇到已存的”就停
-                state.pop("unclean", None)
+            _failed(watch, state, exc, now)
         finally:
             state["lease_until"] = None
             _save(engine, key, state)
