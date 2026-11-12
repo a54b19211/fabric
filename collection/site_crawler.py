@@ -213,6 +213,7 @@ class _Reader:
         # 本次读取里读不到的条目（网址 + 原因），同样只记在读取结果里，不存版本
         self.unread: list[dict] = []
         self.unread_in_a_row = 0  # 连续读不到的条数；读到一条就清零
+        self.position = 0  # 读到第几个父项了；停下时的续读位置指向它
         # 浏览器里只放行目标站点（及其子域）的请求，第三方的广告、统计、cookie 横幅直接中止、不占请求预算
         budget.site_host = _site_host(self.site)
 
@@ -285,6 +286,21 @@ class _Reader:
         self.coverage.append({"parent_record_id": parent_id, **entry})
         return entry
 
+    def attachments(self, links, parent_id, cookies, discovered, skip):
+        """下载一个父项的附件（前 skip 个上一轮读过了，跳过）。预算在中途用完：后面的记成 not_attempted，
+        抛 _Resume，续读位置指向下一个要读的附件。"""
+        for position, link in enumerate(links):
+            if position < skip:
+                continue
+            try:
+                self.attachment(link, parent_id, cookies, discovered)
+            except _Stop as stop:
+                for later in links[position:]:
+                    self.coverage.append({"parent_record_id": parent_id, "url": _kept_url(later),
+                                          "status": "not_attempted",
+                                          "record_id": attachment_record_id(parent_id, _name(later))})
+                raise _Resume(stop.reason, position, page_recorded=True) from None
+
     def site_record(self, parsed, raw, skip_attachments=0, record_page=True):
         """接口记录或表格页的一张表 → 一条 site_record 版本；结果里列出的附件和详情页一样各成版本。
         记录身份是站点给的稳定编号（接口：uuid5(站点:记录键)，与 documents 库的文档 uuid 同一算法）。"""
@@ -311,17 +327,7 @@ class _Reader:
             self.unread_in_a_row = 0
             if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
                 return
-        for position, link in enumerate(links):
-            if position < skip_attachments:
-                continue
-            try:
-                self.attachment(link, record_id, None, "site_record")
-            except _Stop as stop:
-                for later in links[position:]:
-                    self.coverage.append({"parent_record_id": record_id, "url": _kept_url(later),
-                                          "status": "not_attempted",
-                                          "record_id": attachment_record_id(record_id, _name(later))})
-                raise _Resume(stop.reason, position, page_recorded=True) from None
+        self.attachments(links, record_id, None, "site_record", skip_attachments)
 
     def page(self, url, skip_attachments=0, record_page=True):
         """读一个详情页和它的附件。skip_attachments：续读时这一页前面已读过的附件数；record_page=False：
@@ -372,16 +378,7 @@ class _Reader:
             self.unread_in_a_row = 0
             if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
                 return
-        for position, link in enumerate(links):
-            if position < skip_attachments:
-                continue
-            try:
-                self.attachment(link, url, cookies, "detail_page")
-            except _Stop as stop:
-                for later in links[position:]:
-                    self.coverage.append({"parent_record_id": url, "url": _kept_url(later), "status": "not_attempted",
-                                          "record_id": attachment_record_id(url, _name(later))})
-                raise _Resume(stop.reason, position, page_recorded=True) from None
+        self.attachments(links, url, cookies, "detail_page", skip_attachments)
 
 
 def _site_results(reader, query):
@@ -424,23 +421,14 @@ def read_site(request) -> dict:
         return _read(request, _Reader(request, budget))
 
 
-class _Progress:
-    """The parent item a read is at; the resume cursor of a stop names it."""
-
-    __slots__ = ("position",)
-
-    def __init__(self):
-        self.position = 0
-
-
-def _read_named(request, reader, start, at):
+def _read_named(request, reader, start):
     """query=by_url / stored_attachments: the parents are the requested record ids, in order."""
     start_i, start_a, start_recorded = start
     for url in request.source_record_ids:
         if not _on_site(reader.site, url):
             raise HistoryError("url_outside_site", "链接不属于该来源站点")
     for position in range(start_i, len(request.source_record_ids)):
-        at.position = position
+        reader.position = position
         url = request.source_record_ids[position]
         skip = start_a if position == start_i else 0
         if request.query == "by_url":
@@ -456,13 +444,13 @@ def _read_named(request, reader, start, at):
                 raise _Resume(stop_here.reason, k, page_recorded=False) from None
 
 
-def _read_site_records(request, reader, start, at):
+def _read_site_records(request, reader, start):
     """API and table-page sites: the parents are the site's results, replayed from the start."""
     start_i, start_a, start_recorded = start
     with closing(_site_results(reader, request.query)) as results:
         for position, (parsed, raw) in enumerate(results):
             if position >= start_i:  # 前面的是重放：续读位置只往前走，重放途中停下也不倒退
-                at.position = position
+                reader.position = position
                 if isinstance(parsed, ItemUnreadable):  # 读不到：不存版本，记下，接着读下一条
                     reader.skip(parsed)
                 else:
@@ -470,12 +458,12 @@ def _read_site_records(request, reader, start, at):
                     reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
                                        record_page=not (first and start_recorded))
                 # 拉取函数在循环来要下一条时才去读它：停在那里，就从那一条接着读
-                at.position = position + 1
-    if at.position == 0:
+                reader.position = position + 1
+    if reader.position == 0:
         raise HistoryError("list_empty", LIST_EMPTY)
 
 
-def _read_detail_pages(request, reader, start, at):
+def _read_detail_pages(request, reader, start):
     """List sites: the parents are the detail pages the list entry leads to."""
     start_i, start_a, start_recorded = start
     if request.query not in reader.profile.get("start_urls", []):
@@ -486,14 +474,14 @@ def _read_detail_pages(request, reader, start, at):
             seen += 1
             if seen < start_i:
                 continue
-            at.position = seen
+            reader.position = seen
             first = seen == start_i
             try:
                 reader.page(url, skip_attachments=start_a if first else 0,
                             record_page=not (first and start_recorded))
             except Exception as exc:  # noqa: BLE001 -- 这一页读不出来：和接口站点的 ItemUnreadable 一样记下，接着读下一页
                 reader.skip(ItemUnreadable(url, _why(exc)))
-            at.position = seen + 1  # 这一项读完了：下一页列表要在这之后才取，停在那里就从下一项接
+            reader.position = seen + 1  # 这一项读完了：下一页列表要在这之后才取，停在那里就从下一项接
     if seen < 0:
         raise HistoryError("list_empty", LIST_EMPTY)
 
@@ -507,36 +495,36 @@ def _why(exc) -> str:
     return type(exc).__name__ + ("：" + line[:200] if line else "")
 
 
-def _stopped_at(at, start):
+def _stopped_at(reader, start):
     """在父项中途停下（不是附件中途）的续读位置。还没走到起点那一项（重放时停下），位置原样不动，不倒退。"""
-    return start if at.position == start[0] else (at.position, 0, False)
+    return start if reader.position == start[0] else (reader.position, 0, False)
 
 
 def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
     续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件}。"""
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
-    at, start = _Progress(), (0, 0, False)
+    start = (0, 0, False)
     try:
         start = _cursor(request)
-        at.position = start[0]
+        reader.position = start[0]
         if request.query in {"by_url", "stored_attachments"}:
-            _read_named(request, reader, start, at)
+            _read_named(request, reader, start)
         elif reader.profile.get("source_type") == "api" or reader.profile.get("source_type") == "table_page":
-            _read_site_records(request, reader, start, at)
+            _read_site_records(request, reader, start)
         else:
-            _read_detail_pages(request, reader, start, at)
+            _read_detail_pages(request, reader, start)
         exhausted = True
     except _Resume as stopped:
-        stop, resume = stopped.reason, (at.position, stopped.attachment, stopped.page_recorded)
+        stop, resume = stopped.reason, (reader.position, stopped.attachment, stopped.page_recorded)
     except _Stop as stopped:
         # 读到旧的了（增量读取）：没有下一页要接
-        stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else _stopped_at(at, start)
+        stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else _stopped_at(reader, start)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
         if reader.budget.stopped:  # 浏览器里的请求因预算被中止，驱动随后报的错不是来源失败
-            stop, resume = reader.budget.stopped, _stopped_at(at, start)
+            stop, resume = reader.budget.stopped, _stopped_at(reader, start)
         else:
             error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
             stop = "source_failed"
