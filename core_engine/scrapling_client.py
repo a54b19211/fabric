@@ -8,7 +8,6 @@ import io
 import os
 import re
 import tempfile
-import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +20,7 @@ from prefect import task
 # 引入 Scrapling 的高级反爬抓取器
 from scrapling.fetchers import Fetcher, StealthyFetcher
 
+from biz_rules.history_models import make_uuid
 from collection import transport
 from config.crawler_settings import DEFAULT_HEADERS
 from config.settings import APP
@@ -28,11 +28,6 @@ from config.settings import APP
 # ---------------------------------------------------------------------------
 #  工具函数
 # ---------------------------------------------------------------------------
-
-def make_uuid(identifier: str) -> str:
-    """基于 URL 或文件路径生成确定性 UUID5，保证幂等。"""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, identifier))
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

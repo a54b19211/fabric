@@ -9,8 +9,7 @@ Fierce Pharma RSS + 详情页混合采集器。
 """
 
 import re
-import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterator
 from xml.etree import ElementTree as ET
 
@@ -19,7 +18,7 @@ from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
 from biz_rules.extractors.fiercepharma.fiercepharma import extract_fiercepharma_detail
-from biz_rules.history_models import ItemUnreadable
+from biz_rules.history_models import ItemUnreadable, make_uuid
 from collection import transport
 
 # RSS 命名空间
@@ -35,14 +34,6 @@ RSS_FEEDS = [
 
 RETRY_DELAY = 10.0  # 第一次没读全，隔多久重读一次（秒）
 MIN_BODY_CHARS = 1000  # 正文比这短，当作页面没读全（整篇文章实测五千字上下）
-
-
-def _make_uuid(identifier: str) -> str:
-    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, identifier))
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _parse_rss(xml_bytes: bytes) -> list[dict]:
@@ -180,7 +171,7 @@ def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
 
     for item in items:
         url = item["url"]
-        doc_uuid = _make_uuid(url)
+        doc_uuid = make_uuid(url)
 
         try:
             extracted = _read_article(url)
@@ -209,5 +200,4 @@ def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
             "source_url": url,
             "source_site": "fiercepharma",
             "sniffed_meta": {},
-            "timestamp": _now_iso(),
         }

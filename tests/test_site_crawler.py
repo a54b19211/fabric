@@ -364,7 +364,7 @@ def test_api_site_records_become_site_record_versions_with_their_attachments(fak
     [record] = batch["records"]
     data = json.loads(record.raw_content)
     assert data["role"] == "site_record" and data["raw"]["id"] == "R1" and data["parsed"]["title"] == "召回一"
-    from core_engine.api_router import _make_uuid
+    from biz_rules.history_models import make_uuid as _make_uuid
     assert record.source_record_id == _make_uuid("fda_api_enforcement:R1")
     assert batch["stop_reason"] == "record_budget" and batch["next_continuation"]
     projected = site_crawler.project_capture("fda_api_enforcement", record)
@@ -1174,7 +1174,7 @@ def test_a_read_that_stored_nothing_new_is_not_a_failure_but_an_empty_list_is(fa
 
 
 def test_api_site_stops_at_known_records_and_an_empty_result_is_an_alarm_too(fake_web, monkeypatch, stored):
-    from core_engine.api_router import _make_uuid
+    from biz_rules.history_models import make_uuid as _make_uuid
 
     items = [{"id": f"R{i}", "t": f"召回{i}", "d": "2026-01-0" + str(i + 1), "u": f"https://x.invalid/{i}"} for i in range(6)]
     profile = {"source_type": "api", "api": {}, "uid_field": "id",

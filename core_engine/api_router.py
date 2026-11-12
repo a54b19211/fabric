@@ -10,13 +10,9 @@
 """
 
 import json
-import uuid as _uuid
 
 from biz_rules.cleaners.field.date_format import normalize_date
-
-
-def _make_uuid(identifier: str) -> str:
-    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, identifier))
+from biz_rules.history_models import make_uuid
 
 
 def _get_nested(record: dict, dotted_key) -> str:
@@ -139,11 +135,11 @@ def to_result(site_key: str, profile: dict, record: dict) -> tuple[dict, dict | 
             and (record.get("source_site") or record.get("parse_method")):
         if not record.get("uuid"):
             src = record.get("source_url", json.dumps(record, sort_keys=True))
-            record = {**record, "uuid": _make_uuid(f"{site_key}:{src}")}
+            record = {**record, "uuid": make_uuid(f"{site_key}:{src}")}
         return record, None
 
     uid_src = _get_nested(record, uid_field) if uid_field else json.dumps(record, sort_keys=True)
-    doc_uuid = _make_uuid(f"{site_key}:{uid_src}")
+    doc_uuid = make_uuid(f"{site_key}:{uid_src}")
     title = _get_nested(record, field_map.get("title", ""))
     publish_date = normalize_date(_get_nested(record, field_map.get("publish_date", "")))
     summary = _get_nested(record, field_map.get("summary", ""))

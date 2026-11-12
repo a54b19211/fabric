@@ -11,7 +11,6 @@ Roche Media Releases 采集器（Scrapling 版）
 """
 
 import re
-import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Iterator, Set
 
@@ -19,7 +18,7 @@ from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
 from biz_rules.cleaners.field.date_format import normalize_date
-from biz_rules.history_models import HistoryError, ItemUnreadable
+from biz_rules.history_models import HistoryError, ItemUnreadable, make_uuid
 from collection import transport
 
 RETRY_DELAY = 10.0  # 详情页第一次没读到，隔多久重读一次（秒）
@@ -27,10 +26,6 @@ RETRY_DELAY = 10.0  # 详情页第一次没读到，隔多久重读一次（秒�
 # 页面照常返回，解析出 0 条，这一年读完）；正常的页面 10 来秒就出现。
 LIST_READY = ".teaser__title"
 LIST_TIMEOUT = 30000
-
-
-def _make_uuid(source_url: str) -> str:
-    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"roche:{source_url}"))
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +184,7 @@ def _article_record(art: dict, body: str) -> dict:
         markdown += f"**Date:** {art['publish_date']}\n\n"
     markdown += f"**Source:** [{art['source_url']}]({art['source_url']})\n\n{body}"
     return {
-        "uuid": _make_uuid(art["source_url"]),
+        "uuid": make_uuid(f"roche:{art['source_url']}"),
         "title": art["title"],
         "publish_date": art["publish_date"],
         "markdown": markdown,

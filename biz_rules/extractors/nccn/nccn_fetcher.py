@@ -9,14 +9,12 @@
 """
 
 import re
-import uuid as _uuid
-from datetime import datetime, timezone
 from typing import Iterator
 
 from loguru import logger
 
 from biz_rules.extractors.nccn.nccn import extract_nccn_detail
-from biz_rules.history_models import ItemUnreadable
+from biz_rules.history_models import ItemUnreadable, make_uuid
 
 BASE_URL = "https://www.nccn.org"
 
@@ -41,14 +39,6 @@ def _render(fetcher, url: str, ready_selector: str):
     """渲染一页：等 ready_selector 出现，不等网络空闲、不加载图片等资源。"""
     return fetcher.fetch(url, network_idle=False, disable_resources=True, wait_selector=ready_selector,
                          timeout=45000, retries=2)
-
-
-def _make_uuid(identifier: str) -> str:
-    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, identifier))
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _extract_year(version: str) -> str:
@@ -192,7 +182,7 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
 
         for item in items:
             detail_url = item["detail_url"]
-            doc_uuid = _make_uuid(detail_url)
+            doc_uuid = make_uuid(detail_url)
 
             record: dict = {
                 "uuid": doc_uuid,
@@ -201,7 +191,6 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
                 "version": item["version"],
                 "category_name": item["category_name"],
                 "source_url": detail_url,
-                "crawl_timestamp": _now_iso(),
                 "pdf_url": "",
                 "sections": [],
                 "attachment_links": [],

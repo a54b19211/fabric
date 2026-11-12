@@ -42,7 +42,7 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
-from biz_rules.history_models import ArchiveRecord, HistoryError, ItemUnreadable, source_time
+from biz_rules.history_models import ArchiveRecord, HistoryError, ItemUnreadable, make_uuid, source_time
 from collection import transport
 from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
 
@@ -103,8 +103,6 @@ def _documents_engine():
 def _stored_attachment_links(site, parent_url):
     """documents 库 attachments 表里这个父文档的附件链接（只读、有界）。文档 uuid = uuid5(URL)。"""
     from sqlalchemy import text
-
-    from core_engine.scrapling_client import make_uuid
 
     with _documents_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout='10s'"))

@@ -6,6 +6,7 @@ import calendar
 import hashlib
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -46,6 +47,11 @@ class ItemUnreadable(HistoryError):
     def __init__(self, url: str, reason: str):
         super().__init__("item_unreadable", f"{reason} | {url}")
         self.url, self.reason = url, reason
+
+
+def make_uuid(identifier: str) -> str:
+    """URL、文件路径或“来源:记录键”的确定性 UUID5：同一个标识永远得到同一个 UUID（站点记录的身份，保证幂等）。"""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, identifier))
 
 
 class Model(BaseModel):

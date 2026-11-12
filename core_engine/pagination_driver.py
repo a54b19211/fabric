@@ -19,10 +19,11 @@ from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 
+from biz_rules.history_models import make_uuid
 from collection.transport import in_context
 from config.crawler_settings import DEFAULT_HEADERS, SITE_PROFILES
 from core_engine.excel_parser import _rows_to_markdown
-from core_engine.scrapling_client import fetch_page, make_uuid
+from core_engine.scrapling_client import fetch_page
 
 # ===================================================================
 #  基类
