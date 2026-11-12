@@ -10,6 +10,8 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 附件记录身份是“父记录#attachment=附件链接”（attachment_record_id）。下载链接每次都不同的（ChiCTR 的链接带一次性令牌），
 抽取器给附件一个固定的 key（页面上的字段名），身份改用“父记录#attachment=key”，带令牌的链接只在下载那一刻用，
 不存进原件（否则每抓一次就多一个附件、多一个版本）。
+一条记录读不到（拉取函数产出 ItemUnreadable：如 FiercePharma、Roche 的一篇详情页读了两次都不行）：
+记在本次读取的 unread_items（网址 + 原因），不存版本，接着读下一条；读到底时运行标“部分完成”，原因“有 N 条读不到”。
 
 读取方式（FetchRequest.query）：
 - "by_url"，source_record_ids=详情页 URL：重抓这些页面及其附件；
@@ -34,7 +36,7 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
-from biz_rules.history_models import ArchiveRecord, HistoryError, source_time
+from biz_rules.history_models import ArchiveRecord, HistoryError, ItemUnreadable, source_time
 from collection import transport
 from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
 
@@ -204,6 +206,8 @@ class _Reader:
         # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_attempted ...）。放在读取结果里，
         # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本。
         self.coverage: list[dict] = []
+        # 本次读取里读不到的条目（网址 + 原因），同样只记在读取结果里，不存版本
+        self.unread: list[dict] = []
         # 浏览器里只放行目标站点（及其子域）的请求，第三方的广告、统计、cookie 横幅直接中止、不占请求预算
         budget.site_host = _site_host(self.site)
 
@@ -217,6 +221,12 @@ class _Reader:
             self.records.append(record)
         else:
             self.records[at] = record
+
+    def skip(self, unread):
+        """拉取函数读不到一条记录（ItemUnreadable）：记下网址和原因，不存版本，读取接着往下走。"""
+        self.budget.check()  # 这期间时间或请求数用完了：那是停在这一条（续读从这里接），不是这一条读不到
+        self.unread.append({"url": unread.url, "reason": unread.reason})
+        logger.warning("站点 {} 有一条读不到：{} | {}", self.site, unread.reason, unread.url)
 
     def attachment(self, link, parent_id, cookies, discovered):
         """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。预算用完抛 _Stop。"""
@@ -367,6 +377,9 @@ def _site_results(reader, query):
         from core_engine.api_router import to_result
 
         for raw in profile["api_fetcher"](profile.get("api", {})):
+            if isinstance(raw, ItemUnreadable):  # the fetcher could not read this one and went on: passed on as it is
+                yield raw, None
+                continue
             parsed, kept = to_result(reader.site, profile, raw)
             yield parsed, kept
         return
@@ -432,11 +445,15 @@ def _read_site_records(request, reader, start, at):
     with closing(_site_results(reader, request.query)) as results:
         for position, (parsed, raw) in enumerate(results):
             at.position = position
-            if position < start_i:
-                continue
-            first = position == start_i
-            reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
-                               record_page=not (first and start_recorded))
+            if position >= start_i:
+                if isinstance(parsed, ItemUnreadable):  # not stored, noted; the next one
+                    reader.skip(parsed)
+                else:
+                    first = position == start_i
+                    reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
+                                       record_page=not (first and start_recorded))
+            # the fetcher reads the next item while the loop asks for it: a stop there resumes at that item
+            at.position = position + 1
 
 
 def _read_detail_pages(request, reader, start, at):
@@ -493,6 +510,12 @@ def _read(request, reader) -> dict:
             error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
             stop = "source_failed"
             logger.error("站点 {} 读取失败：{}", reader.site, error["message"])
+    if reader.unread and stop == "upstream_exhausted" and error is None:
+        # 读到底了，但有几条没读到：不能说读完。有版本的是“部分完成”，一个版本也没有的是“失败”（history._close_run）
+        first = reader.unread[0]
+        error = {"code": "items_unread",
+                 "message": f"有 {len(reader.unread)} 条读不到，如 {first['url']}：{first['reason']}"}
+        stop = "items_unread"
     return _site_read_result(request, reader, exhausted, stop, error, resume)
 
 
@@ -517,6 +540,7 @@ def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
         "count_drift": None,
         "next_continuation": next_continuation,
         "attachment_coverage": reader.coverage,
+        "unread_items": reader.unread,
     }
 
 

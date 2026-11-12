@@ -1009,14 +1009,18 @@ def job_input(run_id, attempt):
 
 def _reported_coverage(batch):
     """The parts of a read's coverage that only some plugins report: where to resume, how each attachment went,
-    for a windowed read what each window returned and which intervals may be cut short, and for a read made by an
-    explicit backfill its receipt (flows.who_backfill), which marks the run's new versions as background."""
+    which items could not be read (url and reason), for a windowed read what each window returned and which
+    intervals may be cut short, and for a read made by an explicit backfill its receipt (flows.who_backfill),
+    which marks the run's new versions as background."""
     reported = {}
     if batch.get("next_continuation") is not None:
         reported["next_continuation"] = batch["next_continuation"]
     if batch.get("attachment_coverage"):
         # 本次读取每个附件读没读到（站点插件），留在读取记录里，不进原件
         reported["attachment_coverage"] = batch["attachment_coverage"][:500]
+    if batch.get("unread_items"):
+        # 本次读取里读不到的条目（站点插件）：没存版本，只在这里留一份
+        reported["unread_items"] = batch["unread_items"][:500]
     for key in ("window_coverage", "truncated_intervals", "backfill"):
         if key in batch:
             reported[key] = batch[key]

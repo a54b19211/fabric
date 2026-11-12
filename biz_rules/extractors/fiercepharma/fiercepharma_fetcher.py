@@ -5,11 +5,10 @@ Fierce Pharma RSS + 详情页混合采集器。
   1. 通过 httpx 拉取 RSS XML，解析出文章 URL 和基本元数据
   2. 对每篇文章用 StealthyFetcher 渲染详情页，提取标题和正文（RSS 里的标题是空的，只有详情页有）
   3. yield 标准记录 dict（与 route_webpage 输出格式一致）
-详情页没读全（403、超时、标题或正文缺失）：重读一次，还不行就抛 HistoryError，这一篇不存版本。
+详情页没读全（403、超时、标题或正文缺失）：重读一次，还不行就记为读不到（ItemUnreadable），这一篇不存版本，接着读下一篇。
 """
 
 import re
-import time
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Iterator
@@ -20,7 +19,8 @@ from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
 from biz_rules.extractors.fiercepharma.fiercepharma import extract_fiercepharma_detail
-from biz_rules.history_models import HistoryError
+from biz_rules.history_models import ItemUnreadable
+from collection import transport
 
 # RSS 命名空间
 _DC_NS = "http://purl.org/dc/elements/1.1/"
@@ -141,11 +141,12 @@ def _fetch_rss_items(api_cfg: dict) -> list[dict]:
 
 def _read_article(url: str) -> dict:
     """读一篇详情页，返回提取结果（标题、日期、正文）。网站对同一篇偶尔回 403（反爬），或页面没读全；等一会儿重读
-    一次，两次都不行就抛 HistoryError：这一篇不存版本，原因写进这次读取的错误里。以前这里用 RSS 的摘要充数，
-    存下标题为空、正文两百字的半页，和整篇文章一样当成一个版本。"""
+    一次，两次都不行就抛 ItemUnreadable：这一篇不存版本，网址和原因记进这次读取的覆盖信息，接着读下一篇。
+    以前这里用 RSS 的摘要充数，存下标题为空、正文两百字的半页，和整篇文章一样当成一个版本。
+    等待用 transport.pause：到截止时间就停，不睡过头。"""
     why = ""
     for attempt in range(2):
-        time.sleep(REQUEST_DELAY if attempt == 0 else RETRY_DELAY)
+        transport.pause(REQUEST_DELAY if attempt == 0 else RETRY_DELAY)
         try:
             page = StealthyFetcher.fetch(
                 url,
@@ -162,9 +163,11 @@ def _read_article(url: str) -> dict:
             continue
         extracted = extract_fiercepharma_detail(page)
         if extracted["title"] and len(extracted["body_text"]) >= MIN_BODY_CHARS:
+            if attempt:  # why 还是第一次的原因
+                logger.warning(f"[FiercePharma] 重读一次后读全了（第一次：{why}） | {url}")
             return extracted
         why = f"页面没读全（标题 {len(extracted['title'])} 字，正文 {len(extracted['body_text'])} 字）"
-    raise HistoryError("source_read_failed", f"FiercePharma 详情页读取失败（已重读一次）：{why} | {url}")
+    raise ItemUnreadable(url, f"FiercePharma 详情页读取失败（已重读一次）：{why}")
 
 
 def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
@@ -179,7 +182,11 @@ def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
         url = item["url"]
         doc_uuid = _make_uuid(url)
 
-        extracted = _read_article(url)
+        try:
+            extracted = _read_article(url)
+        except ItemUnreadable as unread:
+            yield unread  # 不是抛出：抛出会结束这个生成器。读取方（collection.site_crawler）记下这一篇，再要下一篇
+            continue
         title = extracted["title"]
         pub_date = extracted["publish_date"] or item["pub_date"]  # 日期页面上没有时用 RSS 的
         body_text = extracted["body_text"]

@@ -159,6 +159,16 @@ def current() -> Budget | None:
     return _ACTIVE.get()
 
 
+def pause(seconds):
+    """A wait of a fetcher's own (the delay between pages, before a re-read) inside a read: it never runs past the
+    deadline, the read stops with "deadline" instead. Outside a read it is a plain sleep."""
+    budget = _ACTIVE.get()
+    if budget is None:
+        time.sleep(seconds)
+    else:
+        budget.pause(seconds)
+
+
 def gate(url):
     """一次真实传输之前（替身和自带传输的代码用）：有活动读取就过闸计数。"""
     budget = _ACTIVE.get()

@@ -38,6 +38,16 @@ class HistoryError(Exception):
         self.code, self.message, self.status = code, message, status
 
 
+class ItemUnreadable(HistoryError):
+    """One item of a read (an article's detail page, read twice) could not be read. A fetcher that goes through
+    items one by one yields this error instead of raising it, so its generator goes on with the next item;
+    collection.site_crawler notes the item (url and reason) in the read's coverage and stores no version for it."""
+
+    def __init__(self, url: str, reason: str):
+        super().__init__("item_unreadable", f"{reason} | {url}")
+        self.url, self.reason = url, reason
+
+
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

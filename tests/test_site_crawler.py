@@ -57,7 +57,6 @@ def fake_web(monkeypatch, tmp_path):
         return {"uuid": "f", "local_path": str(path), "source_url": pdf_url, "file_ext": "." + ext, "skipped": False,
                 "file_name": calls.get("file_name", "")}
 
-
     monkeypatch.setattr(site_crawler, "_fetch_page", fetch_page)
     monkeypatch.setattr(site_crawler, "_route_webpage", route_webpage)
     monkeypatch.setattr(site_crawler, "_download", download)
@@ -813,23 +812,25 @@ class _FiercePage:
 WHOLE = _FiercePage(200, "Merck KGaA lands FDA nod", "正文。" * 400)
 
 
-def _fierce_read(monkeypatch, pages):
+def _fierce_read(monkeypatch, pages, max_records=5, retry_delay=0):
     """pages：文章网址 → 依次给出的答复（页面替身，或要抛出的异常）。RSS 里的标题是空的，和真实情况一致。"""
     from biz_rules.extractors.fiercepharma import fiercepharma_fetcher as fetcher
 
     monkeypatch.setattr(fetcher, "REQUEST_DELAY", 0)
-    monkeypatch.setattr(fetcher, "RETRY_DELAY", 0)
+    monkeypatch.setattr(fetcher, "RETRY_DELAY", retry_delay)
     monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: [
         {"url": url, "guid": "", "title": "", "description": "RSS 摘要", "pub_date": "2026-11-01"} for url in pages])
 
     def fetch(url, **kwargs):
         answer = pages[url].pop(0)
-        if isinstance(answer, Exception):
+        if callable(answer):  # 要在读取中间做点什么（如让预算停下），再给答复
+            answer = answer()
+        if isinstance(answer, BaseException):  # 预算的 Stop 是 BaseException
             raise answer
         return answer
 
     monkeypatch.setattr(fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
-    return read_public(FetchRequest(source_id="fiercepharma", query="records", max_records=5))
+    return read_public(FetchRequest(source_id="fiercepharma", query="records", max_records=max_records))
 
 
 def test_fiercepharma_article_blocked_once_is_read_again_and_stored_whole(monkeypatch):
@@ -848,10 +849,123 @@ def test_fiercepharma_article_blocked_once_is_read_again_and_stored_whole(monkey
     ([_FiercePage(200), TimeoutError("Page.goto: Timeout 60000ms exceeded.")],
      "TimeoutError：Page.goto: Timeout 60000ms exceeded."),
 ])
-def test_fiercepharma_article_that_stays_unread_is_not_stored_and_fails_the_read(monkeypatch, answers, reason):
+def test_fiercepharma_article_that_stays_unread_is_noted_and_the_read_goes_on(monkeypatch, answers, reason):
+    """读了两次都不行的一篇：不存版本，网址和原因记进 unread_items，后面的文章照读；读到底时是“有 1 条读不到”。"""
     a, b, c = (f"https://www.fiercepharma.com/pharma/{x}" for x in "abc")
     batch = _fierce_read(monkeypatch, {a: [WHOLE], b: answers, c: [WHOLE]})
-    assert batch["error"] == {"code": "source_read_failed",
-                              "message": f"FiercePharma 详情页读取失败（已重读一次）：{reason} | {b}"}
-    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
-    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]  # 前面读全的保留，坏的这篇和后面的没存
+    why = f"FiercePharma 详情页读取失败（已重读一次）：{reason}"
+    assert batch["unread_items"] == [{"url": b, "reason": why}]
+    assert batch["error"] == {"code": "items_unread", "message": f"有 1 条读不到，如 {b}：{why}"}
+    assert batch["stop_reason"] == "items_unread" and not batch["upstream_pagination_exhausted"]
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a, c]  # 坏的这篇没存，后面的存了
+
+
+def test_fiercepharma_when_no_article_can_be_read_nothing_is_stored_and_every_one_is_listed(monkeypatch):
+    a, b = (f"https://www.fiercepharma.com/pharma/{x}" for x in "ab")
+    batch = _fierce_read(monkeypatch, {a: [_FiercePage(403)] * 2, b: [_FiercePage(403)] * 2})
+    assert batch["records"] == [] and [u["url"] for u in batch["unread_items"]] == [a, b]
+    assert batch["error"]["code"] == "items_unread" and batch["error"]["message"].startswith("有 2 条读不到")
+
+
+def test_fiercepharma_unread_articles_do_not_use_up_the_record_budget(monkeypatch):
+    """max_records 数的是版本：读不到的不占名额，读满之后照常停在 record_budget，读不到的清单还在。"""
+    a, b, c, d = (f"https://www.fiercepharma.com/pharma/{x}" for x in "abcd")
+    batch = _fierce_read(monkeypatch, {a: [_FiercePage(403)] * 2, b: [WHOLE], c: [WHOLE], d: [WHOLE]}, max_records=2)
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [b, c]
+    assert batch["stop_reason"] == "record_budget" and batch["error"] is None
+    assert [u["url"] for u in batch["unread_items"]] == [a]
+    assert json.loads(batch["next_continuation"]["cursor"])["i"] == 3  # 续读从第 4 篇接
+
+
+def test_fiercepharma_deadline_during_a_reread_is_a_stop_and_keeps_what_was_stored(monkeypatch):
+    """截止时间到的时候单篇正在读：运行是“到期”（停在这一篇、给续读位置），不是失败；已存的保留，这一篇不算读不到。"""
+    a, b, c = (f"https://www.fiercepharma.com/pharma/{x}" for x in "abc")
+    expired = lambda: transport.Stop("deadline")  # noqa: E731 -- 预算在发出请求前停下，和 transport.Budget.before_send 一样
+    batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [_FiercePage(403), expired], c: [WHOLE]})
+    assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
+    assert json.loads(batch["next_continuation"]["cursor"])["i"] == 1
+
+
+def test_fiercepharma_the_wait_before_a_reread_does_not_run_past_the_deadline(monkeypatch):
+    """第一次读失败后要等 RETRY_DELAY 秒再读：等不及就当场停在到期，不睡过头（以前 time.sleep 睡到过期才发现）。"""
+    a, b = (f"https://www.fiercepharma.com/pharma/{x}" for x in "ab")
+    batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [_FiercePage(403)]}, retry_delay=10_000)
+    assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
+
+
+def test_fiercepharma_failures_caused_by_the_budget_running_out_are_not_unreadable_articles(monkeypatch):
+    """预算用完时浏览器里的请求被中止，抓取报的错（这里是超时）只是预算停下的后果：停在这一篇，不记成读不到。"""
+    a, b = (f"https://www.fiercepharma.com/pharma/{x}" for x in "ab")
+
+    def budget_ran_out():
+        transport.current().stopped = "deadline"
+        return TimeoutError("Page.goto: Timeout 60000ms exceeded.")
+
+    batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [budget_ran_out, TimeoutError("again")]})
+    assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
+
+
+class _RocheDetail:
+    """Roche 详情页替身：状态码和正文（article 里的文字）。"""
+    def __init__(self, status, body=""):
+        self.status, self.body = status, body
+
+    def css(self, selector):
+        return [self] if self.body and selector == "article" else []
+
+    def get_all_text(self, **kwargs):
+        return self.body
+
+
+ROCHE_WHOLE = _RocheDetail(200, "Roche today announced new data. " * 20)
+
+
+def _roche_read(monkeypatch, details):
+    """details：文章网址 → 依次给出的答复（详情页替身，或要抛出的异常）。列表页：一页，列出这些文章，下一页是空的。"""
+    from biz_rules.extractors.roche import roche_web_fetcher as fetcher
+
+    api = site_crawler.SITE_PROFILES["roche"]["api"]
+    for name, value in {"year_end": 2026, "detail_delay": 0, "delay_between_requests": 0}.items():
+        monkeypatch.setitem(api, name, value)
+    monkeypatch.setattr(fetcher, "RETRY_DELAY", 0)
+    pages = iter([[{"title": "Title " + url[-1], "source_url": url, "publish_date": "2026-11-10"} for url in details], []])
+    monkeypatch.setattr(fetcher, "_parse_list_page", lambda page, collected, year, number: next(pages))
+
+    def fetch(url, **kwargs):
+        if "#/year/" in url:
+            return _RochePage(200)
+        answer = details[url].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
+    return read_public(FetchRequest(source_id="roche", query="records", max_records=5))
+
+
+def test_roche_detail_page_read_again_after_a_failure_is_stored_whole(monkeypatch):
+    a, b = (f"https://www.roche.com/media/releases/{x}" for x in "ab")
+    batch = _roche_read(monkeypatch, {a: [_RocheDetail(503), ROCHE_WHOLE], b: [TimeoutError("x"), ROCHE_WHOLE]})
+    assert batch["error"] is None and batch["upstream_pagination_exhausted"] and batch["unread_items"] == []
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a, b]
+    assert all("Roche today announced" in json.loads(r.raw_content)["parsed"]["markdown"] for r in batch["records"])
+
+
+@pytest.mark.parametrize("answers, reason", [
+    ([_RocheDetail(403), _RocheDetail(403)], "HTTP 403"),
+    ([TimeoutError("Page.goto: Timeout 60000ms exceeded."), _RocheDetail(502)], "HTTP 502"),
+    ([_RocheDetail(200, ""), _RocheDetail(200, "")], "正文为空"),
+    ([_RocheDetail(200, ""), TimeoutError("Page.goto: Timeout 60000ms exceeded.")],
+     "TimeoutError：Page.goto: Timeout 60000ms exceeded."),
+])
+def test_roche_detail_page_that_stays_unread_is_not_stored_with_an_empty_body(monkeypatch, answers, reason):
+    """以前读不到就返回空正文，标题照存，存成一个只有标题的版本。现在记为读不到，不存，后面的照读。"""
+    a, b, c = (f"https://www.roche.com/media/releases/{x}" for x in "abc")
+    batch = _roche_read(monkeypatch, {a: [ROCHE_WHOLE], b: answers, c: [ROCHE_WHOLE]})
+    why = f"Roche 详情页读取失败（已重读一次）：{reason}"
+    assert batch["unread_items"] == [{"url": b, "reason": why}]
+    assert batch["error"]["code"] == "items_unread" and batch["stop_reason"] == "items_unread"
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a, c]

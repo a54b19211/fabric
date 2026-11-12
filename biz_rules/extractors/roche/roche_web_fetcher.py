@@ -5,12 +5,12 @@ Roche Media Releases 采集器（Scrapling 版）
 采集方式：
   1. 用 StealthyFetcher 抓取列表页（支持 hash 路由分页）
      URL 格式: https://www.roche.com/media/releases#/year/{year}/page/{page}
-  2. 用 Fetcher（快速）抓取详情页正文，失败时降级到 StealthyFetcher
+  2. 用 StealthyFetcher 抓取详情页正文；没读到就重读一次，还不行就记为读不到（ItemUnreadable），
+     这一篇不存版本（不存空正文），接着读下一篇
   3. 按年份从高到低遍历，每年按页递增，直到某页返回 0 条为止
 """
 
 import re
-import time
 import uuid as _uuid
 from typing import Iterator, Set
 
@@ -18,7 +18,10 @@ from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
 from biz_rules.cleaners.field.date_format import normalize_date
-from biz_rules.history_models import HistoryError
+from biz_rules.history_models import HistoryError, ItemUnreadable
+from collection import transport
+
+RETRY_DELAY = 10.0  # 详情页第一次没读到，隔多久重读一次（秒）
 
 
 def _make_uuid(source_url: str) -> str:
@@ -131,26 +134,34 @@ def _parse_list_page(page, collected_urls: Set[str], year: int, page_num: int) -
 # ---------------------------------------------------------------------------
 
 def _fetch_detail(url: str, delay: float) -> str:
-    """抓取详情页正文，使用 StealthyFetcher。"""
+    """抓取详情页正文，使用 StealthyFetcher。没读到（状态码不是 2xx、抛错、正文为空）就隔 RETRY_DELAY 秒重读一次，
+    还不行就抛 ItemUnreadable：这一篇不存版本，网址和原因记进这次读取的覆盖信息。以前读不到返回空正文，
+    标题照存，存成一个只有标题的版本。等待用 transport.pause：到截止时间就停，不睡过头。"""
     if _is_non_html(url):
         return ""
 
-    time.sleep(delay)
-
-    try:
-        page = StealthyFetcher.fetch(
-            url,
-            headless=True,
-            network_idle=False,
-            disable_resources=True,
-            timeout=60000,
-        )
-        if page.status and 200 <= page.status < 300:
-            return _extract_body(page)
-    except Exception as e:
-        logger.error(f"[Roche] 详情页抓取失败: {url} | {e}")
-
-    return ""
+    why = ""
+    for attempt in range(2):
+        transport.pause(delay if attempt == 0 else RETRY_DELAY)
+        try:
+            page = StealthyFetcher.fetch(
+                url,
+                headless=True,
+                network_idle=False,
+                disable_resources=True,
+                timeout=60000,
+            )
+        except Exception as e:  # noqa: BLE001 -- 原因写进下面的错误
+            why = type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120]
+            continue
+        if not (page.status and 200 <= page.status < 300):
+            why = f"HTTP {page.status}"
+            continue
+        body = _extract_body(page)
+        if body.strip():
+            return body
+        why = "正文为空"
+    raise ItemUnreadable(url, f"Roche 详情页读取失败（已重读一次）：{why}")
 
 
 def _extract_body(page) -> str:
@@ -163,6 +174,32 @@ def _extract_body(page) -> str:
                 return text
     # 兜底：全页文本
     return page.get_all_text(ignore_tags=("script", "style", "nav", "footer", "header"))
+
+
+def _article_record(art: dict, body: str) -> dict:
+    """列表页上的一条（标题、网址、日期）加详情页正文 → 标准记录 dict。"""
+    markdown = f"# {art['title']}\n\n"
+    if art["publish_date"]:
+        markdown += f"**Date:** {art['publish_date']}\n\n"
+    markdown += f"**Source:** [{art['source_url']}]({art['source_url']})\n\n{body}"
+    return {
+        "uuid": _make_uuid(art["source_url"]),
+        "title": art["title"],
+        "publish_date": art["publish_date"],
+        "markdown": markdown,
+        "structured_data": {
+            "title": art["title"],
+            "publish_date": art["publish_date"],
+            "source_url": art["source_url"],
+            "category": "制药企业新闻",
+            "manufacturer": "Roche",
+        },
+        "sniffed_meta": {},
+        "attachment_links": [],
+        "source_url": art["source_url"],
+        "source_site": "roche",
+        "parse_method": "scrapling_stealthy",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -216,37 +253,19 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
             # 列表页抓完立即逐条抓详情页并 yield
             for art in page_articles:
                 logger.info(f"[Roche] 详情页 {art['source_url']}")
-                body = _fetch_detail(art["source_url"], detail_delay)
+                try:
+                    body = _fetch_detail(art["source_url"], detail_delay)
+                except ItemUnreadable as unread:
+                    yield unread  # 不是抛出：抛出会结束这个生成器。读取方（collection.site_crawler）记下这一篇，再要下一篇
+                    continue
 
-                markdown = f"# {art['title']}\n\n"
-                if art["publish_date"]:
-                    markdown += f"**Date:** {art['publish_date']}\n\n"
-                markdown += f"**Source:** [{art['source_url']}]({art['source_url']})\n\n{body}"
-
-                yield {
-                    "uuid": _make_uuid(art["source_url"]),
-                    "title": art["title"],
-                    "publish_date": art["publish_date"],
-                    "markdown": markdown,
-                    "structured_data": {
-                        "title": art["title"],
-                        "publish_date": art["publish_date"],
-                        "source_url": art["source_url"],
-                        "category": "制药企业新闻",
-                        "manufacturer": "Roche",
-                    },
-                    "sniffed_meta": {},
-                    "attachment_links": [],
-                    "source_url": art["source_url"],
-                    "source_site": "roche",
-                    "parse_method": "scrapling_stealthy",
-                }
+                yield _article_record(art, body)
 
                 total_yielded += 1
                 if max_articles > 0 and total_yielded >= max_articles:
                     return
 
-            time.sleep(delay)
+            transport.pause(delay)
 
         if max_articles > 0 and total_yielded >= max_articles:
             break

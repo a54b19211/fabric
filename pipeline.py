@@ -77,7 +77,7 @@ STATES = {"completed": "完成", "partial": "部分完成（读满 --max 条或�
 STOPS = {"upstream_exhausted": "来源读完了", "record_budget": "读满了 --max 条", "page_budget": "翻满了页数上限",
          "deadline": "到了 --deadline 截止时间", "byte_budget": "下载量到了上限", "request_budget": "请求数到了上限",
          "outbound_quota_day": "本机今天对该站的请求数到了上限", "outbound_quota_hour": "本机这一小时对该站的请求数到了上限",
-         "source_failed": "来源读取失败"}
+         "source_failed": "来源读取失败", "items_unread": "读到底了，但有几条读不到（网址和原因在运行记录的 unread_items 里）"}
 
 
 def fetch(site, max_records, deadline):
@@ -105,6 +105,8 @@ def report_fetch(run_id):
     new, same = cover.get("new_version_count", 0), cover.get("same_version_count", 0)
     print(f"fetch   运行号 {run_id}：状态 {STATES.get(run.state, run.state)}，停止原因 {why}，"
           f"新增 {new} 个版本，{same} 个没变，共 {len(run.version_ids)} 个版本")
+    if run.version_ids and isinstance(run.error, dict):  # 部分完成：版本保留，原因在这里（如“有 2 条读不到”）
+        print("        ", run.error.get("message"))
     if not run.version_ids:
         reason = (run.error or {}).get("message") or why
         hint = "；网页站点一页常要 30 秒，请加大 --deadline（最大 120）" if cover.get("stop_reason") == "deadline" else ""
