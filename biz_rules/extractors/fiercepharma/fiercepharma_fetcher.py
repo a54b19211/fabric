@@ -25,8 +25,10 @@ from collection import transport
 # RSS 命名空间
 _DC_NS = "http://purl.org/dc/elements/1.1/"
 
+# 和 config/sites/fiercepharma.py 的 rss_feeds 一样。总源 https://www.fiercepharma.com/rss/xml 已去掉：
+# 它每次回 403（Cloudflare 的人机验证，响应头 cf-mitigated: challenge；/rss 也一样），没有替代地址
+# （/rss.xml 只有 10 条，其中 9 条是网络研讨会、资源页，不是新闻），不绕过验证。读不到它之前也没给过一条，覆盖没变。
 RSS_FEEDS = [
-    "https://www.fiercepharma.com/rss/xml",
     "https://www.fiercepharma.com/rss/Pharma/xml",
     "https://www.fiercepharma.com/rss/manufacturing/xml",
 ]

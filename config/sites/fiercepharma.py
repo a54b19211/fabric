@@ -8,8 +8,9 @@ CONFIG = {
     "source_type": "api",
     "url_pattern": "fiercepharma.com",
     "api": {
+        # 总源 /rss/xml 已去掉：每次回 403（Cloudflare 人机验证，cf-mitigated: challenge），没有替代地址
+        # （/rss.xml 只有 10 条，多数是网络研讨会、资源页），不绕过验证。2026-11-12 查证。
         "rss_feeds": [
-            "https://www.fiercepharma.com/rss/xml",
             "https://www.fiercepharma.com/rss/Pharma/xml",
             "https://www.fiercepharma.com/rss/manufacturing/xml",
         ],
