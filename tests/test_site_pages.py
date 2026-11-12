@@ -135,6 +135,10 @@ HKEX_ROWS = [
      "DOD_WEB_PATH": "", "STOCK_NAME": "中國生物製藥", "FILE_TYPE": "PDF", "DATE_TIME": "08/10/2026 17:30",
      "TITLE": "自願公告 - TQC3721吸入混懸液「PDE3&#x2f;4抑制劑」III期註冊臨床完成全部受試者入組",
      "STOCK_CODE": "01177", "FILE_LINK": "/listedco/listconews/sehk/2026/1008/2026100800670_c.pdf"},
+    {"FILE_INFO": "1KB", "NEWS_ID": "12299999", "SHORT_TEXT": "公告及通告 - [海外監管公告-其他]<br/>", "DOD_WEB_PATH": "",
+     "STOCK_NAME": "中國生物製藥", "FILE_TYPE": "HTM", "DATE_TIME": "30/09/2026 09:00",
+     "TITLE": "發行人剛在本網站英文版面發布一項公告，相應中文版本或會／或不會在本版面發布。",
+     "STOCK_CODE": "01177", "FILE_LINK": "/listedco/listconews/sehk/2026/0930/2026093001075_c.htm"},
 ]
 HKEX_COMPANIES = [{"code": "00013", "name": "和黃醫藥", "stock_id": 1000001102},
                   {"code": "01177", "name": "中國生物製藥", "stock_id": 6833}]
@@ -191,12 +195,13 @@ def test_hkex_end_date_defaults_to_today_and_is_sent_as_yyyymmdd(monkeypatch):
 
 
 def test_hkex_skips_the_display_document_notice_rows(monkeypatch):
-    """“展示文件”行只是提示语，不是公告：不读。普通公告照常读到。"""
+    """“展示文件”行只是提示语，不是公告：不读。同一句提示语也会出现在普通文件类型下（链接到一页只有这句话的 .htm，
+    14 家公司的 2187 条里有 35 条），按标题也跳过。普通公告照常读到。"""
     announcements, _ = _hkex_read(monkeypatch)
     assert [a["stock_code"] for a in announcements] == ["00013", "01177"]
     assert announcements[0]["pdf_url"].endswith("/2026/1105/2026110500118_c.pdf")
-    kept, _ = _hkex_read(monkeypatch, {"skip_headlines": []})
-    assert len(kept) == 3
+    kept, _ = _hkex_read(monkeypatch, {"skip_headlines": [], "skip_titles": []})
+    assert len(kept) == 4
 
 
 def test_hkex_title_is_the_announcement_title_and_the_file_type_column_is_kept_apart(monkeypatch):

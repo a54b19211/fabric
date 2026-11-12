@@ -34,14 +34,14 @@ def _day(release_time: str) -> str:
     return f"{found[3]}-{int(found[2]):02d}-{int(found[1]):02d}" if found else ""
 
 
-def _parse_row(row: Dict, company: Dict, skip_headlines) -> Dict | None:
-    """接口的一行 → 一条公告。不是公告的返回 None：文件类型栏在 skip_headlines 里（如“展示文件”，只是提示语）。
+def _parse_row(row: Dict, company: Dict, skip_headlines, skip_titles) -> Dict | None:
+    """接口的一行 → 一条公告。不是公告的返回 None：文件类型栏在 skip_headlines 里（如“展示文件”），或标题在 skip_titles 里
+    （同一句“发行人刚在英文版发布了公告……”也会出现在普通文件类型下，链接到一页只有这句话的 .htm）——都只是提示语。
     title 是公告真正的标题（页面上文件链接的文字）；doc_type 是“文件类型”栏（如“公告及通告 - [...]”“月報表”）。"""
-    doc_type = _plain(row.get("SHORT_TEXT"))
-    if doc_type in skip_headlines:
+    doc_type, title = _plain(row.get("SHORT_TEXT")), _plain(row.get("TITLE"))
+    if doc_type in skip_headlines or title in skip_titles:
         return None
     pdf_url = urljoin(SITE, row["FILE_LINK"]) if row.get("FILE_LINK") else ""
-    title = _plain(row.get("TITLE"))
     return {
         "release_time": row.get("DATE_TIME", ""),
         "publish_date": _day(row.get("DATE_TIME")),
@@ -101,7 +101,7 @@ def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
     """从港交所披露易拉取上市公司公告，一条一条给。读不到的公司给一个 ItemUnreadable（写明哪家、为什么，采集插件记下它、
     不存版本），接着读下一家。"""
     companies = api_config.get("companies", PHARMA_COMPANIES)
-    skip_headlines = api_config.get("skip_headlines", ())
+    skip_headlines, skip_titles = api_config.get("skip_headlines", ()), api_config.get("skip_titles", ())
     logger.info(f"[HKEX] 公司数量: {len(companies)}")
     seen = set()  # 联合公告会出现在几家公司名下，同一个文件只给一次
     for company in companies:
@@ -111,7 +111,7 @@ def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
             yield ItemUnreadable(f"{api_config['base_url']}?stockId={company.get('stock_id')}", exc.message)
             continue
         for row in rows:
-            announcement = _parse_row(row, company, skip_headlines)
+            announcement = _parse_row(row, company, skip_headlines, skip_titles)
             if announcement and announcement["pdf_url"] not in seen:
                 seen.add(announcement["pdf_url"])
                 yield announcement
