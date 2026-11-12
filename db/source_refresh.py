@@ -21,7 +21,7 @@ from biz_rules.history_models import (
 from biz_rules.timestamps import parse_timestamp
 from collection import rate, transport
 from collection.catalog import CATALOG, WATCHABLE, spec
-from collection.windows import cycle_request, first_unread
+from collection.windows import SEGMENTS_PER_CYCLE, cycle_request, first_unread
 from db import history, publication
 
 
@@ -114,10 +114,8 @@ def _save(engine, key, state):
 
 
 def _hold_at_ceiling(watch, state, coverage, now):
-    """The read stopped at an outbound ceiling (collection.rate). That is neither a failure nor a loss: the reason is
-    the run's stop_reason, kept in last_coverage. Pages already read stay read. The cycle ends without success and
-    without moving the checkpoint, and the next cycle resumes at the cursor, or, when no page was read, plans its
-    window again from the same checkpoint."""
+    """读取停在出站上限（collection.rate）：既不是失败也不是丢数据，原因写在运行的 stop_reason、留在 last_coverage。
+    已读的页保留。这一周期不记成功、检查点不动；下一周期从续读位置接着读，一页都没读到就按同一个检查点重新定窗口。"""
     if coverage.get("next_continuation"):
         state["request"]["continuation"] = coverage["next_continuation"]
     elif not state["request"].get("continuation"):
@@ -126,26 +124,39 @@ def _hold_at_ceiling(watch, state, coverage, now):
     state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
 
 
-def _page_finished(watch, state, coverage, now):
-    """Record a read that ended without error: ask for the next page, or end the cycle.
+def _stalled(state, coverage):
+    """续读位置和请求里的一样，而且这一段一个版本也没读到：原地没动（比如重放就用完了截止时间）。"""
+    before = state["request"].get("continuation") or {}
+    after = coverage["next_continuation"]
+    return coverage.get("adopted_count") == 0 and all(after.get(key) == before.get(key) for key in ("cursor", "read_count"))
 
-    A read that stopped at an outbound ceiling ends the cycle with that reason (_hold_at_ceiling). Any other read that
-    stopped short without a cursor is an error, except a windowed one (GDELT): its receipts show which intervals may
-    be cut short and which windows were not reached. The cycle ends with those gaps left in the receipts, and the
-    checkpoint moves to the first window not reached so that the next cycle reads from there."""
+
+def _page_finished(watch, state, coverage, now):
+    """记下一次没有出错的读取：要下一段就接着读，或者结束这一周期。
+
+    停在出站上限的读取带着原因结束这一周期（_hold_at_ceiling）。其他没有续读位置的提前停止都是错误，除了按窗口读的
+    （GDELT）：它的回执写明哪些区间可能被截断、哪些窗口没读到，周期带着这些缺口结束，检查点移到第一个没读到的窗口。
+    “遇到已存的就停”的来源一个周期最多读 SEGMENTS_PER_CYCLE 段就收工记成功：第一次读一个很深的来源（空库）不会
+    一个周期接一个周期地读下去，更老的交给回填（ops/backfill_source.py）。"""
     state["last_page_at"] = now.isoformat()
     state["last_coverage"] = coverage
     state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
+    state["fail_streak"] = 0
     if coverage.get("stop_reason") in rate.CEILING_STOPS and "window_coverage" not in coverage:
         return _hold_at_ceiling(watch, state, coverage, now)
+    capped = (watch.mode == "realtime" and spec(watch.request.source_id).incremental.kind == "stop_at_known"
+              and state["cycle_pages"] >= SEGMENTS_PER_CYCLE)
     if coverage.get("next_continuation"):
-        state["request"]["continuation"] = coverage["next_continuation"]
-        state["state"] = "paging"
-        state["next_check_at"] = now.isoformat()
-        return
+        if _stalled(state, coverage):
+            raise HistoryError("source_watch_no_progress", "续读位置没有前进，这一段一个版本也没读到；下个间隔再试", 503)
+        if not capped:
+            state["request"]["continuation"] = coverage["next_continuation"]
+            state["state"] = "paging"
+            state["next_check_at"] = now.isoformat()
+            return
     checkpoint, finished = state.get("window_ended_at"), True
     # 增量读取读到了已存且没变的原件（reached_known）：前面都是读过的，这一周期到此为止，不是“截断”
-    if coverage.get("upstream_pagination_exhausted") is not True and coverage.get("stop_reason") != transport.KNOWN:
+    if not (capped or coverage.get("upstream_pagination_exhausted") is True or coverage.get("stop_reason") == transport.KNOWN):
         if "window_coverage" not in coverage:
             # 截断且无可靠续页位置不能称完成，更不能跳过未知页。
             raise HistoryError(
@@ -179,6 +190,9 @@ def _plan_cycle(watch, state, now):
         cycle_started_at=now.isoformat(),
         cycle_pages=0,
     )
+
+
+GIVE_UP_AFTER = 3  # 同一周期连续失败（读取失败、续读位置不前进）这么多次，就放弃这一周期
 
 
 def _read_all_next_time(state):
@@ -294,15 +308,21 @@ def refresh_once(engine=None):
             ).isoformat()
             # 已完成失败页用新run重试相同范围/续页；未知create/入队结果保留固定key。
             # 只有运行本身失败（failed，或带着错误的 partial）才换新 run；正常的 partial（只是预算用完）不是失败。
+            # 续读位置没前进的那一段读完了也没错，同样要换新 run 重读（否则每个间隔都取回同一个结果）。
             if state.get("active_run_id"):
                 try:
                     saved = history.read_run(state["active_run_id"])
-                    if saved.state == "failed" or saved.error:
+                    if saved.state == "failed" or saved.error or exc.code == "source_watch_no_progress":
                         state.pop("active_run_id", None)
                         state.pop("request_key", None)
                         _read_all_next_time(state)
                 except HistoryError:
                     pass
+            state["fail_streak"] = int(state.get("fail_streak", 0)) + 1
+            if state["fail_streak"] >= GIVE_UP_AFTER and "active_run_id" not in state:
+                # 同一周期连续失败这么多次：放弃这一周期，下个间隔从头（窗口来源从检查点）重新规划，不永远卡在同一个位置
+                state.pop("request", None)
+                state["fail_streak"] = 0
         finally:
             state["lease_until"] = None
             _save(engine, key, state)

@@ -239,6 +239,31 @@ def test_page_finished_pages_on_ends_at_the_end_and_still_rejects_a_stop_short_w
     assert exc.value.code == "source_watch_no_cursor"
 
 
+def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalled_cursor_is_a_failure():
+    from collection.windows import SEGMENTS_PER_CYCLE
+
+    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+    more = {"next_continuation": {"cursor": "c", "read_count": 100}, "upstream_pagination_exhausted": False}
+    state = {"request": {}, "cycle_pages": SEGMENTS_PER_CYCLE - 2}  # one more is still read on
+    _page_finished(pubmed, state, more, NOW)
+    assert state["state"] == "paging" and state["request"]["continuation"] == more["next_continuation"]
+    state["cycle_pages"] = SEGMENTS_PER_CYCLE - 1  # the last segment of the cycle: done, the older ones are the backfill's
+    _page_finished(pubmed, state, more, NOW)
+    assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
+    # a source read by its update window is not cut off: the window has to be read to its end
+    window = {"request": {}, "window_ended_at": NOW.isoformat(), "cycle_pages": 50}
+    _page_finished(ct_watch(), window, more, NOW)
+    assert window["state"] == "paging"
+    # the cursor did not move and the segment read nothing: that is not progress
+    stalled = {"request": {"continuation": more["next_continuation"]}}
+    with pytest.raises(HistoryError) as exc:
+        _page_finished(pubmed, stalled, {**more, "adopted_count": 0}, NOW)
+    assert exc.value.code == "source_watch_no_progress"
+    moved = {"request": {"continuation": {"cursor": "c", "read_count": 0}}}
+    _page_finished(pubmed, moved, {**more, "adopted_count": 100}, NOW)
+    assert moved["state"] == "paging"
+
+
 def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the_cursor():
     who = SourceWatch.model_validate(
         {"id": "w", "cadence_seconds": 900, "request": {"source_id": "who_don", "query": "*"}}

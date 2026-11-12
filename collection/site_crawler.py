@@ -456,16 +456,16 @@ def _read_site_records(request, reader, start, at):
     start_i, start_a, start_recorded = start
     with closing(_site_results(reader, request.query)) as results:
         for position, (parsed, raw) in enumerate(results):
-            at.position = position
-            if position >= start_i:
-                if isinstance(parsed, ItemUnreadable):  # not stored, noted; the next one
+            if position >= start_i:  # 前面的是重放：续读位置只往前走，重放途中停下也不倒退
+                at.position = position
+                if isinstance(parsed, ItemUnreadable):  # 读不到：不存版本，记下，接着读下一条
                     reader.skip(parsed)
                 else:
                     first = position == start_i
                     reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
                                        record_page=not (first and start_recorded))
-            # the fetcher reads the next item while the loop asks for it: a stop there resumes at that item
-            at.position = position + 1
+                # 拉取函数在循环来要下一条时才去读它：停在那里，就从那一条接着读
+                at.position = position + 1
     if at.position == 0:
         raise HistoryError("list_empty", LIST_EMPTY)
 
@@ -488,6 +488,7 @@ def _read_detail_pages(request, reader, start, at):
                             record_page=not (first and start_recorded))
             except Exception as exc:  # noqa: BLE001 -- 这一页读不出来：和接口站点的 ItemUnreadable 一样记下，接着读下一页
                 reader.skip(ItemUnreadable(url, _why(exc)))
+            at.position = seen + 1  # 这一项读完了：下一页列表要在这之后才取，停在那里就从下一项接
     if seen < 0:
         raise HistoryError("list_empty", LIST_EMPTY)
 
@@ -501,11 +502,16 @@ def _why(exc) -> str:
     return type(exc).__name__ + ("：" + line[:200] if line else "")
 
 
+def _stopped_at(at, start):
+    """在父项中途停下（不是附件中途）的续读位置。还没走到起点那一项（重放时停下），位置原样不动，不倒退。"""
+    return start if at.position == start[0] else (at.position, 0, False)
+
+
 def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
     续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件}。"""
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
-    at = _Progress()
+    at, start = _Progress(), (0, 0, False)
     try:
         start = _cursor(request)
         at.position = start[0]
@@ -520,12 +526,12 @@ def _read(request, reader) -> dict:
         stop, resume = stopped.reason, (at.position, stopped.attachment, stopped.page_recorded)
     except _Stop as stopped:
         # 读到旧的了（增量读取）：没有下一页要接
-        stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else (at.position, 0, False)
+        stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else _stopped_at(at, start)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
         if reader.budget.stopped:  # 浏览器里的请求因预算被中止，驱动随后报的错不是来源失败
-            stop, resume = reader.budget.stopped, (at.position, 0, False)
+            stop, resume = reader.budget.stopped, _stopped_at(at, start)
         else:
             error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
             stop = "source_failed"

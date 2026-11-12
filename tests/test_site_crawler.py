@@ -1124,6 +1124,27 @@ def test_a_detail_page_that_cannot_be_read_does_not_stop_the_list(fake_web, monk
     assert batch["error"]["code"] == "items_unread" and "有 1 条读不到" in batch["error"]["message"]
 
 
+def test_a_stop_while_replaying_to_the_cursor_does_not_move_the_cursor_back(fake_web, monkeypatch):
+    """接口站点没有可恢复的游标，续读从头重放到续读位置。重放途中时间到了：位置原样不动（以前倒退到重放走到的地方）。"""
+    items = [{"id": f"R{i}", "t": f"召回{i}", "d": "2026-01-01", "u": f"https://x.invalid/{i}"} for i in range(8)]
+
+    def fetcher(cfg):
+        for i, item in enumerate(items):
+            if i == 2:
+                raise transport.Stop("deadline")  # 重放还没走到第 5 条
+            yield item
+
+    profile = {"source_type": "api", "api": {}, "uid_field": "id",
+               "field_map": {"title": "t", "publish_date": "d", "source_url": "u"}, "api_fetcher": fetcher}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_enforcement", profile)
+    first = FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100)
+    cursor = {"i": 4, "a": 1, "p": 1}
+    cont = {"scope_hash": first.scope_hash(), "cursor": json.dumps(cursor), "read_count": 4}
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100, continuation=cont))
+    assert batch["records"] == [] and batch["stop_reason"] == "deadline" and batch["error"] is None
+    assert json.loads(batch["next_continuation"]["cursor"]) == cursor  # 同一个位置，连附件序号也不丢
+
+
 def test_budget_known_counts_consecutive_known_only():
     budget = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60, known_stop=3)
     budget.is_known = lambda item: item != "new"

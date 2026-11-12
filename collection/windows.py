@@ -22,6 +22,7 @@ from biz_rules.timestamps import parse_timestamp
 from collection.catalog import spec
 
 KNOWN_STOP = 3  # 连续读到这么多条“已存且没变”的，就当读到旧的了（老 ETL 是 1 条；3 条能容忍置顶的老条目）
+SEGMENTS_PER_CYCLE = 5  # “遇到已存的就停”的来源，一个刷新周期最多读这么多段（每段最多 max_records 条）；更老的交给回填
 
 
 def window_start(watch, state: dict, now: datetime) -> datetime:
