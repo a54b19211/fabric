@@ -181,7 +181,7 @@ def to_result(site_key: str, profile: dict, record: dict) -> tuple[dict, dict | 
             "manufacturer": manufacturer,
         },
         "parse_method": "api",
-        "attachment_links": [],
+        "attachment_links": record.get("attachment_links") or [],  # 拉取函数给出附件链接（如港交所的公告 PDF）就带上
         "source_url": source_url,
         "source_site": site_key,
         "sniffed_meta": sniffed_meta,

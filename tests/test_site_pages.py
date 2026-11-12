@@ -88,57 +88,133 @@ def test_fda_drug_safety_list_is_a_table_paged_by_its_next_button():
 
 # ── 港交所披露易（hkex）──────────────────────────────────────────────────
 
-# 接口返回的真实两行（和黄医药 00013）：一行是普通公告，一行是“展示文件”（只是一句提示语，各公司指向同一个网址）
-HKEX_ROWS = """<table class="table"><tbody>
-<tr><td class="release-time"><span class="mobile-list-heading">發放時間: </span>05/11/2026 08:00</td>
-<td class="stock-short-code"><span class="mobile-list-heading">股份代號: </span>00013</td>
-<td class="stock-short-name"><span class="mobile-list-heading">股份簡稱: </span>和黃醫藥</td>
-<td><span class="mobile-list-heading">文件: </span><div class="headline">公告及通告 - [海外監管公告-業務發展最新情況]<br/></div>
-<div class="doc-link"><a href="/listedco/listconews/sehk/2026/1105/2026110500118_c.pdf">自願性公告 - 和黃醫藥宣佈索樂匹尼布獲FDA孤兒藥資格認定</a> (<span class="attachment_filesize">200KB</span>)</div></td></tr>
-<tr><td class="release-time"><span class="mobile-list-heading">發放時間: </span>09/04/2026 16:44</td>
-<td class="stock-short-code"><span class="mobile-list-heading">股份代號: </span>00013</td>
-<td class="stock-short-name"><span class="mobile-list-heading">股份簡稱: </span>和黃醫藥</td>
-<td><span class="mobile-list-heading">文件: </span><div class="headline">展示文件<br/></div>
-<div class="doc-link"><a href="/listedco/listconews/sehk/dod/tc.html">發行人剛在本網站英文版面發布一項公告，相應中文版本或會／或不會在本版面發布。</a> (<span class="attachment_filesize">1KB</span>, HTM)</div></td></tr>
-</tbody></table>"""
+# 接口 titleSearchServlet.do 返回的三行真实数据：普通公告（和黄医药 00013）；“展示文件”（只是一句提示语，各公司指向同一个网址）；
+# 标题里带 HTML 转义（&#x2f; 是斜杠）的公告（中国生物制药 01177）。“SHORT_TEXT”是页面上的文件类型栏，“TITLE”才是公告标题。
+HKEX_ROWS = [
+    {"FILE_INFO": "200KB", "NEWS_ID": "12400954", "SHORT_TEXT": "公告及通告 - [海外監管公告-業務發展最新情況]<br/>",
+     "DOD_WEB_PATH": "", "STOCK_NAME": "和黃醫藥", "FILE_TYPE": "PDF", "DATE_TIME": "05/11/2026 08:00",
+     "TITLE": "自願性公告 - 和黃醫藥宣佈索樂匹尼布 (sovleplenib) 獲FDA孤兒藥資格認定用於治療自身免疫性溶血性貧血",
+     "STOCK_CODE": "00013", "FILE_LINK": "/listedco/listconews/sehk/2026/1105/2026110500118_c.pdf"},
+    {"FILE_INFO": "1KB", "NEWS_ID": "12099592", "SHORT_TEXT": "展示文件<br/>", "DOD_WEB_PATH": "",
+     "STOCK_NAME": "和黃醫藥", "FILE_TYPE": "HTM", "DATE_TIME": "09/04/2026 16:44",
+     "TITLE": "發行人剛在本網站英文版面發布一項公告，相應中文版本或會／或不會在本版面發布。",
+     "STOCK_CODE": "00013", "FILE_LINK": "/listedco/listconews/sehk/dod/tc.html"},
+    {"FILE_INFO": "176KB", "NEWS_ID": "12367210", "SHORT_TEXT": "公告及通告 - [其他-業務發展最新情況]<br/>",
+     "DOD_WEB_PATH": "", "STOCK_NAME": "中國生物製藥", "FILE_TYPE": "PDF", "DATE_TIME": "08/10/2026 17:30",
+     "TITLE": "自願公告 - TQC3721吸入混懸液「PDE3&#x2f;4抑制劑」III期註冊臨床完成全部受試者入組",
+     "STOCK_CODE": "01177", "FILE_LINK": "/listedco/listconews/sehk/2026/1008/2026100800670_c.pdf"},
+]
+HKEX_COMPANIES = [{"code": "00013", "name": "和黃醫藥", "stock_id": 1000001102},
+                  {"code": "01177", "name": "中國生物製藥", "stock_id": 6833}]
 
 
-def _hkex_read(monkeypatch, overrides=None):
-    """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告, 发出的表单参数)。"""
+def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
+    """用替身接口顶掉 hkex 的 requests.get，返回 (站点接口配置, 发出的请求参数)。rows_of(stock_id) 给这家公司的行；
+    默认 00013 给前两行、01177 给第三行；返回异常对象就是这家读不到。"""
+    import json
+
     from biz_rules.extractors import hkex_fetcher
 
     sent = []
+    rows_of = rows_of or {1000001102: HKEX_ROWS[:2], 6833: HKEX_ROWS[2:]}.get
 
-    class Reply:
-        text = HKEX_ROWS
+    def get(url, params, **kwargs):
+        sent.append(params)
+        rows = rows_of(params["stockId"])
+        if isinstance(rows, Exception):
+            raise rows
 
-        def raise_for_status(self):
-            pass
+        class Reply:
+            def raise_for_status(self):
+                pass
 
-    monkeypatch.setattr(hkex_fetcher.requests, "post", lambda url, data, **kw: (sent.append(data), Reply())[1])
-    api = {**SITE_PROFILES["hkex"]["api"], "companies": [{"code": "00013", "name": "和黃醫藥", "stock_id": 1000001102}]}
-    api.update(overrides or {})
+            def json(self):
+                return {"result": json.dumps(rows), "hasNextRow": False, "recordCnt": len(rows)}
+
+        return Reply()
+
+    monkeypatch.setattr(hkex_fetcher.requests, "get", get)
+    return {**SITE_PROFILES["hkex"]["api"], "companies": HKEX_COMPANIES, **(overrides or {})}, sent
+
+
+def _hkex_read(monkeypatch, overrides=None, rows_of=None):
+    """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告, 发出的请求参数)。"""
+    from biz_rules.extractors import hkex_fetcher
+
+    api, sent = _hkex_stub(monkeypatch, overrides, rows_of)
     return list(hkex_fetcher.fetch_hkex_announcements(api)), sent
 
 
 def test_hkex_end_date_defaults_to_today_and_is_sent_as_yyyymmdd(monkeypatch):
-    """截止日写死成 20260410 时，之后发布的公告全读不到。留空 = 读取当天；接口不接受空的 to（返回 0 条），所以不能原样传空。"""
+    """截止日写死成 20260410 时，之后发布的公告全读不到。留空 = 读取当天；接口不接受空的 to（返回 0 条），所以不能原样传空。
+    rowRange 要传接口的上限 10000：一次请求读完这家公司从 from_date 起的全部公告（默认只给 100 条）。"""
     from datetime import date
 
     assert SITE_PROFILES["hkex"]["api"]["to_date"] == ""
     _, sent = _hkex_read(monkeypatch)
-    assert sent[0]["to"] == date.today().strftime("%Y%m%d") and sent[0]["from"] == "20240101"
+    assert sent[0]["toDate"] == date.today().strftime("%Y%m%d") and sent[0]["fromDate"] == "20240101"
+    assert sent[0]["rowRange"] == 10000 and len(sent) == 2  # 两家公司各一次请求
     _, sent = _hkex_read(monkeypatch, {"to_date": "20261231"})
-    assert sent[0]["to"] == "20261231"
+    assert sent[0]["toDate"] == "20261231"
 
 
 def test_hkex_skips_the_display_document_notice_rows(monkeypatch):
     """“展示文件”行只是提示语，不是公告：不读。普通公告照常读到。"""
     announcements, _ = _hkex_read(monkeypatch)
-    assert [a["headline"] for a in announcements] == ["公告及通告 - [海外監管公告-業務發展最新情況]"]
+    assert [a["stock_code"] for a in announcements] == ["00013", "01177"]
     assert announcements[0]["pdf_url"].endswith("/2026/1105/2026110500118_c.pdf")
     kept, _ = _hkex_read(monkeypatch, {"skip_headlines": []})
-    assert len(kept) == 2
+    assert len(kept) == 3
+
+
+def test_hkex_title_is_the_announcement_title_and_the_file_type_column_is_kept_apart(monkeypatch):
+    """以前标题取的是“文件类型”栏（“公告及通告 - [...]”“月報表”），真正的公告标题在文件链接的文字里。
+    标题里的 HTML 转义要还原；日期是“日/月/年 时:分”，要转成 YYYY-MM-DD。"""
+    first, second = _hkex_read(monkeypatch)[0]
+    assert first["title"].startswith("自願性公告 - 和黃醫藥宣佈索樂匹尼布")
+    assert first["doc_type"] == "公告及通告 - [海外監管公告-業務發展最新情況]"
+    assert second["title"] == "自願公告 - TQC3721吸入混懸液「PDE3/4抑制劑」III期註冊臨床完成全部受試者入組"
+    assert (first["publish_date"], second["publish_date"]) == ("2026-11-05", "2026-10-08")
+
+
+def test_hkex_record_through_the_site_config_has_title_date_and_the_pdf_as_attachment(monkeypatch):
+    """走站点配置的字段映射之后：标题是公告标题、日期是 ISO、公告 PDF 作为附件交给采集插件。"""
+    from core_engine.api_router import to_result
+
+    first = _hkex_read(monkeypatch)[0][0]
+    parsed, kept = to_result("hkex", SITE_PROFILES["hkex"], first)
+    assert parsed["title"] == first["title"] and parsed["publish_date"] == "2026-11-05"
+    assert parsed["attachment_links"] == [{"url": first["pdf_url"], "name": first["title"]}]
+    assert kept is first
+
+
+def test_hkex_company_that_cannot_be_read_is_reported_with_its_name_and_the_next_one_is_still_read(monkeypatch):
+    """一家读不到（网络、状态码）：抛 HistoryError，code=source_read_failed，写明是哪家、为什么；再要下一条，接着读下一家，
+    不是整个来源停在这里。"""
+    import pytest
+
+    from biz_rules.extractors import hkex_fetcher
+    from biz_rules.history_models import HistoryError
+
+    def rows_of(stock_id):
+        return TimeoutError("read timed out") if stock_id == 1000001102 else HKEX_ROWS[2:]
+
+    api, _ = _hkex_stub(monkeypatch, rows_of=rows_of)
+    announcements = hkex_fetcher.fetch_hkex_announcements(api)
+    with pytest.raises(HistoryError) as stopped:
+        next(announcements)
+    assert stopped.value.code == "source_read_failed"
+    assert "和黃醫藥" in stopped.value.message and "00013" in stopped.value.message and "TimeoutError" in stopped.value.message
+    assert next(announcements)["stock_code"] == "01177"
+    with pytest.raises(StopIteration):
+        next(announcements)
+
+
+def test_hkex_a_joint_announcement_under_two_companies_is_given_once(monkeypatch):
+    """联合公告会出现在几家公司名下，指向同一个 PDF：同一个文件只给一次，不然同一条记录一次读两遍。"""
+    rows = {1000001102: HKEX_ROWS[:1], 6833: HKEX_ROWS[:1]}
+    announcements, _ = _hkex_read(monkeypatch, rows_of=rows.get)
+    assert len(announcements) == 1
 
 
 # ── Roche 新闻稿（roche）────────────────────────────────────────────────
@@ -156,3 +232,4 @@ def test_roche_list_titles_are_read_from_inside_the_nested_teaser_link():
     assert items[0]["title"] == ("Roche presents new data across pharmaceuticals and diagnostics from its growing "
                                  "Alzheimer’s disease portfolio at CTAD 2026")
     assert all(i["title"] for i in items) and items[0]["publish_date"] == "2026-11-10"
+
