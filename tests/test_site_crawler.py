@@ -805,9 +805,30 @@ class _RochePage:
 def _roche_one_year(monkeypatch, fetch):
     from biz_rules.extractors.roche import roche_web_fetcher
 
-    monkeypatch.setitem(site_crawler.SITE_PROFILES["roche"]["api"], "year_end", 2026)  # 只读 2026 年
+    for name in ("year_start", "year_end"):
+        monkeypatch.setitem(site_crawler.SITE_PROFILES["roche"]["api"], name, 2026)  # 只读 2026 年
     monkeypatch.setattr(roche_web_fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
     return read_public(FetchRequest(source_id="roche", query="records"))
+
+
+def test_roche_starts_at_this_year_when_the_start_year_is_zero_or_not_given(monkeypatch):
+    """起始年份以前写死 2026：到了 2027 年，新年的新闻稿读不到。0 或不写 = 今年。"""
+    from datetime import datetime, timezone
+
+    from biz_rules.extractors.roche import roche_web_fetcher as fetcher
+
+    seen = []
+
+    def fetch(url, **kwargs):
+        seen.append(url)
+        raise RuntimeError("读第一页就够了")
+
+    monkeypatch.setattr(fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
+    for cfg in ({}, {"year_start": 0}, site_crawler.SITE_PROFILES["roche"]["api"]):
+        seen.clear()
+        with pytest.raises(RuntimeError):
+            next(fetcher.iter_roche_web(cfg))
+        assert seen[0].endswith(f"#/year/{datetime.now(timezone.utc).year}/page/1")
 
 
 def test_roche_list_page_timeout_is_a_failed_read_with_the_real_reason(monkeypatch):
@@ -1014,7 +1035,7 @@ def _roche_read(monkeypatch, details):
     from biz_rules.extractors.roche import roche_web_fetcher as fetcher
 
     api = site_crawler.SITE_PROFILES["roche"]["api"]
-    for name, value in {"year_end": 2026, "detail_delay": 0, "delay_between_requests": 0}.items():
+    for name, value in {"year_start": 2026, "year_end": 2026, "detail_delay": 0, "delay_between_requests": 0}.items():
         monkeypatch.setitem(api, name, value)
     monkeypatch.setattr(fetcher, "RETRY_DELAY", 0)
     pages = iter([[{"title": "Title " + url[-1], "source_url": url, "publish_date": "2026-11-10"} for url in details], []])

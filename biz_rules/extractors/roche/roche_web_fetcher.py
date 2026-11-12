@@ -12,6 +12,7 @@ Roche Media Releases 采集器（Scrapling 版）
 
 import re
 import uuid as _uuid
+from datetime import datetime, timezone
 from typing import Iterator, Set
 
 from loguru import logger
@@ -217,7 +218,7 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
     """
     start_url = api_cfg.get("start_url", "https://www.roche.com/media/releases")
     max_articles = api_cfg.get("max_articles", 0)
-    year_start = api_cfg.get("year_start", 2026)
+    year_start = api_cfg.get("year_start") or datetime.now(timezone.utc).year  # 不写或 0 = 今年
     year_end = api_cfg.get("year_end", 2016)
     max_pages_per_year = api_cfg.get("max_pages_per_year", 100)
     delay = api_cfg.get("delay_between_requests", 2.0)          # 列表页间隔

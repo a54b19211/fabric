@@ -10,7 +10,7 @@ CONFIG = {
     "api": {
         "start_url": "https://www.roche.com/media/releases",
         "max_articles": 0,
-        "year_start": 2026,
+        "year_start": 0,  # 从哪一年往前读；0（或不写）= 今年
         "year_end": 2016,
         "max_pages_per_year": 100,
         "delay_between_requests": 2.0,
