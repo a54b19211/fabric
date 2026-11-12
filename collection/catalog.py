@@ -122,7 +122,19 @@ _NOT_WATCHED = {
     "drugbank": "需要 DrugBank API 凭据与许可（还没有）；药物库没有时间顺序",
 }
 
-SPECS: tuple[CollectionSpec, ...] = (
+def _site(source_id, name, *, evidence, decisions, group, coverage, notes="", interval=2.0, supply_system="",
+          datasets=()):
+    """站点插件（site_crawler）的来源：已接通、未经本系统对原站实测；能不能进固定刷新看 _NOT_WATCHED。
+    group 是限速组（主机名后缀），interval 是同一限速组里两次请求的最短间隔（秒）。"""
+    incremental = Incremental("none", None, _NOT_WATCHED[source_id]) if source_id in _NOT_WATCHED else _NEWEST_FIRST
+    return CollectionSpec(
+        source_id=source_id, name=name, status="active", plugin="site_crawler", evidence_types=evidence,
+        decisions=decisions, incremental=incremental, rate_group=group, min_interval_seconds=interval,
+        coverage=coverage, verified=False, notes=notes, supply_system=supply_system, datasets=datasets,
+    )
+
+
+_ENTRIES: tuple[CollectionSpec, ...] = (
     CollectionSpec(
         source_id="clinicaltrials",
         verified=True,  # 已对真实来源跑通（隔离与现役窄 watch）
@@ -302,65 +314,43 @@ SPECS: tuple[CollectionSpec, ...] = (
         verified=False,
         supply_system="cde_website",
     ),
-    *(
-        CollectionSpec(
-            source_id=source_id,
-            name=name,
-            status="active",
-            plugin="site_crawler",
-            evidence_types=evidence,
-            decisions=decisions,
-            incremental=Incremental("none", None, _NOT_WATCHED[source_id]) if source_id in _NOT_WATCHED else _NEWEST_FIRST,
-            rate_group=group,
-            min_interval_seconds=interval,
-            coverage=coverage,
-            verified=False,
-            notes=notes,
-            supply_system={"fda_api_drug_label": "openfda", "fda_api_enforcement": "openfda",
-                           "cde_xxgk": "cde_website", "cde_zdyz": "cde_website",
-                           "phirda_industry": "phirda_website", "phirda_policy": "phirda_website",
-                           "phirda_rd": "phirda_website", "phirda_healthcare_reform": "phirda_website",
-                           "fda_press": "fda_website", "fda_drug_safety": "fda_website"}.get(source_id, ""),
-            datasets={"fda_api_drug_label": ("api.fda.gov/drug/label.json",),
-                      "fda_api_enforcement": ("api.fda.gov/drug/enforcement.json",)}.get(source_id, ()),
-        )
-        for source_id, name, evidence, decisions, group, interval, coverage, notes in (
-            ("cde_xxgk", "国家药品审评中心·信息公开（表格页）", ("regulatory_notice",), ("A",), "cde.org.cn", 2.0,
-             {"metadata": "表格页每张表", "fulltext": "表格转 Markdown"}, "query=列表入口；每张表一条 site_record"),
-            ("cde_zdyz", "国家药品审评中心·指导原则", ("guideline",), ("A", "B"), "cde.org.cn", 2.0,
-             {"metadata": "指导原则页", "fulltext": "正文", "attachments": "附件"}, ""),
-            ("phirda_industry", "中国药促会·产业资讯", ("industry_media",), ("C",), "phirda.com", 2.0,
-             {"metadata": "资讯页", "fulltext": "正文"}, ""),
-            ("phirda_policy", "中国药促会·政策法规", ("policy",), ("C",), "phirda.com", 2.0,
-             {"metadata": "政策页", "fulltext": "正文"}, ""),
-            ("phirda_rd", "中国药促会·研发追踪", ("industry_media",), ("A",), "phirda.com", 2.0,
-             {"metadata": "资讯页", "fulltext": "正文"}, ""),
-            ("phirda_healthcare_reform", "中国药促会·医改专题", ("policy",), ("C",), "phirda.com", 2.0,
-             {"metadata": "专题页", "fulltext": "正文"}, ""),
-            ("fda_press", "FDA Press Announcements", ("regulatory_notice",), ("A",), "fda.gov", 2.0,
-             {"metadata": "新闻稿页", "fulltext": "正文"}, ""),
-            ("fda_drug_safety", "FDA Drug Safety Communications", ("regulatory_notice",), ("A",), "fda.gov", 2.0,
-             {"metadata": "安全通讯页", "fulltext": "正文"}, ""),
-            ("fda_api_drug_label", "openFDA 药品说明书（drug/label）", ("regulatory_label",), ("A",),
-             "api.fda.gov", 0.5, {"metadata": "说明书接口记录", "fulltext": "接口字段"},
-             "query=records；与 fda_api_enforcement、fda_crl 同属 openFDA 供给系统，不能仅凭端点不同算两份独立证实"),
-            ("fda_api_enforcement", "openFDA 药品召回执行报告（drug/enforcement）", ("regulatory_notice",), ("A",),
-             "api.fda.gov", 0.5, {"metadata": "召回接口记录", "fulltext": "接口字段"},
-             "query=records；产品类别 drug（站点配置 config/sites/fda/api_enforcement.py 指向 "
-             "api.fda.gov/drug/enforcement.json），只证明配置能读，不代表在采；与 fda_api_drug_label、fda_crl "
-             "同属 openFDA 供给系统"),
-            ("hkex", "港交所披露易", ("corporate_filing",), ("A", "C"), "hkexnews.hk", 2.0,
-             {"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, "query=records；医药公司清单见站点配置"),
-            ("fiercepharma", "Fierce Pharma（RSS）", ("industry_media",), ("A", "C"), "fiercepharma.com", 2.0,
-             {"metadata": "RSS 条目", "fulltext": "文章页"}, "query=records；行业媒体，不是独立证实来源"),
-            ("nccn", "NCCN 临床实践指南", ("guideline",), ("B",), "nccn.org", 2.0,
-             {"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, "query=records；许可未核实"),
-            ("roche", "Roche Media Releases", ("company_disclosure",), ("A",), "roche.com", 2.0,
-             {"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}, "query=records；企业披露，不是独立无偏来源"),
-            ("drugbank", "DrugBank", ("drug_database",), ("A",), "drugbank.com", 1.0,
-             {"metadata": "药物条目接口"}, "query=records；需要 DrugBank API 凭据与许可，未核实"),
-        )
-    ),
+    _site("cde_xxgk", "国家药品审评中心·信息公开（表格页）", evidence=("regulatory_notice",), decisions=("A",), group="cde.org.cn",
+          coverage={"metadata": "表格页每张表", "fulltext": "表格转 Markdown"}, notes="query=列表入口；每张表一条 site_record",
+          supply_system="cde_website"),
+    _site("cde_zdyz", "国家药品审评中心·指导原则", evidence=("guideline",), decisions=("A", "B"), group="cde.org.cn",
+          coverage={"metadata": "指导原则页", "fulltext": "正文", "attachments": "附件"}, supply_system="cde_website"),
+    _site("phirda_industry", "中国药促会·产业资讯", evidence=("industry_media",), decisions=("C",), group="phirda.com",
+          coverage={"metadata": "资讯页", "fulltext": "正文"}, supply_system="phirda_website"),
+    _site("phirda_policy", "中国药促会·政策法规", evidence=("policy",), decisions=("C",), group="phirda.com",
+          coverage={"metadata": "政策页", "fulltext": "正文"}, supply_system="phirda_website"),
+    _site("phirda_rd", "中国药促会·研发追踪", evidence=("industry_media",), decisions=("A",), group="phirda.com",
+          coverage={"metadata": "资讯页", "fulltext": "正文"}, supply_system="phirda_website"),
+    _site("phirda_healthcare_reform", "中国药促会·医改专题", evidence=("policy",), decisions=("C",), group="phirda.com",
+          coverage={"metadata": "专题页", "fulltext": "正文"}, supply_system="phirda_website"),
+    _site("fda_press", "FDA Press Announcements", evidence=("regulatory_notice",), decisions=("A",), group="fda.gov",
+          coverage={"metadata": "新闻稿页", "fulltext": "正文"}, supply_system="fda_website"),
+    _site("fda_drug_safety", "FDA Drug Safety Communications", evidence=("regulatory_notice",), decisions=("A",),
+          group="fda.gov", coverage={"metadata": "安全通讯页", "fulltext": "正文"}, supply_system="fda_website"),
+    _site("fda_api_drug_label", "openFDA 药品说明书（drug/label）", evidence=("regulatory_label",), decisions=("A",),
+          group="api.fda.gov", interval=0.5, coverage={"metadata": "说明书接口记录", "fulltext": "接口字段"},
+          notes="query=records；与 fda_api_enforcement、fda_crl 同属 openFDA 供给系统，不能仅凭端点不同算两份独立证实",
+          supply_system="openfda", datasets=("api.fda.gov/drug/label.json",)),
+    _site("fda_api_enforcement", "openFDA 药品召回执行报告（drug/enforcement）", evidence=("regulatory_notice",),
+          decisions=("A",), group="api.fda.gov", interval=0.5, coverage={"metadata": "召回接口记录", "fulltext": "接口字段"},
+          notes="query=records；产品类别 drug（站点配置 config/sites/fda/api_enforcement.py 指向 "
+          "api.fda.gov/drug/enforcement.json），只证明配置能读，不代表在采；与 fda_api_drug_label、fda_crl "
+          "同属 openFDA 供给系统",
+          supply_system="openfda", datasets=("api.fda.gov/drug/enforcement.json",)),
+    _site("hkex", "港交所披露易", evidence=("corporate_filing",), decisions=("A", "C"), group="hkexnews.hk",
+          coverage={"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, notes="query=records；医药公司清单见站点配置"),
+    _site("fiercepharma", "Fierce Pharma（RSS）", evidence=("industry_media",), decisions=("A", "C"), group="fiercepharma.com",
+          coverage={"metadata": "RSS 条目", "fulltext": "文章页"}, notes="query=records；行业媒体，不是独立证实来源"),
+    _site("nccn", "NCCN 临床实践指南", evidence=("guideline",), decisions=("B",), group="nccn.org",
+          coverage={"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, notes="query=records；许可未核实"),
+    _site("roche", "Roche Media Releases", evidence=("company_disclosure",), decisions=("A",), group="roche.com",
+          coverage={"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}, notes="query=records；企业披露，不是独立无偏来源"),
+    _site("drugbank", "DrugBank", evidence=("drug_database",), decisions=("A",), group="drugbank.com", interval=1.0,
+          coverage={"metadata": "药物条目接口"}, notes="query=records；需要 DrugBank API 凭据与许可，未核实"),
     CollectionSpec(
         source_id="cninfo",
         name="巨潮资讯（沪深北公告与财报）",
@@ -446,13 +436,6 @@ _DECLARED = (
      "research_institution_ledger"),
     ("grants", "公开的基金资助信息", ("funding",), ("B",), "grants"),
 )
-SPECS = SPECS + tuple(
-    CollectionSpec(source_id=sid, name=name, status="declared", plugin=None, evidence_types=evidence,
-                   decisions=decisions, incremental=_NO_INCREMENT, rate_group=group, min_interval_seconds=1.0,
-                   supply_system={"medrxiv": "openrxiv", "sec_filings": "sec_edgar"}.get(sid, ""))
-    for sid, name, evidence, decisions, group in _DECLARED
-)
-
 # 读取插件注册时声明的读取方式（按代码现状：每种方式都对应插件里真正读取的 FetchRequest 字段）；
 # 同一插件下某个来源不支持其中一种时，在 SOURCE_READ_MODES 里收窄。biz_rules.history_sources.PLUGINS 的插件名须与此一一对应
 PLUGIN_READ_MODES: dict[str, tuple[ReadMode, ...]] = {
@@ -474,7 +457,16 @@ def _with_read_modes(item: CollectionSpec) -> CollectionSpec:
     return replace(item, read_modes=SOURCE_READ_MODES.get(item.source_id, PLUGIN_READ_MODES.get(item.plugin, ())))
 
 
-SPECS = tuple(_with_read_modes(item) for item in SPECS)
+# 目录：上面逐个写的来源，加上 _DECLARED 里只登记、没接通的；只在这里建一次
+SPECS: tuple[CollectionSpec, ...] = tuple(
+    _with_read_modes(item)
+    for item in _ENTRIES + tuple(
+        CollectionSpec(source_id=sid, name=name, status="declared", plugin=None, evidence_types=evidence,
+                       decisions=decisions, incremental=_NO_INCREMENT, rate_group=group, min_interval_seconds=1.0,
+                       supply_system={"medrxiv": "openrxiv", "sec_filings": "sec_edgar"}.get(sid, ""))
+        for sid, name, evidence, decisions, group in _DECLARED
+    )
+)
 
 CATALOG: dict[str, CollectionSpec] = {s.source_id: s for s in SPECS}
 FETCHABLE = frozenset(s.source_id for s in SPECS if s.fetchable)
