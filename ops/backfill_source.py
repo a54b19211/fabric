@@ -77,12 +77,19 @@ def why_stop(run, cover, message, before, read_nothing):
     return None, False
 
 
+def seconds(text):
+    """--deadline 的值：5 到 120 的整数（FetchRequest.deadline_seconds 的范围，超出范围到最后才被拒）。"""
+    value = int(text)
+    if not 5 <= value <= 120:
+        raise argparse.ArgumentTypeError("要在 5 到 120 之间")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description="把一个来源的历史存量一次读到底（会写库，可中断后接着读）")
     parser.add_argument("source", help="来源编号，如 roche、chictr、fda_crl")
     parser.add_argument("--query", help="读取入口：站点的列表入口网址、PubMed 检索词……；不给就用 check_sources 里的默认")
-    parser.add_argument("--deadline", type=int, default=120, choices=range(5, 121), metavar="5-120",
-                        help="每一段最多用几秒（5 到 120，默认 120）")
+    parser.add_argument("--deadline", type=seconds, default=120, metavar="5-120", help="每一段最多用几秒（5 到 120，默认 120）")
     parser.add_argument("--pages", type=int, help="列表网页站点最多读几页，盖过站点配置里的 max_pages")
     args = parser.parse_args()
     known = sorted(catalog.FETCHABLE - {"local_files"})
