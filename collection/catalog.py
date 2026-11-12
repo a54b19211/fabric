@@ -29,6 +29,7 @@ IncrementalKind = Literal[
     "modified_window",  # 来源 API 的修改时间参数（updated_since/until）
     "fixed_ids",  # 只读明确清单，没有变更流
     "stop_at_known",  # 没有可过滤的更新时间，但列表从新到旧：每轮从头读，连续读到已存且没变的就停（collection.windows）
+    "full_reread",  # 没有可过滤的更新时间，列表顺序也靠不住（旧条目会后补进来）：每轮整份重读，没变的版本不重复存
     "none",  # 尚无可靠增量键，只能快照加对账
 ]
 
@@ -107,6 +108,10 @@ _NO_INCREMENT = Incremental("none", None, "尚未接通，没有增量键")
 # 老 ETL 的“遇到第一个重复的就停止”，一处通用实现（transport.Budget.known）。列表的顺序是站点自己的默认顺序，不是来源的承诺。
 _NEWEST_FIRST = Incremental(
     "stop_at_known", None, "列表从新到旧，每轮从头读，连续读到 3 条已存且没变的就停；没有更新时间可过滤，旧条目被改动读不到"
+)
+# 列表不大、但新条目不一定排在前面（成批公布的旧信函排在读过的新信函后面，“遇到已存的就停”会漏）：每轮整份重读
+_FULL_REREAD = Incremental(
+    "full_reread", None, "每轮整份重读（列表不大）；没有更新时间可过滤，新公布的条目也可能日期很旧，不能靠“遇到已存的就停”"
 )
 # 这个办法用不了的来源（还是 kind="none"，不进固定刷新），原因写在这里，目录里如实可见
 _NOT_WATCHED = {
@@ -212,11 +217,12 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="public_api_reader",
         evidence_types=("regulatory_letter",),
         decisions=("A",),
-        incremental=_NEWEST_FIRST,  # 读取时指定 sort=letter_date:desc
+        incremental=_FULL_REREAD,  # 读取时指定 sort=letter_date:desc，只是为了 skip 翻页有个稳定的顺序
         rate_group="api.fda.gov",
         min_interval_seconds=0.4,
         coverage={"metadata": "原生字段", "fulltext": "信函文本"},
-        notes="openFDA 无变更流；固定刷新按“遇到已存的就停”增量读（信函按日期从新到旧）",
+        notes="openFDA 无变更流。FDA 成批公布信函，旧日期的信可能排在已读过的新信后面，“遇到已存的就停”会漏掉它们，"
+        "所以固定刷新每轮整份重读（约 460 封，5 次请求），没变的不重复存版本",
         supply_system="openfda",
         datasets=("api.fda.gov/transparency/crl.json",),
     ),

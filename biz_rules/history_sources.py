@@ -776,7 +776,7 @@ def _api_page(request, cursor, size, offset):
     if source == "fda_crl":
         if request.source_record_ids:
             raise HistoryError("by_id_unsupported", "FDA复合记录尚不支持精确by-ID重采")
-        # 新的在前：不指定时 openFDA 的顺序是乱的（第一条是 2018 年的），增量读取“遇到已存的就停”靠这个顺序
+        # 指定一个顺序：不指定时 openFDA 的顺序是乱的（第一条是 2018 年的），skip 翻页要一个稳定的顺序
         params = {"limit": size, "skip": offset, "sort": "letter_date:desc"}
         if request.query.strip() != "*":
             params["search"] = request.query

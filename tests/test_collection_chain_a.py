@@ -24,7 +24,7 @@ def ct_watch(**extra):
 
 
 STOP_AT_KNOWN = {
-    "pubmed", "fda_crl", "chictr", "nmpa", "cde", "cde_xxgk", "cde_zdyz", "phirda_industry", "phirda_policy", "phirda_rd",
+    "pubmed", "chictr", "nmpa", "cde", "cde_xxgk", "cde_zdyz", "phirda_industry", "phirda_policy", "phirda_rd",
     "phirda_healthcare_reform", "fda_press", "fda_drug_safety", "fda_api_drug_label", "fda_api_enforcement",
     "fiercepharma", "roche",
 }
@@ -34,8 +34,9 @@ def test_watchable_set_is_the_earlier_five_and_the_newest_first_lists():
     # 改造前写死的四个来源，加上按整点读取的 GDELT，再加列表从新到旧、靠“遇到已存的就停”增量读的来源；
     # 港交所、NCCN、DrugBank 这个办法用不了，不进（原因写在目录里）；本地导入不对外抓，不进
     earlier = {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts", "gdelt_doc"}
-    assert catalog.WATCHABLE == earlier | STOP_AT_KNOWN
+    assert catalog.WATCHABLE == earlier | STOP_AT_KNOWN | {"fda_crl"}
     assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.kind == "stop_at_known"} == STOP_AT_KNOWN
+    assert catalog.spec("fda_crl").incremental.kind == "full_reread"  # 成批公布的旧信会排在读过的新信后面：整份重读
     for source in ("hkex", "nccn", "drugbank", "local_files"):
         assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
 
@@ -147,6 +148,9 @@ def test_known_stop_is_filled_by_the_cycle_not_written_in_the_watch(monkeypatch)
     assert again["known_stop"] == KNOWN_STOP and again.get("updated_since") is None  # a checkpoint changes nothing here
     clinical = cycle_request(ct_watch(), {}, NOW)[0]
     assert clinical["known_stop"] == 0  # a source with an update window is read by the window, as before
+    crl = SourceWatch.model_validate({"id": "c", "request": {"source_id": "fda_crl", "query": "*"}})
+    request, start, end = cycle_request(crl, {}, NOW)
+    assert request["known_stop"] == 0 and start is end is None  # the whole list every cycle, no window, no stop
     written = [{"id": "p", "request": {"source_id": "pubmed", "query": "x", "known_stop": 3}}]
     monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(written))
     with pytest.raises(HistoryError):
