@@ -1,4 +1,11 @@
-"""中国临床试验注册中心（ChiCTR）详情页特解"""
+"""中国临床试验注册中心（ChiCTR）详情页特解
+
+附件：只有“试验完成后的统计结果（上传文件）”一栏是真附件（约 2% 的页面有）：值那一格里的下载链接
+DownloadTest?path=<令牌>，令牌每次打开页面都不同，path 为空表示没有文件。其他两处不算附件：
+伦理批件的“查看附件”没有链接（抓不到），DownloadXml 是登记记录本身的 XML。
+"""
+
+from urllib.parse import urljoin
 
 from biz_rules.cleaners import normalize_whitespace
 
@@ -42,6 +49,17 @@ def _clean(text: str) -> str:
     return normalize_whitespace(text)
 
 
+def _add_upload_links(links, cell, label):
+    """上传的文件：值那一格里带令牌的下载链接 DownloadTest?path=<令牌>（path 为空 = 没有文件）。中文行、英文行各有
+    一个，令牌相同，只取第一个。附件身份是字段名（key），不是带令牌的网址：令牌每次打开页面都不同，用网址当身份
+    每抓一次就多一个附件。collection.site_crawler 只在下载那一刻用这个网址，不存进原件。"""
+    for link in cell.css("a[href*='DownloadTest?path=']"):
+        href = link.attrib.get("href", "")
+        url = urljoin("https://www.chictr.org.cn/", href)
+        if href.split("path=", 1)[1] and url not in [known["url"] for known in links]:
+            links.append({"url": url, "key": label or "上传文件"})
+
+
 def extract_chictr_detail(page) -> dict:
     result = {
         "title": "",
@@ -61,8 +79,7 @@ def extract_chictr_detail(page) -> dict:
     fields = {}
     tables = page.css("table")
     for tbl in tables:
-        rows = tbl.css("tr")
-        for row in rows:
+        for row in tbl.css("tr"):
             tds = row.css("td")
             if len(tds) < 2:
                 continue
@@ -77,6 +94,7 @@ def extract_chictr_detail(page) -> dict:
             value = _clean(tds[1].get_all_text(strip=True))
             if label and value:
                 fields[label] = value
+            _add_upload_links(result["attachment_links"], tds[1], label)
 
     # 用字段映射填充 extra
     extra = {}

@@ -7,7 +7,9 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 - 接口记录、表格页的一张表 → site_record 版本（提取结果 + 接口原始字段）；
 - 每个附件 → attachment 版本（链接、父记录、sha256、大小、类型、原件路径），正文由加工层
   processing.attachment_parse 按版本产出。附件下载失败只记在本次读取的 attachment_coverage 里。
-附件记录身份是“父记录#attachment=附件链接”（attachment_record_id）。
+附件记录身份是“父记录#attachment=附件链接”（attachment_record_id）。下载链接每次都不同的（ChiCTR 的链接带一次性令牌），
+抽取器给附件一个固定的 key（页面上的字段名），身份改用“父记录#attachment=key”，带令牌的链接只在下载那一刻用，
+不存进原件（否则每抓一次就多一个附件、多一个版本）。
 
 读取方式（FetchRequest.query）：
 - "by_url"，source_record_ids=详情页 URL：重抓这些页面及其附件；
@@ -60,10 +62,11 @@ def _route_webpage(page_data, site_key=None):
     return route_webpage.fn(page_data, site_key=site_key)
 
 
-def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None):
+def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None, store_as=""):
     from core_engine.scrapling_client import download_pdf
 
-    return download_pdf.fn(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies)
+    return download_pdf.fn(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies,
+                           store_as=store_as)
 
 
 def _make_driver(site, profile, start_url):
@@ -119,9 +122,31 @@ def attachment_record_id(parent_id: str, url: str) -> str:
 
 def _links(parsed):
     """The attachment links of a parse result as {"url", "text"}: the extractors name the label "name",
-    the stored-attachments table "text"."""
-    return [{"url": link["url"], "text": link.get("text") or link.get("name") or ""}
-            for link in parsed.get("attachment_links") or [] if link and link.get("url")]
+    the stored-attachments table "text". A link that is different on every visit (ChiCTR's carries a one-off
+    token) also has a "key", a fixed name for the attachment (the page's field name): see _name."""
+    links = []
+    for link in parsed.get("attachment_links") or []:
+        if link and link.get("url"):
+            links.append({"url": link["url"], "text": link.get("text") or link.get("name") or "",
+                          **({"key": link["key"]} if link.get("key") else {})})
+    return links
+
+
+def _name(link):
+    """What names an attachment under its parent: its link, or its key when the link changes on every visit."""
+    return link.get("key") or link["url"]
+
+
+def _kept_url(link):
+    """The link as the originals keep it. A keyed link is only used to download, it is not kept: its token would
+    make every read of the same page look like a new version."""
+    return "" if link.get("key") else link["url"]
+
+
+def _listed(parent_id, link):
+    """A link as the parent's original lists it."""
+    return {"record_id": attachment_record_id(parent_id, _name(link)), "url": _kept_url(link),
+            "text": link.get("text", "")}
 
 
 def _sha256_file(path: str) -> tuple[str, int]:
@@ -196,11 +221,15 @@ class _Reader:
     def attachment(self, link, parent_id, cookies, discovered):
         """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。预算用完抛 _Stop。"""
         url = (link or {}).get("url") or ""
-        record_id = attachment_record_id(parent_id, url)
-        entry = {"record_id": record_id, "url": url, "text": (link or {}).get("text", ""), "status": "stored"}
+        key = (link or {}).get("key") or ""
+        record_id = attachment_record_id(parent_id, _name(link))
+        entry = {"record_id": record_id, "url": _kept_url(link), "text": (link or {}).get("text", ""),
+                 "status": "stored"}
         self.before_record()
         try:
-            info = _download(url, parent_uuid=parent_id, source_site=self.site, cookies=cookies)
+            # 带 key 的链接（每次都不同）：原件落盘的路径也用附件记录号，同一个文件每次落在同一处
+            info = _download(url, parent_uuid=parent_id, source_site=self.site, cookies=cookies,
+                             store_as=record_id if key else "")
             sha, size = _sha256_file(info["local_path"])
         except ValueError as exc:
             status = "too_large" if str(exc) == "attachment_too_large" else "download_failed"
@@ -212,6 +241,8 @@ class _Reader:
             self.coverage.append({"parent_record_id": parent_id, **entry})
             return entry
         entry.update(sha256=sha, size=size)
+        # 文件名：页面上的文字；没有就用网址末段。带 key 的链接网址里没有文件名，用站点在响应头里给的名字
+        name = entry["text"] or (key and info.get("file_name")) or key or Path(urlparse(url).path).name
         self.add(
             _record(
                 record_id,
@@ -219,9 +250,10 @@ class _Reader:
                     "schema_version": ATT_SCHEMA,
                     "role": "attachment",
                     "site": self.site,
-                    "url": url,
+                    "url": entry["url"],
+                    **({"key": key} if key else {}),
                     "parent_record_id": parent_id,
-                    "file_name": entry["text"] or Path(urlparse(url).path).name,
+                    "file_name": name,
                     "file_ext": (info.get("file_ext") or "").lower(),
                     "sha256": sha,
                     "size": size,
@@ -254,11 +286,7 @@ class _Reader:
                     "title", "publish_date", "markdown", "parse_method", "structured_data", "extra")},
                 # 接口原始字段；拉取函数已直接给出解析结果的站点没有原始字段（如实为空）
                 "raw": raw,
-                "attachments": [
-                    {"record_id": attachment_record_id(record_id, link["url"]), "url": link["url"],
-                     "text": link.get("text", "")}
-                    for link in links
-                ],
+                "attachments": [_listed(record_id, link) for link in links],
             }))
         for position, link in enumerate(links):
             if position < skip_attachments:
@@ -267,9 +295,9 @@ class _Reader:
                 self.attachment(link, record_id, None, "site_record")
             except _Stop as stop:
                 for later in links[position:]:
-                    self.coverage.append({"parent_record_id": record_id, "url": later["url"],
+                    self.coverage.append({"parent_record_id": record_id, "url": _kept_url(later),
                                           "status": "not_attempted",
-                                          "record_id": attachment_record_id(record_id, later["url"])})
+                                          "record_id": attachment_record_id(record_id, _name(later))})
                 raise _Resume(stop.reason, position, page_recorded=True) from None
 
     def page(self, url, skip_attachments=0, record_page=True):
@@ -314,10 +342,7 @@ class _Reader:
         cookies = page_data.get("cookies") or []
         links = _links(parsed)
         # 原件里的附件清单只有来源给出的链接和文字；每个附件这次读没读到记在 coverage
-        capture["attachments"] = [
-            {"record_id": attachment_record_id(url, link["url"]), "url": link["url"], "text": link.get("text", "")}
-            for link in links
-        ]
+        capture["attachments"] = [_listed(url, link) for link in links]
         if record_page:
             self.add(_record(url, capture), at=index)
         for position, link in enumerate(links):
@@ -327,8 +352,8 @@ class _Reader:
                 self.attachment(link, url, cookies, "detail_page")
             except _Stop as stop:
                 for later in links[position:]:
-                    self.coverage.append({"parent_record_id": url, "url": later["url"], "status": "not_attempted",
-                                          "record_id": attachment_record_id(url, later["url"])})
+                    self.coverage.append({"parent_record_id": url, "url": _kept_url(later), "status": "not_attempted",
+                                          "record_id": attachment_record_id(url, _name(later))})
                 raise _Resume(stop.reason, position, page_recorded=True) from None
 
 
@@ -553,7 +578,7 @@ _CAPTURE_ROLES = {
 def _expected_capture_id(role, data):
     """The source record id a capture of this role must be stored under."""
     if role == "attachment":
-        return attachment_record_id(data.get("parent_record_id") or "", data.get("url") or "")
+        return attachment_record_id(data.get("parent_record_id") or "", data.get("key") or data.get("url") or "")
     if role in ("site_record", "legacy_capture"):
         return data.get("record_id")
     return data.get("url")

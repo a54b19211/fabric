@@ -75,6 +75,12 @@ def _url_suffix(url: str) -> str:
     return ""
 
 
+def _file_name_from_response(resp) -> str:
+    """站点在 Content-Disposition 里给的文件名，如 attachment;filename=4C3F5162.xlsx（没有就是空串）。"""
+    found = re.search(r'filename\s*=\s*"?([^";]+)', resp.headers.get("content-disposition", ""), re.I)
+    return Path(found.group(1).strip()).name if found else ""
+
+
 def _ext_from_response(resp, url: str = "") -> str:
     """从 HTTP 响应推断文件扩展名。
     优先级：Content-Disposition → Content-Type → URL 后缀 → .bin
@@ -263,6 +269,7 @@ def download_pdf(
     cookies: list[dict] | None = None,
     max_bytes: int | None = None,
     timeout: float = 120,
+    store_as: str = "",
 ) -> dict:
     """
     下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx/xls/xlsx）。
@@ -273,6 +280,9 @@ def download_pdf(
                  skipped仅表示本地已有相同字节，不表示未检查远端。
         cookies: 从抓取页面继承的浏览器 cookies（Playwright 格式），
                  用于需要会话的站点（如 CDE）
+        store_as: 原件落盘用的身份（默认是下载网址）。下载链接每次都不同的站点（ChiCTR 的链接带一次性令牌）
+                 传附件记录号，同一个文件每次落到同一个路径。
+    返回里的 file_name 是站点在响应头 Content-Disposition 里给的文件名（没有就是空串）。
     """
     file_uuid = make_uuid(pdf_url)
     save_dir = APP.RAW_DIR / source_site
@@ -306,7 +316,7 @@ def download_pdf(
         raise ValueError("附件响应为空，未采用旧缓存")
     # PDF文件头比可能变化的响应头可靠；其余类型沿用已有判别规则。
     file_ext = ".pdf" if content.startswith(b"%PDF") else _ext_from_response(resp, pdf_url)
-    stored = store_original(content, pdf_url, source_site, file_ext)
+    stored = store_original(content, store_as or pdf_url, source_site, file_ext)
     save_path, skipped = stored["local_path"], stored["skipped"]
 
     logger.info(f"附件已核对远端并保留原件: {pdf_url} → {save_path}")
@@ -317,6 +327,7 @@ def download_pdf(
         "parent_uuid": parent_uuid,
         "source_site": source_site,
         "file_ext": file_ext,
+        "file_name": _file_name_from_response(resp),
         "sha256": stored["sha256"],
         "size": stored["size"],
         "timestamp": _now_iso(),

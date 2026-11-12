@@ -156,3 +156,23 @@ def test_roche_list_titles_are_read_from_inside_the_nested_teaser_link():
     assert items[0]["title"] == ("Roche presents new data across pharmaceuticals and diagnostics from its growing "
                                  "Alzheimer’s disease portfolio at CTAD 2026")
     assert all(i["title"] for i in items) and items[0]["publish_date"] == "2026-11-10"
+
+
+# ── ChiCTR 登记详情页（chictr）───────────────────────────────────────────
+
+def test_chictr_upload_link_is_the_only_attachment_and_is_named_by_its_field():
+    """chictr_upload.html 是 2026-11-12 的真实页面（317987）：标题、注册号一行、伦理批件一行（“查看附件”没有链接）、
+    “试验完成后的统计结果（上传文件）”一栏（中文行和英文行各有一个同一令牌的 DownloadTest 链接）。只有统计结果是附件：
+    只取一个，用字段名作 key（令牌每次都变，不能当身份）；页面顶上的 DownloadXml 是记录本身的 XML，不算。
+    path 为空 = 没有文件，不算附件。"""
+    import re
+
+    html = (PAGES / "chictr_upload.html").read_text(encoding="utf-8")
+    extract = SITE_PROFILES["chictr"]["detail_extractor"]
+    got = extract(Selector(html))
+    href = re.search(r'href="\./(bin/chictr/DownloadTest\?path=[^"]+)"', html).group(1)
+    assert got["attachment_links"] == [{"url": "https://www.chictr.org.cn/" + href,
+                                        "key": "试验完成后的统计结果（上传文件）"}]
+    assert got["title"].startswith("基于叙事教学法的死亡教育项目") and got["extra"]["regno"] == "ChiCTR2600136516"
+    no_file = html.replace(href, "bin/chictr/DownloadTest?path=")
+    assert extract(Selector(no_file))["attachment_links"] == []

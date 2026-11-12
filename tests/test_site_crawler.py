@@ -45,15 +45,18 @@ def fake_web(monkeypatch, tmp_path):
             "source_site": site_key,
         }
 
-    def download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None):
+    def download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None, store_as=""):
         transport.gate(pdf_url)
         calls["download"].append((pdf_url, cookies))
+        calls.setdefault("store_as", []).append(store_as)
         if pdf_url == ATT2 and calls.get("fail_second"):
             raise RuntimeError("HTTP 404")
-        path = tmp_path / (pdf_url[-6:])
-        path.write_bytes(b"\xd0\xcf\x11\xe0 synthetic" + pdf_url.encode())
-        return {"uuid": "f", "local_path": str(path), "source_url": pdf_url, "file_ext": "." + pdf_url.rsplit(".", 1)[1],
-                "skipped": False}
+        path = tmp_path / (store_as or pdf_url)[-6:]  # 落盘路径也只看 store_as（有的话），和 store_original 一样
+        path.write_bytes(b"\xd0\xcf\x11\xe0 synthetic" + (store_as or pdf_url).encode())  # 同一个文件，每次同样的字节
+        ext = "xlsx" if "?" in pdf_url else pdf_url.rsplit(".", 1)[1]
+        return {"uuid": "f", "local_path": str(path), "source_url": pdf_url, "file_ext": "." + ext, "skipped": False,
+                "file_name": calls.get("file_name", "")}
+
 
     monkeypatch.setattr(site_crawler, "_fetch_page", fetch_page)
     monkeypatch.setattr(site_crawler, "_route_webpage", route_webpage)
@@ -113,11 +116,58 @@ def test_detail_page_becomes_capture_plus_one_record_per_attachment(fake_web):
 def test_links_read_the_label_from_text_or_name():
     parsed = {"attachment_links": [
         {"url": "u1", "name": "从 name 读"}, {"url": "u2", "text": "从 text 读"}, {"url": "u3", "text": "text", "name": "name"},
-        {"url": "u4"}, {"text": "没有网址"}, None]}
+        {"url": "u4"}, {"text": "没有网址"}, None, {"url": "u5", "key": "字段名"}]}
     assert site_crawler._links(parsed) == [
         {"url": "u1", "text": "从 name 读"}, {"url": "u2", "text": "从 text 读"}, {"url": "u3", "text": "text"},
-        {"url": "u4", "text": ""}]
+        {"url": "u4", "text": ""}, {"url": "u5", "text": "", "key": "字段名"}]
     assert site_crawler._links({}) == [] and site_crawler._links({"attachment_links": None}) == []
+
+
+CHICTR = "https://www.chictr.org.cn/showproj.html?proj=317987"
+CHICTR_ATT = CHICTR + "#attachment=统计结果"
+
+
+def _chictr_route(monkeypatch, tokens):
+    """ChiCTR 页面替身：每次读到的下载链接带一个不同的令牌，附件有固定的 key（页面上的字段名）。"""
+    tokens = iter(tokens)
+
+    def route_webpage(page_data, site_key=None):
+        link = {"url": "https://www.chictr.org.cn/bin/chictr/DownloadTest?path=" + next(tokens), "key": "统计结果"}
+        return {"uuid": "u", "title": "某试验", "publish_date": "2026-11-11", "markdown": "# 某试验\n\n正文。",
+                "parse_method": "css_extract", "attachment_links": [link], "source_url": page_data["url"],
+                "source_site": site_key}
+
+    monkeypatch.setattr(site_crawler, "_route_webpage", route_webpage)
+
+
+def test_attachment_whose_link_changes_on_every_visit_is_named_by_its_key_and_the_link_is_not_kept(fake_web, monkeypatch):
+    """ChiCTR 的下载链接带一次性令牌（每次打开页面都不同）。附件身份是“父记录#attachment=字段名”，令牌只在下载那一刻用，
+    不进任何原件：同一页面连读几遍，页面和附件的原件逐字相同（不新增版本）；文件名用站点在响应头里给的。"""
+    fake_web["file_name"] = "4C3F5162.xlsx"
+    _chictr_route(monkeypatch, ["TOKEN1", "TOKEN2", "TOKEN3"])
+    rounds = [read_public(FetchRequest(source_id="chictr", query="by_url", source_record_ids=[CHICTR]))
+              for _ in range(3)]
+    for batch in rounds:
+        assert batch["error"] is None and [r.source_record_id for r in batch["records"]] == [CHICTR, CHICTR_ATT]
+        assert [a["status"] for a in batch["attachment_coverage"]] == ["stored"]
+        assert "TOKEN" not in json.dumps(batch["attachment_coverage"])
+        assert all("TOKEN" not in r.raw_content for r in batch["records"])
+    assert [url[-6:] for url, _ in fake_web["download"]] == ["TOKEN1", "TOKEN2", "TOKEN3"]  # 令牌只用在下载那一刻
+    assert fake_web["store_as"] == [CHICTR_ATT] * 3  # 原件每次落在同一处
+    for later in rounds[1:]:
+        assert [r.raw_content for r in later["records"]] == [r.raw_content for r in rounds[0]["records"]]
+    page, att = (json.loads(r.raw_content) for r in rounds[0]["records"])
+    assert page["attachments"] == [{"record_id": CHICTR_ATT, "url": "", "text": ""}]
+    assert att["key"] == "统计结果" and att["url"] == "" and att["file_name"] == "4C3F5162.xlsx"
+    projected = project_record("chictr", rounds[0]["records"][1])  # 身份核对用 key，不是网址
+    assert projected["facts"]["parent_record_id"] == CHICTR and projected["source_url"] is None
+    assert projected["title"] == "4C3F5162.xlsx"
+
+
+def test_keyed_attachment_without_a_file_name_in_the_response_is_named_by_its_key(fake_web, monkeypatch):
+    _chictr_route(monkeypatch, ["T"])
+    batch = read_public(FetchRequest(source_id="chictr", query="by_url", source_record_ids=[CHICTR]))
+    assert json.loads(batch["records"][1].raw_content)["file_name"] == "统计结果"
 
 
 def test_attachment_download_failure_is_a_gap_not_a_failed_page(fake_web):
