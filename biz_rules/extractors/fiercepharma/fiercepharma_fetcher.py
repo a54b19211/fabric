@@ -49,15 +49,9 @@ def _now_iso() -> str:
 def _parse_rss(xml_bytes: bytes) -> list[dict]:
     """解析 RSS XML，返回文章基本信息列表。"""
     items = []
-    try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError as e:
-        logger.error(f"[FiercePharma] RSS XML 解析失败: {e}")
-        return items
-
-    channel = root.find("channel")
+    channel = ET.fromstring(xml_bytes).find("channel")  # 解析不了就抛 ParseError：由调用方记成这个 feed 读不到
     if channel is None:
-        return items
+        raise ValueError("RSS 里没有 channel")
 
     for item in channel.findall("item"):
         link_el = item.find("link")
@@ -107,13 +101,13 @@ def _parse_rss(xml_bytes: bytes) -> list[dict]:
     return items
 
 
-def _fetch_rss_items(api_cfg: dict) -> list[dict]:
-    """拉取所有 RSS feed，去重后返回文章列表。"""
+def _fetch_rss_items(api_cfg: dict) -> tuple[list[dict], list[ItemUnreadable]]:
+    """拉取所有 RSS feed，去重后返回（文章列表，读不到的 feed）。一个 feed 读不到不拦着别的 feed，但要报出来。"""
     feeds = api_cfg.get("rss_feeds", RSS_FEEDS)
     max_articles = api_cfg.get("max_articles", 100)
 
     seen_urls = set()
-    all_items = []
+    all_items, failed = [], []
 
     headers = {
         "User-Agent": (
@@ -135,13 +129,13 @@ def _fetch_rss_items(api_cfg: dict) -> list[dict]:
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_items.append(item)
-        except Exception as e:
-            logger.error(f"[FiercePharma] RSS 拉取失败: {feed_url} | {e}")
+        except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录
+            failed.append(ItemUnreadable(feed_url, "FiercePharma RSS 读取失败：" + type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120]))
 
     # 几个 feed 并成一个从新到旧的队列（同一天的保持 feed 里的先后）：增量读取“遇到已存的就停”要的是一条从新到旧的列表，
     # 不能第一个 feed 的最新几篇读过了就停，第二个 feed 里新的就漏掉。日期取不到的（空串）排最后。
     all_items.sort(key=lambda item: item["pub_date"], reverse=True)
-    return all_items[:max_articles]
+    return all_items[:max_articles], failed
 
 
 def _read_article(url: str) -> dict:
@@ -180,8 +174,9 @@ def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
     Fierce Pharma 混合采集器（RSS 列表 + Playwright 详情页）。
     作为 api_fetcher 被 iter_api_records 调用。
     """
-    items = _fetch_rss_items(api_cfg)
+    items, failed_feeds = _fetch_rss_items(api_cfg)
     logger.info(f"[FiercePharma] 共 {len(items)} 篇文章待采集")
+    yield from failed_feeds  # 读不到的 feed 记成读不到的条目，不能当成“那个 feed 没有文章”
 
     for item in items:
         url = item["url"]

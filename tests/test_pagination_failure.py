@@ -226,3 +226,30 @@ def test_a_table_page_takes_its_date_from_the_newest_date_in_the_table(monkeypat
     assert parsed["publish_date"] == "2026-11-12" == parsed["structured_data"]["publish_date"]
     driver._extract_table_rows = lambda _table: [["序号", "名称"], ["1", "x"]]  # a table with no date in it
     assert driver._tables_on_page(page, 0)[0]["publish_date"] == ""
+
+
+def test_a_list_page_without_items_ends_the_walk_without_clicking_on(monkeypatch):
+    driver, page = driver_for(monkeypatch, advance=True, pages=50)
+    page.query_selector_all = lambda selector: []  # 第一页就没有条目
+    assert crawl(driver, "_playwright_crawl") == [] and page.clicks == 0
+    assert page.context_closes == page.browser_closes == 1
+
+
+def test_the_walk_over_list_pages_stops_at_the_first_empty_one():
+    base = load_driver().__mro__[1]
+
+    class Link:
+        attrib = {"href": "/a"}
+
+    class Walk(base):
+        def __init__(self):
+            self.site_cfg, self.start_url, self.fetched = {"list_item_selector": "a"}, "https://x.invalid/list/", []
+
+        def _iter_list_pages(self):
+            for number in range(50):  # 配置翻 50 页
+                self.fetched.append(number)
+                yield SimpleNamespace(css=lambda selector, number=number: [Link()] if number == 0 else [])
+
+    walk = Walk()
+    assert list(walk.iter_detail_urls()) == ["https://x.invalid/a"]
+    assert walk.fetched == [0, 1]  # 第二页是空的：到头了，不再去取后面的页

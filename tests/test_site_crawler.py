@@ -861,8 +861,8 @@ def _fierce_read(monkeypatch, pages, max_records=5, retry_delay=0):
 
     monkeypatch.setattr(fetcher, "REQUEST_DELAY", 0)
     monkeypatch.setattr(fetcher, "RETRY_DELAY", retry_delay)
-    monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: [
-        {"url": url, "guid": "", "title": "", "description": "RSS 摘要", "pub_date": "2026-11-01"} for url in pages])
+    monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: ([
+        {"url": url, "guid": "", "title": "", "description": "RSS 摘要", "pub_date": "2026-11-01"} for url in pages], []))
 
     def fetch(url, **kwargs):
         answer = pages[url].pop(0)
@@ -949,6 +949,49 @@ def test_fiercepharma_failures_caused_by_the_budget_running_out_are_not_unreadab
     batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [budget_ran_out, TimeoutError("again")]})
     assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
     assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
+
+
+def test_fiercepharma_a_feed_that_cannot_be_read_is_noted_and_the_other_feed_is_still_read(monkeypatch):
+    """一个 RSS 读不到（以前只记日志，当成“这个 feed 没有文章”）：记成读不到的条目，别的 feed 照读，运行是“有 1 条读不到”。"""
+    from biz_rules.extractors.fiercepharma import fiercepharma_fetcher as fetcher
+
+    good, bad = "https://www.fiercepharma.com/rss/Pharma/xml", "https://www.fiercepharma.com/rss/manufacturing/xml"
+    rss = (b"<rss><channel><item><link>https://www.fiercepharma.com/pharma/a</link>"
+           b"<pubDate>Nov 1, 2026 1:55pm</pubDate></item></channel></rss>")
+
+    class Reply:
+        def __init__(self, url):
+            self.content = rss if url == good else b"<html>blocked</html>"
+            self.status = 200 if url == good else 403
+
+        def raise_for_status(self):
+            if self.status != 200:
+                raise RuntimeError(f"HTTP {self.status}")
+
+    monkeypatch.setattr(fetcher.httpx, "get", lambda url, **kwargs: Reply(url))
+    monkeypatch.setattr(fetcher.StealthyFetcher, "fetch", staticmethod(lambda url, **kwargs: WHOLE))
+    monkeypatch.setitem(site_crawler.SITE_PROFILES["fiercepharma"]["api"], "rss_feeds", [good, bad])
+    batch = read_public(FetchRequest(source_id="fiercepharma", query="records", max_records=5))
+    assert [u["url"] for u in batch["unread_items"]] == [bad] and "HTTP 403" in batch["unread_items"][0]["reason"]
+    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == ["https://www.fiercepharma.com/pharma/a"]
+    assert batch["error"]["code"] == "items_unread"
+
+
+def test_nccn_a_category_list_that_cannot_be_rendered_fails_the_read(monkeypatch):
+    """以前只记日志、跳过这个分类：整次读取照样“读到底”，少了一整个分类。"""
+    import scrapling.fetchers
+
+    class Fetcher:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch(self, url, **kwargs):
+            raise TimeoutError("Page.goto: Timeout 45000ms exceeded.")
+
+    monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", Fetcher)
+    batch = read_public(FetchRequest(source_id="nccn", query="records", max_records=5))
+    assert batch["records"] == [] and batch["stop_reason"] == "source_failed"
+    assert batch["error"]["code"] == "source_read_failed" and "TimeoutError" in batch["error"]["message"]
 
 
 class _RocheDetail:

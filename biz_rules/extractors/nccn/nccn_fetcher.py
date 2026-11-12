@@ -17,6 +17,7 @@ from typing import Iterator
 from loguru import logger
 
 from biz_rules.extractors.nccn.nccn import extract_nccn_detail
+from biz_rules.history_models import ItemUnreadable
 
 BASE_URL = "https://www.nccn.org"
 
@@ -178,13 +179,11 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
         cat_url = CATEGORIES[cat_num][1]
 
         logger.info(f"[NCCN] 渲染分类列表页: {cat_name} → {cat_url}")
-        try:
-            list_page = _render(fetcher, cat_url, LIST_READY)
-        except Exception as e:
-            logger.error(f"[NCCN] 列表页渲染失败 ({cat_url}): {e}")
-            continue
-
+        list_page = _render(fetcher, cat_url, LIST_READY)  # 渲染失败就让异常出去：整次读取失败，不能当成“这个分类没有指南”
         items = _parse_rendered_list(list_page, cat_num, cat_name)
+        if not items:
+            yield ItemUnreadable(cat_url, "分类列表页一条指南都没解析到，可能改版")
+            continue
 
         # 跨分类去重
         items = [it for it in items if it["guideline_id"] not in seen_globally]

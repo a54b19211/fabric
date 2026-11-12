@@ -55,6 +55,8 @@ class BasePaginationDriver(ABC):
         for page in self._iter_list_pages():
             urls = self._extract_detail_urls(page)
             logger.info(f"  提取到 {len(urls)} 条详情页链接")
+            if not urls:  # 这一页一条都没有：列表到头了（或页面改版）；不再往后翻，再翻只会得到更多空页或 404
+                return
             yield from urls
 
     @abstractmethod
@@ -263,6 +265,8 @@ class JsClickDriver(BasePaginationDriver):
 
                     page_urls = [(origin + h if h.startswith("/") else h) for h in hrefs]
                     logger.info(f"  提取到 {len(page_urls)} 条详情页链接")
+                    if not page_urls:  # 这一页一条都没有：列表到头了（或页面改版），不再翻
+                        break
                     if not emit(page_urls):  # 调用方读满了，不再翻
                         break
 
