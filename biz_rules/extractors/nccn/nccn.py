@@ -73,6 +73,10 @@ def extract_nccn_detail(page) -> dict:
                 href = el.get("href", "")
                 if not href.endswith(".pdf"):
                     continue
+                if current_section == "General":
+                    # 第一个 h4 之前的 PDF 是整站每页都有的宣传资料（化疗模板说明、年会招商册，每份几 MB），不是这份指南
+                    # 的文件：每份指南都下载一遍是重复下载（实测一次读取 12MB 里大半是它们）。
+                    continue
                 href = _abs(href)
                 label = el.get_text(strip=True)
 

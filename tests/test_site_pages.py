@@ -264,3 +264,35 @@ def test_roche_list_titles_are_read_from_inside_the_nested_teaser_link():
                                  "Alzheimer’s disease portfolio at CTAD 2026")
     assert all(i["title"] for i in items) and items[0]["publish_date"] == "2026-11-10"
 
+
+# ── NCCN 指南（nccn）────────────────────────────────────────────────────
+
+def test_nccn_detail_keeps_the_guideline_pdfs_and_leaves_out_the_site_wide_promo_pdfs():
+    """第一个 h4 之前的 PDF（化疗模板说明、年会招商册、展位图）整站每页都有，不是这份指南的文件：每份指南都下载一遍是重复下载
+    （一次读取 12MB 里大半是它们）。留下各 section 下的 8 个指南 PDF。fixture 是 2026-11-12 存下来的 ALL 指南页的主要部分。"""
+    from biz_rules.extractors.nccn.nccn import extract_nccn_detail
+
+    parsed = extract_nccn_detail(page("nccn_detail.html"))
+    assert parsed["title"] == "Acute Lymphoblastic Leukemia" and parsed["version"] == "3.2026"
+    assert [(s["section_name"], len(s["pdfs"])) for s in parsed["sections"]] == [
+        ("Guidelines", 1), ("Evidence Blocks", 1), ("Frameworks", 3), ("Guidelines for Patients", 2), ("International", 1)]
+    urls = [a["url"] for a in parsed["attachment_links"]]
+    assert len(urls) == 8 and not [u for u in urls if "/docs/default-source/" in u]
+
+
+def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_images():
+    """页面挂着很多第三方脚本，等“网络空闲”一页要一两分钟：列表页等指南链接、详情页等 section 小标题出现就够了。"""
+    from biz_rules.extractors.nccn import nccn_fetcher
+
+    seen = []
+
+    class Fetcher:
+        def fetch(self, url, **options):
+            seen.append((url, options))
+            return "page"
+
+    assert nccn_fetcher._render(Fetcher(), "https://www.nccn.org/x", nccn_fetcher.DETAIL_READY) == "page"
+    [(url, options)] = seen
+    assert options["network_idle"] is False and options["disable_resources"] is True
+    assert options["wait_selector"] == "h4" and options["timeout"] == 45000
+
