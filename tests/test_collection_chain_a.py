@@ -271,6 +271,23 @@ def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalle
     assert moved["state"] == "paging"
 
 
+def test_three_failures_in_a_row_give_the_cycle_up_and_the_next_cycle_starts_over(monkeypatch):
+    """同一个位置一直失败（PubMed 翻过 1 万条之后）：不能每个间隔都重试同一个位置，3 次之后放弃这一周期。"""
+    from db import source_refresh
+
+    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+    state = {"request": {"known_stop": 3, "continuation": {"cursor": "9900", "read_count": 9900}}, "cycle_pages": 3}
+    failure = HistoryError("source_read_failed", "PubMed读取或EFetch原件校验失败", 503)
+    for streak in (1, 2):
+        source_refresh._failed(pubmed, state, failure, NOW)
+        assert state["state"] == "failed" and state["fail_streak"] == streak and state["request"]["continuation"]
+    source_refresh._failed(pubmed, state, failure, NOW)
+    assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
+    state = {"request": {}, "fail_streak": 2}
+    _page_finished(pubmed, state, {"next_continuation": {"cursor": "c", "read_count": 1}}, NOW)
+    assert state["fail_streak"] == 0  # 读成功一段，连续失败数清零
+
+
 def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the_cursor():
     who = SourceWatch.model_validate(
         {"id": "w", "cadence_seconds": 900, "request": {"source_id": "who_don", "query": "*"}}
