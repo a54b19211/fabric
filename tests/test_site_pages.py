@@ -69,6 +69,7 @@ def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_ol
     assert len(links) == 10 and sample.css(profile["wait_selector"])
     assert all(a.attrib["href"].startswith("/news-events/press-announcements/") for a in links)
     assert links[0].get_all_text(strip=True).startswith("November 9, 2026")
+    assert profile["use_simple_fetch"] is True  # 静态 HTML，简单请求读，不开浏览器
 
 
 # ── FDA 药品安全通讯（fda_drug_safety）───────────────────────────────────
