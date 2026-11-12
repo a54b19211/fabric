@@ -49,8 +49,8 @@ from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES �
 WEB_SCHEMA = "datafabric.web_capture.v1"
 RECORD_SCHEMA = "datafabric.site_record.v1"
 ATT_SCHEMA = "datafabric.attachment.v1"
-# v3 6.3: a legacy document rebuilt for this parser by collection.legacy_migration (the old crawler's markdown
-# of a page or record); never a web capture or an API response of ours
+# v3 6.3：旧文档由 collection.legacy_migration 重建给这个解析器用（旧爬虫存的页面或记录的 Markdown）；
+# 不是我们自己的网页原件，也不是接口响应
 LEGACY_SCHEMA = "datafabric.site.legacy_capture.v1"
 HTML_INLINE_BYTES = 700 * 1024
 LIST_EMPTY = "列表页一条都没解析到，可能改版"  # 列表里一条都没有：不是“没有新内容”（那是解析到了、但全是已存的）
@@ -127,9 +127,8 @@ def attachment_record_id(parent_id: str, url: str) -> str:
 
 
 def _links(parsed):
-    """The attachment links of a parse result as {"url", "text"}: the extractors name the label "name",
-    the stored-attachments table "text". A link that is different on every visit (ChiCTR's carries a one-off
-    token) also has a "key", a fixed name for the attachment (the page's field name): see _name."""
+    """解析结果里的附件链接，整理成 {"url", "text"}：提取器把名称叫 "name"，已存附件表叫 "text"。每次访问都不同的链接
+    （ChiCTR 的带一次性令牌）还有一个 "key"，是这个附件固定的名字（页面上的字段名）：见 _name。"""
     links = []
     for link in parsed.get("attachment_links") or []:
         if link and link.get("url"):
@@ -139,18 +138,17 @@ def _links(parsed):
 
 
 def _name(link):
-    """What names an attachment under its parent: its link, or its key when the link changes on every visit."""
+    """附件在父项下的名字：它的链接；链接每次访问都变的，用它的 key。"""
     return link.get("key") or link["url"]
 
 
 def _kept_url(link):
-    """The link as the originals keep it. A keyed link is only used to download, it is not kept: its token would
-    make every read of the same page look like a new version."""
+    """原件里保留的链接。带 key 的链接只用来下载，不保留：它的令牌会让同一个页面每读一次都像是新版本。"""
     return "" if link.get("key") else link["url"]
 
 
 def _listed(parent_id, link):
-    """A link as the parent's original lists it."""
+    """父项的原件里怎样列出一个附件链接。"""
     return {"record_id": attachment_record_id(parent_id, _name(link)), "url": _kept_url(link),
             "text": link.get("text", "")}
 
@@ -391,7 +389,7 @@ def _site_results(reader, query):
         from core_engine.api_router import to_result
 
         for raw in profile["api_fetcher"](profile.get("api", {})):
-            if isinstance(raw, ItemUnreadable):  # the fetcher could not read this one and went on: passed on as it is
+            if isinstance(raw, ItemUnreadable):  # 拉取函数读不到这一条、接着往下读了：原样传下去
                 yield raw, None
                 continue
             parsed, kept = to_result(reader.site, profile, raw)
@@ -422,7 +420,7 @@ def read_site(request) -> dict:
 
 
 def _read_named(request, reader, start):
-    """query=by_url / stored_attachments: the parents are the requested record ids, in order."""
+    """query=by_url / stored_attachments：父项就是请求里的记录号，按顺序读。"""
     start_i, start_a, start_recorded = start
     for url in request.source_record_ids:
         if not _on_site(reader.site, url):
@@ -445,7 +443,7 @@ def _read_named(request, reader, start):
 
 
 def _read_site_records(request, reader, start):
-    """API and table-page sites: the parents are the site's results, replayed from the start."""
+    """接口站点和表格页站点：父项是站点给出的各条结果，续读时从头重放。"""
     start_i, start_a, start_recorded = start
     with closing(_site_results(reader, request.query)) as results:
         for position, (parsed, raw) in enumerate(results):
@@ -464,7 +462,7 @@ def _read_site_records(request, reader, start):
 
 
 def _read_detail_pages(request, reader, start):
-    """List sites: the parents are the detail pages the list entry leads to."""
+    """列表网页站点：父项是列表入口通向的各个详情页。"""
     start_i, start_a, start_recorded = start
     if request.query not in reader.profile.get("start_urls", []):
         raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
@@ -502,7 +500,8 @@ def _stopped_at(reader, start):
 
 def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
-    续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件}。"""
+    续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件,
+    "p": 1 表示这个父项的页面版本已经保存、续读时只为拿附件链接重取页面}。重放到续读位置途中停下，位置原样不动。"""
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
     start = (0, 0, False)
     try:
@@ -564,7 +563,7 @@ def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
 
 
 def _parsed_text(parsed):
-    """(title, clean text, publication time) of a parsed page."""
+    """解析结果 → (标题, 清洗正文, 发布时间)。"""
     title, clean_text = parsed.get("title") or "", parsed.get("markdown") or ""
     return title, clean_text, source_time(parsed.get("publish_date") or None, "site_publish_date")
 
@@ -609,7 +608,7 @@ def _attachment_fields(data):
     return facts, data.get("file_name") or "", "", None
 
 
-# role -> (the schema version it must carry, its (facts, title, clean text, publication time) projection)
+# role → (它必须带的 schema 版本, 它的 (facts, 标题, 清洗正文, 发布时间) 投影)
 _CAPTURE_ROLES = {
     "web_capture": (WEB_SCHEMA, _web_capture_fields),
     "site_record": (RECORD_SCHEMA, _site_record_fields),
@@ -619,7 +618,7 @@ _CAPTURE_ROLES = {
 
 
 def _expected_capture_id(role, data):
-    """The source record id a capture of this role must be stored under."""
+    """这个 role 的原件必须登记在哪个来源记录号下。"""
     if role == "attachment":
         return attachment_record_id(data.get("parent_record_id") or "", data.get("key") or data.get("url") or "")
     if role in ("site_record", "legacy_capture"):

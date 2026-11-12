@@ -1,5 +1,13 @@
 """一次读取的唯一闸门和预算。
 
+学生不用读这个文件，只需知道三件事：
+1. 采集代码里发出的每一次真实请求（httpx、requests、curl、浏览器），在发出的那一刻都会经过这里：先等共享限速的间隔，
+   再查预算（读几条、多少字节、几点截止），超了就抛 Stop，已经读到的保留，插件给出续读位置；
+2. 写采集代码不要自己加 time.sleep 限速，也不要自己数请求：间隔、出站上限和计数都在这里和 collection/rate.py；
+   在读取里要等一会儿（比如重读前）用 transport.pause，到截止时间就停，不会睡过头；
+3. 一次读取只有一份预算（Budget），所有插件共用；超时和 429 的有界重试也在这里，插件里不用再写。
+下面的大部分是“让这三件事对每一种传输层（httpx、requests、curl_cffi、浏览器）都成立”的补丁，不需要读懂，也不要改。
+
 所有读取插件（公开接口、站点插件、本地导入、PubMed 全文）共用这里的 Budget：字节数、版本数（抓几条）、截止时间，
 加上共享限速组和出站计数（collection.rate，按每一跳的实际目标主机）。请求次数不设额度：对对方网站的压力由限速间隔和
 出站上限管，读多少由“抓几条”和截止时间管；请求数只是如实计数，写进读取结果。读取期间，这个线程（及复制了上下文的线程）里发出的
@@ -125,7 +133,7 @@ class Budget:
         except TimeoutError:
             self.stop("deadline")
         if quota:
-            self.stop(quota)  # this instance's outbound cap for the site: the request is not sent
+            self.stop(quota)  # 本实例对这个网站的出站上限：这次请求不发出
         self.requests += 1
 
     def take_bytes(self, n):
@@ -181,8 +189,8 @@ def known(item) -> bool:
 
 
 def pause(seconds):
-    """A wait of a fetcher's own (the delay between pages, before a re-read) inside a read: it never runs past the
-    deadline, the read stops with "deadline" instead. Outside a read it is a plain sleep."""
+    """拉取函数自己要等的一会儿（重读之前的间隔等）：在读取里不会睡过截止时间，到了就以 "deadline" 停下；
+    不在读取里就是普通的睡眠。"""
     budget = _ACTIVE.get()
     if budget is None:
         time.sleep(seconds)

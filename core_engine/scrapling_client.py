@@ -249,7 +249,8 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")
 
-    # 非 2xx 状态码视为失败，抛出异常让 Prefect 重试机制接管
+    # 非 2xx 状态码视为失败，抛出异常。这里是经 fetch_page.fn 直接调用的，Prefect 的 retries 不生效；
+    # 超时和 429 的有界重试在 collection.transport，其他错误不重试
     if not (200 <= page.status < 300):
         raise RuntimeError(f"HTTP {page.status}，页面请求被拒绝: {url}")
 

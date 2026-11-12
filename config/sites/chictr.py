@@ -30,7 +30,7 @@ CONFIG = {
     "detail_extractor": extract_chictr_detail,
     "detail_wait_selector": "table td.left_title",
 
-    # 详情页用 simple_fetch 即可（服务端渲染，无需 Playwright）
+    # 详情页走浏览器读（use_simple_fetch=False）。页面是服务端渲染的，简单请求（True）也许够用，但没有实测过，不改。
     "use_simple_fetch": False,
     "disable_resources": True,
     "solve_cloudflare": False,

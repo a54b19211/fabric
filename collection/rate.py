@@ -8,12 +8,10 @@
   跨主机部署必须配 Redis。
 - 等待受 deadline 约束（time.monotonic() 的绝对值），等不到就抛 TimeoutError，调用方记为截止。
 
-Outbound counters (take_for_url): a site that declares an OutboundCap in the catalog also has its requests counted per
-UTC day, and per UTC hour for each value of the `query` parameter. The counters sit in the same place as the
-interval gate (Redis with an expiry, or one lock-guarded file per group), so every read and every process of this
-instance adds to the same count. A request that would pass a ceiling is refused and not counted. The counters are
-this instance's own ceiling, not a limit shared with other instances; a flushed Redis or an emptied DATAFABRIC_RATE_DIR
-starts the count again.
+出站计数（take_for_url）：目录里给来源声明了 OutboundCap 的网站，它的请求还要按 UTC 日、以及按 UTC 小时里 `query` 参数的
+每个取值各数一份。计数和间隔闸门放在同一个地方（带过期时间的 Redis，或每个限速组一个加锁的文件），所以这个实例的每次读取、
+每个进程都累加到同一个数上。会越过上限的请求被拒绝，也不计数。计数是本实例自己的上限，不是和其他实例共享的；
+Redis 被清空或 DATAFABRIC_RATE_DIR 被删，计数从零开始。
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 REDIS_FAILURE_RETRIES = 8
 HOUR, DAY = 3600, 86400
-# The stop reasons of a read that reached an outbound ceiling (take_for_url): its request was not sent.
+# 读取碰到出站上限（take_for_url）时的停止原因：那个请求没有发出。
 QUOTA_DAY, QUOTA_HOUR = "outbound_quota_day", "outbound_quota_hour"
 CEILING_STOPS = frozenset({QUOTA_DAY, QUOTA_HOUR})
 
@@ -128,14 +126,14 @@ def wait_for_url(url: str, *, deadline: float | None = None, default_interval: f
 
 
 class _Ceiling(NamedTuple):
-    reason: str  # stop reason once the ceiling is reached
-    key: str  # what is counted inside the period
+    reason: str  # 到了上限时的停止原因
+    key: str  # 在这个周期里数的是什么
     limit: int
-    period: int  # seconds; counted per UTC period, so an hour or a day starts at its mark
+    period: int  # 秒；按 UTC 周期数，所以一小时或一天从整点或零点算起
 
 
 def _ceilings(url: str) -> tuple[str, list[_Ceiling]]:
-    """(rate group, ceilings) the catalog declares for the url's site; no ceilings for a site without a cap."""
+    """(限速组, 上限列表)：目录里给这个网址所在网站声明的；没有声明上限的网站，上限列表为空。"""
     declared = group_for_url(url)
     cap = declared.outbound_cap if declared else None
     if cap is None:
@@ -202,9 +200,8 @@ def _take_redis(client, group: str, ceilings: list[_Ceiling], now: float) -> str
 
 
 def take_for_url(url: str) -> str | None:
-    """Count one request to the url against its site's outbound cap. The stop reason when a ceiling is already
-    reached (outbound_quota_day or outbound_quota_hour): that request is not counted and must not be sent. None when
-    it may go, or when the site declares no cap. Raises TimeoutError when the counters cannot be reached."""
+    """把发往这个网址的一次请求记到它网站的出站上限上。上限已到（outbound_quota_day 或 outbound_quota_hour）就返回
+    停止原因：这次请求不计数，也不能发出。可以发、或网站没有声明上限，返回 None。计数连不上时抛 TimeoutError。"""
     group, ceilings = _ceilings(url)
     if not ceilings:
         return None

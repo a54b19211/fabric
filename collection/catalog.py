@@ -41,17 +41,16 @@ class Incremental:
     semantics: str
     # 窗口回看重叠：来源更新日期常是“天”精度且有发布延迟，重叠读到的同一原件按版本身份去重。
     overlap_days: int = 2
-    # The shortest cadence a watch of this source may have (db.source_refresh). One round costs at least one request,
-    # so a source with a daily ceiling declares a floor its ceiling can carry.
+    # 固定刷新（db.source_refresh）的最短间隔。一轮至少一次请求，有每日上限的来源要声明一个它的上限撑得住的下限。
     min_cadence_seconds: int = 3600
 
 
 @dataclass(frozen=True)
 class OutboundCap:
-    """This instance's own ceiling on requests to one site, counted across reads and processes (collection.rate).
-    It limits what this instance sends; it is not a limit shared with other instances or the live system.
-    per_day: requests per UTC day, every query of the source together.
-    per_hour_per_query: requests per UTC hour for each value of the request's `query` parameter."""
+    """本实例自己对一个网站的请求上限，跨读取、跨进程一起数（collection.rate）。它只限制本实例发出去的，
+    不是和其他实例或现役系统共享的上限。
+    per_day：每个 UTC 日的请求数，这个来源的所有查询加在一起。
+    per_hour_per_query：每个 UTC 小时、请求的 `query` 参数每个取值各自的请求数。"""
 
     per_day: int
     per_hour_per_query: int | None = None
@@ -179,13 +178,13 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
         plugin="who_don",
         evidence_types=("official_notice",),
         decisions=("D", "E"),
-        # Rounds of 15 minutes: at one request each, 96 a day, well inside the 200 of the daily ceiling.
+        # 每 15 分钟一轮：每轮一次请求，一天 96 次，远在每日 200 次的上限之内。
         incremental=Incremental(
             "modified_window", "LastModified", "公告最后修改时间；不是暴发开始时间", min_cadence_seconds=900
         ),
         rate_group="who.int",
         min_interval_seconds=30.0,
-        outbound_cap=OutboundCap(per_day=200),  # a backfill's requests count inside the 200
+        outbound_cap=OutboundCap(per_day=200),  # 回填的请求也算在这 200 次里
         coverage={"metadata": "全部", "fulltext": "公告原文"},
     ),
     CollectionSpec(
@@ -269,9 +268,10 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
         "旧 ETL 没有这个站的采集代码；等官方数据渠道或授权。",
     ),
     # ——站点插件 site_crawler（站点配置 config/sites/* + core_engine 抓取器）——
-    # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件用站点配置里的浏览器抓取器运行，
-    # 本系统未对原站实测（verified=False）。没有更新时间可过滤；列表从新到旧的站点按“遇到已存的就停”进固定刷新
-# （_NEWEST_FIRST），用不了的写在 _NOT_WATCHED。
+    # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件用站点配置里的浏览器抓取器运行。后来用
+    # ops/check_sources.py 对原站真抓过多轮（chictr、nmpa、cde 等都读得到），verified 要不要改 True 由主持人定，
+    # 这里仍是 False。没有更新时间可过滤；列表从新到旧的站点按“遇到已存的就停”进固定刷新（_NEWEST_FIRST），
+    # 用不了的写在 _NOT_WATCHED。
     # 附件：详情页附件各成独立版本，正文由加工层 attachment_parse（自部署 MinerU）产出。
     CollectionSpec(
         source_id="chictr",
@@ -381,16 +381,15 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
         plugin="gdelt_doc",
         evidence_types=("media",),
         decisions=("D",),
-        # No cursor: a full page hides the rest of its window. The watch therefore reads whole UTC hours, halves the
-        # full ones (biz_rules.gdelt_news) and records what stays cut short in the run's coverage. Each hour is read
-        # once (no overlap): a re-read would spend requests for the same hour.
+        # 没有续页：满额的一页会藏起窗口里剩下的。所以固定刷新按整点的 UTC 小时读，满额的对半拆开再读
+        # （biz_rules.gdelt_news），仍被截断的留在读取回执里。每个小时只读一次（不重叠）：重读只是为同一小时再花请求。
         incremental=Incremental(
             "source_updated_window", "seendate",
             "GDELT 观察到这条新闻的时间；不是新闻发布时间，也不是本地首次见到的时间", overlap_days=0,
         ),
         rate_group="gdeltproject.org",
-        min_interval_seconds=6.0,  # GDELT asks for one request every 5 seconds; one more second as margin
-        outbound_cap=OutboundCap(per_day=900, per_hour_per_query=7),  # 5 queries x 24 hours x 7 = 840 at most
+        min_interval_seconds=6.0,  # GDELT 要求每 5 秒最多一个请求；多留 1 秒
+        outbound_cap=OutboundCap(per_day=900, per_hour_per_query=7),  # 5 个查询 x 24 小时 x 7 次 = 最多 840
         coverage={"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
         notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条",
     ),

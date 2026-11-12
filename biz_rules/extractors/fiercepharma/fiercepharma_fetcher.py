@@ -163,7 +163,7 @@ def _read_article(url: str) -> dict:
 def iter_fiercepharma(api_cfg: dict) -> Iterator[dict]:
     """
     Fierce Pharma 混合采集器（RSS 列表 + Playwright 详情页）。
-    作为 api_fetcher 被 iter_api_records 调用。
+    作为站点配置的 api_fetcher，由 collection.site_crawler 逐条取用。
     """
     items, failed_feeds = _fetch_rss_items(api_cfg)
     logger.info(f"[FiercePharma] 共 {len(items)} 篇文章待采集")

@@ -28,7 +28,7 @@ from db import history, publication
 class SourceWatch(Model):
     id: str = Field(pattern=r"^[a-z0-9_-]{1,60}$")
     request: FetchRequest
-    cadence_seconds: int = Field(default=3600, gt=0, le=604800)  # the floor is the source's own, see query_budget
+    cadence_seconds: int = Field(default=3600, gt=0, le=604800)  # 下限由来源目录定，见 query_budget
     lookback_days: int = Field(default=30, ge=1, le=3650)
     # realtime：按来源更新窗口增量读，窗口有持久检查点；backfill：不加窗口，按续页读完整个范围，
     # 读到底后按 cadence 重新对账。实时优先，回填在每轮实时之后各走一页（保底，不被饿死）。

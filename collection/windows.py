@@ -49,8 +49,7 @@ def _whole_hours(watch, state: dict, now: datetime) -> tuple[datetime, datetime]
 
 
 def first_unread(coverage: dict) -> str | None:
-    """A windowed read's coverage -> the start of its earliest window that was not read (a stop or a failure left
-    it), or None when every window was read."""
+    """按窗口读的读取回执 → 最早一个没读到的窗口的起点（读取停下或失败留下的），每个窗口都读到了就返回 None。"""
     starts = [
         parse_timestamp(receipt["start"])
         for receipt in coverage["window_coverage"]

@@ -1,5 +1,5 @@
 """
-翻页驱动层 —— 封装三种翻页策略，对外统一暴露 collect_detail_urls()。
+翻页驱动层 —— 封装三种翻页策略，对外统一暴露 iter_detail_urls()（逐页产出详情页链接）。
 
 策略说明：
   - UrlPatternDriver  : 翻页 URL 按规律生成（如 index.html / index_1.html）

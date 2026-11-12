@@ -210,7 +210,7 @@ def _article_record(art: dict, body: str) -> dict:
 def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
     """
     主生成器：遍历年份和页码，抓取列表页，再抓取详情页正文。
-    作为 api_fetcher 被 iter_api_records 调用。
+    作为站点配置的 api_fetcher，由 collection.site_crawler 逐条取用。
     """
     start_url = api_cfg.get("start_url", "https://www.roche.com/media/releases")
     max_articles = api_cfg.get("max_articles", 0)

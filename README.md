@@ -59,6 +59,8 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 
 ## 运行
 
+想读懂采集，从 `pipeline.py` 读起：一份资料从抓取到能被检索，一步一个函数，按顺序往下读就是整条链路。
+
 数据链路只有一条：采集框架把原件写成只追加的 history 版本，加工层按版本产出派生结果，
 正文经 `db/index_publication` 和桥接服务进 WeKnora。
 
@@ -105,9 +107,20 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 
 ## 新增采集站点
 
-1. 在 `config/sites/` 加一个站点配置（`SITE_KEY` + `CONFIG`）；
-2. 在 `collection/catalog.py` 加一条 `CollectionSpec(plugin="site_crawler", verified=False, ...)`；
-3. 加契约样例测试（`tests/test_site_crawler.py` 的写法），对原站实测后再把 `verified` 改为 True。
+一个网站接进来要做六件事，前三件是写代码，后三件是让库和测试认识它、再对原站验证：
+
+1. 在 `config/sites/` 加一个站点配置（`SITE_KEY` + `CONFIG`：列表入口 `start_urls`、选择器、翻页、详情页提取函数；
+   接口站点写 `source_type: "api"` 和拉取函数 `api_fetcher`）；
+2. 通解读不好详情页时，在 `biz_rules/extractors/` 写一个提取函数，配置里的 `detail_extractor` 指向它（可选）；
+3. 在 `collection/catalog.py` 加一个 `_site(...)` 调用：来源编号、名称、证据类型、服务的业务判断、限速组和间隔、覆盖说明。
+   `verified` 一律是 False，对原站实测之后由主持人决定改不改；列表不是从新到旧、不能“遇到已存的就停”的，
+   在 `_NOT_WATCHED` 里写原因，它就不进固定刷新；
+4. 在 `tests/fixtures/source_catalog_golden.json` 加这个来源的许可项（站点来源的许可项由目录生成，`tests/test_source_catalog_golden.py`
+   会指出少了哪一项；先看生成的内容对不对，再写进固定文件）；
+5. 让库认识它：`python -m migration.runner --db history --apply` 给目录里的每个来源补一行 `history_sources`（已有的不动）；
+   `DATAFABRIC_HISTORY_SOURCE_ALLOWLIST` 里加上这个来源编号；要定时刷新的，再把它写进 `DATAFABRIC_HISTORY_WATCHES`；
+6. 对原站实测：`python ops/check_sources.py <来源> --rounds 3 --incremental`（连抓三轮，看版本、标题、正文、日期有没有读全，
+   第二、三轮有没有重复存），再按 `tests/test_site_crawler.py` 的写法补契约样例测试。
 
 ---
 
