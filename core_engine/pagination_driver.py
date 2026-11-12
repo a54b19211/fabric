@@ -12,6 +12,7 @@
 import concurrent.futures
 import json
 import queue
+import re
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -405,14 +406,16 @@ class JsClickDriver(BasePaginationDriver):
             if page_count > 0:
                 doc_title = f"{doc_title} - 第{page_count + 1}页"
 
+            # 表格页没有自己的发布日期：取表里最新的一个日期（CDE 受理品种表的“承办日期”列）作为这一页的日期
+            latest = max((c for row in rows_data for c in row if re.fullmatch(r"\d{4}-\d{2}-\d{2}", c)), default="")
             parsed = {
                 "uuid": make_uuid(f"{self.start_url}#page{page_count + 1}"),
                 "title": doc_title,
-                "publish_date": "",
+                "publish_date": latest,
                 "markdown": f"# {doc_title}\n\n{md_table}",
                 "structured_data": {
                     "title": doc_title,
-                    "publish_date": "",
+                    "publish_date": latest,
                     "category": "",
                     "summary": "",
                 },

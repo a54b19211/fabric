@@ -206,3 +206,13 @@ def test_pdf_header_keeps_content_path_stable_despite_http_type_change(http_sour
                         lambda **kwargs: httpx_client(transport=transport, **kwargs))
     repeated = download()
     assert repeated["local_path"] == first["local_path"] and repeated["file_ext"] == ".pdf"
+
+
+def test_an_attachment_that_is_a_web_page_gets_the_html_extension_and_not_bin():
+    """HKEX announcements are sometimes .htm pages: the content type says what they are."""
+    from types import SimpleNamespace
+
+    page = SimpleNamespace(headers={"content-type": "text/html; charset=UTF-8"})
+    assert client._ext_from_response(page, "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/1105/a_c.htm") == ".html"
+    assert client._ext_from_response(SimpleNamespace(headers={"content-type": "application/pdf"}), "https://x.invalid/y") == ".pdf"
+    assert client._ext_from_response(SimpleNamespace(headers={}), "https://x.invalid/y") == ".bin"  # nothing says what it is

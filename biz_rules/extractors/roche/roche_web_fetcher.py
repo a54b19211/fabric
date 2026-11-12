@@ -22,6 +22,10 @@ from biz_rules.history_models import HistoryError, ItemUnreadable
 from collection import transport
 
 RETRY_DELAY = 10.0  # 详情页第一次没读到，隔多久重读一次（秒）
+# 列表页等到新闻标题（每条新闻一个）出现，内容就齐了。一年的最后一页之后没有标题，等不到就是等满 LIST_TIMEOUT（毫秒，
+# 页面照常返回，解析出 0 条，这一年读完）；正常的页面 10 来秒就出现。
+LIST_READY = ".teaser__title"
+LIST_TIMEOUT = 30000
 
 
 def _make_uuid(source_url: str) -> str:
@@ -233,9 +237,10 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
                 page = StealthyFetcher.fetch(
                     target_url,
                     headless=True,
-                    network_idle=True,
+                    network_idle=False,  # 不等“网络空闲”（实测 23 秒），新闻标题出现就够了（13 秒）
+                    wait_selector=LIST_READY,
                     disable_resources=True,
-                    timeout=60000,
+                    timeout=LIST_TIMEOUT,
                 )
             except Exception as e:  # 读不到列表页是失败，不是“这一年读完了”：抛出去，运行记为失败（以前 break，被当作读到底）
                 logger.error(f"[Roche] 列表页抓取失败: {target_url} | {e}")

@@ -85,7 +85,7 @@ def _ext_from_response(resp, url: str = "") -> str:
     """从 HTTP 响应推断文件扩展名。
     优先级：Content-Disposition → Content-Type → URL 后缀 → .bin
     注意：魔数嗅探不在这里做，因为可能和 URL 后缀冲突（如 NMPA 的 .doc 实为 OLE2），
-    由调用方在 .bin 时用 _sniff_bytes 兜底。
+    由调用方在 .bin 时用 _sniff_bytes 兜底。内容类型是网页（html）的给 .html。
     """
     # 1. Content-Disposition: attachment; filename="xxx.docx"
     cd = resp.headers.get("content-disposition", "")
@@ -108,6 +108,8 @@ def _ext_from_response(resp, url: str = "") -> str:
         return ".xlsx"
     if "ms-excel" in ct:
         return ".xls"
+    if "html" in ct:  # 网页（港交所有的公告附件是 .htm 页面）：按内容类型给 .html，不当成未知文件存成 .bin
+        return ".html"
 
     # 3. URL 后缀
     if url:

@@ -422,7 +422,11 @@ def _fda_crl_fields(item, data) -> _Projection:
     if item.source_record_id != crl_id(data):
         raise HistoryError("native_id_mismatch", "FDA复合来源ID与原件不一致")
     facts, locators = _facts(data, FDA_CRL_FIELDS)
-    title = " / ".join(str(data.get(k, "")) for k in ("file_name", "letter_type", "letter_date"))
+    # 标题：谁收到的、什么信、哪个申请、信上的日期（以前是 PDF 文件名 / 类型 / 日期，文件名不是标题）；没有公司名才退到文件名
+    applications = data.get("application_number")
+    applications = ", ".join(map(str, applications)) if isinstance(applications, list) else str(applications or "")
+    title = (f"{data.get('company_name') or data.get('file_name')} - {data.get('letter_type')} "
+             f"({applications}, {data.get('letter_date')})")
     clean_text = data.get("text") or ""
     if not isinstance(clean_text, str):
         raise HistoryError("invalid_source_fields", "FDA信函text字段不是文本")

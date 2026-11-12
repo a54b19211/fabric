@@ -161,3 +161,14 @@ def test_every_page_request_asks_for_the_remaining_budget_and_europe_pmc_starts_
     sources._read_public_api(FetchRequest(source_id="europe_pmc", query="a", max_records=3, max_pages=2))
     assert [(call["cursorMark"], call["pageSize"]) for call in seen] == [("*", "3"), ("c2", "1")]
     assert json.dumps(sorted(seen[0])) == json.dumps(sorted(seen[1]))
+
+
+def test_crl_title_names_the_company_the_letter_and_the_application_not_the_pdf_file():
+    from biz_rules.history_models import ArchiveRecord
+
+    letter = {**crl("210649_2019_Orig1s000OtherActionLtrs.pdf"), "company_name": "AB Pharmaceuticals, LLC",
+              "letter_date": "09/12/2018", "application_number": ["NDA 210649"]}
+    item = ArchiveRecord(source_record_id=sources.crl_id(letter), record_kind="document", raw_content=json.dumps(letter))
+    projected = sources.project_record("fda_crl", item)
+    assert projected["title"] == "AB Pharmaceuticals, LLC - COMPLETE RESPONSE (NDA 210649, 09/12/2018)"
+    assert projected["event_time"]["value"] == "2018-09-12"  # the letter's date: kept as the event time, not as a publication date

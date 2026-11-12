@@ -4,6 +4,7 @@ import ast
 import concurrent.futures
 import json
 import queue
+import re
 import sys
 import threading
 import types
@@ -28,7 +29,7 @@ def load_driver():
              and n.name in {"BasePaginationDriver", "JsClickDriver"}]
     namespace = {
         "ABC": ABC, "abstractmethod": abstractmethod, "urlparse": urlparse,
-        "urljoin": urljoin, "json": json, "concurrent": concurrent, "queue": queue, "threading": threading,
+        "urljoin": urljoin, "json": json, "concurrent": concurrent, "queue": queue, "threading": threading, "re": re,
         "in_context": lambda fn: fn, "SITE_PROFILES": {}, "DEFAULT_HEADERS": {"User-Agent": "synthetic"},
         "logger": Quiet(), "time": SimpleNamespace(sleep=lambda _delay: None),
         "make_uuid": lambda value: value,
@@ -215,3 +216,13 @@ def test_detail_url_dedup_keeps_distinct_record_ids(links, expected):
         css=lambda _selector: [SimpleNamespace(attrib={"href": link}) for link in links],
     )
     assert driver._extract_detail_urls(page) == expected
+
+
+def test_a_table_page_takes_its_date_from_the_newest_date_in_the_table(monkeypatch):
+    """CDE's accepted-products tables have no publication date of their own: the newest "承办日期" in the table is the page's."""
+    driver, page = driver_for(monkeypatch, advance=True)
+    driver._extract_table_rows = lambda _table: [["受理号", "承办日期"], ["A1", "2026-11-10"], ["A2", "2026-11-12"], ["A3", ""]]
+    [parsed] = driver._tables_on_page(page, 0)
+    assert parsed["publish_date"] == "2026-11-12" == parsed["structured_data"]["publish_date"]
+    driver._extract_table_rows = lambda _table: [["序号", "名称"], ["1", "x"]]  # a table with no date in it
+    assert driver._tables_on_page(page, 0)[0]["publish_date"] == ""
