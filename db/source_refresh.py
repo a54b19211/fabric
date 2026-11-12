@@ -293,10 +293,11 @@ def refresh_once(engine=None):
                 now + timedelta(seconds=watch.cadence_seconds)
             ).isoformat()
             # 已完成失败页用新run重试相同范围/续页；未知create/入队结果保留固定key。
+            # 只有运行本身失败（failed，或带着错误的 partial）才换新 run；正常的 partial（只是预算用完）不是失败。
             if state.get("active_run_id"):
                 try:
                     saved = history.read_run(state["active_run_id"])
-                    if saved.state in {"failed", "partial"}:
+                    if saved.state == "failed" or saved.error:
                         state.pop("active_run_id", None)
                         state.pop("request_key", None)
                         _read_all_next_time(state)
