@@ -1,7 +1,7 @@
 """Codex 408：统一预算在真实连接上的停止边界（本机 HTTP 服务；浏览器项需要本机装有 Chromium）。
 
 - 截止时间在读块处执行：慢速逐字节返回、发完响应头后停住不发，都在期限附近停，报 deadline，不报读到底；
-- 浏览器内部跟随的重定向超出请求预算时，导航一返回就按 request_budget 停，这一页不交付。
+- 浏览器内部跟随的重定向（发出前拦不到）照实计入请求数；请求次数不设额度，不据此停。
 """
 
 import threading
@@ -161,7 +161,7 @@ def test_curl_transfer_stops_at_the_run_deadline(monkeypatch, path):
 
 
 @pytest.mark.parametrize("library", ["playwright", "patchright"])
-def test_browser_redirects_past_the_request_budget_stop_the_read(monkeypatch, library):
+def test_browser_redirects_are_counted_as_requests_and_do_not_stop_the_read(monkeypatch, library):
     sync_api = pytest.importorskip(library + ".sync_api")
 
     def browse():
@@ -178,10 +178,9 @@ def test_browser_redirects_past_the_request_budget_stop_the_read(monkeypatch, li
     with _Server() as server:
         batch, _ = _read(monkeypatch, browse, deadline=30)
     assert len(server.hits) == 13  # 1 次过闸 + 12 跳浏览器内部跟随（Chromium 发出前拦不到）
-    assert batch["requests"] == 13
-    assert batch["stop_reason"] == "request_budget"
-    assert not batch["upstream_pagination_exhausted"] and batch["records"] == [] and batch["error"] is None
-    assert batch["next_continuation"] is not None
+    assert batch["requests"] == 13  # counted as they are, no limit
+    assert batch["stop_reason"] == "upstream_exhausted" and batch["error"] is None
+    assert batch["upstream_pagination_exhausted"] and len(batch["records"]) == 1
 
 
 @pytest.mark.parametrize("library", ["playwright", "patchright"])

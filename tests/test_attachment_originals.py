@@ -37,7 +37,7 @@ def http_source(monkeypatch, tmp_path):
 
 
 def _budget():
-    return transport.Budget(max_requests=10, max_bytes=10**9, max_records=10, deadline_seconds=60)
+    return transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
 
 
 def download(**kwargs):

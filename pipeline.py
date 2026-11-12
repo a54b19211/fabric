@@ -75,7 +75,7 @@ from flows.history_fetch import history_fetch_job
 STEPS = ("fetch", "clean", "align", "score", "index", "measure")
 STATES = {"completed": "完成", "partial": "部分完成（读满 --max 条或到截止时间就停，来源还没读完，这是正常的）", "failed": "失败"}
 STOPS = {"upstream_exhausted": "来源读完了", "record_budget": "读满了 --max 条", "page_budget": "翻满了页数上限",
-         "deadline": "到了 --deadline 截止时间", "byte_budget": "下载量到了上限", "request_budget": "请求数到了上限",
+         "deadline": "到了 --deadline 截止时间", "byte_budget": "下载量到了上限",
          "outbound_quota_day": "本机今天对该站的请求数到了上限", "outbound_quota_hour": "本机这一小时对该站的请求数到了上限",
          "source_failed": "来源读取失败", "items_unread": "读到底了，但有几条读不到（网址和原因在运行记录的 unread_items 里）"}
 

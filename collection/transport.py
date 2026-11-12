@@ -1,7 +1,8 @@
 """一次读取的唯一闸门和预算。
 
-所有读取插件（公开接口、站点插件、本地导入、PubMed 全文）共用这里的 Budget：请求数、字节数、版本数、截止时间，
-加上共享限速组和出站计数（collection.rate，按每一跳的实际目标主机）。读取期间，这个线程（及复制了上下文的线程）里发出的
+所有读取插件（公开接口、站点插件、本地导入、PubMed 全文）共用这里的 Budget：字节数、版本数（抓几条）、截止时间，
+加上共享限速组和出站计数（collection.rate，按每一跳的实际目标主机）。请求次数不设额度：对对方网站的压力由限速间隔和
+出站上限管，读多少由“抓几条”和截止时间管；请求数只是如实计数，写进读取结果。读取期间，这个线程（及复制了上下文的线程）里发出的
 每一次真实传输都在发出那一刻过闸：
 
 - httpx：Client._send_single_request，每一跳一次（自动跟随的重定向逐跳过闸）；
@@ -19,8 +20,7 @@
 截止时间：每次等待（连接、读块、整次传输、限速、重试间隔，以及浏览器里等加载、选择器、函数、睡眠）都不超过开始等待
 那一刻的剩余时间——读块的超时在每次阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的 SyncStream.read，requests 在 http.client 底下的
 SocketIO.readinto；响应头、chunk 内部、正文都从这两处读），读块因到期超时报 deadline。
-请求数：唯一先发后计的是浏览器内部跟随的重定向（发出前拦不到，Chromium 一次导航最多跟 20 跳）。照实计数，
-导航一返回就按 request_budget 停，这一页不交付，不报读到底。
+请求数：浏览器内部跟随的重定向（Chromium 一次导航最多跟 20 跳）发出前拦不到，照实计数，不据此停。
 """
 
 from __future__ import annotations
@@ -67,11 +67,11 @@ class Stop(BaseException):
 
 
 class Budget:
-    """一次读取的预算与计量。版本数 ≤ max_records（父记录、附件、全文都算）；请求数 ≤ max_pages × 10；
-    字节 ≤ DATAFABRIC_READ_MAX_BYTES；截止时间 deadline_seconds。任何一项用完就停，并且停住。"""
+    """一次读取的预算与计量。版本数 ≤ max_records（父记录、附件、全文都算）；字节 ≤ DATAFABRIC_READ_MAX_BYTES；
+    截止时间 deadline_seconds。任何一项用完就停，并且停住。请求数只计数，不设额度。"""
 
-    def __init__(self, *, max_requests, max_bytes, max_records, deadline_seconds):
-        self.max_requests, self.max_bytes, self.max_records = max_requests, max_bytes, max_records
+    def __init__(self, *, max_bytes, max_records, deadline_seconds):
+        self.max_bytes, self.max_records = max_bytes, max_records
         self.deadline = time.monotonic() + deadline_seconds
         self.requests = self.bytes = self.records = self.subrequests = self.redirect_hops = 0
         self.stopped: str | None = None
@@ -82,8 +82,8 @@ class Budget:
 
     @classmethod
     def for_request(cls, request):
-        return cls(max_requests=request.max_pages * 10, max_bytes=byte_budget(),
-                   max_records=request.max_records, deadline_seconds=request.deadline_seconds)
+        return cls(max_bytes=byte_budget(), max_records=request.max_records,
+                   deadline_seconds=request.deadline_seconds)
 
     def stop(self, reason):
         self.stopped = self.stopped or reason
@@ -94,8 +94,6 @@ class Budget:
             raise Stop(self.stopped)
         if self.bytes > self.max_bytes:
             self.stop("byte_budget")
-        if self.requests > self.max_requests:  # 只有浏览器内部跳转会先发后计
-            self.stop("request_budget")
         if time.monotonic() >= self.deadline:
             self.stop("deadline")
 
@@ -103,8 +101,6 @@ class Budget:
         self.check()
         if self.bytes >= self.max_bytes:
             self.stop("byte_budget")
-        if self.requests >= self.max_requests:
-            self.stop("request_budget")
         try:
             rate.wait_for_url(url, deadline=self.deadline)
             quota = rate.take_for_url(url)
@@ -434,8 +430,7 @@ def _route(page):
         route.fallback()
 
     def redirected(request):
-        # 浏览器内部跟随的重定向，下一跳不经过路由，发出前拦不住：照实计数（占请求数）；超了之后的请求在路由处中止，
-        # 导航返回时 check 按 request_budget 停
+        # 浏览器内部跟随的重定向，下一跳不经过路由，发出前拦不住：照实计数（占请求数），不据此停
         budget = getattr(page, "_collection_budget", None)
         if budget is not None and request.redirected_from is not None and request.resource_type in GATED_BROWSER_TYPES:
             budget.requests += 1

@@ -10,7 +10,7 @@ from biz_rules.gdelt_news import ENDPOINT, article_id
 from biz_rules.history_models import ArchiveRecord, Coverage, FetchRequest, HistoryError
 from biz_rules.history_sources import project_record, read_public
 from biz_rules.window_coverage import effective_receipts
-from collection import rate
+from collection import rate, transport
 from collection.windows import cycle_request
 from config.settings import APP
 from db.history import _lead_window, _list_coverage
@@ -209,16 +209,26 @@ def test_failed_window_is_not_zero_news_and_the_rest_stays_unread(monkeypatch, w
     assert len(result["records"]) == 3 and result["upstream_pagination_exhausted"] is False
 
 
-def test_request_budget_stop_reports_the_windows_not_reached(monkeypatch, open_gate):
-    monkeypatch.setattr(rate, "take_for_url", lambda url: None)  # the ceiling of 7 an hour is not under test here
+def test_a_deadline_stop_reports_the_windows_not_reached(monkeypatch, open_gate):
+    """A stop in the middle of a read (here the deadline, which falls before the 11th request) lists the windows it did
+    not reach; the read has no limit on the number of requests of its own, two full hours need 14."""
+    calls = []
+
+    def take(url):  # the ceiling of 7 an hour is not under test here
+        calls.append(url)
+        if len(calls) == 11:
+            transport.current().stop("deadline")
+        return None
+
+    monkeypatch.setattr(rate, "take_for_url", take)
     sent = stand_in(monkeypatch, lambda start, end: 3)
-    result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, max_pages=1,
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3,
                                       updated_since="2026-10-30T00:00:00Z", updated_until="2026-10-30T02:00:00Z"))
-    assert len(sent) == 10 and result["requests"] == 10  # max_pages=1 allows 10 requests; two full hours need 14
-    assert result["stop_reason"] == "request_budget" and result["upstream_pagination_exhausted"] is False
+    assert len(sent) == 10 and result["requests"] == 10
+    assert result["stop_reason"] == "deadline" and result["upstream_pagination_exhausted"] is False
     unread = [w for w in result["window_coverage"] if w["status"] == "not_read"]
     assert [(w["start"][11:16], w["end"][11:16], w["reason"]) for w in unread] == [
-        ("01:15", "01:30", "request_budget"), ("01:30", "02:00", "request_budget")]
+        ("01:15", "01:30", "deadline"), ("01:30", "02:00", "deadline")]
 
 
 def test_hourly_ceiling_counts_across_reads_per_query_and_names_the_reason(monkeypatch, open_gate, mid_hour_clock):

@@ -257,11 +257,11 @@ def test_codex_r61_resuming_with_the_smallest_budget_still_makes_progress(fake_w
     assert batch["upstream_pagination_exhausted"] and rounds == 9 and len(set(saved)) == 9
 
 
-def test_request_budget_counts_every_request(fake_web):
+def test_every_request_is_counted_and_none_is_limited_by_the_page_budget(fake_web):
     urls = [PAGE, PAGE.replace("123.html", "124.html")]
     batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_pages=1,
                                      max_records=100))
-    # max_pages=1 → 10 个请求：两页各 1 个页面请求 + 2 个附件 = 6，没用完
+    # 两页各 1 个页面请求 + 2 个附件 = 6；请求次数只计数，不设额度（max_pages 不再折成请求数上限）
     assert batch["requests"] == 6 and batch["upstream_pagination_exhausted"]
 
 
@@ -378,9 +378,9 @@ def test_api_site_only_answers_records_query(fake_web, monkeypatch):
     assert batch["stop_reason"] == "source_failed" and batch["error"]["code"] == "unknown_query"
 
 
-def test_every_real_http_transfer_is_gated_and_budgeted_before_it_is_sent(monkeypatch):
-    """Codex r69 反例：拉取函数在产出第一条记录前发 12 个请求。现在每个请求发出前都过共享限速并计数，
-    请求预算 10 次用完就停在第 11 个请求之前，不再读到底。"""
+def test_every_real_http_transfer_is_gated_and_counted_before_it_is_sent(monkeypatch):
+    """Codex r69 反例：拉取函数在产出第一条记录前发 12 个请求。每个请求发出前都过共享限速并计数；
+    请求次数不设额度（对方站点的压力由限速间隔和出站上限管），12 个都发，读完记录。"""
     import httpx
 
     seen = []
@@ -398,9 +398,8 @@ def test_every_real_http_transfer_is_gated_and_budgeted_before_it_is_sent(monkey
     result = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
                                                  max_records=1))
     assert seen[:4] == ["gate", "http", "gate", "http"]  # 先过闸再发
-    assert seen.count("http") == 10 and result["requests"] == 10
-    assert result["stop_reason"] == "request_budget" and not result["upstream_pagination_exhausted"]
-    assert result["records"] == []
+    assert seen.count("http") == 12 and seen.count("gate") == 12 and result["requests"] == 12
+    assert result["stop_reason"] == "upstream_exhausted" and len(result["records"]) == 1
 
 
 def test_transient_errors_are_retried_at_the_transport_and_each_retry_is_counted(monkeypatch):
@@ -526,7 +525,7 @@ def test_a_timeout_is_retried_after_a_short_pause_and_only_a_429_backs_off(monke
 
 
 def _budget():
-    return transport.Budget(max_requests=10, max_bytes=10**9, max_records=10, deadline_seconds=60)
+    return transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
 
 
 def _api_site(monkeypatch, fetcher):
@@ -536,7 +535,7 @@ def _api_site(monkeypatch, fetcher):
 
 
 def test_codex_401_every_redirect_hop_is_metered(monkeypatch):
-    """Codex 401 反例：httpx 自动跟随 12 跳重定向，预算 10。现在每一跳在实际发送处过闸、计数，第 11 跳前停下。"""
+    """Codex 401 反例：httpx 自动跟随 12 跳重定向。每一跳在实际发送处过闸、计数（请求次数不设额度，12 跳都发）。"""
     import httpx
 
     hops, gates = [], []
@@ -557,8 +556,8 @@ def test_codex_401_every_redirect_hop_is_metered(monkeypatch):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: gates.append(True))
     batch = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
                                                 max_records=1))
-    assert len(hops) == 10 and len(gates) == 10 and batch["requests"] == 10
-    assert batch["stop_reason"] == "request_budget" and batch["records"] == []
+    assert len(hops) == 12 and len(gates) == 12 and batch["requests"] == 12
+    assert batch["stop_reason"] == "upstream_exhausted" and len(batch["records"]) == 1
 
 
 def test_codex_402_retry_response_bytes_count_towards_the_budget(monkeypatch):
@@ -595,7 +594,7 @@ def test_streamed_download_stops_at_the_chunk_that_exhausts_the_budget(monkeypat
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    budget = transport.Budget(max_requests=10, max_bytes=1000, max_records=10, deadline_seconds=60)
+    budget = transport.Budget(max_bytes=1000, max_records=10, deadline_seconds=60)
     seen = []
     with transport.metered(budget), pytest.raises(transport.Stop):
         with client.stream("GET", "https://synthetic.invalid/file") as response:

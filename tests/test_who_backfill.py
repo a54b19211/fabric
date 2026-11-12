@@ -113,7 +113,7 @@ def test_backfill_starts_at_2024_reads_in_legs_and_stops_at_400_records_leaving_
 
 def test_backfill_with_a_since_is_another_task_that_reads_only_its_window_and_leaves_the_first_alone(monkeypatch):
     who, store = WhoStandIn(monkeypatch, count=200), RunStore()
-    first = backfill_who(UNTIL, bounds=Counts(records=100, bytes=40 << 20, requests=20), store=store)
+    first = backfill_who(UNTIL, bounds=Counts(records=100, bytes=40 << 20), store=store)
     sent = len(who.requests)
     since = FIRST_NEW + timedelta(hours=150)
     inside = [n["Id"] for n in who.notices if n["LastModified"] >= since.strftime("%Y-%m-%dT%H:%M:%SZ")]
@@ -126,17 +126,10 @@ def test_backfill_with_a_since_is_another_task_that_reads_only_its_window_and_le
         backfill_who(since, since=since, store=store)  # an end that is not after the start
 
 
-def test_backfill_stops_when_its_request_bound_is_reached(monkeypatch):
-    who, store = WhoStandIn(monkeypatch), RunStore()
-    receipt = backfill_who(UNTIL, bounds=Counts(records=400, bytes=40 << 20, requests=3), store=store)
-    assert receipt["stopped_by"] == "requests_bound" and len(who.requests) == 3  # the 4th is not even sent
-    assert receipt["spent"]["requests"] == 3 and receipt["spent"]["records"] == 150
-
-
 def test_backfill_stops_when_its_byte_bound_is_reached_and_does_not_keep_the_page_that_crossed_it(monkeypatch):
     who, store = WhoStandIn(monkeypatch, pad=1500), RunStore()
     page = len(json.dumps({"value": who.notices[20:71]}))  # a response of the first page, give or take the spacing
-    receipt = backfill_who(UNTIL, bounds=Counts(records=400, bytes=page * 3 // 2, requests=20), store=store)
+    receipt = backfill_who(UNTIL, bounds=Counts(records=400, bytes=page * 3 // 2), store=store)
     assert receipt["stopped_by"] == "bytes_bound" and len(who.requests) == 2  # the first page fits, the second crosses
     assert receipt["spent"]["bytes"] > page * 3 // 2 and receipt["spent"]["records"] == 50
     assert receipt["cursor"]["id"] == adopted(store)[-1]  # the second page is the gap: it starts at the cursor

@@ -878,7 +878,7 @@ def _insert_version(conn, run, item, projected, proof, mapping_review, version_i
 
 
 # 因为预算或额度停下的读取，来源没读完：状态是 partial，不是 completed
-_LIMIT_STOPS = ("page_budget", "record_budget", "deadline", "request_budget", "byte_budget", *rate.CEILING_STOPS)
+_LIMIT_STOPS = ("page_budget", "record_budget", "deadline", "byte_budget", *rate.CEILING_STOPS)
 
 
 def _close_run(conn, run, prepared, version_ids, new_ids, coverage, error, now):

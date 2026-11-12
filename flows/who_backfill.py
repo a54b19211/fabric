@@ -4,8 +4,9 @@ Run by hand, once, before the freeze:  python -m flows.who_backfill --until 2026
 A recent window is another task:           python -m flows.who_backfill --since 2026-10-08T00:00:00Z --until ...
 
 It reads the notices with LastModified from 2024-01-01 (or --since) up to the frozen --until, oldest first, each in its current
-version, and stops at the first bound it reaches: 400 records, 40 MiB, 20 requests. The requests count against the
-200 a day this instance may send to who.int (collection.rate), together with the scheduled watch's. The plugin takes
+version, and stops at the first bound it reaches: 400 records or 40 MiB. There is no bound on the number of requests of
+its own (they are at most 8 for 400 records); they count against the 200 a day this instance may send to who.int
+(collection.rate), together with the scheduled watch's, and that ceiling is what holds. The plugin takes
 50 records from a response and a history run reads at most 100, so the backfill goes in legs of one run each.
 
 The coverage of every leg carries a receipt under "backfill": the bounds, what has been spent, why the backfill
@@ -38,11 +39,13 @@ SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 LEG_PAGES, LEG_DEADLINE = 2, 120
 LEG_RECORDS = LEG_PAGES * who_don.PAGE_SIZE  # a history run reads at most 100 records
 # Stops that end the backfill; any other stop (a ceiling, a failure, a deadline) ends one call and a later call goes on.
-FINAL = frozenset({"reached_end", "records_bound", "bytes_bound", "requests_bound"})
+FINAL = frozenset({"reached_end", "records_bound", "bytes_bound"})
 
 
 @dataclass(frozen=True)
 class Counts:
+    """What was spent (records, bytes, requests); only records and bytes have a bound (BOUNDS)."""
+
     records: int = 0
     bytes: int = 0
     requests: int = 0
@@ -52,10 +55,10 @@ class Counts:
 
     def reached(self, bounds: Counts) -> str | None:
         """The first bound these counts have reached."""
-        return next((f"{name}_bound" for name in asdict(self) if getattr(self, name) >= getattr(bounds, name)), None)
+        return next((f"{name}_bound" for name in ("records", "bytes") if getattr(self, name) >= getattr(bounds, name)), None)
 
 
-BOUNDS = Counts(records=400, bytes=40 * 1024 * 1024, requests=20)
+BOUNDS = Counts(records=400, bytes=40 * 1024 * 1024)
 
 
 @dataclass
@@ -97,8 +100,7 @@ def _read_leg(store, run, bounds: Counts, progress: Progress) -> dict:
     """Read one leg inside what the bounds leave: the budget of this one read is the rest of the backfill's."""
     request, _ = store.job_input(run.id, run.attempt)
     budget = transport.Budget.for_request(request)
-    budget.max_requests = min(budget.max_requests, bounds.requests - progress.spent.requests)
-    budget.max_bytes = min(budget.max_bytes, bounds.bytes - progress.spent.bytes)
+    budget.max_bytes =min(budget.max_bytes, bounds.bytes - progress.spent.bytes)
     try:
         with transport.metered(budget):
             return read_public(request)
@@ -114,7 +116,7 @@ def _run_leg(store, run, since: datetime, until: datetime, bounds: Counts, progr
     ahead = batch["next_continuation"] or progress.continuation
     receipt = {
         "background": True, "leg": progress.legs + 1, "since": since.isoformat(), "until": until.isoformat(),
-        "bounds": asdict(bounds), "spent": asdict(spent), "stopped_by": stopped_by,
+        "bounds": {"records": bounds.records, "bytes": bounds.bytes}, "spent": asdict(spent), "stopped_by": stopped_by,
         "reached_end": stopped_by == "reached_end",
         "cursor": None if stopped_by == "reached_end" or not ahead else json.loads(ahead["cursor"]),
         "note": None if stopped_by == "reached_end" else "回填有界，未到底",
