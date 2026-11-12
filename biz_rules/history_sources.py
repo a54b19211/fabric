@@ -821,6 +821,8 @@ class _PublicApiRead:
         self.request = request
         self.source = request.source_id
         self.records, self.seen, self.source_total = [], {}, None
+        self.skipped: list[dict] = []  # 来源列了、但不是一条要存的原件（openFDA 的“待发布”信函占位行），不是读不到
+        self.unread: list[dict] = []  # 读到了、但存不了的（CRL 有正文却认不出身份）：网址位置放标识，和站点插件的同名
         self.exhausted, self.error, self.stop = False, None, "record_budget"
         self.cursor = "*" if self.source == "europe_pmc" else None
         if request.continuation:
@@ -835,7 +837,7 @@ class _PublicApiRead:
         remaining = request.max_records - len(self.records)
         if remaining <= 0:
             return True
-        url, params, path = _api_page(request, self.cursor, min(remaining, 100), len(self.records))
+        url, params, path = _api_page(request, self.cursor, min(remaining, 100), self.consumed)
         status, body = transport.get(client, url, params, cap=PAGE_BYTES)
         text = body.decode("utf-8")
         # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
@@ -852,7 +854,7 @@ class _PublicApiRead:
         next_cursor = self._next_cursor(data, page_items)
         if not page_items and not self.exhausted:
             raise HistoryError("unexpected_empty_page", "来源仍有后续标记但返回空页")
-        if source in {"clinicaltrials", "europe_pmc"}:
+        if source in {"clinicaltrials", "europe_pmc", "fda_crl"}:
             self.next_continuation = None if self.exhausted else {
                 "scope_hash": request.scope_hash(), "cursor": next_cursor, "read_count": self.consumed}
         if self.exhausted:
@@ -870,7 +872,20 @@ class _PublicApiRead:
 
     def _absorb(self, page_items) -> None:
         for data_item, raw in page_items:
-            native, kind = _api_native(self.source, data_item)
+            try:
+                native, kind = _api_native(self.source, data_item)
+            except HistoryError as exc:
+                # openFDA CRL 里认不出身份的行，一条不卡住整次读取：没有正文的是还没发布的信函（file_name
+                # "Under Review for Release"，没有类型、申请号），没有内容可存，记在 skipped_items；有正文却缺类型或申请号的
+                # 是老信函，不猜编号，记为读不到（unread_items，和站点插件一样）。别的来源仍然报错
+                if self.source != "fda_crl":
+                    raise
+                name = str(data_item.get("file_name"))
+                if data_item.get("text"):
+                    self.unread.append({"url": name, "reason": exc.message})
+                else:
+                    self.skipped.append({"id": name, "reason": "信函待发布：没有类型、申请号和正文"})
+                continue
             item = ArchiveRecord(source_record_id=native, record_kind=kind, raw_content=raw)
             project_record(self.source, item)
             if native in self.seen:
@@ -890,8 +905,10 @@ class _PublicApiRead:
             return self._clinicaltrials_cursor(data, page_items)
         if self.source == "europe_pmc":
             return self._europe_pmc_cursor(data, page_items)
-        self.exhausted = isinstance(self.source_total, int) and len(self.records) >= self.source_total
-        return None
+        # openFDA 用 skip 翻页：位置就是已读过的条数（续读时从 continuation.read_count 接上）
+        self.consumed += len(page_items)
+        self.exhausted = isinstance(self.source_total, int) and self.consumed >= self.source_total
+        return "skip"
 
     def _clinicaltrials_cursor(self, data, page_items):
         next_cursor = data.get("nextPageToken")
@@ -931,6 +948,8 @@ class _PublicApiRead:
             "source_total": self.source_total,
             "count_drift": self.count_drift,
             "next_continuation": self.next_continuation if not self.error else None,
+            "skipped_items": self.skipped,
+            "unread_items": self.unread,
         }
 
 
@@ -958,6 +977,12 @@ def _read_public_api(request: FetchRequest) -> dict:
         except (httpx.HTTPError, UnicodeError, ValueError, TypeError, KeyError, IndexError):
             read.error = {"code": "source_read_failed", "message": "公开来源读取或格式校验失败；已读原件单独保留"}
             read.stop = "source_failed"
+    if read.unread and read.stop in ("upstream_exhausted", transport.KNOWN) and read.error is None:
+        # 读到底（或读到旧的）了，但有几条存不了：和站点插件一样不能说读完，运行标“部分完成”
+        first = read.unread[0]
+        read.error = {"code": "items_unread",
+                      "message": f"有 {len(read.unread)} 条读不到，如 {first['url']}：{first['reason']}"}
+        read.stop = "items_unread"
     return read.result()
 
 
@@ -990,8 +1015,6 @@ def _pubmed_articles(raw_xml, ids):
     return [by_id[pmid] for pmid in ids]
 
 
-def _read_pubmed(request):
-    """PubMed：ESearch 找 PMID（或给定的 PMID 清单），EFetch 取摘要原件；有合法全文的另成附件版本
 PUBMED = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 
 
@@ -1011,6 +1034,8 @@ def _pubmed_ids(client, request, start):
     return int(found["count"]), found["idlist"]
 
 
+def _read_pubmed(request):
+    """PubMed：ESearch 找 PMID（或给定的 PMID 清单），EFetch 取摘要原件；有合法全文的另成附件版本
     （collection.pubmed_fulltext）。文献和全文都占 max_records；额度或其他预算用完就停，给续读位置：
     cursor = {"i": 结果里第几篇, "a": 1 表示这一篇的文献版本已保存、只差全文}（与站点插件同一写法）。"""
     from collection.pubmed_fulltext import fulltext
@@ -1035,10 +1060,10 @@ def _pubmed_ids(client, request, start):
                     if not (k == 0 and fulltext_only):  # 续读时这一篇已保存，只为取全文重取
                         budget.take_record()
                         records.append(item)
-                    resume = (start + k, 1)
-                    facts = _project_pubmed(item)["facts"]
                         if transport.known(item):  # 增量读取：已存且没变，全文也是上一轮存的，不再取（连续够数就抛 Stop）
                             continue
+                    resume = (start + k, 1)
+                    facts = _project_pubmed(item)["facts"]
                     found_records, found_coverage = fulltext(
                         client, item.source_record_id, facts.get("pmcid"), facts.get("doi"))
                     records += found_records
@@ -1047,10 +1072,10 @@ def _pubmed_ids(client, request, start):
                 stop, resume = ("upstream_exhausted", None) if done >= count else ("record_budget", (done, 0))
         except transport.Stop as stopped:
             stop = stopped.reason
-        except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
-            error = {"code": "source_read_failed", "message": "PubMed读取或EFetch原件校验失败"}
             if stop == transport.KNOWN:  # 读到旧的了，没有“下一页”
                 resume = None
+        except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
+            error = {"code": "source_read_failed", "message": "PubMed读取或EFetch原件校验失败"}
             stop = "source_failed"
     return {
         "records": records,

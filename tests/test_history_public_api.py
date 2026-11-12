@@ -163,6 +163,21 @@ def test_every_page_request_asks_for_the_remaining_budget_and_europe_pmc_starts_
     assert json.dumps(sorted(seen[0])) == json.dumps(sorted(seen[1]))
 
 
+def test_crl_is_read_newest_first_and_goes_on_at_the_count_it_has_read(monkeypatch):
+    """openFDA CRL pages by skip: the newest letters first (sort), and a read that stopped at its record budget gives the
+    count read so far as the place to go on from."""
+    letters = {"meta": {"results": {"total": 3}}}
+    seen = serve(monkeypatch, [(200, {**letters, "results": [crl("a.pdf"), crl("b.pdf")]}),
+                               (200, {**letters, "results": [crl("c.pdf")]})])
+    first = sources._read_public_api(FetchRequest(source_id="fda_crl", query="*", max_records=2))
+    assert seen[0]["sort"] == "letter_date:desc" and seen[0]["skip"] == "0"
+    assert first["stop_reason"] == "record_budget" and first["next_continuation"]["read_count"] == 2
+    second = sources._read_public_api(FetchRequest(source_id="fda_crl", query="*", max_records=2,
+                                                   continuation=first["next_continuation"]))
+    assert seen[1]["skip"] == "2" and len(second["records"]) == 1
+    assert second["upstream_pagination_exhausted"] and second["next_continuation"] is None
+
+
 def test_crl_title_names_the_company_the_letter_and_the_application_not_the_pdf_file():
     from biz_rules.history_models import ArchiveRecord
 
@@ -172,3 +187,25 @@ def test_crl_title_names_the_company_the_letter_and_the_application_not_the_pdf_
     projected = sources.project_record("fda_crl", item)
     assert projected["title"] == "AB Pharmaceuticals, LLC - COMPLETE RESPONSE (NDA 210649, 09/12/2018)"
     assert projected["event_time"]["value"] == "2018-09-12"  # the letter's date: kept as the event time, not as a publication date
+
+
+def test_crl_rows_without_an_identity_do_not_stop_the_read(monkeypatch):
+    """openFDA lists a letter still being reviewed for release as a row with no type, application number or text: nothing to
+    store, noted in skipped_items, and the read goes on."""
+    placeholder = {"file_name": "Under Review for Release", "letter_date": "02/27/2026", "letter_type": None,
+                   "application_number": None, "company_name": "Chiesi Farmaceutici S.p.A", "text": ""}
+    serve(monkeypatch, [(200, {"meta": {"results": {"total": 2}}, "results": [placeholder, crl("a.pdf")]})])
+    result = sources._read_public_api(FetchRequest(source_id="fda_crl", query="*", max_records=5))
+    assert [r.source_record_id.split("#")[0] for r in result["records"]] == ["a.pdf"]
+    assert result["error"] is None and result["upstream_pagination_exhausted"] and result["unread_items"] == []
+    assert result["skipped_items"] == [{"id": "Under Review for Release", "reason": "信函待发布：没有类型、申请号和正文"}]
+
+
+def test_crl_old_letter_with_a_text_but_no_identity_is_unread_and_the_read_is_partial(monkeypatch):
+    """No guessed id: the letter is not stored, listed as an unread item, and a read that ended with one is not complete."""
+    old = {**crl("021164Orig1s000OtherActionLtrs.pdf"), "letter_type": None}
+    serve(monkeypatch, [(200, {"meta": {"results": {"total": 2}}, "results": [old, crl("b.pdf")]})])
+    partial = sources._read_public_api(FetchRequest(source_id="fda_crl", query="*", max_records=5))
+    assert [r.source_record_id.split("#")[0] for r in partial["records"]] == ["b.pdf"]
+    assert [item["url"] for item in partial["unread_items"]] == ["021164Orig1s000OtherActionLtrs.pdf"]
+    assert partial["error"]["code"] == "items_unread" and partial["stop_reason"] == "items_unread"

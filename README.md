@@ -55,6 +55,7 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 - 已验证的组合：uv 0.13.0、CPython 3.10.12；通过数量以 `make check` 的输出为准，这里不写数字。
 - 已有环境里只做导入检查：`python ops/check_imports.py`。
 - 各来源真抓一遍、打印一张表：`python ops/check_sources.py [来源…] [--twice | --rounds N] [--incremental]`（`--twice` 抓两次，查重复存版本，`--rounds N` 抓 N 次；`--incremental` 按固定刷新的读法抓：连续读到 3 条已存且没变的就停，第二次起应该停在 reached_known）；它会写库，`DATAFABRIC_HISTORY_DATABASE_URL` 要指向临时库（先 `python -m migration.runner --db history --apply`），用法和环境变量见文件开头。
+- 把一个来源的历史存量一次读到底：`python ops/backfill_source.py <来源> [--query …]`（不设条数上限，每段 100 条，按页往后读到来源读完；中途中断、再跑同一条命令就接着读，已读完的段不再发请求）；同样会写库，要指向临时库或有意要补的库，用法见文件开头。
 
 ## 运行
 

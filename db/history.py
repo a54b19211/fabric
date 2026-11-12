@@ -1037,6 +1037,12 @@ def _reported_coverage(batch):
     if batch.get("unread_items"):
         # 本次读取里读不到的条目（站点插件）：没存版本，只在这里留一份
         reported["unread_items"] = batch["unread_items"][:500]
+    if batch.get("skipped_items"):
+        # 来源列了、但没有内容可存的行（openFDA 待发布的信函）：不是读不到，不影响“读完”，留一份说明
+        reported["skipped_items"] = batch["skipped_items"][:500]
+    if batch.get("skipped_items"):
+        # 来源列了、但没有内容可存的行（openFDA 待发布的信函）：不是读不到，不影响“读完”，留一份说明
+        reported["skipped_items"] = batch["skipped_items"][:500]
     for key in ("window_coverage", "truncated_intervals", "backfill"):
         if key in batch:
             reported[key] = batch[key]
