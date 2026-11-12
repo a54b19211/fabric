@@ -521,10 +521,7 @@ ATTACHMENT_SOURCES = SITE_SOURCES | frozenset(
 
 
 def spec(source_id: str) -> CollectionSpec:
-    try:
-        return CATALOG[source_id]
-    except KeyError:
-        raise KeyError(source_id) from None
+    return CATALOG[source_id]
 
 
 def gaps() -> list[dict]:

@@ -141,7 +141,6 @@ def _page_finished(watch, state, coverage, now):
     state["last_page_at"] = now.isoformat()
     state["last_coverage"] = coverage
     state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
-    state["fail_streak"] = 0
     if _unread_not_stuck(watch.request.source_id, coverage):
         state["unclean"] = True  # 这一周期有条目读不到：周期收尾时记下，下一周期整份重读（read_all）
     if coverage.get("stop_reason") in rate.CEILING_STOPS and "window_coverage" not in coverage:
@@ -206,7 +205,8 @@ def _plan_cycle(watch, state, now):
     )
 
 
-GIVE_UP_AFTER = 3  # 同一周期连续失败（读取失败、续读位置不前进）这么多次，就放弃这一周期
+GIVE_UP_AFTER = 3  # 同一周期连续失败这么多次，就放弃这一周期（只有 realtime；回填保留续读位置，按间隔重试）
+READ_FAILURES = ("source_watch_failed", "source_watch_no_progress")  # 计数的只有这次读取本身失败或原地不动；磁盘低水位、许可撤回等不计
 
 
 def _read_all_next_time(state):
@@ -287,6 +287,7 @@ def _advance(engine, key, watch, state, now):
         state["state"] = "running"
     elif run.state in {"completed", "partial"} and (not run.error or run.coverage.get("stop_reason") == "items_unread"):
         _page_finished(watch, state, run.coverage, now)  # items_unread：读到底了，只是有几条读不到，不是失败
+        state["fail_streak"] = 0  # 正常读完一页（没抛错）才算连续失败断了
         state.pop("active_run_id", None)
         state.pop("request_key", None)
         state["error"] = None
@@ -295,7 +296,8 @@ def _advance(engine, key, watch, state, now):
 
 
 def _failed(watch, state, exc, now):
-    """这一步出错：记下原因，按间隔重试；已读完的失败页换新 run 重试相同范围/续页，连续失败多次就放弃这一周期。"""
+    """这一步出错：记下原因，按间隔重试；已读完的失败页换新 run 重试相同范围/续页。读取本身连续失败多次，realtime 放弃这一周期；
+    回填不放弃（丢了续读位置就要从头读起），保留位置按间隔重试。"""
     state["state"] = "blocked" if exc.status == 403 else "failed"
     state["error"] = {"code": exc.code, "message": exc.message}
     state["last_failure_at"] = now.isoformat()
@@ -311,8 +313,10 @@ def _failed(watch, state, exc, now):
                 _read_all_next_time(state)
         except HistoryError:
             pass
+    if exc.code not in READ_FAILURES:
+        return
     state["fail_streak"] = int(state.get("fail_streak", 0)) + 1
-    if state["fail_streak"] >= GIVE_UP_AFTER and "active_run_id" not in state:
+    if watch.mode == "realtime" and state["fail_streak"] >= GIVE_UP_AFTER and "active_run_id" not in state:
         # 同一周期连续失败这么多次：放弃这一周期，下个间隔从头（窗口来源从检查点）重新规划，不永远卡在同一个位置
         state.pop("request", None)
         state["fail_streak"] = 0

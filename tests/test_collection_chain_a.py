@@ -271,21 +271,75 @@ def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalle
     assert moved["state"] == "paging"
 
 
-def test_three_failures_in_a_row_give_the_cycle_up_and_the_next_cycle_starts_over(monkeypatch):
-    """同一个位置一直失败（PubMed 翻过 1 万条之后）：不能每个间隔都重试同一个位置，3 次之后放弃这一周期。"""
+def _step(monkeypatch, watch, state, *, run=None, disk_low=False):
+    """refresh_once 里的一步：_advance，出错交给 _failed。库和队列换成桩：run 是这一步读到的、已读完的那次读取
+    （没有 run 就是还没建），disk_low 为真时磁盘在低水位。"""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
     from db import source_refresh
 
+    monkeypatch.setattr(source_refresh.history, "history_engine", lambda: SimpleNamespace(begin=nullcontext))
+    monkeypatch.setattr(source_refresh.history, "_source", lambda permit, source_id: None)
+    monkeypatch.setattr(source_refresh.history, "read_run", lambda run_id: run)
+    monkeypatch.setattr(source_refresh.publication, "disk_status", lambda: {"backfill_paused": disk_low})
+    if run is not None:
+        state["active_run_id"] = "r1"  # 失败后换新 run 重试：桩每次给的是同一个读完的结果
+    try:
+        source_refresh._advance(None, "key", watch, state, NOW)
+    except HistoryError as exc:
+        source_refresh._failed(watch, state, exc, NOW)
+
+
+def _read(cursor, adopted):
+    from types import SimpleNamespace
+
+    coverage = {"next_continuation": cursor, "adopted_count": adopted}
+    return SimpleNamespace(state="completed", error=None, coverage=coverage)
+
+
+def test_three_stalled_reads_in_a_row_give_the_cycle_up_and_a_page_read_cleanly_ends_the_streak(monkeypatch):
+    """同一个位置一直原地不动（PubMed 翻过 1 万条之后）：不能每个间隔都重试同一个位置，连续 3 次之后放弃这一周期；
+    中间读成功一页，连续次数从头数。走的是真实路径：_advance → _page_finished 抛错 → _failed。"""
     pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    state = {"request": {"known_stop": 3, "continuation": {"cursor": "9900", "read_count": 9900}}, "cycle_pages": 3}
-    failure = HistoryError("source_read_failed", "PubMed读取或EFetch原件校验失败", 503)
+    stuck, moved = {"cursor": "9900", "read_count": 9900}, {"cursor": "10000", "read_count": 10000}
+    state = {"request": {"known_stop": 3, "continuation": stuck}}
     for streak in (1, 2):
-        source_refresh._failed(pubmed, state, failure, NOW)
-        assert state["state"] == "failed" and state["fail_streak"] == streak and state["request"]["continuation"]
-    source_refresh._failed(pubmed, state, failure, NOW)
+        _step(monkeypatch, pubmed, state, run=_read(stuck, 0))
+        assert state["state"] == "failed" and state["fail_streak"] == streak and state["request"]["continuation"] == stuck
+    _step(monkeypatch, pubmed, state, run=_read(moved, 100))
+    assert state["state"] == "paging" and state["fail_streak"] == 0  # 读成功一页，连续失败数清零
+    for streak in (1, 2):
+        _step(monkeypatch, pubmed, state, run=_read(moved, 0))
+        assert state["fail_streak"] == streak and state["request"]["continuation"] == moved
+    _step(monkeypatch, pubmed, state, run=_read(moved, 0))
     assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
-    state = {"request": {}, "fail_streak": 2}
-    _page_finished(pubmed, state, {"next_continuation": {"cursor": "c", "read_count": 1}}, NOW)
-    assert state["fail_streak"] == 0  # 读成功一段，连续失败数清零
+
+
+def test_a_backfill_keeps_its_place_when_the_disk_is_low_or_the_reads_fail(monkeypatch):
+    """回填的续读位置是读了很久才到的：磁盘低水位、许可撤回不是这次读取的问题，不计失败；读取本身连续失败 3 次，
+    回填也不丢位置（丢了就从头读起），按间隔重试——放弃周期是实时刷新的办法。"""
+    from types import SimpleNamespace
+
+    cursor = {"cursor": "c", "read_count": 900}
+    for mode in ("backfill", "realtime"):
+        watch = ct_watch(mode=mode)
+        state = {"request": {"continuation": cursor}}
+        for _ in range(3):
+            _step(monkeypatch, watch, state, disk_low=True)
+        assert state["error"]["code"] == "source_watch_disk_low" and not state.get("fail_streak")
+        assert state["request"]["continuation"] == cursor  # 磁盘低水位多少次都不丢
+    broken = SimpleNamespace(state="failed", error={"code": "source_read_failed", "message": "x"}, coverage={})
+    backfill = ct_watch(mode="backfill")
+    state = {"request": {"continuation": cursor}}
+    for _ in range(4):
+        _step(monkeypatch, backfill, state, run=broken)
+    assert state["fail_streak"] == 4 and state["request"]["continuation"] == cursor and state["state"] == "failed"
+    realtime = ct_watch()
+    state = {"request": {"continuation": cursor}}
+    for _ in range(3):
+        _step(monkeypatch, realtime, state, run=broken)
+    assert "request" not in state and state["read_all"] is True  # 实时刷新：放弃这一周期，下个间隔重新规划
 
 
 def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the_cursor():
