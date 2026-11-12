@@ -8,16 +8,12 @@ CONFIG = {
     "start_urls": ["https://www.fda.gov/drugs/drug-safety-and-availability/drug-safety-communications"],
     "request_delay_seconds": 2.0,
     "max_pages": 10,
-    "disable_resources": False,
-    "solve_cloudflare": True,
-    # 列表是一张表（日期 | 标题），每行的标题是详情页链接。
-    "wait_selector": "table tbody td a",
+    # 列表页和详情页都是静态 HTML，用简单请求读，不开浏览器：浏览器开一个页面要 20-60 秒（等全部资源加载、被对方连接重置后
+    # 重试），简单请求正常 1-2 秒；个别连接会卡住，由 scrapling_client 里的短超时加重试处理。
+    "use_simple_fetch": True,
+    # 列表是一张表（日期 | 标题），每行的标题是详情页链接。整张表（约 44 条）都在静态 HTML 里（浏览器里才被 DataTables
+    # 分成每页 10 行），所以一页读完：没有“下一页”按钮，selector 留空。
     "list_item_selector": "table tbody td a",
-    # 整张表（约 44 条）在浏览器里分页显示，地址上没有页码，只能点“下一页”（DataTables 的 li.next，翻到末页时变 disabled）
-    "pagination": {
-        "type": "js_click",
-        "next_btn_selector": "li.paginate_button.next:not(.disabled) a",
-    },
+    "pagination": {"type": "css_next_btn", "selector": ""},
     "detail_extractor": extract_fda_drug_safety,
-    "detail_wait_selector": "h1",
 }

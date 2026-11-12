@@ -73,17 +73,48 @@ def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_ol
 
 # ── FDA 药品安全通讯（fda_drug_safety）───────────────────────────────────
 
-def test_fda_drug_safety_list_is_a_table_paged_by_its_next_button():
-    """列表是一张表（日期 | 标题，10 行一页，共约 44 条），标题是详情页链接；翻页只能点表下面的“下一页”
-    （地址上没有页码，?page=N 返回的还是第一页）。第一页时“上一页”是 disabled，“下一页”可点。"""
+def test_fda_drug_safety_list_is_one_static_table_read_with_a_plain_request_in_a_single_page():
+    """整张表（日期 | 标题，共约 44 条）都在静态 HTML 里（浏览器里才被分成每页 10 行），标题是详情页链接，最新的在前：
+    用简单请求读一页就够了，不开浏览器（浏览器开一个页面要 20-60 秒）。fixture 是 2026-11-12 存下来的整张表。"""
+    from core_engine.pagination_driver import make_driver
+
     profile = SITE_PROFILES["fda_drug_safety"]
     sample = page("fda_drug_safety_list.html")
     links = sample.css(profile["list_item_selector"])
-    assert len(links) == 10 and sample.css(profile["wait_selector"])
+    assert len(links) == 44 and len({a.attrib["href"] for a in links}) == 44
     assert all(a.attrib["href"].startswith("/drugs/") for a in links)
-    assert profile["pagination"]["type"] == "js_click"
-    assert len(sample.css(profile["pagination"]["next_btn_selector"])) == 1
-    assert not sample.css("li.paginate_button.previous:not(.disabled)")
+    assert sample.css("table tbody td")[0].get_all_text(strip=True) == "11-9-2026"
+    assert profile["use_simple_fetch"] is True
+    driver = make_driver("fda_drug_safety", profile, profile["start_urls"][0])
+    fetched = []
+    driver._fetch = lambda url: (fetched.append(url), {"page": sample})[1]
+    urls = list(driver.iter_detail_urls())
+    assert fetched == profile["start_urls"] and len(urls) == 44  # 一页，没有“下一页”
+    assert urls[0].startswith("https://www.fda.gov/drugs/drug-safety-communications/fda-requires-safety-labeling")
+
+
+def test_fda_drug_safety_issue_date_comes_from_the_page_text_not_from_the_content_current_as_of_footer():
+    """页脚 <time datetime> 是“Content current as of”（最后一次改页面的日期），不是发布日期：以前 44 篇里一批是同一天
+    2026-04-03。发布日期在正文上方的小标题（月-日-年）或标题下的副标题（Month D, YYYY）里，和列表里的日期一致。"""
+    from biz_rules.extractors.fda.drug_safety import extract_fda_drug_safety
+
+    for name, issued, footer in [("subtitle_date", "2026-11-09", None), ("panels", "2026-03-31", "04/03/2026"),
+                                 ("plain", "2022-06-01", "06/07/2022")]:
+        sample = page(f"fda_drug_safety_detail_{name}.html")
+        parsed = extract_fda_drug_safety(sample)
+        assert parsed["publish_date"] == issued and parsed["title"]
+        if footer:  # 样本里带着这个误导的页脚日期
+            assert sample.css("time")[0].get_all_text(strip=True) == footer
+
+
+def test_fda_drug_safety_body_is_the_whole_article_column_also_on_pages_without_accordion_panels():
+    """文章在 div[role=main] 里。老页面没有折叠面板（div.panel-group），旧选择器匹配到空元素，入库的正文是空的。"""
+    from biz_rules.extractors.fda.drug_safety import extract_fda_drug_safety
+
+    plain = extract_fda_drug_safety(page("fda_drug_safety_detail_plain.html"))
+    assert "Ukoniq" in plain["body_text"] and "withdrawn its approval" in plain["body_text"]
+    panels = extract_fda_drug_safety(page("fda_drug_safety_detail_panels.html"))
+    assert "What Safety Concern" in panels["body_text"] or "What Is FDA Doing" in panels["body_text"]
 
 
 # ── 港交所披露易（hkex）──────────────────────────────────────────────────
