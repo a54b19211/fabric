@@ -82,9 +82,7 @@ def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None
 def _make_driver(site, profile, start_url):
     from core_engine.pagination_driver import make_driver
 
-    driver = make_driver(site, profile, start_url)
-    driver.delay = 0  # 间隔由共享限速组在每次传输前控制
-    return driver
+    return make_driver(site, profile, start_url)
 
 
 def _store_root() -> Path:

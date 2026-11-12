@@ -446,8 +446,6 @@ def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, m
     from collection.transport import in_context
 
     class Driver:
-        delay = 2.0
-
         def iter_detail_urls(self):
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 executor.submit(in_context(lambda: transport.gate(PAGE))).result()  # 列表页的一次真实传输
@@ -459,7 +457,7 @@ def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, m
     monkeypatch.setattr(pd, "make_driver", lambda site, profile, url: made.append(Driver()) or made[-1])
     start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
     batch = read_public(FetchRequest(source_id="nmpa", query=start))
-    assert made[0].delay == 0 and batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
+    assert batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
 
 
 def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
@@ -742,15 +740,12 @@ def test_openfda_failure_on_a_later_page_keeps_what_was_read_and_still_fails(mon
     """第二页出错：第一页读到的原件保留，但这次读取不是“读完了”。"""
     import httpx
 
-    from biz_rules.extractors.fda import _openfda_base
-
     record = {"set_id": "S1", "effective_time": "20261101", "openfda": {},
               "spl_product_data_elements": ["Some Product SOME INGREDIENT"]}
     link = '<https://api.fda.gov/drug/label.json?search_after=1&sort=effective_time:desc>; rel="next"'
     answers = iter([_http(200, {"meta": {"results": {"total": 3}}, "results": [record]}, {"Link": link}),
                     _http(500, {"error": {"code": "SERVER_ERROR"}})])
     monkeypatch.setattr(httpx, "get", lambda *a, **k: next(answers))
-    monkeypatch.setattr(_openfda_base, "REQUEST_DELAY", 0)
     batch = read_public(FetchRequest(source_id="fda_api_drug_label", query="records", max_records=5))
     assert len(batch["records"]) == 1
     assert "HTTP 500" in batch["error"]["message"] and "已读 1 条" in batch["error"]["message"]
@@ -761,15 +756,12 @@ def test_openfda_404_past_the_last_skip_page_is_still_the_normal_end(monkeypatch
     """skip 翻页翻过最后一页，openFDA 回 404：这是读完了，不是失败。"""
     import httpx
 
-    from biz_rules.extractors.fda import _openfda_base
-
     # 召回站点的配置现在指定了 sort（新的在前，走 search_after）；skip 翻页是没指定 sort 时的读法，这里去掉 sort 测它
     monkeypatch.delitem(site_crawler.SITE_PROFILES["fda_api_enforcement"]["api"], "sort")
     record = {"recall_number": "D-1-2026", "product_description": "Some product", "report_date": "20261101"}
     answers = iter([_http(200, {"meta": {"results": {"total": 5}}, "results": [record]}),
                     _http(404, {"error": {"code": "NOT_FOUND", "message": "No matches found!"}})])
     monkeypatch.setattr(httpx, "get", lambda *a, **k: next(answers))
-    monkeypatch.setattr(_openfda_base, "REQUEST_DELAY", 0)
     batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=10))
     assert len(batch["records"]) == 1 and batch["error"] is None
     assert batch["upstream_pagination_exhausted"] and batch["stop_reason"] == "upstream_exhausted"
@@ -880,7 +872,6 @@ def _fierce_read(monkeypatch, pages, max_records=5, retry_delay=0):
     """pages：文章网址 → 依次给出的答复（页面替身，或要抛出的异常）。RSS 里的标题是空的，和真实情况一致。"""
     from biz_rules.extractors.fiercepharma import fiercepharma_fetcher as fetcher
 
-    monkeypatch.setattr(fetcher, "REQUEST_DELAY", 0)
     monkeypatch.setattr(fetcher, "RETRY_DELAY", retry_delay)
     monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: ([
         {"url": url, "guid": "", "title": "", "description": "RSS 摘要", "pub_date": "2026-11-01"} for url in pages], []))
@@ -1063,7 +1054,7 @@ def _roche_read(monkeypatch, details):
     from biz_rules.extractors.roche import roche_web_fetcher as fetcher
 
     api = site_crawler.SITE_PROFILES["roche"]["api"]
-    for name, value in {"year_start": 2026, "year_end": 2026, "detail_delay": 0, "delay_between_requests": 0}.items():
+    for name, value in {"year_start": 2026, "year_end": 2026}.items():
         monkeypatch.setitem(api, name, value)
     monkeypatch.setattr(fetcher, "RETRY_DELAY", 0)
     pages = iter([[{"title": "Title " + url[-1], "source_url": url, "publish_date": "2026-11-10"} for url in details], []])

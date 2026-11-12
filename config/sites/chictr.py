@@ -9,7 +9,6 @@ CONFIG = {
     "start_urls": [
         "https://www.chictr.org.cn/searchproj.html",
     ],
-    "request_delay_seconds": 2.0,
     "max_pages": 50,          # 按需调整，全量约 12000 页
 
     # ── 列表页解析 ──

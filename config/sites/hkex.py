@@ -27,7 +27,6 @@ CONFIG = {
         "skip_headlines": ["展示文件"],
         # 同一句提示语也会出现在普通文件类型（如“公告及通告 - [海外监管公告-其他]”）下，链接到一页只有这句话的 .htm：按标题跳过。
         "skip_titles": ["發行人剛在本網站英文版面發布一項公告，相應中文版本或會／或不會在本版面發布。"],
-        "request_delay": 3.0,
         "companies": PHARMA_COMPANIES,
     },
 

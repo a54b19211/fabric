@@ -6,7 +6,6 @@ CONFIG = {
     "name": "FDA Drug Safety Communications",
     "url_pattern": "fda.gov/drugs/drug-safety-and-availability/drug-safety-communications",
     "start_urls": ["https://www.fda.gov/drugs/drug-safety-and-availability/drug-safety-communications"],
-    "request_delay_seconds": 2.0,
     "max_pages": 10,
     # 列表页和详情页都是静态 HTML，用简单请求读，不开浏览器：浏览器开一个页面要 20-60 秒（等全部资源加载、被对方连接重置后
     # 重试），简单请求正常 1-2 秒；个别连接会卡住，由 scrapling_client 里的短超时加重试处理。

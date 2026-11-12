@@ -9,7 +9,6 @@ CONFIG = {
         "https://www.cde.org.cn/main/xxgk/listpage/9f9c74c73e0f8f56a8bfbc646055026d",     # 信息公开
         "https://www.cde.org.cn/main/xxgk/listpage/4b5255eb0a84820cef4ca3e8b6bbe20c",     # 临床试验默示许可
     ],
-    "request_delay_seconds": 2.0,
     "max_pages": 200,
 
     # ── 表格直提配置 ──

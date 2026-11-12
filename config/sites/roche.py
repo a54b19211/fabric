@@ -13,8 +13,6 @@ CONFIG = {
         "year_start": 0,  # 从哪一年往前读；0（或不写）= 今年
         "year_end": 2016,
         "max_pages_per_year": 100,
-        "delay_between_requests": 2.0,
-        "detail_delay": 1.0,
     },
     "api_fetcher": iter_roche_web,
     "uid_field": "",  # iter_roche_web 内部已生成 UUID

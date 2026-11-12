@@ -14,7 +14,6 @@ import json
 import queue
 import re
 import threading
-import time
 from abc import ABC, abstractmethod
 from urllib.parse import urljoin, urlparse
 
@@ -40,7 +39,6 @@ class BasePaginationDriver(ABC):
         self.profile = profile
         self.start_url = start_url
         self.site_cfg = SITE_PROFILES.get(site_key, {})
-        self.delay = profile.get("request_delay_seconds", 2.0)
         self.max_pages = profile.get("max_pages", 1)
         self.wait_sel = self.site_cfg.get("wait_selector")
         self.disable_resources = self.site_cfg.get("disable_resources", True)
@@ -95,7 +93,7 @@ class BasePaginationDriver(ABC):
             return executor.submit(
                 in_context(fetch_page.fn),
                 url=url,
-                delay=self.delay,
+                delay=0,  # 两次传输之间的间隔由共享限速（collection.rate）在发出处控制
                 wait_selector=self.wait_sel,
                 disable_resources=self.disable_resources,
                 solve_cloudflare=self.solve_cloudflare,
@@ -299,7 +297,6 @@ class JsClickDriver(BasePaginationDriver):
                         pw_page.wait_for_timeout(3000)
 
                     page_count += 1
-                    time.sleep(self.delay)
 
             finally:
                 try:
@@ -373,7 +370,6 @@ class JsClickDriver(BasePaginationDriver):
                         pw_page.wait_for_timeout(3000)
 
                     page_count += 1
-                    time.sleep(self.delay)
 
             finally:
                 try:

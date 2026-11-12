@@ -7,7 +7,6 @@ CONFIG = {
     "name": "中国药促会·医改专题",
     "url_pattern": "phirda.com",
     "start_urls": ["https://www.phirda.com/news_12.html"],
-    "request_delay_seconds": 1.5,
     "max_pages": 50,
     "wait_selector": None,
     "list_item_selector": "a[href*='artilce_']",

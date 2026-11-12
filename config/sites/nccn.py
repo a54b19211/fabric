@@ -25,8 +25,6 @@ CONFIG = {
         "max_per_category": 0,
         # 是否抓取详情页
         "fetch_detail": True,
-        # 详情页请求间隔（秒）
-        "request_delay": 1.5,
     },
     "api_fetcher": iter_nccn,
     # iter_nccn 内部已生成 UUID，field_map 直接映射

@@ -8,7 +8,6 @@ import io
 import os
 import re
 import tempfile
-import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -22,6 +21,7 @@ from prefect import task
 # 引入 Scrapling 的高级反爬抓取器
 from scrapling.fetchers import Fetcher, StealthyFetcher
 
+from collection import transport
 from config.crawler_settings import DEFAULT_HEADERS
 from config.settings import APP
 
@@ -222,7 +222,7 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
                            适合无反爬、无 JS 渲染需求的站点，速度快 10x
     """
     if delay > 0:
-        time.sleep(delay)
+        transport.pause(delay)  # 在读取里（collection.transport）不睡过截止时间
 
     cookies: list[dict] = []
 

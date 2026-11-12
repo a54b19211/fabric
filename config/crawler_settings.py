@@ -10,7 +10,6 @@
         "name": "站点名称",
         "url_pattern": "example.com",
         "start_urls": ["https://www.example.com/news/index.html"],
-        "request_delay_seconds": 2.0,
         "max_pages": 10,
         "wait_selector": None,
         "list_item_selector": None,
@@ -46,8 +45,3 @@ for _py_file in sorted(_sites_dir.rglob("*.py")):
     _mod = importlib.import_module(_mod_path)
     if hasattr(_mod, "SITE_KEY") and hasattr(_mod, "CONFIG"):
         SITE_PROFILES[_mod.SITE_KEY] = _mod.CONFIG
-
-# ======================== 本地 PDF 扫描目录 ========================
-LOCAL_PDF_SCAN_DIRS = [
-
-]

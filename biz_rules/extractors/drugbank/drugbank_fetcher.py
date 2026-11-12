@@ -16,7 +16,6 @@ api_cfg 字段（来自 config/sites/drugbank.py 的 "api" 块）：
 
 import os
 import re
-import time
 from typing import Iterator
 
 import httpx
@@ -26,7 +25,6 @@ from biz_rules.history_models import HistoryError
 
 BASE_URL = "https://api.drugbank.com/v1"
 DEFAULT_PAGE_SIZE = 50
-REQUEST_DELAY = 0.5  # 秒，避免触发限速
 
 
 def iter_drugbank(api_cfg: dict) -> Iterator[dict]:
@@ -97,7 +95,6 @@ def iter_drugbank(api_cfg: dict) -> Iterator[dict]:
         # 从 Link header 解析下一页 URL
         url = _parse_next_link(resp.headers.get("Link", ""))
         params = {}  # 下一页 URL 已含参数，清空 params 避免重复
-        time.sleep(REQUEST_DELAY)
 
     logger.info(f"[DrugBank] 拉取完成，共 {fetched} 条")
 

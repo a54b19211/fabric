@@ -9,7 +9,6 @@ openFDA API 分页基础函数。
 """
 
 import re
-import time
 from typing import Iterator
 
 import httpx
@@ -20,7 +19,6 @@ from biz_rules.history_models import HistoryError
 OPENFDA_BASE = "https://api.fda.gov"
 PAGE_SIZE = 100
 MAX_SKIP = 25000
-REQUEST_DELAY = 0.5
 NEXT_LINK_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
@@ -106,7 +104,6 @@ def _iter_search_after(api_cfg: dict) -> Iterator[dict]:
         else:
             break
 
-        time.sleep(REQUEST_DELAY)
 
 
 # ── skip-based 分页（受 25000 限制）──────────────────────────────────
@@ -161,4 +158,3 @@ def _iter_skip(api_cfg: dict) -> Iterator[dict]:
             break
 
         skip += len(results)
-        time.sleep(REQUEST_DELAY)

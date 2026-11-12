@@ -138,7 +138,7 @@ def _parse_list_page(page, collected_urls: Set[str], year: int, page_num: int) -
 # 详情页抓取
 # ---------------------------------------------------------------------------
 
-def _fetch_detail(url: str, delay: float) -> str:
+def _fetch_detail(url: str) -> str:
     """抓取详情页正文，使用 StealthyFetcher。没读到（状态码不是 2xx、抛错、正文为空）就隔 RETRY_DELAY 秒重读一次，
     还不行就抛 ItemUnreadable：这一篇不存版本，网址和原因记进这次读取的覆盖信息。以前读不到返回空正文，
     标题照存，存成一个只有标题的版本。等待用 transport.pause：到截止时间就停，不睡过头。"""
@@ -147,7 +147,8 @@ def _fetch_detail(url: str, delay: float) -> str:
 
     why = ""
     for attempt in range(2):
-        transport.pause(delay if attempt == 0 else RETRY_DELAY)
+        if attempt:
+            transport.pause(RETRY_DELAY)
         try:
             page = StealthyFetcher.fetch(
                 url,
@@ -221,8 +222,6 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
     year_start = api_cfg.get("year_start") or datetime.now(timezone.utc).year  # 不写或 0 = 今年
     year_end = api_cfg.get("year_end", 2016)
     max_pages_per_year = api_cfg.get("max_pages_per_year", 100)
-    delay = api_cfg.get("delay_between_requests", 2.0)          # 列表页间隔
-    detail_delay = api_cfg.get("detail_delay", 1.0)              # 详情页间隔
 
     collected_urls: Set[str] = set()
     total_yielded = 0
@@ -260,7 +259,7 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
             for art in page_articles:
                 logger.info(f"[Roche] 详情页 {art['source_url']}")
                 try:
-                    body = _fetch_detail(art["source_url"], detail_delay)
+                    body = _fetch_detail(art["source_url"])
                 except ItemUnreadable as unread:
                     yield unread  # 不是抛出：抛出会结束这个生成器。读取方（collection.site_crawler）记下这一篇，再要下一篇
                     continue
@@ -271,7 +270,6 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
                 if max_articles > 0 and total_yielded >= max_articles:
                     return
 
-            transport.pause(delay)
 
         if max_articles > 0 and total_yielded >= max_articles:
             break

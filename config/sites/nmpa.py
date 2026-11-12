@@ -15,7 +15,6 @@ CONFIG = {
         "https://www.nmpa.gov.cn/yaopin/ypggtg/index.html",      # 药品公告通告
         "https://www.nmpa.gov.cn/yaopin/ypzhcjd/index.html",     # 药品政策解读
     ],
-    "request_delay_seconds": 1.0,   # 降低延迟，nmpa 反爬不强
     "max_pages": 50,
 
     # ── 列表页解析 ──
@@ -32,9 +31,4 @@ CONFIG = {
     # ── 详情页解析 ──
     "detail_extractor": extract_nmpa_detail,
     "detail_wait_selector": None,
-
-    # ── 附件策略 ──
-    # True：附件内容合并进父文档 raw_content，不单独入库
-    # False（默认）：附件作为独立 document 入库，parent_uuid 指向父文档
-    "merge_attachments": True,
 }

@@ -9,7 +9,6 @@
 """
 
 import re
-import time
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Iterator
@@ -31,8 +30,6 @@ CATEGORIES = {
 
 # 分类名 → 分类编号（反查）
 _NAME_TO_NUM = {v[0]: k for k, v in CATEGORIES.items()}
-
-REQUEST_DELAY = 1.5
 
 # 列表页等到指南链接出现、详情页等到各 section 的小标题（h4）出现，内容就齐了：不等“网络空闲”（页面挂着很多第三方脚本，
 # 空闲要一两分钟，实测一页 88-141 秒），也不加载图片、字体、样式（只要文字和链接）。
@@ -155,12 +152,10 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
       - categories:       要抓取的分类名列表，默认全部 4 个分类
       - max_per_category: 每个分类最多抓取条数，0 = 全量（默认 0）
       - fetch_detail:     是否抓取详情页（默认 True）
-      - request_delay:    请求间隔秒数（默认 1.5）
     """
     cat_names: list[str] = api_cfg.get("categories", [v[0] for v in CATEGORIES.values()])
     max_per_cat: int = api_cfg.get("max_per_category", 0)
     fetch_detail: bool = api_cfg.get("fetch_detail", True)
-    delay: float = api_cfg.get("request_delay", REQUEST_DELAY)
 
     try:
         from scrapling.fetchers import StealthyFetcher
@@ -218,7 +213,6 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
 
             if fetch_detail:
                 try:
-                    time.sleep(delay)
                     detail_page = _render(fetcher, detail_url, DETAIL_READY)
                     detail = extract_nccn_detail(detail_page)
 

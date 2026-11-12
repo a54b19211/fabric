@@ -8,7 +8,6 @@ CONFIG = {
     # 列表页已搬到 fda-newsroom 下（旧地址 /news-events/press-announcements?page=0 现在是 404）；
     # 新闻稿详情页的地址还是 /news-events/press-announcements/<名字>，url_pattern 不用改。
     "start_urls": ["https://www.fda.gov/news-events/fda-newsroom/press-announcements"],
-    "request_delay_seconds": 2.0,
     "max_pages": 20,
     # 列表页和详情页都是静态 HTML：用简单请求读（1-2 秒一页），不开浏览器。浏览器一页要几十秒，对方连接被重置、
     # 卡住时一次读取 130 秒一条都读不到（见 fda_drug_safety）。简单请求不需要加载资源，也不需要过 Cloudflare 验证。

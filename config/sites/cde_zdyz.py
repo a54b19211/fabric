@@ -9,7 +9,6 @@ CONFIG = {
     "start_urls": [
         "https://www.cde.org.cn/zdyz/listpage/9cd8db3b7530c6fa0c86485e563f93c7",
     ],
-    "request_delay_seconds": 2.0,
     "max_pages": 100,
 
     # ── 列表页解析 ──
@@ -26,7 +25,6 @@ CONFIG = {
 
     # ── 详情页解析 ──
     # 详情页是一张“名称 / 适用范围 / 版本状态 / 附件”的信息表（table.layui-table），指导原则正文在附件 PDF 里。
-    "merge_attachments": True,
     "detail_extractor": extract_cde_detail,
     "detail_wait_selector": "table.layui-table",
 }

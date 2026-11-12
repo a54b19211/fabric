@@ -33,7 +33,6 @@ RSS_FEEDS = [
     "https://www.fiercepharma.com/rss/manufacturing/xml",
 ]
 
-REQUEST_DELAY = 3.0  # 详情页请求间隔（秒）
 RETRY_DELAY = 10.0  # 第一次没读全，隔多久重读一次（秒）
 MIN_BODY_CHARS = 1000  # 正文比这短，当作页面没读全（整篇文章实测五千字上下）
 
@@ -145,7 +144,8 @@ def _read_article(url: str) -> dict:
     等待用 transport.pause：到截止时间就停，不睡过头。"""
     why = ""
     for attempt in range(2):
-        transport.pause(REQUEST_DELAY if attempt == 0 else RETRY_DELAY)
+        if attempt:
+            transport.pause(RETRY_DELAY)
         try:
             page = StealthyFetcher.fetch(
                 url,

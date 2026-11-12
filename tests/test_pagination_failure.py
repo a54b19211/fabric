@@ -113,7 +113,7 @@ def install_browser(monkeypatch, page):
 def driver_for(monkeypatch, advance, pages=2):
     page = Page(advance)
     install_browser(monkeypatch, page)
-    driver = load_driver()("site", {"max_pages": pages, "request_delay_seconds": 0}, page.url)
+    driver = load_driver()("site", {"max_pages": pages}, page.url)
     driver.site_cfg = {"pagination": {"next_btn_selector": ".next"}, "list_item_selector": "a"}
     driver._extract_table_rows = lambda _table: [["header"], ["row-" + str(page.number)]]
     return driver, page
