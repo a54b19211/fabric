@@ -378,7 +378,7 @@ SPECS: tuple[CollectionSpec, ...] = (
             "GDELT 观察到这条新闻的时间；不是新闻发布时间，也不是本地首次见到的时间", overlap_days=0,
         ),
         rate_group="gdeltproject.org",
-        min_interval_seconds=5.0,
+        min_interval_seconds=6.0,  # GDELT asks for one request every 5 seconds; one more second as margin
         outbound_cap=OutboundCap(per_day=900, per_hour_per_query=7),  # 5 queries x 24 hours x 7 = 840 at most
         coverage={"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
         notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条",
