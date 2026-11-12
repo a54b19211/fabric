@@ -16,7 +16,7 @@ from urllib.parse import urljoin
 import requests
 from loguru import logger
 
-from biz_rules.history_models import HistoryError
+from biz_rules.history_models import HistoryError, ItemUnreadable
 from config.sites.hkex_pharma_list_auto import PHARMA_COMPANIES
 
 SITE = "https://www1.hkexnews.hk"
@@ -62,6 +62,8 @@ def _parse_row(row: Dict, company: Dict, skip_headlines) -> Dict | None:
 def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
     """这家公司从 from_date 到 to_date 的全部公告（新的在前）。读不到就抛 HistoryError("source_read_failed")，写明哪家、为什么。"""
     who = f"{company.get('name')}({company.get('code')})"
+    if not company.get("stock_id"):
+        raise HistoryError("source_read_failed", f"港交所 {who} 缺少 stock_id，没有读")
     params = {
         "sortDir": 0,
         "sortByOptions": "DateTime",
@@ -95,35 +97,21 @@ def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
     return rows
 
 
-class _Announcements:
-    """所有公司的公告，一条一条给。读不到的公司在 next() 里抛 HistoryError；再调一次 next() 接着读下一家
-    （生成器抛出后就结束了，做不到这样，所以用迭代器）。"""
-
-    def __init__(self, api_config: Dict):
-        self.api_config = api_config
-        self.skip_headlines = api_config.get("skip_headlines", ())
-        self.companies = iter(api_config.get("companies", PHARMA_COMPANIES))
-        self.rows = iter(())
-        self.company = {}
-        self.seen = set()  # 联合公告会出现在几家公司名下，同一个文件只给一次
-
-    def __iter__(self):
-        return self
-
-    def __next__(self) -> Dict:
-        while True:
-            for row in self.rows:
-                announcement = _parse_row(row, self.company, self.skip_headlines)
-                if announcement and announcement["pdf_url"] not in self.seen:
-                    self.seen.add(announcement["pdf_url"])
-                    return announcement
-            self.company = next(self.companies)  # 没有下一家了：StopIteration，结束
-            if not self.company.get("stock_id"):
-                raise HistoryError("source_read_failed", f"港交所 {self.company.get('name')} 缺少 stock_id，没有读")
-            self.rows = iter(_read_company(self.api_config, self.company))
-
-
 def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
-    """从港交所披露易拉取上市公司公告"""
-    logger.info(f"[HKEX] 公司数量: {len(api_config.get('companies', PHARMA_COMPANIES))}")
-    return _Announcements(api_config)
+    """从港交所披露易拉取上市公司公告，一条一条给。读不到的公司给一个 ItemUnreadable（写明哪家、为什么，采集插件记下它、
+    不存版本），接着读下一家。"""
+    companies = api_config.get("companies", PHARMA_COMPANIES)
+    skip_headlines = api_config.get("skip_headlines", ())
+    logger.info(f"[HKEX] 公司数量: {len(companies)}")
+    seen = set()  # 联合公告会出现在几家公司名下，同一个文件只给一次
+    for company in companies:
+        try:
+            rows = _read_company(api_config, company)
+        except HistoryError as exc:
+            yield ItemUnreadable(f"{api_config['base_url']}?stockId={company.get('stock_id')}", exc.message)
+            continue
+        for row in rows:
+            announcement = _parse_row(row, company, skip_headlines)
+            if announcement and announcement["pdf_url"] not in seen:
+                seen.add(announcement["pdf_url"])
+                yield announcement

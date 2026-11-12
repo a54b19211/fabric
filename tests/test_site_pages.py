@@ -219,26 +219,18 @@ def test_hkex_record_through_the_site_config_has_title_date_and_the_pdf_as_attac
     assert kept is first
 
 
-def test_hkex_company_that_cannot_be_read_is_reported_with_its_name_and_the_next_one_is_still_read(monkeypatch):
-    """一家读不到（网络、状态码）：抛 HistoryError，code=source_read_failed，写明是哪家、为什么；再要下一条，接着读下一家，
-    不是整个来源停在这里。"""
-    import pytest
-
-    from biz_rules.extractors import hkex_fetcher
-    from biz_rules.history_models import HistoryError
+def test_hkex_company_that_cannot_be_read_is_given_as_unreadable_with_its_name_and_the_next_one_is_still_read(monkeypatch):
+    """一家读不到（网络、状态码）：给一个 ItemUnreadable，写明是哪家、为什么，采集插件记下它、不存版本；
+    接着读下一家，不是整个来源停在这里。"""
+    from biz_rules.history_models import ItemUnreadable
 
     def rows_of(stock_id):
         return TimeoutError("read timed out") if stock_id == 1000001102 else HKEX_ROWS[2:]
 
-    api, _ = _hkex_stub(monkeypatch, rows_of=rows_of)
-    announcements = hkex_fetcher.fetch_hkex_announcements(api)
-    with pytest.raises(HistoryError) as stopped:
-        next(announcements)
-    assert stopped.value.code == "source_read_failed"
-    assert "和黃醫藥" in stopped.value.message and "00013" in stopped.value.message and "TimeoutError" in stopped.value.message
-    assert next(announcements)["stock_code"] == "01177"
-    with pytest.raises(StopIteration):
-        next(announcements)
+    unreadable, announcement = _hkex_read(monkeypatch, rows_of=rows_of)[0]
+    assert isinstance(unreadable, ItemUnreadable) and "stockId=1000001102" in unreadable.url
+    assert "和黃醫藥" in unreadable.reason and "00013" in unreadable.reason and "TimeoutError" in unreadable.reason
+    assert announcement["stock_code"] == "01177"
 
 
 def test_hkex_a_joint_announcement_under_two_companies_is_given_once(monkeypatch):
