@@ -15,7 +15,7 @@
         "wait_selector": None,
         "list_item_selector": None,
         "pagination": {"type": "url_pattern", "first_page": "index.html", "other_pages": "index_{n}.html"},
-        "detail_extractor": None,   # None 走通解，或传入 css_extractors 里的函数
+        "detail_extractor": None,   # None 走通解，或传入 biz_rules/extractors/ 里的详情页特解函数
         "detail_wait_selector": None,
     }
 """

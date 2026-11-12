@@ -8,7 +8,6 @@ def extract_phirda_detail(page) -> dict:
     result = {
         "title": "",
         "publish_date": "",
-        "body_html": "",
         "body_text": "",
         "attachment_links": [],
     }
@@ -32,7 +31,6 @@ def extract_phirda_detail(page) -> dict:
     body_el = body_els[0] if body_els else None
 
     if body_el:
-        result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
 
     # 附件：正文内的文件链接

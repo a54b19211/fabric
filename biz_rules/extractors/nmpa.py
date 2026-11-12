@@ -5,37 +5,11 @@ from biz_rules.cleaners.field.date_format import normalize_date
 from biz_rules.extractors import extract_approval_number, extract_labeled_field
 
 
-def _extract_summary(body_text: str, max_len: int = 200) -> str:
-    """
-    从正文中提取有效摘要，跳过页面结构噪音行（索引号、主题分类、标题重复等）。
-    取第一段实质性内容。
-    """
-    noise_prefixes = ("索引号", "主题分类", "标题", "发布日期", "发布时间", "JGXX-")
-    lines = body_text.splitlines()
-    content_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(p) for p in noise_prefixes):
-            continue
-        # 跳过纯日期行
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", stripped):
-            continue
-        content_lines.append(stripped)
-        if sum(len(ln) for ln in content_lines) >= max_len:
-            break
-    summary = " ".join(content_lines)
-    return summary[:max_len]
-
-
 def extract_nmpa_detail(page) -> dict:
     result = {
         "title": "",
         "publish_date": "",
-        "body_html": "",
         "body_text": "",
-        "summary": "",
         "attachment_links": [],
         "extra": {},
     }
@@ -59,9 +33,7 @@ def extract_nmpa_detail(page) -> dict:
     body_els = page.css("div.wenzhang")
     body_el = body_els[0] if body_els else None
     if body_el:
-        result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
-        result["summary"] = _extract_summary(result["body_text"])
 
     # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
     body_text = result["body_text"]

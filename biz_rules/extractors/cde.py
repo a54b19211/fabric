@@ -7,7 +7,6 @@ def extract_cde_detail(page) -> dict:
     result = {
         "title": "",
         "publish_date": "",
-        "body_html": "",
         "body_text": "",
         "attachment_links": [],
         "extra": {},
@@ -33,13 +32,11 @@ def extract_cde_detail(page) -> dict:
     body_els = page.css("div.new_detail_content") or page.css("div.new_detail_content_old")
     body_el = body_els[0] if body_els else None
     if body_el:
-        result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
     else:
         info_table = page.css("table.layui-table")
         if info_table:
             rows = info_table[0].css("tr:not(.adviceInput)")
-            result["body_html"] = info_table[0].html_content
             result["body_text"] = "\n".join(row.get_all_text(separator=" ", strip=True) for row in rows)
 
     # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）

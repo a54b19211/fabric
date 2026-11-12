@@ -8,7 +8,6 @@ def extract_fiercepharma_detail(page) -> dict:
     result = {
         "title": "",
         "publish_date": "",
-        "body_html": "",
         "body_text": "",
         "attachment_links": [],
     }
@@ -48,7 +47,6 @@ def extract_fiercepharma_detail(page) -> dict:
             break
 
     if body_el:
-        result["body_html"] = body_el.html_content
         result["body_text"] = body_el.get_all_text(strip=True)
 
     return result

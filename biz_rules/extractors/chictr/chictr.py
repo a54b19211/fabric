@@ -64,7 +64,6 @@ def extract_chictr_detail(page) -> dict:
     result = {
         "title": "",
         "publish_date": "",
-        "body_html": "",
         "body_text": "",
         "attachment_links": [],
         "extra": {},
@@ -133,9 +132,5 @@ def extract_chictr_detail(page) -> dict:
             lines.append(f"{label}：{val}")
 
     result["body_text"] = "\n".join(lines)
-
-    # body_html：取第一个 table 的 html
-    if tables:
-        result["body_html"] = tables[0].html_content
 
     return result

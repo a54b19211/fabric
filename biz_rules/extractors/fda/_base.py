@@ -31,7 +31,6 @@ def extract_base(page, body_selectors: List[str]) -> Dict:
     result = {
         "title": "",
         "publish_date": "",
-        "body_html": "",
         "body_text": "",
         "attachment_links": [],
     }
@@ -47,7 +46,6 @@ def extract_base(page, body_selectors: List[str]) -> Dict:
     for sel in body_selectors:
         els = page.css(sel)
         if els:
-            result["body_html"] = els[0].html_content
             result["body_text"] = els[0].get_all_text(strip=True)
             break
 
