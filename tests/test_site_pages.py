@@ -242,17 +242,17 @@ def test_hkex_a_joint_announcement_under_two_companies_is_given_once(monkeypatch
 
 # ── NCCN 指南（nccn）────────────────────────────────────────────────────
 
-def test_nccn_detail_keeps_the_guideline_pdfs_and_leaves_out_the_site_wide_promo_pdfs():
+def test_nccn_detail_attaches_only_the_pdfs_that_can_be_downloaded_and_leaves_out_the_site_wide_promo_pdfs():
     """第一个 h4 之前的 PDF（化疗模板说明、年会招商册、展位图）整站每页都有，不是这份指南的文件：每份指南都下载一遍是重复下载
-    （一次读取 12MB 里大半是它们）。留下各 section 下的 8 个指南 PDF。fixture 是 2026-11-12 存下来的 ALL 指南页的主要部分。"""
+    （一次读取 12MB 里大半是它们）。医生版指南 PDF（/professionals/…）要登录，下载到的是登录页，每次内容不同，读一次多一个
+    “版本”：不当附件，链接仍留在 sections 里。公开的患者版 PDF 当附件。fixture 是 2026-11-12 存下来的 ALL 指南页的主要部分。"""
     from biz_rules.extractors.nccn.nccn import extract_nccn_detail
 
     parsed = extract_nccn_detail(page("nccn_detail.html"))
     assert parsed["title"] == "Acute Lymphoblastic Leukemia" and parsed["version"] == "3.2026"
     assert [(s["section_name"], len(s["pdfs"])) for s in parsed["sections"]] == [
         ("Guidelines", 1), ("Evidence Blocks", 1), ("Frameworks", 3), ("Guidelines for Patients", 2), ("International", 1)]
-    urls = [a["url"] for a in parsed["attachment_links"]]
-    assert len(urls) == 8 and not [u for u in urls if "/docs/default-source/" in u]
+    assert [a["url"].rsplit("/", 1)[1] for a in parsed["attachment_links"]] == ["all-patient.pdf", "ALL-es-patient.pdf"]
 
 
 def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_images():

@@ -119,6 +119,10 @@ def extract_nccn_detail(page) -> dict:
     # ── 扁平化 attachment_links（storage_writer 格式）────────────────────────
     for sec in result["sections"]:
         for pdf in sec["pdfs"]:
+            if "/professionals/" in pdf["url"]:
+                # 医生版指南 PDF 要登录 NCCN 账号：不登录下载到的是登录页（每次内容不同，每读一次就多一个“版本”），
+                # 不当附件；链接仍在 sections 和 markdown 里
+                continue
             result["attachment_links"].append({
                 "name": pdf["label"],
                 "url": pdf["url"],
