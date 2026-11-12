@@ -36,6 +36,14 @@ def _abs(href: str) -> str:
     return "https://www.nccn.org" + href
 
 
+def _attachments(sections: list) -> list:
+    """各 section 的 PDF 里能下载的，摊平成 [{name, url, version, section}]（storage_writer 格式）。
+    医生版指南 PDF（/professionals/…）要登录 NCCN 账号：不登录下载到的是登录页（每次内容不同，每读一次就多一个“版本”），
+    不当附件；链接仍在 sections 和 markdown 里。"""
+    return [{"name": pdf["label"], "url": pdf["url"], "version": pdf["version"], "section": sec["section_name"]}
+            for sec in sections for pdf in sec["pdfs"] if "/professionals/" not in pdf["url"]]
+
+
 def extract_nccn_detail(page) -> dict:
     result = {
         "title": "",
@@ -117,18 +125,7 @@ def extract_nccn_detail(page) -> dict:
         result["sections"].append({"section_name": sec_name, "pdfs": pdfs})
 
     # ── 扁平化 attachment_links（storage_writer 格式）────────────────────────
-    for sec in result["sections"]:
-        for pdf in sec["pdfs"]:
-            if "/professionals/" in pdf["url"]:
-                # 医生版指南 PDF 要登录 NCCN 账号：不登录下载到的是登录页（每次内容不同，每读一次就多一个“版本”），
-                # 不当附件；链接仍在 sections 和 markdown 里
-                continue
-            result["attachment_links"].append({
-                "name": pdf["label"],
-                "url": pdf["url"],
-                "version": pdf["version"],
-                "section": sec["section_name"],
-            })
+    result["attachment_links"] = _attachments(result["sections"])
 
     # ── 主版本号：取 Guidelines section 第一个 PDF 的版本 ────────────────────
     for sec in result["sections"]:

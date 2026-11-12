@@ -140,6 +140,12 @@ def _build_markdown(title: str, version: str, category_name: str,
     return "\n".join(lines)
 
 
+def _list_only_markdown(item: dict, detail_url: str) -> str:
+    """只有列表页的信息（没读详情页，或详情页读失败）时的最小 markdown。"""
+    return (f"# {item['title']}\n\n**Version**: {item['version']}\n**Category**: {item['category_name']}\n"
+            f"**Source**: {detail_url}\n")
+
+
 def iter_nccn(api_cfg: dict) -> Iterator[dict]:
     """
     NCCN 指南采集器。
@@ -270,19 +276,9 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
                 except Exception as e:
                     logger.warning(f"[NCCN] 详情页抓取失败 ({detail_url}): {e}")
                     # 降级：用列表页信息构造最小 markdown
-                    record["markdown"] = (
-                        f"# {item['title']}\n\n"
-                        f"**Version**: {item['version']}\n"
-                        f"**Category**: {item['category_name']}\n"
-                        f"**Source**: {detail_url}\n"
-                    )
+                    record["markdown"] = _list_only_markdown(item, detail_url)
             else:
-                record["markdown"] = (
-                    f"# {item['title']}\n\n"
-                    f"**Version**: {item['version']}\n"
-                    f"**Category**: {item['category_name']}\n"
-                    f"**Source**: {detail_url}\n"
-                )
+                record["markdown"] = _list_only_markdown(item, detail_url)
                 record["structured_data"] = {
                     "title": item["title"],
                     "publish_date": _extract_year(item["version"]),
@@ -295,4 +291,5 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
                     "guideline_id": item["guideline_id"],
                 }
 
+            record["publish_date"] = _extract_year(record["version"])  # 页面只有版本号（3.2026），用版本年份当发布日期（见站点配置）
             yield record
