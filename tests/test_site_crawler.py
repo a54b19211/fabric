@@ -443,6 +443,39 @@ def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
     assert transport.is_transient(httpx.ReadTimeout("t")) and not transport.is_transient(RuntimeError("HTTP 429"))
 
 
+def test_a_timeout_is_retried_after_a_short_pause_and_only_a_429_backs_off(monkeypatch):
+    """超时 = 这条连接没通（实测 Akamai 的个别节点会让一半的连接卡住）：换一条马上重试，只等 1 秒；
+    干等设置里的 10 秒（再翻倍）会让一个页面用掉半分钟。429 才按间隔退避、逐次翻倍。"""
+    import httpx
+
+    from config.settings import APP
+
+    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
+    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 10.0)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
+    slept = []
+    monkeypatch.setattr(transport.time, "sleep", slept.append)
+
+    def failing(error):
+        calls = []
+
+        def send():
+            calls.append(1)
+            if len(calls) < 3:
+                raise error
+            return "ok"
+        return send
+
+    assert transport._hop(_budget(), "https://synthetic.invalid/", failing(httpx.ConnectTimeout("t")),
+                          drain=lambda r: None) == "ok"
+    assert slept == [1.0, 1.0]
+    slept.clear()
+    limited = httpx.HTTPStatusError("429", request=httpx.Request("GET", "https://synthetic.invalid/"),
+                                    response=httpx.Response(429))
+    assert transport._hop(_budget(), "https://synthetic.invalid/", failing(limited), drain=lambda r: None) == "ok"
+    assert slept == [10.0, 20.0]
+
+
 def _budget():
     return transport.Budget(max_requests=10, max_bytes=10**9, max_records=10, deadline_seconds=60)
 

@@ -96,7 +96,7 @@ def test_timeout_uses_the_bounded_retry_and_keeps_the_old_original(http_source, 
     with transport.metered(_budget()), pytest.raises(httpx.ReadTimeout):
         site_crawler._download(URL, source_site="synthetic_files")
     assert len(http_source["requests"]) == 4  # 初次成功＋本轮最多三次读取
-    assert delays == [.01, .02]
+    assert delays == [.01, .01]  # 超时每次等同样的短时间（上限 1 秒），不翻倍；只有 429 才翻倍
     assert Path(first["local_path"]).read_bytes() == A
 
 

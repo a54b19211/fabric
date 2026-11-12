@@ -186,6 +186,14 @@ def store_original(content: bytes, identifier: str, source_site: str, file_ext: 
 #  Prefect Tasks
 # ---------------------------------------------------------------------------
 
+# 简单请求（use_simple_fetch）的超时（连接秒数，读取秒数）和次数（次数 = 最多发几次，scrapling 的 retries 就是这个意思）。
+# 正常的页面一两秒就回来；个别节点会让连接或握手卡住：实测 zktest 到 fda.gov 的 Akamai 节点（23.35.148.x 一组，
+# 解析会随时间换组）有时一半以上的新连接卡住，卡住就是一直没有回音，干等 30 秒再来两次要 90 秒。所以超时短，
+# 超时后的重试交给 collection.transport（立刻换一条连接重试）。
+SIMPLE_FETCH_TIMEOUT = (3, 6)
+SIMPLE_FETCH_TRIES = 2
+
+
 @task(
     name="fetch_page",
     retries=APP.TASK_RETRIES,
@@ -215,7 +223,8 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
             url,
             stealthy_headers=True,
             follow_redirects=True,
-            timeout=30,
+            timeout=SIMPLE_FETCH_TIMEOUT,
+            retries=SIMPLE_FETCH_TRIES,
         )
     else:
         def _collect_cookies(pw_page):
