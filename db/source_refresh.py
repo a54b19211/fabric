@@ -19,7 +19,7 @@ from biz_rules.history_models import (
     sha256,
 )
 from biz_rules.timestamps import parse_timestamp
-from collection import rate
+from collection import rate, transport
 from collection.catalog import CATALOG, WATCHABLE, spec
 from collection.windows import cycle_request, first_unread
 from db import history, publication
@@ -77,6 +77,7 @@ def watches():
             or value.request.continuation is not None
             or value.request.updated_since is not None
             or value.request.updated_until is not None
+            or value.request.known_stop  # 每轮由 collection.windows.cycle_request 按目录填，配置里不写
             for value in values
         ):
             raise ValueError()
@@ -93,6 +94,7 @@ def _key(watch):
     data = watch.model_dump(mode="json")
     if data.get("mode") == "realtime":
         data.pop("mode")  # 改造前已在运行的刷新保持原键，状态和窗口不重置
+    data["request"].pop("known_stop")  # 同理：配置里本来就不写（watches 拒绝非 0），新加的字段不能改动已有的键
     return "source-watch:" + sha256(canonical(data))
 
 
@@ -142,7 +144,8 @@ def _page_finished(watch, state, coverage, now):
         state["next_check_at"] = now.isoformat()
         return
     checkpoint, finished = state.get("window_ended_at"), True
-    if coverage.get("upstream_pagination_exhausted") is not True:
+    # 增量读取读到了已存且没变的原件（reached_known）：前面都是读过的，这一周期到此为止，不是“截断”
+    if coverage.get("upstream_pagination_exhausted") is not True and coverage.get("stop_reason") != transport.KNOWN:
         if "window_coverage" not in coverage:
             # 截断且无可靠续页位置不能称完成，更不能跳过未知页。
             raise HistoryError(
@@ -162,6 +165,26 @@ def _page_finished(watch, state, coverage, now):
         state["window_checkpoint"] = checkpoint
     state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
     state.pop("request", None)
+
+
+def _plan_cycle(watch, state, now):
+    """新的一个周期（state 里没有进行中的请求）：定这一周期读什么。失败后的重试不走这里，原请求还留在 state 里。"""
+    request, start, end = cycle_request(watch, state, now)
+    state.update(
+        mode=watch.mode,
+        fixed_scope_query=request["query"],
+        window_started_at=start.isoformat() if start else None,
+        window_ended_at=end.isoformat() if end else None,
+        request=request,
+        cycle_started_at=now.isoformat(),
+        cycle_pages=0,
+    )
+
+
+def _read_all_next_time(state):
+    """这一页的读取失败了，或有条目读不到（运行没读干净）：下一次重试不许“遇到已存的就停”。前面几条是已存的，
+    停在它们上面，就把后面没存的跳过去了；整份读到底，没存的才会再碰到、补上。"""
+    state["request"]["known_stop"] = 0
 
 
 def refresh_once(engine=None):
@@ -210,14 +233,7 @@ def refresh_once(engine=None):
                 lease_token=uuid4().hex,
             )
             if "request" not in state:
-                request, start, end = cycle_request(watch, state, now)
-                state["mode"] = watch.mode
-                state["fixed_scope_query"] = request["query"]
-                state["window_started_at"] = start.isoformat() if start else None
-                state["window_ended_at"] = end.isoformat() if end else None
-                state["request"] = request
-                state["cycle_started_at"] = now.isoformat()
-                state["cycle_pages"] = 0
+                _plan_cycle(watch, state, now)
             if not state.get("active_run_id") and not state.get("request_key"):
                 # 先持久意图：create_fetch提交后丢回复，下轮以同key找回原run。
                 state["generation"] = int(state.get("generation", 0)) + 1
@@ -283,6 +299,7 @@ def refresh_once(engine=None):
                     if saved.state in {"failed", "partial"}:
                         state.pop("active_run_id", None)
                         state.pop("request_key", None)
+                        _read_all_next_time(state)
                 except HistoryError:
                     pass
         finally:
@@ -290,6 +307,41 @@ def refresh_once(engine=None):
             _save(engine, key, state)
         results.append({"watch_id": watch.id, "state": state["state"]})
     return results
+
+
+WATCH_FIELDS = (  # 健康输出里每个固定刷新给出的状态字段
+    "watch_id", "mode", "state", "scope", "fixed_scope_query", "window_started_at", "window_ended_at",
+    "window_checkpoint", "backfill_completed_at", "cadence_seconds", "last_check_at", "last_success_at",
+    "last_failure_at", "last_page_at", "active_run_id", "next_check_at", "cycle_started_at", "cycle_pages",
+    "last_coverage", "error",
+)
+STUCK_ROUNDS = 3  # 同一条连续这么多轮都读不到，健康输出里单列出来
+
+
+def stuck_items(source_id):
+    """连续 STUCK_ROUNDS 轮都读不到的条目 [{"url", "reason", "rounds"}]。数据就是各次读取留在 coverage.unread_items 里的
+    （网址 + 原因），不另建表。一轮 = 同一个读取范围（query）的一次读取；整次失败的一轮没有 unread_items，连续数就断了。"""
+    with history.history_engine().begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout='3000ms'"))
+        rows = conn.execute(
+            text("""
+          SELECT request_payload->>'query', coverage->'unread_items' FROM history_runs
+          WHERE source_id=:source AND kind='fetch' AND NOT is_demo AND state IN ('completed','partial','failed')
+          ORDER BY created_at DESC LIMIT 30
+        """),
+            {"source": source_id},
+        ).all()
+    rounds = {}  # 读取范围 → 它最近几轮各自读不到的 {网址: 原因}，新的在前
+    for query, unread in rows:
+        if len(rounds.setdefault(query, [])) < STUCK_ROUNDS:
+            rounds[query].append({item["url"]: item["reason"] for item in unread or []})
+    return [
+        {"url": url, "reason": reason, "rounds": STUCK_ROUNDS}
+        for recent in rounds.values()
+        if len(recent) == STUCK_ROUNDS
+        for url, reason in recent[0].items()
+        if all(url in earlier for earlier in recent[1:])
+    ]
 
 
 def source_health(source_id, engine=None):
@@ -403,33 +455,7 @@ def source_health(source_id, engine=None):
         if payload.get("source_id") == source_id and payload.get("watch_id"):  # noqa: SIM102
             # 配置已删除的watch不能继续被误认为在刷新。
             if row["event_key"] in current_watches:
-                watch_states.append(
-                    {
-                        key: payload.get(key)
-                        for key in (
-                            "watch_id",
-                            "mode",
-                            "state",
-                            "scope",
-                            "fixed_scope_query",
-                            "window_started_at",
-                            "window_ended_at",
-                            "window_checkpoint",
-                            "backfill_completed_at",
-                            "cadence_seconds",
-                            "last_check_at",
-                            "last_success_at",
-                            "last_failure_at",
-                            "last_page_at",
-                            "active_run_id",
-                            "next_check_at",
-                            "cycle_started_at",
-                            "cycle_pages",
-                            "last_coverage",
-                            "error",
-                        )
-                    }
-                )
+                watch_states.append({key: payload.get(key) for key in WATCH_FIELDS})
         if "last_heartbeat" in payload:
             runtime = {
                 "last_heartbeat": payload["last_heartbeat"],
@@ -460,6 +486,7 @@ def source_health(source_id, engine=None):
         "publication": runtime or {"last_heartbeat": None, "state": "unknown"},
         "seed": seeds,
         "watches": watch_states,
+        "stuck_items": stuck_items(source_id),  # 连续 3 轮读不到的条目；空 = 没有
         "limitations": [
             "CrawlLog仅说明所记录任务；缺日志不补零，成功不证明全站完整",
             "发表器心跳/采用日志不是原站最后检查；库存EOF仅固定旧库存范围",

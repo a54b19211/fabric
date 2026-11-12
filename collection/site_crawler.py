@@ -10,8 +10,12 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 附件记录身份是“父记录#attachment=附件链接”（attachment_record_id）。下载链接每次都不同的（ChiCTR 的链接带一次性令牌），
 抽取器给附件一个固定的 key（页面上的字段名），身份改用“父记录#attachment=key”，带令牌的链接只在下载那一刻用，
 不存进原件（否则每抓一次就多一个附件、多一个版本）。
-一条记录读不到（拉取函数产出 ItemUnreadable：如 FiercePharma、Roche 的一篇详情页读了两次都不行）：
-记在本次读取的 unread_items（网址 + 原因），不存版本，接着读下一条；读到底时运行标“部分完成”，原因“有 N 条读不到”。
+一条记录读不到（拉取函数产出 ItemUnreadable：如 FiercePharma、Roche 的一篇详情页读了两次都不行；列表站点的一个详情页
+读不出来也一样）：记在本次读取的 unread_items（网址 + 原因），不存版本，接着读下一条；读到底时运行标“部分完成”，
+原因“有 N 条读不到”。没存的下一轮从头读会再碰到；固定刷新对“没读干净”的一轮，下一次不许“遇到已存的就停”（db.source_refresh）。
+列表一条都没解析到（列表页改版、接口改格式的样子）不算读完，标成失败（list_empty）；“解析到了但全是已存的”是正常读到旧的了。
+增量读取（FetchRequest.known_stop）：每读完一条父记录（页面或接口记录）问一次 transport.Budget.known，已存且没变的父记录
+不再下载它的附件（上一轮存过了）；连续够 known_stop 条就以 reached_known 停，不给续读位置。
 
 读取方式（FetchRequest.query）：
 - "by_url"，source_record_ids=详情页 URL：重抓这些页面及其附件；
@@ -20,7 +24,7 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 - "stored_attachments"，source_record_ids=已存文档 URL：按 documents 库 attachments 表记录的链接
   重新下载附件原件（只读那张表，父页面不重抓）。
 每一次真实传输（接口拉取函数里的 httpx/requests/curl 请求及其每一跳重定向、网页抓取、附件下载、浏览器里的
-document/xhr/fetch 请求）都在发出处过 collection.transport 的闸门：共享限速、请求/字节/期限预算、超时与 429 的
+document/xhr/fetch 请求）都在发出处过 collection.transport 的闸门：共享限速、字节/期限预算、超时与 429 的
 有界重试，续读重放也计数。
 """
 
@@ -47,6 +51,7 @@ ATT_SCHEMA = "datafabric.attachment.v1"
 # of a page or record); never a web capture or an API response of ours
 LEGACY_SCHEMA = "datafabric.site.legacy_capture.v1"
 HTML_INLINE_BYTES = 700 * 1024
+LIST_EMPTY = "列表页一条都没解析到，可能改版"  # 列表里一条都没有：不是“没有新内容”（那是解析到了、但全是已存的）
 
 from config.crawler_settings import SITE_PROFILES  # noqa: E402  站点配置
 
@@ -193,7 +198,7 @@ class _Resume(_Stop):
 
 class _Reader:
     """一次读取：版本、附件覆盖和续读位置。预算与计量是本次读取共用的 transport.Budget——版本数 ≤ max_records
-    （父页面和附件都算），请求、字节、截止时间在每次真实传输的发出处执行；单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES。
+    （父页面和附件都算），字节、截止时间在每次真实传输的发出处执行（请求次数不设额度）；单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES。
     任何一项用完就停：已读到的保留，stop_reason 写明是哪一项，给续读位置，不声称读到底。"""
 
     def __init__(self, request, budget):
@@ -224,7 +229,8 @@ class _Reader:
 
     def skip(self, unread):
         """拉取函数读不到一条记录（ItemUnreadable）：记下网址和原因，不存版本，读取接着往下走。"""
-        self.budget.check()  # 这期间时间或请求数用完了：那是停在这一条（续读从这里接），不是这一条读不到
+        self.budget.check()  # 这期间时间用完了：那是停在这一条（续读从这里接），不是这一条读不到
+        self.budget.known(None)  # 没存的不算“已存”：连续数清零，“遇到已存的就停”跳不过它
         self.unread.append({"url": unread.url, "reason": unread.reason})
         logger.warning("站点 {} 有一条读不到：{} | {}", self.site, unread.reason, unread.url)
 
@@ -286,7 +292,7 @@ class _Reader:
             self.before_record()
         links = _links(parsed)
         if record_page:
-            self.add(_record(record_id, {
+            record = _record(record_id, {
                 "schema_version": RECORD_SCHEMA,
                 "role": "site_record",
                 "site": self.site,
@@ -297,7 +303,10 @@ class _Reader:
                 # 接口原始字段；拉取函数已直接给出解析结果的站点没有原始字段（如实为空）
                 "raw": raw,
                 "attachments": [_listed(record_id, link) for link in links],
-            }))
+            })
+            self.add(record)
+            if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
+                return
         for position, link in enumerate(links):
             if position < skip_attachments:
                 continue
@@ -354,7 +363,10 @@ class _Reader:
         # 原件里的附件清单只有来源给出的链接和文字；每个附件这次读没读到记在 coverage
         capture["attachments"] = [_listed(url, link) for link in links]
         if record_page:
-            self.add(_record(url, capture), at=index)
+            record = _record(url, capture)
+            self.add(record, at=index)
+            if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
+                return
         for position, link in enumerate(links):
             if position < skip_attachments:
                 continue
@@ -454,6 +466,8 @@ def _read_site_records(request, reader, start, at):
                                        record_page=not (first and start_recorded))
             # the fetcher reads the next item while the loop asks for it: a stop there resumes at that item
             at.position = position + 1
+    if at.position == 0:
+        raise HistoryError("list_empty", LIST_EMPTY)
 
 
 def _read_detail_pages(request, reader, start, at):
@@ -469,8 +483,13 @@ def _read_detail_pages(request, reader, start, at):
                 continue
             at.position = seen
             first = seen == start_i
-            reader.page(url, skip_attachments=start_a if first else 0,
-                        record_page=not (first and start_recorded))
+            try:
+                reader.page(url, skip_attachments=start_a if first else 0,
+                            record_page=not (first and start_recorded))
+            except Exception as exc:  # noqa: BLE001 -- 这一页读不出来：和接口站点的 ItemUnreadable 一样记下，接着读下一页
+                reader.skip(ItemUnreadable(url, _why(exc)))
+    if seen < 0:
+        raise HistoryError("list_empty", LIST_EMPTY)
 
 
 def _why(exc) -> str:
@@ -500,7 +519,8 @@ def _read(request, reader) -> dict:
     except _Resume as stopped:
         stop, resume = stopped.reason, (at.position, stopped.attachment, stopped.page_recorded)
     except _Stop as stopped:
-        stop, resume = stopped.reason, (at.position, 0, False)
+        # 读到旧的了（增量读取）：没有下一页要接
+        stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else (at.position, 0, False)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
@@ -510,8 +530,8 @@ def _read(request, reader) -> dict:
             error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
             stop = "source_failed"
             logger.error("站点 {} 读取失败：{}", reader.site, error["message"])
-    if reader.unread and stop == "upstream_exhausted" and error is None:
-        # 读到底了，但有几条没读到：不能说读完。有版本的是“部分完成”，一个版本也没有的是“失败”（history._close_run）
+    if reader.unread and stop in ("upstream_exhausted", transport.KNOWN) and error is None:
+        # 读到底（或读到旧的）了，但有几条没读到：不能说读完。有版本的是“部分完成”，一个版本也没有的是“失败”（history._close_run）
         first = reader.unread[0]
         error = {"code": "items_unread",
                  "message": f"有 {len(reader.unread)} 条读不到，如 {first['url']}：{first['reason']}"}

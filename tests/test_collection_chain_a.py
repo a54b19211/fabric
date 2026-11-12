@@ -23,10 +23,21 @@ def ct_watch(**extra):
 # ——来源目录——
 
 
-def test_watchable_set_is_the_four_earlier_sources_and_gdelt():
-    # 改造前写死的四个来源，加上按整点读取的 GDELT，现在由目录推出；没有多放也没有少放
-    assert catalog.WATCHABLE == {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts", "gdelt_doc"}
-    assert {"pubmed", "fda_crl"} <= catalog.FETCHABLE
+STOP_AT_KNOWN = {
+    "pubmed", "fda_crl", "chictr", "nmpa", "cde", "cde_xxgk", "cde_zdyz", "phirda_industry", "phirda_policy", "phirda_rd",
+    "phirda_healthcare_reform", "fda_press", "fda_drug_safety", "fda_api_drug_label", "fda_api_enforcement",
+    "fiercepharma", "roche",
+}
+
+
+def test_watchable_set_is_the_earlier_five_and_the_newest_first_lists():
+    # 改造前写死的四个来源，加上按整点读取的 GDELT，再加列表从新到旧、靠“遇到已存的就停”增量读的来源；
+    # 港交所、NCCN、DrugBank 这个办法用不了，不进（原因写在目录里）；本地导入不对外抓，不进
+    earlier = {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts", "gdelt_doc"}
+    assert catalog.WATCHABLE == earlier | STOP_AT_KNOWN
+    assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.kind == "stop_at_known"} == STOP_AT_KNOWN
+    for source in ("hkex", "nccn", "drugbank", "local_files"):
+        assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
 
 
 def test_blocked_and_declared_sources_are_visible_gaps_not_fetchable():
@@ -71,6 +82,7 @@ def test_existing_realtime_watch_keeps_its_state_key():
     watch = ct_watch()
     legacy = watch.model_dump(mode="json")
     legacy.pop("mode")
+    legacy["request"].pop("known_stop")  # the field that came later does not move the key of a running watch
     assert _key(watch) == "source-watch:" + sha256(canonical(legacy))
     assert _key(ct_watch(mode="backfill")) != _key(watch)
 
@@ -116,12 +128,41 @@ def test_cadence_floor_is_each_sources_own_who_don_runs_every_15_minutes():
             watch(source, seconds)
 
 
-def test_unconnected_source_cannot_be_watched(monkeypatch):
-    monkeypatch.setenv(
-        "DATAFABRIC_HISTORY_WATCHES", json.dumps([{"id": "p", "request": {"source_id": "pubmed", "query": "x"}}])
-    )
+def test_a_source_without_an_incremental_key_cannot_be_watched(monkeypatch):
+    for source in ("hkex", "nccn", "local_files"):
+        monkeypatch.setenv(
+            "DATAFABRIC_HISTORY_WATCHES", json.dumps([{"id": "p", "request": {"source_id": source, "query": "records"}}])
+        )
+        with pytest.raises(HistoryError):
+            watches()
+
+
+def test_known_stop_is_filled_by_the_cycle_not_written_in_the_watch(monkeypatch):
+    from collection.windows import KNOWN_STOP
+
+    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+    request, start, end = cycle_request(pubmed, {}, NOW)
+    assert request["known_stop"] == KNOWN_STOP and request["query"] == "BRCA1" and start is end is None  # no window
+    again, _, _ = cycle_request(pubmed, {"window_checkpoint": NOW.isoformat()}, NOW)
+    assert again["known_stop"] == KNOWN_STOP and again.get("updated_since") is None  # a checkpoint changes nothing here
+    clinical = cycle_request(ct_watch(), {}, NOW)[0]
+    assert clinical["known_stop"] == 0  # a source with an update window is read by the window, as before
+    written = [{"id": "p", "request": {"source_id": "pubmed", "query": "x", "known_stop": 3}}]
+    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(written))
     with pytest.raises(HistoryError):
         watches()
+
+
+def test_a_read_that_came_to_known_records_ends_the_cycle_and_a_failed_page_is_read_in_full_next_time():
+    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+    state = {"request": {"known_stop": 3}}
+    _page_finished(pubmed, state, {"stop_reason": "reached_known", "upstream_pagination_exhausted": False}, NOW)
+    assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
+    from db.source_refresh import _read_all_next_time
+
+    state = {"request": {"known_stop": 3, "continuation": {"cursor": "c"}}}
+    _read_all_next_time(state)  # the page failed or left items unread: the retry may not stop at the first known ones
+    assert state["request"] == {"known_stop": 0, "continuation": {"cursor": "c"}}
 
 
 # ——增量窗口与持久检查点——
@@ -443,3 +484,32 @@ def test_change_id_is_stable_and_versioned():
     assert rd.PROCESSOR_VERSION.endswith(".v3")
     a = rd.change_id("a" * 64, "b" * 64, "status")
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")
+
+
+def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypatch):
+    from contextlib import contextmanager
+
+    from db import source_refresh
+
+    def unread(*urls):
+        return [{"url": url, "reason": "HTTP 403"} for url in urls]
+
+    # (读取范围, 这一轮读不到的条目)，新的在前
+    rows = [("A", unread("u1", "u2")), ("A", unread("u1")), ("A", unread("u1", "u3")), ("A", unread("u1")),
+            ("B", unread("u1")), ("B", unread("u1")),  # B 只有两轮：不够
+            ("C", unread("u9")), ("C", None), ("C", unread("u9"))]  # C 中间有一轮整次失败（没有 unread_items）：连续数断了
+
+    class Conn:
+        def execute(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return rows
+
+    class Engine:
+        @contextmanager
+        def begin(self):
+            yield Conn()
+
+    monkeypatch.setattr(source_refresh.history, "history_engine", lambda: Engine())
+    assert source_refresh.stuck_items("nmpa") == [{"url": "u1", "reason": "HTTP 403", "rounds": 3}]

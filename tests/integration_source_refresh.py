@@ -609,3 +609,81 @@ def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_th
     assert state["last_coverage"]["truncated_intervals"] == [cut]  # the gap stays readable
     assert state["last_coverage"]["stop_reason"] == "outbound_quota_hour"
     assert source_refresh.refresh_once() == []  # next cycle waits for its cadence
+
+
+def test_stored_unchanged_is_the_judgement_adopting_a_record_makes(databases, monkeypatch):
+    """The incremental read's "already stored and unchanged" (db.history.stored_unchanged) is _adopted_version, the same
+    code that decides between a new version and the same one when a read is adopted."""
+    source, _ = databases
+    allow(monkeypatch, ["clinicaltrials"])
+    watch_config(monkeypatch)
+    import flows.history_fetch as fetch
+
+    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
+    monkeypatch.setattr(fetch, "retry_inactive", lambda *args: (_ for _ in ()).throw(
+        HistoryError("job_may_be_active", "SYNTHETIC active", 409)))
+    source_refresh.refresh_once()
+
+    def record(value, **dump):
+        return ArchiveRecord(source_record_id=value["Id"], record_kind="document", raw_content=json.dumps(value, **dump))
+
+    value = who_value(1)
+    assert history.stored_unchanged("who_don", record(value)) is False  # not stored yet
+    finish_active(source, [record(value)], exhausted=True)
+    assert history.stored_unchanged("who_don", record(value)) is True
+    reordered = record(value, sort_keys=True, separators=(",", ":"))  # only key order and spacing differ
+    assert history.stored_unchanged("who_don", reordered) is True
+    assert history.stored_unchanged("who_don", record({**value, "Title": "SYNTHETIC corrected title"})) is False
+    assert history.stored_unchanged("who_don", record(who_value(2))) is False  # another record, not stored
+
+
+def test_watch_of_a_newest_first_source_reads_in_full_after_a_page_that_was_not_clean(databases, monkeypatch):
+    """A source without an update window (nmpa) is read from its first page and stops at the first known records
+    (known_stop). A page that failed or left items unread makes the next try read to the end: stopping at the known
+    ones would skip what was never stored."""
+    from collection.windows import KNOWN_STOP
+
+    source, target = databases
+    allow(monkeypatch, ["clinicaltrials"])
+    watch_config(monkeypatch, source="nmpa")
+    import flows.history_fetch as fetch
+
+    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
+    monkeypatch.setattr(fetch, "retry_inactive", lambda *args: (_ for _ in ()).throw(
+        HistoryError("job_may_be_active", "SYNTHETIC active", 409)))
+    watch = "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'"
+    due = ("UPDATE publication_outbox SET snapshot = jsonb_set(snapshot, '{next_check_at}', "
+           "to_jsonb('2000-01-01T00:00:00+00:00'::text)) WHERE event_key LIKE 'source-watch:%'")
+
+    def payloads():
+        return [row["request_payload"] for row in rows(target, "SELECT request_payload FROM history_runs ORDER BY created_at")]
+
+    def make_due():  # the watch's cadence has passed
+        with source.begin() as conn:
+            conn.execute(text(due))
+
+    source_refresh.refresh_once()
+    first = rows(source, watch)[0]["snapshot"]
+    assert first["request"]["known_stop"] == KNOWN_STOP and first["request"]["updated_since"] is None  # no window
+    assert payloads()[0]["known_stop"] == KNOWN_STOP
+    unread = {"code": "items_unread", "message": "有 1 条读不到，如 https://x.invalid/3：HTTP 403"}
+    finish_active(source, [], error=unread, stop_reason="items_unread")  # a page that was not clean
+    source_refresh.refresh_once()
+    failed = rows(source, watch)[0]["snapshot"]
+    assert failed["state"] == "failed" and "last_success_at" not in failed and "active_run_id" not in failed
+    assert failed["request"]["known_stop"] == 0  # the retry reads to the end
+    assert source_refresh.refresh_once() == []  # waits for its cadence
+    make_due()
+    source_refresh.refresh_once()  # the failed page is tried again, as for every source
+    assert len(payloads()) == 2 and "known_stop" not in payloads()[1]
+    finish_active(source, [], exhausted=True)  # read clean to the end
+    source_refresh.refresh_once()
+    done = rows(source, watch)[0]["snapshot"]
+    assert done["state"] == "idle" and done["last_success_at"] and "request" not in done
+    make_due()
+    source_refresh.refresh_once()  # the next cycle stops at known records again
+    assert rows(source, watch)[0]["snapshot"]["request"]["known_stop"] == KNOWN_STOP
+    finish_active(source, [], stop_reason="reached_known")
+    source_refresh.refresh_once()
+    ended = rows(source, watch)[0]["snapshot"]
+    assert ended["state"] == "idle" and ended["last_success_at"] and "request" not in ended and ended["error"] is None

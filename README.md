@@ -54,7 +54,7 @@ make check-lock        # requirements.lock 是否仍与 requirements*.txt 一致
 - `make test-integration` 由 `ops/run_integration_tests.sh` 执行：容器名 `fabric-itest-<角色>-<随机>`（`ITEST_PREFIX` 可改），带本次运行的标签 `fabric-itest.run=<随机>`；只登记 docker 实际为本次运行创建的容器 ID（连同镜像和匿名卷）到清单 `.test-artifacts/fabric-itest-<随机>.containers.jsonl`（检出里，git 忽略）（`ITEST_MANIFEST` 可改，跑完保留），结束、失败或被中断时都按清单逐个核对标签后停止并 `docker rm -v`（连匿名卷一起删，不扫描、不清理别的卷），不碰不是本次创建的容器；只绑定 127.0.0.1 上 19871 以上的空闲端口；要求固定端口（18436、18636、18736、18737）的几组测试在私有网络命名空间（`unshare -rn`）里跑，经 unix socket 转发到容器，不占用主机上的这些端口。真实 BioCheck 规则的测试用 `BIOCHECK_SRC`（默认 `../clean-biocheck`，先在那里 `make venv`）；找不到检出时这些测试显示为跳过。也可以只跑其中几个文件：`bash ops/run_integration_tests.sh tests/integration_lease.py`。
 - 已验证的组合：uv 0.13.0、CPython 3.10.12；通过数量以 `make check` 的输出为准，这里不写数字。
 - 已有环境里只做导入检查：`python ops/check_imports.py`。
-- 各来源真抓一遍、打印一张表：`python ops/check_sources.py [来源…] [--twice]`（`--twice` 抓两次，查重复存版本）；它会写库，`DATAFABRIC_HISTORY_DATABASE_URL` 要指向临时库（先 `python -m migration.runner --db history --apply`），用法和环境变量见文件开头。
+- 各来源真抓一遍、打印一张表：`python ops/check_sources.py [来源…] [--twice | --rounds N] [--incremental]`（`--twice` 抓两次，查重复存版本，`--rounds N` 抓 N 次；`--incremental` 按固定刷新的读法抓：连续读到 3 条已存且没变的就停，第二次起应该停在 reached_known）；它会写库，`DATAFABRIC_HISTORY_DATABASE_URL` 要指向临时库（先 `python -m migration.runner --db history --apply`），用法和环境变量见文件开头。
 
 ## 运行
 
@@ -594,6 +594,11 @@ basis.kind=declared 是声明；source_bound 必须逐非空字段与另一份�
 新来源 `gdelt_doc` 只返回标题、原网址及索引元数据，不提供新闻全文；其 `seendate` 是 GDELT 的观察时间，不是原帖发布时间，也不是本机的首次采集时间。接口无续页：给定起止时间的读取按 UTC 整点切成 1 小时窗，窗口返回满额（达到请求的 `max_records`）就对半拆开再读，最细 15 分钟，每查询每小时最多 7 次请求；最细窗口仍满额的标 `possibly_truncated`。读取运行的 coverage 里 `window_coverage` 逐窗口写区间、返回条数、是否满额、请求数和未读完的原因，`truncated_intervals` 列出可能被截断的区间；少于上限只说明没碰到上限，不等于窗口读全。实际探测曾返回 429，故不能声称当前服务器已经稳定采通。资料使用需注明 [GDELT 项目](https://www.gdeltproject.org/about.html#termsofuse)。ProMED 尚无所需许可；各级卫健委网页尚未逐站验证；实时社媒商用接口尚未选定。这些都不能写成已覆盖。
 
 `gdelt_doc` 可以进固定刷新（`DATAFABRIC_HISTORY_WATCHES`，每个查询一条，`lookback_days` 设为 1：首轮没有检查点，按它回看）。每轮读 [检查点, 当前整点)，不读还没走完的这一小时，不回看重叠。读到最细窗口仍满额的区间只留在读取回执里（`truncated_intervals`），不重试，检查点照常前进；截止时间或出站额度用完时，检查点停在第一个没读到的窗口起点，下一轮从那里继续，这一轮不记 `last_success_at`。
+
+没有更新时间可过滤、但列表从新到旧的来源（目录里的增量键 `stop_at_known`）也能进固定刷新：`pubmed`、`fda_crl`、`chictr`、`nmpa`、`cde`、`cde_xxgk`、`cde_zdyz`、`phirda_*` 四个、`fda_press`、`fda_drug_safety`、`fda_api_drug_label`、`fda_api_enforcement`、`fiercepharma`、`roche`。watch 的写法和别的来源一样（`request` 里给来源和读取入口：网页站点填站点配置里的列表入口网址，接口站点填 `records`，PubMed 填检索词，`fda_crl` 填 `*`），**不要在配置里写 `known_stop`**，每一轮由 `collection.windows.cycle_request` 按目录填。读法是老 ETL 的“增量爬取：遇到第一个重复的就停止”：每轮从列表第一页往后读，每读完一条，问一次库里这条记录的当前版本是不是和它一样（`db.history.stored_unchanged`，和存版本判断“新版本还是没变”的是同一段代码），连续 3 条（`collection.windows.KNOWN_STOP`）都是，就以 `reached_known` 停：前面的都读过了，后面更旧。已存且没变的父记录不再下载它的附件（上一轮存过）。这个办法的前提是列表从新到旧、旧条目不会被改动：读不到被改过的旧条目；列表顺序是站点的默认顺序，不是来源的承诺（openFDA 召回、说明书、CRL 读取时明确要求按日期从新到旧；Fierce Pharma 把两个 RSS 并成一个从新到旧的队列）。第一次读（库里什么都没有）读到列表读完为止，可能要几次续页。
+用不了这个办法的来源不进固定刷新，原因写在目录里（`collection/catalog.py` 的 `_NOT_WATCHED`）：`hkex`（183 家公司各自从新到旧，停在第一家就漏掉其余，而且一轮要约 6 分钟，一次读取最长 120 秒，续读又要从头重放）、`nccn`（清单没有时间顺序，新版本只是某一条的版本号变了，必须整份重读，一轮约一百次页面渲染）、`drugbank`（没有 API 凭据与许可）。
+读不到的条目不存版本（读取结果的 `unread_items` 里有网址和原因）：列表站点里一个详情页读不出来，和接口站点的 `ItemUnreadable` 一样，记下它、接着读下一条，这次读取标成“部分完成”（`items_unread`）。没存的下一轮自然会再碰到，但“遇到已存的就停”可能停在它前面，所以：**没读干净的一轮（失败，或有条目读不到）之后，watch 的下一次重试不带 `known_stop`，整份读到底**（`db.source_refresh._read_all_next_time`），读干净了下一个周期才又用回 `known_stop`。整次失败的读取照常按 `cadence_seconds` 重试。同一条连续 3 轮（同一个读取入口的最近三次读取）都读不到，`GET /api/history/source-health` 的 `stuck_items` 里单列出来（网址、原因、轮数），空表示没有；数据就是各次读取留在 coverage 里的 `unread_items`，没有另建表。
+列表页一条都没解析到（列表页改版、接口改了格式的样子）不算读完：读取标为失败，原因 `list_empty`“列表页一条都没解析到，可能改版”。和“没有新内容”分得开：后者是解析到了、但全是已存的，读取正常结束（`reached_known`）。
 
 请求次数不设额度：读取只受“抓几条”（`max_records`）、截止时间（`deadline_seconds`）、字节数、对方网站的间隔和本机的出站上限（`collection.rate`）约束；请求数照实计数写进读取结果（`requests`），`max_pages` 只管接口分页读的页数，不再折成请求数上限。
 

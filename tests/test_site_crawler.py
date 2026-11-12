@@ -76,8 +76,12 @@ def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
     for source in ("nmpa", "cde", "chictr"):
         spec = catalog.spec(source)
         assert spec.status == "active" and spec.plugin == "site_crawler"
-        assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
+        assert source in catalog.FETCHABLE and source in catalog.WATCHABLE  # 列表从新到旧：遇到已存的就停
+        assert spec.incremental.kind == "stop_at_known"
         assert spec.verified is False  # 迁入旧代码，本系统未对原站实测
+    for source in ("hkex", "nccn", "drugbank"):  # 这个办法用不了的：还是不进固定刷新，原因写在目录里
+        assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
+        assert catalog.spec(source).incremental.semantics
 
 
 
@@ -737,6 +741,7 @@ def test_openfda_http_errors_and_timeouts_are_failed_reads_that_say_so(monkeypat
 def test_openfda_failure_on_a_later_page_keeps_what_was_read_and_still_fails(monkeypatch):
     """第二页出错：第一页读到的原件保留，但这次读取不是“读完了”。"""
     import httpx
+
     from biz_rules.extractors.fda import _openfda_base
 
     record = {"set_id": "S1", "effective_time": "20261101", "openfda": {},
@@ -755,8 +760,11 @@ def test_openfda_failure_on_a_later_page_keeps_what_was_read_and_still_fails(mon
 def test_openfda_404_past_the_last_skip_page_is_still_the_normal_end(monkeypatch):
     """skip 翻页翻过最后一页，openFDA 回 404：这是读完了，不是失败。"""
     import httpx
+
     from biz_rules.extractors.fda import _openfda_base
 
+    # 召回站点的配置现在指定了 sort（新的在前，走 search_after）；skip 翻页是没指定 sort 时的读法，这里去掉 sort 测它
+    monkeypatch.delitem(site_crawler.SITE_PROFILES["fda_api_enforcement"]["api"], "sort")
     record = {"recall_number": "D-1-2026", "product_description": "Some product", "report_date": "20261101"}
     answers = iter([_http(200, {"meta": {"results": {"total": 5}}, "results": [record]}),
                     _http(404, {"error": {"code": "NOT_FOUND", "message": "No matches found!"}})])
@@ -817,8 +825,11 @@ def test_roche_list_page_http_error_is_a_failed_read_but_an_empty_page_still_end
     assert batch["error"] == {"code": "source_read_failed",
                               "message": "Roche 列表页读取失败：2026 年第 1 页返回 HTTP 503（不当作读到底）"}
     assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
-    ended = _roche_one_year(monkeypatch, lambda url, **kw: _RochePage(200))  # 这一年没有（更多）新闻：正常读完
-    assert ended["error"] is None and ended["upstream_pagination_exhausted"]
+    # 页面读到了但一条新闻也没解析出来：不是“没有新内容”，是可能改版——失败，不当正常读完（这里只给了一年；
+    # 真实读取从 2026 年一路往前，某一年没有（更多）新闻只是跳到下一年）
+    empty = _roche_one_year(monkeypatch, lambda url, **kw: _RochePage(200))
+    assert empty["error"] == {"code": "list_empty", "message": site_crawler.LIST_EMPTY}
+    assert empty["stop_reason"] == "source_failed" and not empty["upstream_pagination_exhausted"]
 
 
 class _FierceNode:
@@ -1001,3 +1012,127 @@ def test_roche_detail_page_that_stays_unread_is_not_stored_with_an_empty_body(mo
     assert batch["unread_items"] == [{"url": b, "reason": why}]
     assert batch["error"]["code"] == "items_unread" and batch["stop_reason"] == "items_unread"
     assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a, c]
+
+
+# ——增量读取（FetchRequest.known_stop）：连续读到“库里已有且没变”的就停——
+
+
+@pytest.fixture
+def stored(monkeypatch):
+    """库里已有且没变的原件（记录身份的集合）。真正的判断是 db.history.stored_unchanged，和存版本共用 _adopted_version，
+    要真库，见 tests/integration_history.py；这里换成查集合。"""
+    from db import history
+
+    known = set()
+    monkeypatch.setattr(history, "stored_unchanged", lambda source, item: item.source_record_id in known)
+    return known
+
+
+def _list_site(monkeypatch, urls):
+    """nmpa 的列表入口，列表上依次是这些详情页。"""
+    class Driver:
+        def iter_detail_urls(self):
+            yield from urls
+
+    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    return site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
+
+
+def test_known_stop_stops_after_three_known_in_a_row_and_does_not_download_their_attachments(fake_web, monkeypatch, stored):
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
+    stored.update(urls[2:])  # 前两条是新的，从第三条起都读过了
+    start = _list_site(monkeypatch, urls)
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
+    assert pages_of(batch) == urls[:5]  # 两条新的 + 连续三条已存的；第 6 条起没有去读
+    assert len(batch["records"]) == 2 * 3 + 3  # 新的：页面 + 2 个附件；已存的只有页面，附件上一轮存过，不再下载
+    assert len(fake_web["fetch"]) == 5 and len(fake_web["download"]) == 4
+    assert batch["stop_reason"] == "reached_known" and batch["next_continuation"] is None and batch["error"] is None
+
+
+def test_without_known_stop_the_same_list_is_read_to_the_end(fake_web, monkeypatch, stored):
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
+    stored.update(urls[2:])
+    start = _list_site(monkeypatch, urls)
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))  # 手动抓取、回填：known_stop=0
+    assert pages_of(batch) == urls and batch["stop_reason"] == "upstream_exhausted"
+
+
+def test_an_unread_item_resets_the_count_so_known_ones_after_it_do_not_hide_it(fake_web, monkeypatch, stored):
+    """没存的不能被“遇到已存的就停”跳过：读不到的这一条打断连续数，后面要再连续三条已存的才停。"""
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
+    stored.update(set(urls) - {urls[2]})  # 第 3 条读不到，别的都读过了
+    original = site_crawler._fetch_page
+
+    def fetch(url, **kwargs):
+        if url == urls[2]:
+            raise TimeoutError("synthetic")
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(site_crawler, "_fetch_page", fetch)
+    start = _list_site(monkeypatch, urls)
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
+    assert pages_of(batch) == [urls[0], urls[1], urls[3], urls[4], urls[5]]  # 读不到的没存；停在它后面的第三条已存的
+    assert [item["url"] for item in batch["unread_items"]] == [urls[2]]
+    assert batch["error"]["code"] == "items_unread" and batch["stop_reason"] == "items_unread"
+    assert batch["next_continuation"] is None  # 读到旧的了：没有下一页；运行标“部分完成”，下一次整份读到底（db.source_refresh）
+
+
+def test_a_read_that_stored_nothing_new_is_not_a_failure_but_an_empty_list_is(fake_web, monkeypatch, stored):
+    """“解析到了但全是已存的”是正常读到旧的了；“一条都没解析到”才是可能改版，标成失败。"""
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(4)]
+    stored.update(urls)
+    start = _list_site(monkeypatch, urls)
+    quiet = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
+    assert quiet["error"] is None and quiet["stop_reason"] == "reached_known" and len(pages_of(quiet)) == 3
+    start = _list_site(monkeypatch, [])
+    broken = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
+    assert broken["error"] == {"code": "list_empty", "message": "列表页一条都没解析到，可能改版"}
+    assert broken["stop_reason"] == "source_failed" and broken["records"] == []
+
+
+def test_api_site_stops_at_known_records_and_an_empty_result_is_an_alarm_too(fake_web, monkeypatch, stored):
+    from core_engine.api_router import _make_uuid
+
+    items = [{"id": f"R{i}", "t": f"召回{i}", "d": "2026-01-0" + str(i + 1), "u": f"https://x.invalid/{i}"} for i in range(6)]
+    profile = {"source_type": "api", "api": {}, "uid_field": "id",
+               "field_map": {"title": "t", "publish_date": "d", "source_url": "u"},
+               "api_fetcher": lambda cfg: iter(items)}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_enforcement", profile)
+    stored.update(_make_uuid("fda_api_enforcement:" + item["id"]) for item in items[1:])
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100, known_stop=3))
+    assert [json.loads(r.raw_content)["raw"]["id"] for r in batch["records"]] == ["R0", "R1", "R2", "R3"]
+    assert batch["stop_reason"] == "reached_known" and batch["next_continuation"] is None
+    profile["api_fetcher"] = lambda cfg: iter([])
+    empty = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100, known_stop=3))
+    assert empty["error"]["code"] == "list_empty" and empty["stop_reason"] == "source_failed"
+
+
+def test_a_detail_page_that_cannot_be_read_does_not_stop_the_list(fake_web, monkeypatch, stored):
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(3)]
+    original = site_crawler._fetch_page
+
+    def fetch(url, **kwargs):
+        if url == urls[1]:
+            raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(site_crawler, "_fetch_page", fetch)
+    start = _list_site(monkeypatch, urls)
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))
+    assert pages_of(batch) == [urls[0], urls[2]]  # 第 2 页读不到，没存，第 3 页照读
+    assert batch["unread_items"] == [{"url": urls[1], "reason": "TimeoutError：Page.goto: Timeout 30000ms exceeded."}]
+    assert batch["error"]["code"] == "items_unread" and "有 1 条读不到" in batch["error"]["message"]
+
+
+def test_budget_known_counts_consecutive_known_only():
+    budget = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60, known_stop=3)
+    budget.is_known = lambda item: item != "new"
+    assert [budget.known(item) for item in ("a", "b", "new", "c", "d")] == [True, True, False, True, True]
+    assert budget.known(None) is False and budget.known_run == 0  # 没读到的：连续数清零
+    with pytest.raises(transport.Stop) as stop:
+        for item in ("a", "b", "c"):
+            budget.known(item)
+    assert stop.value.reason == "reached_known" and budget.stopped is None  # 不是预算用完，之后的传输照常
+    off = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
+    off.is_known = lambda item: True
+    assert [off.known(item) for item in "abcdef"] == [False] * 6  # known_stop=0：从不停

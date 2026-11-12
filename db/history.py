@@ -816,6 +816,20 @@ def _adopted_version(conn, run, item, identity):
     return version_id, existing, current
 
 
+def stored_unchanged(source_id, item) -> bool:
+    """存下这条原件会不会多出新版本？不会（库里这条记录的当前版本就是它）= True。增量读取（FetchRequest.known_stop）
+    用它判断“读到旧的了”。直接走 _adopted_version，和 _publish 判断“新版本还是没变”的是同一段代码，不会两套规则。
+    原件投影失败时返回 False：不在这里报错，留给存版本时按原样报。"""
+    run = {"source_id": source_id, "is_demo": False, "kind": "fetch"}
+    try:
+        projected = project_record(source_id, item)
+    except HistoryError:
+        return False
+    identity = _version_identity(run, item, projected, AvailabilityProof(kind="unverified"), None)
+    with history_engine().begin() as conn:
+        return _adopted_version(conn, run, item, identity)[1] is not None
+
+
 def _insert_version(conn, run, item, projected, proof, mapping_review, version_id, seq, now, current):
     payload = HistoryRecord(
         source_id=run["source_id"],
@@ -959,6 +973,8 @@ def create_fetch(request: FetchRequest, key: str):
     # Preserve hashes of pre-demo public requests and their existing idempotency keys.
     if not request.is_demo:
         body.pop("is_demo")
+    if not request.known_stop:  # likewise for a read that is not an incremental one
+        body.pop("known_stop")
     with history_engine().begin() as conn:
         stored = None
         if request.is_demo:

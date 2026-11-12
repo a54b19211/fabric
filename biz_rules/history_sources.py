@@ -742,6 +742,10 @@ def read_public(request: FetchRequest) -> dict:
     if plugin is None:
         raise HistoryError("source_plugin_missing", "来源插件未注册", 503)
     with transport.reading(request) as budget:
+        if request.known_stop:  # 增量读取：读到“库里已有且没变”的原件就算读到旧的了（transport.Budget.known）
+            from db import history  # 在这里才导入：db.history 自己导入了本模块
+
+            budget.is_known = lambda item: history.stored_unchanged(request.source_id, item)
         result = plugin(request)
     return {**result, "requests": budget.requests, "bytes": budget.bytes, "subrequests": budget.subrequests}
 
@@ -772,7 +776,8 @@ def _api_page(request, cursor, size, offset):
     if source == "fda_crl":
         if request.source_record_ids:
             raise HistoryError("by_id_unsupported", "FDA复合记录尚不支持精确by-ID重采")
-        params = {"limit": size, "skip": offset}
+        # 新的在前：不指定时 openFDA 的顺序是乱的（第一条是 2018 年的），增量读取“遇到已存的就停”靠这个顺序
+        params = {"limit": size, "skip": offset, "sort": "letter_date:desc"}
         if request.query.strip() != "*":
             params["search"] = request.query
         return "https://api.fda.gov/transparency/crl.json", params, ["results"]
@@ -875,6 +880,7 @@ class _PublicApiRead:
                 continue
             self.seen[native] = sha256(raw)
             self.records.append(item)
+            transport.known(item)  # 增量读取：连续读到已存没变的，抛 Stop，已读的保留
             if len(self.records) >= self.request.max_records:
                 break
 
@@ -986,37 +992,42 @@ def _pubmed_articles(raw_xml, ids):
 
 def _read_pubmed(request):
     """PubMed：ESearch 找 PMID（或给定的 PMID 清单），EFetch 取摘要原件；有合法全文的另成附件版本
+PUBMED = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+
+
+def _pubmed_ids(client, request, start):
+    """这一次要取的 PMID：给定的清单，或 ESearch 的结果（不指定排序时新入库的在前）。返回 (命中总数, 本次的 PMID)。"""
+    if request.source_record_ids:
+        if not all(re.fullmatch(r"\d+", value) for value in request.source_record_ids):
+            raise ValueError("invalid_native_id")
+        return len(request.source_record_ids), request.source_record_ids[start: start + request.max_records]
+    status, body = transport.get(client, PUBMED + "esearch.fcgi", {
+        "db": "pubmed", "retmode": "json", "term": request.query, "retstart": start,
+        "retmax": request.max_records}, cap=1024 * 1024)
+    _ok(status)
+    found = parse_json(body.decode("utf-8")).get("esearchresult")
+    if not isinstance(found, dict) or "count" not in found or not isinstance(found.get("idlist"), list):
+        raise ValueError("invalid_search")
+    return int(found["count"]), found["idlist"]
+
+
     （collection.pubmed_fulltext）。文献和全文都占 max_records；额度或其他预算用完就停，给续读位置：
     cursor = {"i": 结果里第几篇, "a": 1 表示这一篇的文献版本已保存、只差全文}（与站点插件同一写法）。"""
     from collection.pubmed_fulltext import fulltext
 
     budget = transport.current()
     start, fulltext_only = _pubmed_cursor(request)
-    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
     records, coverage, count = [], [], None
     stop, error, resume = "upstream_exhausted", None, (start, int(fulltext_only))
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
-            if request.source_record_ids:
-                if not all(re.fullmatch(r"\d+", value) for value in request.source_record_ids):
-                    raise ValueError("invalid_native_id")
-                count = len(request.source_record_ids)
-                ids = request.source_record_ids[start: start + request.max_records]
-            else:
-                status, body = transport.get(client, base + "esearch.fcgi", {
-                    "db": "pubmed", "retmode": "json", "term": request.query, "retstart": start,
-                    "retmax": request.max_records}, cap=1024 * 1024)
-                _ok(status)
-                found = parse_json(body.decode("utf-8")).get("esearchresult")
-                if not isinstance(found, dict) or "count" not in found or not isinstance(found.get("idlist"), list):
-                    raise ValueError("invalid_search")
-                count, ids = int(found["count"]), found["idlist"]
+            count, ids = _pubmed_ids(client, request, start)
             if not ids:
                 if start < count:
                     raise ValueError("unexpected_empty_ids")
                 stop, resume = ("upstream_no_match" if count == 0 else "upstream_exhausted"), None
             else:
-                status, body = transport.get(client, base + "efetch.fcgi", {
+                status, body = transport.get(client, PUBMED + "efetch.fcgi", {
                     "db": "pubmed", "retmode": "xml", "id": ",".join(ids)}, cap=7 * 1024 * 1024)
                 _ok(status)
                 for k, item in enumerate(_pubmed_articles(body.decode("utf-8"), ids)):
@@ -1026,6 +1037,8 @@ def _read_pubmed(request):
                         records.append(item)
                     resume = (start + k, 1)
                     facts = _project_pubmed(item)["facts"]
+                        if transport.known(item):  # 增量读取：已存且没变，全文也是上一轮存的，不再取（连续够数就抛 Stop）
+                            continue
                     found_records, found_coverage = fulltext(
                         client, item.source_record_id, facts.get("pmcid"), facts.get("doi"))
                     records += found_records
@@ -1036,11 +1049,13 @@ def _read_pubmed(request):
             stop = stopped.reason
         except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
             error = {"code": "source_read_failed", "message": "PubMed读取或EFetch原件校验失败"}
+            if stop == transport.KNOWN:  # 读到旧的了，没有“下一页”
+                resume = None
             stop = "source_failed"
     return {
         "records": records,
         "complete": False,
-        "upstream_pagination_exhausted": error is None and resume is None,
+        "upstream_pagination_exhausted": error is None and resume is None and stop != transport.KNOWN,
         "stop_reason": stop,
         "error": error,
         "source_total": count,

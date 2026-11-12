@@ -138,6 +138,9 @@ def _fetch_rss_items(api_cfg: dict) -> list[dict]:
         except Exception as e:
             logger.error(f"[FiercePharma] RSS 拉取失败: {feed_url} | {e}")
 
+    # 几个 feed 并成一个从新到旧的队列（同一天的保持 feed 里的先后）：增量读取“遇到已存的就停”要的是一条从新到旧的列表，
+    # 不能第一个 feed 的最新几篇读过了就停，第二个 feed 里新的就漏掉。日期取不到的（空串）排最后。
+    all_items.sort(key=lambda item: item["pub_date"], reverse=True)
     return all_items[:max_articles]
 
 

@@ -363,6 +363,9 @@ class FetchRequest(Model):
     updated_since: datetime | None = None
     updated_until: datetime | None = None
     continuation: FetchContinuation | None = None
+    # 增量读取（固定刷新给没有更新时间可过滤的来源用）：连续读到这么多条“库里已有且没变”的就停，0 = 不停。
+    # 手动抓取、回填都是 0。不进 scope_hash：它只决定读多远，不改读哪个范围。
+    known_stop: int = Field(default=0, ge=0, le=100)
 
     def scope_hash(self):
         return sha256(

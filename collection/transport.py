@@ -21,6 +21,9 @@
 那一刻的剩余时间——读块的超时在每次阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的 SyncStream.read，requests 在 http.client 底下的
 SocketIO.readinto；响应头、chunk 内部、正文都从这两处读），读块因到期超时报 deadline。
 请求数：浏览器内部跟随的重定向（Chromium 一次导航最多跟 20 跳）发出前拦不到，照实计数，不据此停。
+
+增量读取（FetchRequest.known_stop > 0，固定刷新用）：插件每读到一条父记录就问一次 Budget.known，库里已有且没变的
+连续够 known_stop 条，就以 reached_known 停——前面都是读过的，后面更旧。这是老 ETL“遇到第一个重复的就停止”。
 """
 
 from __future__ import annotations
@@ -66,16 +69,21 @@ class Stop(BaseException):
         self.reason = reason
 
 
+KNOWN = "reached_known"  # stop_reason：增量读取读到了已存且没变的原件，不是预算用完
+
+
 class Budget:
     """一次读取的预算与计量。版本数 ≤ max_records（父记录、附件、全文都算）；字节 ≤ DATAFABRIC_READ_MAX_BYTES；
     截止时间 deadline_seconds。任何一项用完就停，并且停住。请求数只计数，不设额度。"""
 
-    def __init__(self, *, max_bytes, max_records, deadline_seconds):
+    def __init__(self, *, max_bytes, max_records, deadline_seconds, known_stop=0):
         self.max_bytes, self.max_records = max_bytes, max_records
         self.deadline = time.monotonic() + deadline_seconds
         self.requests = self.bytes = self.records = self.subrequests = self.redirect_hops = 0
         self.stopped: str | None = None
         self.site_host: str | None = None  # 站点读取填目标站点的主机；浏览器里不属于它的请求是第三方
+        self.known_stop, self.known_run = known_stop, 0
+        self.is_known = None  # 增量读取时由 read_public 填：原件 → 库里是否已有且没变（db.history.stored_unchanged）
 
     def third_party(self, url) -> bool:
         return bool(self.site_host) and url.startswith(("http://", "https://")) and not on_host(url, self.site_host)
@@ -83,11 +91,21 @@ class Budget:
     @classmethod
     def for_request(cls, request):
         return cls(max_bytes=byte_budget(), max_records=request.max_records,
-                   deadline_seconds=request.deadline_seconds)
+                   deadline_seconds=request.deadline_seconds, known_stop=request.known_stop)
 
     def stop(self, reason):
         self.stopped = self.stopped or reason
         raise Stop(self.stopped)
+
+    def known(self, item) -> bool:
+        """item 是不是库里已有且没变的原件（存了也不会多出新版本）。连续 known_stop 条都是，抛 Stop(KNOWN)。
+        item=None 是这一条没读到：不算已存，连续数清零——没存的不能被“已存的就停”跳过。
+        不走 self.stop：这不是预算用完，不能让这次读取之后的传输都被拦。"""
+        known = bool(self.known_stop and self.is_known and item is not None and self.is_known(item))
+        self.known_run = self.known_run + 1 if known else 0
+        if self.known_stop and self.known_run >= self.known_stop:
+            raise Stop(KNOWN)
+        return known
 
     def check(self):
         if self.stopped:
@@ -154,6 +172,12 @@ class Budget:
 
 def current() -> Budget | None:
     return _ACTIVE.get()
+
+
+def known(item) -> bool:
+    """插件每交出一条父记录（没读到的给 None）就问一句；没有活动读取时恒为 False。见 Budget.known。"""
+    budget = _ACTIVE.get()
+    return budget.known(item) if budget is not None else False
 
 
 def pause(seconds):

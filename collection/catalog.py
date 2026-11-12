@@ -28,6 +28,7 @@ IncrementalKind = Literal[
     "source_updated_window",  # 来源自己的“更新日期”字段按窗口过滤
     "modified_window",  # 来源 API 的修改时间参数（updated_since/until）
     "fixed_ids",  # 只读明确清单，没有变更流
+    "stop_at_known",  # 没有可过滤的更新时间，但列表从新到旧：每轮从头读，连续读到已存且没变的就停（collection.windows）
     "none",  # 尚无可靠增量键，只能快照加对账
 ]
 
@@ -102,6 +103,19 @@ class CollectionSpec:
 
 
 _NO_INCREMENT = Incremental("none", None, "尚未接通，没有增量键")
+# 没有可过滤的更新时间、但列表从新到旧的来源：每轮从头读，连续读到 KNOWN_STOP（collection.windows）条已存且没变的就停，
+# 老 ETL 的“遇到第一个重复的就停止”，一处通用实现（transport.Budget.known）。列表的顺序是站点自己的默认顺序，不是来源的承诺。
+_NEWEST_FIRST = Incremental(
+    "stop_at_known", None, "列表从新到旧，每轮从头读，连续读到 3 条已存且没变的就停；没有更新时间可过滤，旧条目被改动读不到"
+)
+# 这个办法用不了的来源（还是 kind="none"，不进固定刷新），原因写在这里，目录里如实可见
+_NOT_WATCHED = {
+    "hkex": "公告按 183 家公司各自从新到旧，“遇到已存的就停”停在第一家就漏掉其余；一轮要 183 次请求、约 6 分钟，"
+    "一次读取最长 120 秒，续读又要从头重放，读不完",
+    "nccn": "指南清单没有时间顺序，新版本只是某一条的版本号变了，必须整份重读；一轮约一百次页面渲染，"
+    "一次读取最长 120 秒，续读又要从头重放，读不完",
+    "drugbank": "需要 DrugBank API 凭据与许可（还没有）；药物库没有时间顺序",
+}
 
 SPECS: tuple[CollectionSpec, ...] = (
     CollectionSpec(
@@ -178,7 +192,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="public_api_reader",
         evidence_types=("primary_research", "review", "preprint"),
         decisions=("B",),
-        incremental=_NO_INCREMENT,
+        incremental=_NEWEST_FIRST,  # ESearch 不指定排序时新入库的 PMID 在前（实测）
         rate_group="ncbi.nlm.nih.gov",
         min_interval_seconds=0.4,
         coverage={
@@ -188,7 +202,7 @@ SPECS: tuple[CollectionSpec, ...] = (
             "（需配置 DATAFABRIC_UNPAYWALL_EMAIL）；许可不明或不可取得的记缺失",
             "attachments": "PMC 全文 XML / OA PDF 各成附件版本（collection.pubmed_fulltext）",
         },
-        notes="只支持按需读取；增量窗口（EDAT/MHDA）未接，暂不进固定刷新。全文路径 11-04 只对 PMC 真实请求过，"
+        notes="固定刷新按“遇到已存的就停”增量读（EDAT/MHDA 更新窗口未接）。全文路径 11-04 只对 PMC 真实请求过，"
         "未跑完整发布链",
     ),
     CollectionSpec(
@@ -198,11 +212,11 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="public_api_reader",
         evidence_types=("regulatory_letter",),
         decisions=("A",),
-        incremental=_NO_INCREMENT,
+        incremental=_NEWEST_FIRST,  # 读取时指定 sort=letter_date:desc
         rate_group="api.fda.gov",
         min_interval_seconds=0.4,
         coverage={"metadata": "原生字段", "fulltext": "信函文本"},
-        notes="只支持按需读取；openFDA 无可靠变更流",
+        notes="openFDA 无变更流；固定刷新按“遇到已存的就停”增量读（信函按日期从新到旧）",
         supply_system="openfda",
         datasets=("api.fda.gov/transparency/crl.json",),
     ),
@@ -238,7 +252,8 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     # ——站点插件 site_crawler（站点配置 config/sites/* + core_engine 抓取器）——
     # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件用站点配置里的浏览器抓取器运行，
-    # 本系统未对原站实测（verified=False）。没有可靠增量键，只按需读取/按列表入口续页，不进固定刷新。
+    # 本系统未对原站实测（verified=False）。没有更新时间可过滤；列表从新到旧的站点按“遇到已存的就停”进固定刷新
+# （_NEWEST_FIRST），用不了的写在 _NOT_WATCHED。
     # 附件：详情页附件各成独立版本，正文由加工层 attachment_parse（自部署 MinerU）产出。
     CollectionSpec(
         source_id="chictr",
@@ -247,7 +262,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="site_crawler",
         evidence_types=("registry_record",),
         decisions=("A", "E"),
-        incremental=_NO_INCREMENT,
+        incremental=_NEWEST_FIRST,
         rate_group="chictr.org.cn",
         min_interval_seconds=2.0,
         coverage={"metadata": "登记详情页", "fulltext": "详情页正文", "attachments": "详情页附件"},
@@ -261,7 +276,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="site_crawler",
         evidence_types=("regulatory_notice",),
         decisions=("A", "C"),
-        incremental=_NO_INCREMENT,
+        incremental=_NEWEST_FIRST,
         rate_group="nmpa.gov.cn",
         min_interval_seconds=1.0,
         coverage={"metadata": "公告页", "fulltext": "公告正文", "attachments": "公告附件（直链 11-04 实测 200）"},
@@ -274,7 +289,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         plugin="site_crawler",
         evidence_types=("regulatory_notice",),
         decisions=("A",),
-        incremental=_NO_INCREMENT,
+        incremental=_NEWEST_FIRST,
         rate_group="cde.org.cn",
         min_interval_seconds=2.0,
         coverage={"metadata": "新闻/政策页", "fulltext": "正文", "attachments": "附件（需页面会话 cookies）"},
@@ -289,7 +304,7 @@ SPECS: tuple[CollectionSpec, ...] = (
             plugin="site_crawler",
             evidence_types=evidence,
             decisions=decisions,
-            incremental=_NO_INCREMENT,
+            incremental=Incremental("none", None, _NOT_WATCHED[source_id]) if source_id in _NOT_WATCHED else _NEWEST_FIRST,
             rate_group=group,
             min_interval_seconds=interval,
             coverage=coverage,

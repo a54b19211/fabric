@@ -11,6 +11,8 @@ CONFIG = {
         "base_url": "https://api.fda.gov/drug/enforcement.json",
         "endpoint": "/drug/enforcement.json",
         "search": "",
+        # 新的在前。不指定时顺序是乱的（实测前三条是 2015、2020、2025 年的），固定刷新“遇到已存的就停”要从新到旧。
+        "sort": "report_date:desc",
         "max_records": 0,
     },
     "api_fetcher": iter_openfda,
