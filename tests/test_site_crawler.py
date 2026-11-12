@@ -998,6 +998,34 @@ def test_fiercepharma_a_feed_that_cannot_be_read_is_noted_and_the_other_feed_is_
     assert batch["error"]["code"] == "items_unread"
 
 
+def test_nccn_a_detail_page_that_cannot_be_read_is_noted_and_no_list_only_version_is_stored(monkeypatch):
+    """以前存一个只有列表页信息的降级版本（没有 PDF 链接）；之后读到全的，它就成了“被改过”的旧版本。"""
+    import scrapling.fetchers
+
+    from biz_rules.extractors.nccn import nccn_fetcher
+
+    items = [{"title": f"Guideline {i}", "version": "1.2026", "detail_url": f"https://www.nccn.org/g/{i}",
+              "guideline_id": str(i), "category_name": "Supportive Care"} for i in range(2)]
+
+    class Fetcher:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch(self, url, **kwargs):
+            if url.endswith("/0"):
+                raise TimeoutError("Page.goto: Timeout 45000ms exceeded.")
+            return "detail page"
+
+    monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", Fetcher)
+    monkeypatch.setattr(nccn_fetcher, "_parse_rendered_list", lambda page, cat_num, cat_name: items)
+    monkeypatch.setattr(nccn_fetcher, "extract_nccn_detail", lambda page: {
+        "title": "", "version": "", "sections": [], "attachment_links": []})
+    monkeypatch.setitem(site_crawler.SITE_PROFILES["nccn"]["api"], "categories", ["Supportive Care"])
+    batch = read_public(FetchRequest(source_id="nccn", query="records", max_records=5))
+    assert [u["url"] for u in batch["unread_items"]] == ["https://www.nccn.org/g/0"]
+    assert len(batch["records"]) == 1 and batch["error"]["code"] == "items_unread"  # 只有读到了详情页的那一篇存了
+
+
 def test_nccn_a_category_list_that_cannot_be_rendered_fails_the_read(monkeypatch):
     """以前只记日志、跳过这个分类：整次读取照样“读到底”，少了一整个分类。"""
     import scrapling.fetchers

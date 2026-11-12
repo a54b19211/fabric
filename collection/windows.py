@@ -63,8 +63,9 @@ def cycle_request(watch, state: dict, now: datetime) -> tuple[dict, datetime | N
     """返回 (请求体, 窗口起点, 窗口终点)。回填和明确清单没有窗口，起止为 None。"""
     request = watch.request.model_dump(mode="json")
     kind = spec(watch.request.source_id).incremental.kind
-    # 上一周期有条目读不到（read_all）：这一周期整份读，不在“遇到已存的”就停
-    if kind == "stop_at_known" and watch.mode == "realtime" and not state.get("read_all"):
+    # 读明确清单（source_record_ids）本来就是读完这份清单，不加；上一周期有条目读不到（read_all）：这一周期整份读，不在“遇到已存的”就停
+    if (kind == "stop_at_known" and watch.mode == "realtime" and not request.get("source_record_ids")
+            and not state.get("read_all")):
         request["known_stop"] = KNOWN_STOP
     if watch.mode == "backfill" or kind in ("fixed_ids", "stop_at_known", "full_reread") or request.get("source_record_ids"):
         return request, None, None

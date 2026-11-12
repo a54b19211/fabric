@@ -971,6 +971,8 @@ def _read_public_api(request: FetchRequest) -> dict:
                 read.stop = "page_budget"
         except transport.Stop as stopped:
             read.stop = stopped.reason  # 停在最后读完的一页，续读位置不变
+            if read.stop == transport.KNOWN:  # 读到旧的了，没有“下一页”：第二页起读到已存的，上一页留下的位置不能再给出去
+                read.next_continuation = None
         except HistoryError as exc:
             read.error = {"code": exc.code, "message": exc.message}
             read.stop = "source_failed"

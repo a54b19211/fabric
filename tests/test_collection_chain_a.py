@@ -148,6 +148,9 @@ def test_known_stop_is_filled_by_the_cycle_not_written_in_the_watch(monkeypatch)
     assert again["known_stop"] == KNOWN_STOP and again.get("updated_since") is None  # a checkpoint changes nothing here
     clinical = cycle_request(ct_watch(), {}, NOW)[0]
     assert clinical["known_stop"] == 0  # a source with an update window is read by the window, as before
+    listed = SourceWatch.model_validate(
+        {"id": "l", "request": {"source_id": "pubmed", "query": "x", "source_record_ids": ["1", "2"]}})
+    assert cycle_request(listed, {}, NOW)[0]["known_stop"] == 0  # an explicit list is read to its end
     crl = SourceWatch.model_validate({"id": "c", "request": {"source_id": "fda_crl", "query": "*"}})
     request, start, end = cycle_request(crl, {}, NOW)
     assert request["known_stop"] == 0 and start is end is None  # the whole list every cycle, no window, no stop

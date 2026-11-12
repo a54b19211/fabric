@@ -272,10 +272,11 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
                         f"{len(detail['sections'])} sections, {total_pdfs} PDFs"
                     )
 
-                except Exception as e:
-                    logger.warning(f"[NCCN] 详情页抓取失败 ({detail_url}): {e}")
-                    # 降级：用列表页信息构造最小 markdown
-                    record["markdown"] = _list_only_markdown(item, detail_url)
+                except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录
+                    # 读不到就是读不到：不存一个只有列表页信息的降级版本（以后读到全的，它就成了“被改过”的旧版本）；
+                    # 不是抛出：抛出会结束这个生成器。读取方记下这一条，再要下一条
+                    yield ItemUnreadable(detail_url, "NCCN 详情页读取失败：" + type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120])
+                    continue
             else:
                 record["markdown"] = _list_only_markdown(item, detail_url)
                 record["structured_data"] = {
