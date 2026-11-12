@@ -7,7 +7,8 @@
 回填模式不加时间窗，按来源自己的续页标记读完整个范围；读到底后按周期重新对账。
 
 没有更新时间可过滤、但列表从新到旧的来源（目录里的 stop_at_known）也没有窗口：每个周期从列表第一页读起，连续读到
-KNOWN_STOP 条库里已有且没变的就停（读到旧的了）。停在没读干净之后的那一次不许这样停（db.source_refresh），整份读到底。
+KNOWN_STOP 条库里已有且没变的就停（读到旧的了）。上一周期有条目读不到（db.source_refresh 的 read_all）时，这一周期不许这样停，
+从头读满 SEGMENTS_PER_CYCLE 段。
 
 GDELT 没有续页，窗口读取按整点：一个周期读 [检查点, 当前整点)，不读还没走完的这一小时，也不回看重叠。
 读取没读完时（预算或出站额度用完）从第一个没读到的窗口起点继续（first_unread）；读到了但最细窗口仍满额的区间
@@ -62,7 +63,8 @@ def cycle_request(watch, state: dict, now: datetime) -> tuple[dict, datetime | N
     """返回 (请求体, 窗口起点, 窗口终点)。回填和明确清单没有窗口，起止为 None。"""
     request = watch.request.model_dump(mode="json")
     kind = spec(watch.request.source_id).incremental.kind
-    if kind == "stop_at_known" and watch.mode == "realtime":
+    # 上一周期有条目读不到（read_all）：这一周期整份读，不在“遇到已存的”就停
+    if kind == "stop_at_known" and watch.mode == "realtime" and not state.get("read_all"):
         request["known_stop"] = KNOWN_STOP
     if watch.mode == "backfill" or kind in ("fixed_ids", "stop_at_known") or request.get("source_record_ids"):
         return request, None, None

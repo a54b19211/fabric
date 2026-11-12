@@ -1145,6 +1145,31 @@ def test_a_stop_while_replaying_to_the_cursor_does_not_move_the_cursor_back(fake
     assert json.loads(batch["next_continuation"]["cursor"]) == cursor  # 同一个位置，连附件序号也不丢
 
 
+def test_five_detail_pages_in_a_row_that_cannot_be_read_are_a_site_fault_not_five_unread_items(fake_web, monkeypatch, stored):
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(9)]
+    original = site_crawler._fetch_page
+
+    def fetch(url, **kwargs):
+        if url in urls[1:6]:  # 第 2 到第 6 页连续读不出来
+            raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(site_crawler, "_fetch_page", fetch)
+    start = _list_site(monkeypatch, urls)
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))
+    assert batch["error"]["code"] == "site_down" and "站点可能出了故障" in batch["error"]["message"]
+    assert batch["stop_reason"] == "source_failed" and pages_of(batch) == [urls[0]]  # 读到第 6 页就不再往下读
+    assert [item["url"] for item in batch["unread_items"]] == urls[1:6]
+    # 中间读到一页就从头数：四条读不到、一条读到、再四条读不到，不算站点故障
+    monkeypatch.setattr(site_crawler, "_fetch_page", lambda url, **kw: original(url, **kw) if url == urls[4] else fetch_fail(url))
+
+    def fetch_fail(url):
+        raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+
+    batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))
+    assert batch["error"]["code"] == "items_unread" and len(batch["unread_items"]) == 8
+
+
 def test_budget_known_counts_consecutive_known_only():
     budget = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60, known_stop=3)
     budget.is_known = lambda item: item != "new"

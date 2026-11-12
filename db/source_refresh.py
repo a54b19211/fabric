@@ -142,6 +142,8 @@ def _page_finished(watch, state, coverage, now):
     state["last_coverage"] = coverage
     state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
     state["fail_streak"] = 0
+    if _unread_not_stuck(watch.request.source_id, coverage):
+        state["unclean"] = True  # 这一周期有条目读不到：周期收尾时记下，下一周期整份重读（read_all）
     if coverage.get("stop_reason") in rate.CEILING_STOPS and "window_coverage" not in coverage:
         return _hold_at_ceiling(watch, state, coverage, now)
     capped = (watch.mode == "realtime" and spec(watch.request.source_id).incremental.kind == "stop_at_known"
@@ -156,7 +158,8 @@ def _page_finished(watch, state, coverage, now):
             return
     checkpoint, finished = state.get("window_ended_at"), True
     # 增量读取读到了已存且没变的原件（reached_known）：前面都是读过的，这一周期到此为止，不是“截断”
-    if not (capped or coverage.get("upstream_pagination_exhausted") is True or coverage.get("stop_reason") == transport.KNOWN):
+    ended = coverage.get("upstream_pagination_exhausted") is True or coverage.get("stop_reason") in (transport.KNOWN, "items_unread")
+    if not (capped or ended):
         if "window_coverage" not in coverage:
             # 截断且无可靠续页位置不能称完成，更不能跳过未知页。
             raise HistoryError(
@@ -175,12 +178,23 @@ def _page_finished(watch, state, coverage, now):
         # 窗口已确认读到底，或读到第一个没读到的窗口为止：下一周期从这里（减重叠）续读
         state["window_checkpoint"] = checkpoint
     state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
+    state["read_all"] = state.pop("unclean", False)
     state.pop("request", None)
+
+
+def _unread_not_stuck(source_id, coverage):
+    """这一段读不到的条目里，还没进 stuck_items 的。连续几轮都读不到的（死链）不再为它整份重读，不然每个周期都重读。"""
+    urls = [item["url"] for item in coverage.get("unread_items") or []]
+    if not urls:
+        return []
+    stuck = {item["url"] for item in stuck_items(source_id)}
+    return [url for url in urls if url not in stuck]
 
 
 def _plan_cycle(watch, state, now):
     """新的一个周期（state 里没有进行中的请求）：定这一周期读什么。失败后的重试不走这里，原请求还留在 state 里。"""
-    request, start, end = cycle_request(watch, state, now)
+    request, start, end = cycle_request(watch, state, now)  # 上一周期有条目读不到（read_all）：这一周期不用 known_stop
+    state.pop("read_all", None)
     state.update(
         mode=watch.mode,
         fixed_scope_query=request["query"],
@@ -196,8 +210,8 @@ GIVE_UP_AFTER = 3  # 同一周期连续失败（读取失败、续读位置不�
 
 
 def _read_all_next_time(state):
-    """这一页的读取失败了，或有条目读不到（运行没读干净）：下一次重试不许“遇到已存的就停”。前面几条是已存的，
-    停在它们上面，就把后面没存的跳过去了；整份读到底，没存的才会再碰到、补上。"""
+    """这一页的读取失败了：下一次重试不许“遇到已存的就停”。前面几条是已存的，停在它们上面，就把后面没存的跳过去了；
+    往后读，没存的才会再碰到、补上。（读到了但有条目读不到的，不在这里：周期收尾时记 read_all，下一周期整份重读。）"""
     state["request"]["known_stop"] = 0
 
 
@@ -290,8 +304,8 @@ def refresh_once(engine=None):
                     if exc.code != "job_may_be_active":
                         raise
                 state["state"] = "running"
-            elif run.state in {"completed", "partial"} and not run.error:
-                _page_finished(watch, state, run.coverage, now)
+            elif run.state in {"completed", "partial"} and (not run.error or run.coverage.get("stop_reason") == "items_unread"):
+                _page_finished(watch, state, run.coverage, now)  # items_unread：读到底了，只是有几条读不到，不是失败
                 state.pop("active_run_id", None)
                 state.pop("request_key", None)
                 state["error"] = None
@@ -323,6 +337,8 @@ def refresh_once(engine=None):
                 # 同一周期连续失败这么多次：放弃这一周期，下个间隔从头（窗口来源从检查点）重新规划，不永远卡在同一个位置
                 state.pop("request", None)
                 state["fail_streak"] = 0
+                state["read_all"] = True  # 这一周期没读完，下一周期别在“遇到已存的”就停
+                state.pop("unclean", None)
         finally:
             state["lease_until"] = None
             _save(engine, key, state)
@@ -341,21 +357,27 @@ STUCK_ROUNDS = 3  # 同一条连续这么多轮都读不到，健康输出里单
 
 def stuck_items(source_id):
     """连续 STUCK_ROUNDS 轮都读不到的条目 [{"url", "reason", "rounds"}]。数据就是各次读取留在 coverage.unread_items 里的
-    （网址 + 原因），不另建表。一轮 = 同一个读取范围（query）的一次读取；整次失败的一轮没有 unread_items，连续数就断了。"""
+    （网址 + 原因），不另建表。一轮 = 同一个读取范围（query）从第一段（没有续读位置的那一段）起的一次整读，
+    它的各段合在一起；整次失败的一轮没有 unread_items，连续数就断了。"""
     with history.history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout='3000ms'"))
         rows = conn.execute(
             text("""
-          SELECT request_payload->>'query', coverage->'unread_items' FROM history_runs
+          SELECT request_payload->>'query', request_payload->'continuation' IS NULL, coverage->'unread_items'
+          FROM history_runs
           WHERE source_id=:source AND kind='fetch' AND NOT is_demo AND state IN ('completed','partial','failed')
-          ORDER BY created_at DESC LIMIT 30
+          ORDER BY created_at DESC LIMIT 60
         """),
             {"source": source_id},
         ).all()
-    rounds = {}  # 读取范围 → 它最近几轮各自读不到的 {网址: 原因}，新的在前
-    for query, unread in rows:
-        if len(rounds.setdefault(query, [])) < STUCK_ROUNDS:
-            rounds[query].append({item["url"]: item["reason"] for item in unread or []})
+    rounds, reading = {}, {}  # 读取范围 → 它最近几轮各自读不到的 {网址: 原因}（新的在前）/ 正在合并的这一轮
+    for query, first_segment, unread in rows:  # 新的在前：碰到一轮的第一段，这一轮就齐了
+        this_round = reading.setdefault(query, {})
+        for item in unread or []:
+            this_round.setdefault(item["url"], item["reason"])
+        if first_segment:
+            if len(rounds.setdefault(query, [])) < STUCK_ROUNDS:
+                rounds[query].append(reading.pop(query))
     return [
         {"url": url, "reason": reason, "rounds": STUCK_ROUNDS}
         for recent in rounds.values()

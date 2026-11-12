@@ -511,18 +511,11 @@ def test_change_id_is_stable_and_versioned():
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")
 
 
-def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypatch):
+def _history_rows(monkeypatch, rows):
+    """db.history.history_engine 的替身：stuck_items 的那条查询返回这些行。"""
     from contextlib import contextmanager
 
     from db import source_refresh
-
-    def unread(*urls):
-        return [{"url": url, "reason": "HTTP 403"} for url in urls]
-
-    # (读取范围, 这一轮读不到的条目)，新的在前
-    rows = [("A", unread("u1", "u2")), ("A", unread("u1")), ("A", unread("u1", "u3")), ("A", unread("u1")),
-            ("B", unread("u1")), ("B", unread("u1")),  # B 只有两轮：不够
-            ("C", unread("u9")), ("C", None), ("C", unread("u9"))]  # C 中间有一轮整次失败（没有 unread_items）：连续数断了
 
     class Conn:
         def execute(self, *args, **kwargs):
@@ -537,4 +530,53 @@ def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypa
             yield Conn()
 
     monkeypatch.setattr(source_refresh.history, "history_engine", lambda: Engine())
+
+
+def _unread(*urls):
+    return [{"url": url, "reason": "HTTP 403"} for url in urls]
+
+
+def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypatch):
+    from db import source_refresh
+
+    # (读取范围, 是不是一轮的第一段, 这一段读不到的条目)，新的在前
+    rows = [("A", True, _unread("u1", "u2")), ("A", True, _unread("u1")), ("A", True, _unread("u1", "u3")),
+            ("A", True, _unread("u1")),
+            ("B", True, _unread("u1")), ("B", True, _unread("u1")),  # B 只有两轮：不够
+            ("C", True, _unread("u9")), ("C", True, None), ("C", True, _unread("u9"))]  # C 中间有一轮整次失败：连续数断了
+    _history_rows(monkeypatch, rows)
     assert source_refresh.stuck_items("nmpa") == [{"url": "u1", "reason": "HTTP 403", "rounds": 3}]
+
+
+def test_a_round_of_several_segments_counts_as_one_round_for_the_stuck_items(monkeypatch):
+    from db import source_refresh
+
+    # 每轮两段：u1 总在第二段（False = 不是第一段）。按段数连续三次是不对的：最近三段里只有一段有它
+    rows = [("D", False, _unread("u1")), ("D", True, _unread("u2")), ("D", False, _unread("u1")), ("D", True, None),
+            ("D", False, _unread("u1")), ("D", True, None)]
+    _history_rows(monkeypatch, rows)
+    assert source_refresh.stuck_items("nmpa") == [{"url": "u1", "reason": "HTTP 403", "rounds": 3}]
+
+
+def test_a_cycle_with_unread_items_is_followed_by_a_cycle_that_reads_it_all_but_a_stuck_one_does_not_count(monkeypatch):
+    from db import source_refresh
+
+    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+    monkeypatch.setattr(source_refresh, "stuck_items", lambda source: [])
+    unread = {"unread_items": _unread("u9")}
+    state = {"request": {}}
+    _page_finished(pubmed, state, {"next_continuation": {"cursor": "c", "read_count": 100}, **unread}, NOW)
+    assert state["state"] == "paging" and state["unclean"]  # a middle segment: the cycle goes on, the mark is kept
+    _page_finished(pubmed, state, {"stop_reason": "reached_known"}, NOW)
+    assert state["read_all"] is True and "unclean" not in state and "request" not in state
+    source_refresh._plan_cycle(pubmed, state, NOW)
+    assert state["request"]["known_stop"] == 0 and "read_all" not in state  # that cycle reads from the start, in full
+    _page_finished(pubmed, state, {"stop_reason": "reached_known"}, NOW)
+    assert state["read_all"] is False
+    source_refresh._plan_cycle(pubmed, state, NOW)
+    assert state["request"]["known_stop"] == 3  # and the one after a clean cycle stops at the known ones again
+    # an item that is already in the stuck list (a dead link) does not ask for another full read
+    monkeypatch.setattr(source_refresh, "stuck_items", lambda source: [{"url": "u9", "reason": "x", "rounds": 3}])
+    dead = {"request": {}}
+    _page_finished(pubmed, dead, {"stop_reason": "items_unread", **unread}, NOW)
+    assert dead["read_all"] is False and dead["state"] == "idle" and dead["last_success_at"]

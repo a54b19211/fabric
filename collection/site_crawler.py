@@ -12,7 +12,9 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 不存进原件（否则每抓一次就多一个附件、多一个版本）。
 一条记录读不到（拉取函数产出 ItemUnreadable：如 FiercePharma、Roche 的一篇详情页读了两次都不行；列表站点的一个详情页
 读不出来也一样）：记在本次读取的 unread_items（网址 + 原因），不存版本，接着读下一条；读到底时运行标“部分完成”，
-原因“有 N 条读不到”。没存的下一轮从头读会再碰到；固定刷新对“没读干净”的一轮，下一次不许“遇到已存的就停”（db.source_refresh）。
+原因“有 N 条读不到”。连续 SITE_DOWN_AFTER 条都读不出来，不是某几页的问题，是站点出了故障：不再往下读，整次读取失败。
+没存的下一轮从头读会再碰到：固定刷新里一个周期有条目读不到（连续几轮都读不到的死链除外），下一个周期不用“遇到已存的就停”，
+从头整份读（db.source_refresh 的 read_all）。
 列表一条都没解析到（列表页改版、接口改格式的样子）不算读完，标成失败（list_empty）；“解析到了但全是已存的”是正常读到旧的了。
 增量读取（FetchRequest.known_stop）：每读完一条父记录（页面或接口记录）问一次 transport.Budget.known，已存且没变的父记录
 不再下载它的附件（上一轮存过了）；连续够 known_stop 条就以 reached_known 停，不给续读位置。
@@ -52,6 +54,7 @@ ATT_SCHEMA = "datafabric.attachment.v1"
 LEGACY_SCHEMA = "datafabric.site.legacy_capture.v1"
 HTML_INLINE_BYTES = 700 * 1024
 LIST_EMPTY = "列表页一条都没解析到，可能改版"  # 列表里一条都没有：不是“没有新内容”（那是解析到了、但全是已存的）
+SITE_DOWN_AFTER = 5  # 连续这么多条读不出来，就当站点出了故障，整次读取失败
 
 from config.crawler_settings import SITE_PROFILES  # noqa: E402  站点配置
 
@@ -213,6 +216,7 @@ class _Reader:
         self.coverage: list[dict] = []
         # 本次读取里读不到的条目（网址 + 原因），同样只记在读取结果里，不存版本
         self.unread: list[dict] = []
+        self.unread_in_a_row = 0  # 连续读不到的条数；读到一条就清零
         # 浏览器里只放行目标站点（及其子域）的请求，第三方的广告、统计、cookie 横幅直接中止、不占请求预算
         budget.site_host = _site_host(self.site)
 
@@ -233,6 +237,9 @@ class _Reader:
         self.budget.known(None)  # 没存的不算“已存”：连续数清零，“遇到已存的就停”跳不过它
         self.unread.append({"url": unread.url, "reason": unread.reason})
         logger.warning("站点 {} 有一条读不到：{} | {}", self.site, unread.reason, unread.url)
+        self.unread_in_a_row += 1
+        if self.unread_in_a_row >= SITE_DOWN_AFTER:
+            raise HistoryError("site_down", f"连续 {SITE_DOWN_AFTER} 条读不出来，站点可能出了故障；最近一条 {unread.url}：{unread.reason}")
 
     def attachment(self, link, parent_id, cookies, discovered):
         """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。预算用完抛 _Stop。"""
@@ -305,6 +312,7 @@ class _Reader:
                 "attachments": [_listed(record_id, link) for link in links],
             })
             self.add(record)
+            self.unread_in_a_row = 0
             if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
                 return
         for position, link in enumerate(links):
@@ -365,6 +373,7 @@ class _Reader:
         if record_page:
             record = _record(url, capture)
             self.add(record, at=index)
+            self.unread_in_a_row = 0
             if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
                 return
         for position, link in enumerate(links):
