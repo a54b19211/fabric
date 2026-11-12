@@ -128,10 +128,47 @@ def _build_markdown(title: str, version: str, category_name: str,
     return "\n".join(lines)
 
 
-def _list_only_markdown(item: dict, detail_url: str) -> str:
-    """只有列表页的信息（没读详情页，或详情页读失败）时的最小 markdown。"""
-    return (f"# {item['title']}\n\n**Version**: {item['version']}\n**Category**: {item['category_name']}\n"
-            f"**Source**: {detail_url}\n")
+def _read_item(fetcher, item: dict) -> dict:
+    """读一条指南的详情页，返回完整的记录 dict（详情页的标题和版本盖过列表页的）。读不到就抛异常。"""
+    detail_url = item["detail_url"]
+    detail = extract_nccn_detail(_render(fetcher, detail_url, DETAIL_READY))
+    title = detail["title"] or item["title"]
+    version = detail["version"] or item["version"]
+    # 主 PDF：Guidelines section 的第一个
+    pdf_url = next((sec["pdfs"][0]["url"] for sec in detail["sections"]
+                    if "guideline" in sec["section_name"].lower() and sec["pdfs"]), "")
+    logger.info(f"[NCCN] ✓ {title!r} v{version} | {len(detail['sections'])} sections, {len(detail['attachment_links'])} PDFs")
+    return {
+        "uuid": make_uuid(detail_url),
+        "guideline_id": item["guideline_id"],
+        "title": title,
+        "version": version,
+        "category_name": item["category_name"],
+        "source_url": detail_url,
+        "pdf_url": pdf_url,
+        "sections": detail["sections"],
+        "attachment_links": detail["attachment_links"],
+        "markdown": _build_markdown(title, version, item["category_name"], detail_url, detail["sections"]),
+        "structured_data": {
+            "title": title,
+            "publish_date": _extract_year(version),
+            "category": "临床指南",
+            "summary": title,
+            "drug_name": "",
+            "manufacturer": "",
+            "version": detail["version"],
+            "pdf_url": pdf_url,
+            "category_name": item["category_name"],
+            "guideline_id": item["guideline_id"],
+            "sections": [
+                {"section_name": sec["section_name"], "pdf_count": len(sec["pdfs"]), "pdfs": sec["pdfs"]}
+                for sec in detail["sections"]
+            ],
+        },
+        "parse_method": "nccn_css_extract",
+        "source_site": "nccn",
+        "publish_date": _extract_year(version),  # 页面只有版本号（3.2026），用版本年份当发布日期（见站点配置）
+    }
 
 
 def iter_nccn(api_cfg: dict) -> Iterator[dict]:
@@ -141,11 +178,9 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
     api_cfg 字段：
       - categories:       要抓取的分类名列表，默认全部 4 个分类
       - max_per_category: 每个分类最多抓取条数，0 = 全量（默认 0）
-      - fetch_detail:     是否抓取详情页（默认 True）
     """
     cat_names: list[str] = api_cfg.get("categories", [v[0] for v in CATEGORIES.values()])
     max_per_cat: int = api_cfg.get("max_per_category", 0)
-    fetch_detail: bool = api_cfg.get("fetch_detail", True)
 
     try:
         from scrapling.fetchers import StealthyFetcher
@@ -181,98 +216,11 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
         logger.info(f"[NCCN] 分类 '{cat_name}' 有效条目 {len(items)} 条")
 
         for item in items:
-            detail_url = item["detail_url"]
-            doc_uuid = make_uuid(detail_url)
-
-            record: dict = {
-                "uuid": doc_uuid,
-                "guideline_id": item["guideline_id"],
-                "title": item["title"],
-                "version": item["version"],
-                "category_name": item["category_name"],
-                "source_url": detail_url,
-                "pdf_url": "",
-                "sections": [],
-                "attachment_links": [],
-                "markdown": "",
-                "structured_data": {},
-                "parse_method": "nccn_list_only",
-                "source_site": "nccn",
-            }
-
-            if fetch_detail:
-                try:
-                    detail_page = _render(fetcher, detail_url, DETAIL_READY)
-                    detail = extract_nccn_detail(detail_page)
-
-                    # 详情页数据覆盖列表页
-                    if detail["title"]:
-                        record["title"] = detail["title"]
-                    if detail["version"]:
-                        record["version"] = detail["version"]
-
-                    # 主 PDF（Guidelines section 第一个）
-                    for sec in detail["sections"]:
-                        if "guideline" in sec["section_name"].lower() and sec["pdfs"]:
-                            record["pdf_url"] = sec["pdfs"][0]["url"]
-                            break
-
-                    record["sections"] = detail["sections"]
-                    record["attachment_links"] = detail["attachment_links"]
-                    record["parse_method"] = "nccn_css_extract"
-                    record["structured_data"] = {
-                        "title": record["title"],
-                        "publish_date": _extract_year(record["version"]),
-                        "category": "临床指南",
-                        "summary": record["title"],
-                        "drug_name": "",
-                        "manufacturer": "",
-                        "version": detail["version"],
-                        "pdf_url": record["pdf_url"],
-                        "category_name": item["category_name"],
-                        "guideline_id": item["guideline_id"],
-                        "sections": [
-                            {
-                                "section_name": s["section_name"],
-                                "pdf_count": len(s["pdfs"]),
-                                "pdfs": s["pdfs"],
-                            }
-                            for s in detail["sections"]
-                        ],
-                    }
-                    record["markdown"] = _build_markdown(
-                        title=record["title"],
-                        version=record["version"],
-                        category_name=item["category_name"],
-                        detail_url=detail_url,
-                        sections=detail["sections"],
-                    )
-
-                    total_pdfs = len(detail["attachment_links"])
-                    logger.info(
-                        f"[NCCN] ✓ {record['title']!r} "
-                        f"v{record['version']} | "
-                        f"{len(detail['sections'])} sections, {total_pdfs} PDFs"
-                    )
-
-                except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录
-                    # 读不到就是读不到：不存一个只有列表页信息的降级版本（以后读到全的，它就成了“被改过”的旧版本）；
-                    # 不是抛出：抛出会结束这个生成器。读取方记下这一条，再要下一条
-                    yield ItemUnreadable(detail_url, "NCCN 详情页读取失败：" + type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120])
-                    continue
-            else:
-                record["markdown"] = _list_only_markdown(item, detail_url)
-                record["structured_data"] = {
-                    "title": item["title"],
-                    "publish_date": _extract_year(item["version"]),
-                    "category": "临床指南",
-                    "summary": item["title"],
-                    "drug_name": "",
-                    "manufacturer": "",
-                    "version": item["version"],
-                    "category_name": item["category_name"],
-                    "guideline_id": item["guideline_id"],
-                }
-
-            record["publish_date"] = _extract_year(record["version"])  # 页面只有版本号（3.2026），用版本年份当发布日期（见站点配置）
+            try:
+                record = _read_item(fetcher, item)
+            except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录
+                # 读不到就是读不到：不存一个只有列表页信息的降级版本（以后读到全的，它就成了“被改过”的旧版本）；
+                # 不是抛出：抛出会结束这个生成器。读取方记下这一条，再要下一条
+                yield ItemUnreadable(item["detail_url"], "NCCN 详情页读取失败：" + type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120])
+                continue
             yield record

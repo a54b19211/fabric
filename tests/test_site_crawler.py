@@ -1009,12 +1009,18 @@ def test_nccn_a_detail_page_that_cannot_be_read_is_noted_and_no_list_only_versio
 
     monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", Fetcher)
     monkeypatch.setattr(nccn_fetcher, "_parse_rendered_list", lambda page, cat_num, cat_name: items)
+    pdf = {"label": "Guidelines", "url": "https://www.nccn.org/pdf/g1.pdf", "version": "2.2026"}
     monkeypatch.setattr(nccn_fetcher, "extract_nccn_detail", lambda page: {
-        "title": "", "version": "", "sections": [], "attachment_links": []})
+        "title": "", "version": "2.2026", "attachment_links": [pdf],
+        "sections": [{"section_name": "Guidelines", "pdfs": [pdf]}]})
     monkeypatch.setitem(site_crawler.SITE_PROFILES["nccn"]["api"], "categories", ["Supportive Care"])
     batch = read_public(FetchRequest(source_id="nccn", query="records", max_records=5))
     assert [u["url"] for u in batch["unread_items"]] == ["https://www.nccn.org/g/0"]
     assert len(batch["records"]) == 1 and batch["error"]["code"] == "items_unread"  # 只有读到了详情页的那一篇存了
+    stored = json.loads(batch["records"][0].raw_content)["parsed"]  # 详情页没给标题就用列表页的；版本、发布年份、PDF 用详情页的
+    assert stored["title"] == "Guideline 1" and stored["publish_date"] == "2026" and stored["parse_method"] == "nccn_css_extract"
+    assert "[Guidelines](https://www.nccn.org/pdf/g1.pdf) (Version 2.2026)" in stored["markdown"]
+    assert stored["structured_data"]["pdf_url"] == "https://www.nccn.org/pdf/g1.pdf"
 
 
 def test_nccn_a_category_list_that_cannot_be_rendered_fails_the_read(monkeypatch):

@@ -62,6 +62,21 @@ def read_leg(source, query, continuation, leg, deadline, tag):
     raise SystemExit("这一段已失败太多次，请先看原因（history_runs 里键以 backfill:%s 开头的运行）" % source)
 
 
+def why_stop(run, cover, message, before, read_nothing):
+    """这一段之后要不要停：(说明, 是不是读到底了)；说明是 None 就接着读下一段。before：这一段开始时的续读位置。"""
+    continuation = cover.get("next_continuation")
+    if cover.get("upstream_pagination_exhausted") or cover.get("stop_reason") == "items_unread":
+        # items_unread：读到底了，只是有几条读不到（它们的网址和原因在那一段的 unread_items 里）
+        return "读到底了。", True
+    if cover.get("stop_reason") in rate.CEILING_STOPS:
+        return f"停在这里：碰到出站上限（{cover['stop_reason']}）。限额过了之后再跑同一条命令，这一段会重读。", False
+    if continuation and continuation == before and read_nothing:
+        return "停在这里：续读位置没有前进，这一段一个版本也没读到（接口站点要先重放前面的条目，可以把 --deadline 调大）。", False
+    if run.state == "failed" or not continuation:
+        return "停在这里：" + (message or "来源没给续读位置") + "。", False
+    return None, False
+
+
 def main():
     parser = argparse.ArgumentParser(description="把一个来源的历史存量一次读到底（会写库，可中断后接着读）")
     parser.add_argument("source", help="来源编号，如 roche、chictr、fda_crl")
@@ -87,7 +102,6 @@ def main():
     continuation, leg, total = None, 1, {"新增": 0, "没变": 0, "读不到": 0}
     while True:
         started = time.monotonic()
-        before = continuation
         run = read_leg(args.source, query, continuation, leg, args.deadline, tag)
         cover = run.coverage or {}
         message = run.error.get("message") if isinstance(run.error, dict) else run.error
@@ -97,25 +111,16 @@ def main():
         total["读不到"] += unread
         print(f"第 {leg} 段：{run.state}，新增 {new}，没变 {same}，读不到 {unread}，停止原因 {cover.get('stop_reason')}，"
               f"{time.monotonic() - started:.0f} 秒" + (f"；{message}" if message else ""), flush=True)
-        continuation = cover.get("next_continuation")
-        summary = "累计：" + "，".join(f"{k} {v}" for k, v in total.items())
-        if cover.get("upstream_pagination_exhausted") or cover.get("stop_reason") == "items_unread":
-            # items_unread：读到底了，只是有几条读不到（它们的网址和原因在那一段的 unread_items 里）
-            print("读到底了。" + summary)
-            if list_site:
-                print("注意：列表网页站点只读到站点配置的页数（%s 页，--pages 可以改）；站点的列表更长的话，后面的页没有读。"
-                      % profile["max_pages"])
-            return 0
-        if cover.get("stop_reason") in rate.CEILING_STOPS:
-            print(f"停在这里：碰到出站上限（{cover['stop_reason']}）。限额过了之后再跑同一条命令，这一段会重读。" + summary)
-            return 1
-        if continuation and continuation == before and new + same == 0:
-            print("停在这里：续读位置没有前进，这一段一个版本也没读到（接口站点要先重放前面的条目，可以把 --deadline 调大）。" + summary)
-            return 1
-        if run.state == "failed" or not continuation:
-            print("停在这里：" + (message or "来源没给续读位置") + "。" + summary)
-            return 1
-        leg += 1
+        stop, finished = why_stop(run, cover, message, continuation, new + same == 0)
+        if stop is None:
+            continuation = cover.get("next_continuation")
+            leg += 1
+            continue
+        print(stop + "累计：" + "，".join(f"{k} {v}" for k, v in total.items()))
+        if finished and list_site:
+            print("注意：列表网页站点只读到站点配置的页数（%s 页，--pages 可以改）；站点的列表更长的话，后面的页没有读。"
+                  % profile["max_pages"])
+        return 0 if finished else 1
 
 
 if __name__ == "__main__":
