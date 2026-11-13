@@ -34,7 +34,7 @@ def test_sec_watch_explicit_scope_survives_config_round_trip(monkeypatch):
 
 
 def test_publish_loop_no_longer_runs_indexing():
-    # v3 3.6：索引由独立 worker 执行（run.index worker），发表循环不再碰索引
+    # v3 3.6：索引由独立 worker 执行（python -m run.index），发表循环不再碰索引
     assert not hasattr(scheduler, "index_tick")
 
 

@@ -3,10 +3,11 @@ Description=Data-Fabric clean stage: clean text, identifiers and profiles of new
 After=network.target
 StartLimitIntervalSec=0
 
-# What it does: claims blocks of new history_versions, writes derived_clean_text, derived_identifiers and
-# derived_profiles, and in the same transaction queues the index and extraction-check work (read run/clean.py).
+# What it does: takes batches of history_versions without a current profile, writes derived_clean_text,
+# derived_identifiers and derived_profiles, and in the same transaction queues the index work (read run/clean.py).
 # Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL (the history database).
-# Several copies may run at once: blocks are claimed with leases. Status: python -m run.clean --status
+# Several copies may run at once: batches are claimed with SELECT ... FOR NO KEY UPDATE SKIP LOCKED.
+# Status: python -m run.clean --status
 
 [Service]
 WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test

@@ -1,24 +1,23 @@
 """清洗段：每个版本只处理一次，写出干净正文、编号和画像。结果只追加、可重跑，同样的输入得到同样的结果。
-工作按块认领，带租约，可多进程并行。
+领活用 SELECT ... FOR NO KEY UPDATE SKIP LOCKED，可多进程并行：别的进程正在处理的版本直接跳过。
 
-从哪读起：process()。它认领一块版本（_claim），一块的活在 _process_rows 里：_prepare_rows 选出清洗的输入，_version_text 清洗
-（见过的输入直接复用），_write_rows 批量写入。process_versions() 只处理指定的几个版本，给 main_etl.py 单次调试用；
-stage_status() 给出各来源的进度；for_versions() 把一页版本的产物读给 API。命令行入口是 run/clean.py。
+从哪读起：process()。它按来源一批一批地领还没画像的版本（_process_batch），一批的活在 _process_rows 里：_prepare_rows
+选出清洗的输入，_version_text 清洗（见过的输入直接复用），_write_rows 批量写入。process_versions() 只处理指定的几个版本，
+给 main_etl.py 单次调试用；stage_status() 给出各来源的进度；for_versions() 把一页版本的产物读给 API。命令行入口是
+run/clean.py。
 
-读写的表：读 history_versions 和 history_sources；用 derived_stage_chunks（按来源和发表序号分块的认领与结果）和
-derived_stage_waiting（附件还没解析完的等待表）做工作队列；写 derived_clean_text（清洗正文）、derived_identifiers（编号）、
-derived_profiles（画像）。写画像的同一个事务里还会给 index_publications（建索引待办）排活。
+读写的表：读 history_versions 和 history_sources；derived_stage_waiting 记附件还没解析完的版本；写 derived_clean_text
+（清洗正文）、derived_identifiers（编号）、derived_profiles（画像）。写画像的同一个事务里还会给 index_publications
+（建索引待办）排活。
 
-原有说明里的事实：
-
-规模（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）决定了运行方式：
-- 工作队列：按（阶段键, 来源, published_seq 分块）认领，带租约；完成的块标 done，中断的块租约过期后重领，
-  失败的块进死信（state=failed + 原因，最多重试 MAX_CHUNK_ATTEMPTS 次）。不再每批反查整张版本表。
+运行方式（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）：
+- 领活：一批 = 一个来源里还没有当前画像、也不在等附件正文的版本，按 published_seq 先后；领到的版本行锁到这批写完。
+  整批写不成时逐个重做，做不成的版本记在返回的 failed_versions 里，本轮跳过，下一轮再试。
 - 按输入复用：清洗器的输入算 input_sha256，同一清洗器版本下见过的输入直接复用结果（EPMC 平均每篇 8 个版本、
   大多正文未变）。版本级结果行照常写，接口与契约不变。
-- 一块一次读（只取所需字段，原件只在 EPMC 和网页版本上读）、一次事务批量写。
-- 附件没解析完记 derived_stage_waiting，不卡住块；之后每次运行先补做。
-- stage_status() 给出每个来源的水位、落后数、在处理/失败的块、吞吐。
+- 一批一次读（只取所需字段，原件只在 EPMC 和网页版本上读）、一次事务批量写。
+- 附件没解析完记 derived_stage_waiting，不卡住别的版本；之后每次运行先补做。
+- stage_status() 给出每个来源的版本数、已画像数、等附件的数和还没做的数。
 
 每个还没有画像（derived_profiles，当前画像处理器版本）的版本，在一个事务里写：
 1. 清洗正文（derived_clean_text，processor_version=datafabric.clean_text.v1）：
@@ -40,14 +39,12 @@ import hashlib
 import json
 import re
 import time
-from uuid import uuid4
 
 from sqlalchemy import text
 
 from clean import attachment_parse, clean_text, identifiers, profile
 from clean.processors import UNCLEANED_SOURCES
 from store.history_models import HistoryError
-from store.lease import LeaseQueue
 
 SKIP_SOURCES = UNCLEANED_SOURCES
 from fetch.catalog import SITE_SOURCES  # noqa: E402  站点插件采集的来源
@@ -56,14 +53,11 @@ REGISTRY_IDS = {"nct", "ctr", "chictr"}
 REGISTRY_SOURCES = {"clinicaltrials", "chictr", "cde_ctr"}
 
 
-CHUNK_SEQS = 1000
-LEASE_SECONDS = 600
-CHUNKS = LeaseQueue("derived_stage_chunks", ("stage_key", "source_id", "chunk_start"))
-MAX_CHUNK_ATTEMPTS = 3
+BATCH = 200  # 一批（一个事务）处理几个版本
 
 
 def stage_key() -> str:
-    """阶段键 = 本阶段用到的所有处理器版本。任何一个升级，就是一套新的分块，从头重算（旧结果保留）。"""
+    """阶段键 = 本阶段用到的所有处理器版本（等附件正文的记录按它分开）。"""
     parts = [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION, identifiers.PROCESSOR_VERSION,
              profile.PROCESSOR_VERSION]
     return "clean_stage:" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:24]
@@ -158,8 +152,8 @@ def _final_attachment_texts(conn, version_ids):
             if r["status"] in ("parsed", "unsupported") or r["attempt"] >= MAX_ATTEMPTS}
 
 
-# 只取清洗需要的字段；原件只在 EPMC 和站点页面/记录版本上取，CT 只取原件里的 briefSummary（省 IO）
-_CHUNK_SQL = """
+# 只取清洗需要的字段；原件只在 EPMC、WHO 和站点页面/记录版本上取，CT 只取原件里的 briefSummary（省 IO）
+_FIELDS = """
     SELECT version_id, source_id, is_demo, source_record_id, record_kind, published_seq,
            payload->'facts' AS facts, payload->'field_locators' AS locators, payload->>'clean_text' AS clean_text,
            payload->>'title' AS title,
@@ -169,65 +163,24 @@ _CHUNK_SQL = """
            CASE WHEN source_id='clinicaltrials'
                 THEN (payload->>'raw_content')::jsonb #>> '{protocolSection,descriptionModule,briefSummary}'
            END AS brief_summary
-    FROM history_versions
-    WHERE source_id=:source AND published_seq BETWEEN :start AND :end
-    ORDER BY published_seq
+    FROM history_versions v
 """
-# 同一条查询，改成按版本号取（等待表补做、main_etl.py 单次调试都用它）
-_BY_VERSION_IDS_SQL = _CHUNK_SQL.replace(
-    "WHERE source_id=:source AND published_seq BETWEEN :start AND :end", "WHERE version_id=ANY(:ids)")
-
-
-def _claim(engine, key, chunk_seqs, lease_seconds):
-    """认领一块：先接过期/可重试的块，再在某个来源的末尾开新块。返回块或 None（没有活了）。
-    最后一次租约也到期（处理进程消失、没交回结果）的块转成死信 failed/lease_exhausted，不会永远显示
-    “有人在处理”；死信由 retry_failed() 受控重置。"""
-    token = uuid4().hex
-    with engine.begin() as conn:
-        conn.execute(text("""
-            UPDATE derived_stage_chunks SET state='failed', lease_token=NULL, lease_until=NULL,
-                   error=jsonb_build_object('type','lease_exhausted',
-                                            'message','最后一次租约到期，处理进程没有交回结果',
-                                            'previous', error),
-                   updated_at=clock_timestamp()
-            WHERE stage_key=:k AND state='leased' AND lease_until < clock_timestamp() AND attempts >= :max
-        """), {"k": key, "max": MAX_CHUNK_ATTEMPTS})
-        again = CHUNKS.claim(
-            conn, lease_seconds=lease_seconds, alias="c", params={"k": key, "max": MAX_CHUNK_ATTEMPTS},
-            columns="c.stage_key,c.source_id,c.chunk_start,c.chunk_end", where="c.stage_key=:k AND c.attempts < :max",
-            # 过期的 leased 块和可重试的 failed 块可以接走
-            free="((c.state='leased' AND c.lease_until < clock_timestamp()) OR c.state='failed')",
-            order_by="c.chunk_start", also_set="state='leased',attempts=attempts+1,updated_at=clock_timestamp()")
-        if again:
-            return {k: again[k] for k in ("source_id", "chunk_start", "chunk_end", "lease_token")}
-        sources = conn.execute(text("""
-            SELECT s.source_id, s.published_seq,
-                   COALESCE((SELECT max(chunk_end) FROM derived_stage_chunks c
-                             WHERE c.stage_key=:k AND c.source_id=s.source_id), 0) AS covered
-            FROM history_sources s WHERE s.published_seq > 0 AND NOT (s.source_id = ANY(:skip))
-            ORDER BY s.source_id
-        """), {"k": key, "skip": list(SKIP_SOURCES)}).mappings().all()
-    for src in sources:
-        if src["covered"] >= src["published_seq"]:
-            continue
-        start = src["covered"] + 1
-        end = min(src["published_seq"], start + chunk_seqs - 1)  # 不越过当前已发布的位置，后来发布的进下一块
-        with engine.begin() as conn:
-            got = conn.execute(text("""
-                INSERT INTO derived_stage_chunks
-                  (stage_key, source_id, chunk_start, chunk_end, state, lease_token, lease_until, attempts)
-                VALUES (:k, :source, :start, :end, 'leased', :t, clock_timestamp()+make_interval(secs => :s), 1)
-                ON CONFLICT DO NOTHING RETURNING source_id, chunk_start, chunk_end, lease_token
-            """), {"k": key, "source": src["source_id"], "start": start, "end": end, "t": token,
-                   "s": lease_seconds}).mappings().first()
-        if got:
-            return dict(got)
-        return _claim(engine, key, chunk_seqs, lease_seconds)  # 别的进程刚开了这一块，重新看
-    return None
+_PROFILED = """EXISTS (SELECT 1 FROM derived_profiles p WHERE p.version_id=v.version_id
+                       AND p.processor_version=:prof AND p.text_processor_version=ANY(:texts))"""
+# 领一批：这个来源里还没有当前画像、也不在等附件正文的版本，按发布先后；别的进程锁着的跳过
+_TODO_SQL = _FIELDS + """
+    WHERE v.source_id=:source AND v.record_kind<>'graph' AND NOT (v.version_id = ANY(:skip))
+      AND NOT """ + _PROFILED + """
+      AND NOT EXISTS (SELECT 1 FROM derived_stage_waiting w WHERE w.stage_key=:k AND w.version_id=v.version_id)
+    ORDER BY v.published_seq LIMIT :n
+    FOR NO KEY UPDATE OF v SKIP LOCKED
+"""
+# 同一组字段，按版本号取（等待表补做、main_etl.py 单次调试都用它）
+_BY_VERSION_IDS_SQL = _FIELDS + " WHERE version_id=ANY(:ids)"
 
 
 def _process_rows(conn, key, rows, counts):
-    """一块版本：清洗（按输入复用）、编号、画像，批量写入。附件没解析完的记等待表。"""
+    """一批版本：清洗（按输入复用）、编号、画像，批量写入。附件没解析完的记等待表。"""
     work = [r for r in rows if r["record_kind"] != "graph" and r["source_id"] not in SKIP_SOURCES]
     prepared, inputs = _prepare_rows(conn, key, work, counts)
     _reuse_cleaned(conn, inputs)
@@ -334,7 +287,7 @@ def _profile_row(r, prof, text_pv):
 
 
 def _write_rows(conn, clean_rows, id_rows, profile_rows, counts):
-    """The chunk's batched writes, in this order: clean texts, identifiers, profiles, then (with the profiles,
+    """The batch's writes, in this order: clean texts, identifiers, profiles, then (with the profiles,
     in the same transaction) the index and extraction-check work they make due."""
     if clean_rows:
         conn.execute(text("""
@@ -395,20 +348,9 @@ def _process_waiting(engine, key, counts, limit=500):
         return len(finals)
 
 
-def retry_failed(source_id=None):
-    """受控恢复：把死信块（failed，含 lease_exhausted）的尝试次数清零，下一次运行重新认领。返回重置了几块。"""
-    from store.history import history_engine
-
-    with history_engine().begin() as conn:
-        return conn.execute(text(
-            "UPDATE derived_stage_chunks SET attempts=0, updated_at=clock_timestamp() "
-            "WHERE stage_key=:k AND state='failed' AND (CAST(:s AS text) IS NULL OR source_id=:s)"),
-            {"k": stage_key(), "s": source_id}).rowcount
-
-
 def process_versions(version_ids):
     """只处理指定的这几个版本（main_etl.py 单次调试用）：每个版本做的事和 process() 一样，同样可重跑，
-    不动块队列。返回计数。"""
+    返回计数。"""
     from store.history import history_engine
 
     counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0}
@@ -418,92 +360,81 @@ def process_versions(version_ids):
     return counts
 
 
-def process(*, batch=None, time_budget_seconds=600, chunk_seqs=CHUNK_SEQS, lease_seconds=LEASE_SECONDS,
-            max_chunks=None):
-    """认领并处理块，直到没有活或到时间。可多进程/多主机同时跑：块认领带租约，互不重复。
-    batch 参数保留兼容（旧调用按版本数），不再使用。"""
+def process(*, batch=BATCH, time_budget_seconds=600):
+    """按来源一批一批地领还没画像的版本处理，直到没有活或到时间；返回计数。"""
     from store.history import history_engine
 
     engine = history_engine()
     key = stage_key()
     began = time.monotonic()
-    counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0, "chunks": 0,
-              "failed_chunks": 0, "quarantine": 0, "weak_signal": 0, "normal": 0}
+    counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0, "batches": 0,
+              "quarantine": 0, "weak_signal": 0, "normal": 0, "failed_versions": []}
     while _process_waiting(engine, key, counts) and time.monotonic() - began < time_budget_seconds:
         pass
-    while time.monotonic() - began < time_budget_seconds and (max_chunks is None or counts["chunks"] < max_chunks):
-        chunk = _claim(engine, key, chunk_seqs, lease_seconds)
-        if chunk is None:
-            break
-        started = time.monotonic()
-        before = dict(counts)
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("SET LOCAL statement_timeout='120000ms'"))
-                if not CHUNKS.holds(conn, {**chunk, "stage_key": key}, unexpired=False, lock=True):
-                    continue  # 租约已被别人接走：这块不写
-                rows = conn.execute(text(_CHUNK_SQL), {"source": chunk["source_id"], "start": chunk["chunk_start"],
-                                                       "end": chunk["chunk_end"]}).mappings().all()
-                _process_rows(conn, key, [dict(r) for r in rows], counts)
-                stats = {k: counts[k] - before.get(k, 0) for k in counts if counts[k] != before.get(k, 0)}
-                stats["seconds"] = round(time.monotonic() - started, 3)
-                stats["versions"] = len(rows)
-                conn.execute(text(
-                    "UPDATE derived_stage_chunks SET state='done', stats=CAST(:st AS jsonb), lease_until=NULL, "
-                    "error=NULL, updated_at=clock_timestamp() WHERE stage_key=:k AND source_id=:s AND chunk_start=:c"),
-                    {"st": json.dumps(stats), "k": key, "s": chunk["source_id"], "c": chunk["chunk_start"]})
-            counts["chunks"] += 1
-        except Exception as exc:  # noqa: BLE001 -- 块失败进死信（state=failed，带原因），可重试有上限
-            counts = {**before, "chunks": counts["chunks"], "failed_chunks": counts["failed_chunks"] + 1}
-            with engine.begin() as conn:
-                CHUNKS.update(conn, {**chunk, "stage_key": key},
-                              "state='failed', error=CAST(:e AS jsonb), lease_until=NULL, updated_at=clock_timestamp()",
-                              {"e": json.dumps({"type": type(exc).__name__, "message": str(exc)[:300]})},
-                              unexpired=False)
+    with engine.begin() as conn:
+        sources = conn.execute(text(
+            "SELECT source_id FROM history_sources WHERE published_seq > 0 AND NOT (source_id = ANY(:skip)) "
+            "ORDER BY source_id"), {"skip": list(SKIP_SOURCES)}).scalars().all()
+    for source in sources:
+        while time.monotonic() - began < time_budget_seconds and _process_batch(engine, key, source, batch, counts):
+            pass
     return counts
 
 
+def _process_batch(engine, key, source, batch, counts):
+    """领这个来源的一批版本处理掉，返回领到几个（0：这个来源没活了）。整批做不成时在同一事务里逐个重做，
+    做不成的版本记进 counts["failed_versions"]，本轮不再领它。"""
+    params = {"source": source, "n": batch, "k": key, "skip": [f["version_id"] for f in counts["failed_versions"]],
+              "prof": profile.PROCESSOR_VERSION, "texts": [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION]}
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout='120000ms'"))
+        rows = [dict(r) for r in conn.execute(text(_TODO_SQL), params).mappings()]
+        if not rows:
+            return 0
+        # 锁到之后再看一眼：别的进程可能刚在放锁之前写完了其中几个
+        done = set(conn.execute(text("SELECT v.version_id FROM history_versions v WHERE v.version_id=ANY(:ids) AND "
+                                     + _PROFILED), {**params, "ids": [r["version_id"] for r in rows]}).scalars())
+        work = [r for r in rows if r["version_id"] not in done]
+        counts["batches"] += 1
+        if work and _in_savepoint(conn, key, work, counts):
+            for row in work:
+                error = _in_savepoint(conn, key, [row], counts)
+                if error:
+                    counts["failed_versions"].append({"version_id": row["version_id"], "error": error})
+    return len(rows)
+
+
+def _in_savepoint(conn, key, rows, counts):
+    """在一个保存点里处理这些版本：成功返回 None；出错就回到保存点、计数退回，返回错误说明。"""
+    before = {k: (list(v) if isinstance(v, list) else v) for k, v in counts.items()}
+    try:
+        with conn.begin_nested():
+            _process_rows(conn, key, rows, counts)
+        return None
+    except Exception as exc:  # noqa: BLE001 -- 一个版本做不成不挡别的版本
+        counts.clear()
+        counts.update(before)
+        return (type(exc).__name__ + ": " + str(exc))[:300]
+
+
 def stage_status():
-    """每个来源的进度：已发布到哪、连续处理到哪（水位）、落后多少、在处理/失败的块、等待解析的附件、
-    最近块的吞吐。"""
+    """每个来源：已发布到哪、版本数、已有当前画像的、在等附件正文的、还没做的。"""
     from store.history import history_engine
 
-    key = stage_key()
+    params = {"k": stage_key(), "skip": list(SKIP_SOURCES), "prof": profile.PROCESSOR_VERSION,
+              "texts": [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION]}
     with history_engine().begin() as conn:
         rows = conn.execute(text("""
-            SELECT s.source_id, s.published_seq,
-              (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
-                 AND c.state='leased') AS leased,
-              (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
-                 AND c.state='failed') AS failed,
-              (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
-                 AND c.state='failed' AND c.attempts >= :max) AS dead_letter,
-              (SELECT count(*) FROM derived_stage_chunks c WHERE c.stage_key=:k AND c.source_id=s.source_id
-                 AND c.state='leased' AND c.lease_until < clock_timestamp()) AS lease_expired,
-              (SELECT COALESCE(sum((stats->>'versions')::int),0) FROM derived_stage_chunks c WHERE c.stage_key=:k
-                 AND c.source_id=s.source_id AND c.state='done') AS done_versions,
-              (SELECT COALESCE(sum((stats->>'seconds')::float),0) FROM derived_stage_chunks c WHERE c.stage_key=:k
-                 AND c.source_id=s.source_id AND c.state='done') AS done_seconds
-            FROM history_sources s WHERE s.published_seq > 0 AND NOT (s.source_id = ANY(:skip)) ORDER BY 1
-        """), {"k": key, "skip": list(SKIP_SOURCES), "max": MAX_CHUNK_ATTEMPTS}).mappings().all()
-        done = conn.execute(text(
-            "SELECT source_id, chunk_start, chunk_end FROM derived_stage_chunks WHERE stage_key=:k AND state='done' "
-            "ORDER BY source_id, chunk_start"), {"k": key}).mappings().all()
-        waiting = conn.execute(text("SELECT count(*) FROM derived_stage_waiting WHERE stage_key=:k"),
-                               {"k": key}).scalar()
-    marks = {}
-    for d in done:  # 连续完成的最高位置
-        mark = marks.get(d["source_id"], 0)
-        if d["chunk_start"] == mark + 1:
-            marks[d["source_id"]] = d["chunk_end"]
-    out = []
-    for r in rows:
-        mark = marks.get(r["source_id"], 0)
-        rate = r["done_versions"] / r["done_seconds"] if r["done_seconds"] else None
-        out.append({**{k: r[k] for k in ("source_id", "published_seq", "leased", "lease_expired", "failed",
-                                         "dead_letter")}, "watermark": mark,
-                    "lag": r["published_seq"] - mark, "versions_per_second": round(rate, 1) if rate else None})
-    return {"stage_key": key, "sources": out, "waiting_attachments": waiting}
+            SELECT source_id, max(published_seq) AS published_seq, count(*) AS versions,
+                   count(*) FILTER (WHERE profiled) AS profiled, count(*) FILTER (WHERE waiting) AS waiting
+            FROM (SELECT v.source_id, v.published_seq, """ + _PROFILED + """ AS profiled,
+                         EXISTS (SELECT 1 FROM derived_stage_waiting w WHERE w.stage_key=:k
+                                 AND w.version_id=v.version_id) AS waiting
+                  FROM history_versions v WHERE v.record_kind<>'graph' AND NOT (v.source_id = ANY(:skip))) s
+            GROUP BY source_id ORDER BY source_id
+        """), params).mappings().all()
+    return {"stage_key": params["k"], "sources": [
+        {**r, "todo": r["versions"] - r["profiled"] - r["waiting"]} for r in rows]}
 
 
 def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_version=None):

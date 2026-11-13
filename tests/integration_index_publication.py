@@ -522,12 +522,11 @@ def test_enqueue_failure_rolls_back_the_profile_and_retries_cleanly(pg):
 
     event.listen(pg, "before_cursor_execute", fail_enqueue)
     try:
-        assert profile()["failed_chunks"] >= 1  # 块重试到上限后进死信
+        assert [f["error"] for f in profile()["failed_versions"]] == ["RuntimeError: synthetic enqueue failure"]
     finally:
         event.remove(pg, "before_cursor_execute", fail_enqueue)
     assert rows(pg, "SELECT * FROM derived_profiles") == [] and rows(pg, "SELECT * FROM index_publications") == []
-    clean_stage.retry_failed()
-    assert profile()["profiled"] == 1
+    assert profile()["profiled"] == 1  # 下一轮再试
     assert len(rows(pg, "SELECT * FROM index_publications")) == 1
 
 

@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import text
@@ -27,7 +28,6 @@ from store.history_models import (
     canonical,
     sha256,
 )
-from store.lease import LeaseQueue
 
 
 def publication_engine():
@@ -138,32 +138,42 @@ def enqueue_current_document(session, uuid):
 
 # 发表待办的租约（一次发表最长的步骤要在租约内做完；过期的 processing 待办可被接走）
 LEASE_SECONDS = 300
-OUTBOX = LeaseQueue("publication_outbox", ("id",))
 
 
 def _claim(engine, *, prepared_only=False):
     with engine.begin() as conn:
         # 失败的较旧正文会阻止同一文档后来事件超车，但不阻止其它文档。
-        row = OUTBOX.claim(
-            conn, lease_seconds=LEASE_SECONDS, alias="o", params={"prepared_only": prepared_only},
-            where="""o.kind IN ('document','graph') AND o.state!='published'
-           AND o.next_attempt_at<=clock_timestamp()
-           AND (NOT :prepared_only OR o.prepared IS NOT NULL)
-           AND NOT EXISTS (SELECT 1 FROM publication_outbox p
-             WHERE p.source_doc_uuid=o.source_doc_uuid AND p.kind IN ('document','graph')
-               AND p.id<o.id AND p.state!='published')""",
-            # processing 状态本身就表示有人持有；租约过期的 processing 可以接走
-            free="(o.state!='processing' OR o.lease_until<clock_timestamp())",
-            order_by="o.id", also_set="state='processing',attempts=attempts+1")
+        # processing 状态本身就表示有人持有；租约过期的 processing 可以接走
+        row = conn.execute(text("""
+            SELECT o.* FROM publication_outbox o
+            WHERE o.kind IN ('document','graph') AND o.state!='published'
+              AND o.next_attempt_at<=clock_timestamp()
+              AND (NOT :prepared_only OR o.prepared IS NOT NULL)
+              AND NOT EXISTS (SELECT 1 FROM publication_outbox p
+                WHERE p.source_doc_uuid=o.source_doc_uuid AND p.kind IN ('document','graph')
+                  AND p.id<o.id AND p.state!='published')
+              AND (o.state!='processing' OR o.lease_until<clock_timestamp())
+            ORDER BY o.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
+        """), {"prepared_only": prepared_only}).mappings().first()
         if row is None:
             return None
-        return {**row, "attempts": row["attempts"] + 1}
+        token = uuid4().hex
+        conn.execute(text(
+            "UPDATE publication_outbox SET lease_token=:token,lease_until=clock_timestamp()+make_interval(secs=>:s),"
+            "state='processing',attempts=attempts+1 WHERE id=:id"), {"token": token, "s": LEASE_SECONDS, "id": row["id"]})
+        return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
+
+
+def _owned_update(conn, row, assignments, params=None):
+    """只有当前持有者（lease_token 还是它的、仍在 processing）能改这一行；返回改了几行。"""
+    return conn.execute(text(
+        "UPDATE publication_outbox SET " + assignments + " WHERE id=:_id AND lease_token=:_token AND state='processing'"
+    ), {**(params or {}), "_id": row["id"], "_token": row["lease_token"]}).rowcount
 
 
 def _save_prepared(engine, row, prepared):
     with engine.begin() as conn:
-        updated = OUTBOX.update(conn, row, "prepared=CAST(:prepared AS jsonb)", {"prepared": canonical(prepared)},
-                                unexpired=False, where_also="state='processing'")
+        updated = _owned_update(conn, row, "prepared=CAST(:prepared AS jsonb)", {"prepared": canonical(prepared)})
         if updated != 1:
             raise HistoryError(
                 "publication_lease_lost", "发表资格已变化，请由当前处理者继续", 409
@@ -562,12 +572,12 @@ def publish_once(engine=None):
                 graph_run_id=graph.id, graph_version_ids=list(graph.version_ids)
             )
         with engine.begin() as conn:
-            updated = OUTBOX.update(conn, row, """state='published',receipt=CAST(:receipt AS jsonb),
+            updated = _owned_update(conn, row, """state='published',receipt=CAST(:receipt AS jsonb),
                 completed_at=clock_timestamp(),lease_until=NULL,error=NULL,prepared=NULL,
                 snapshot=jsonb_build_object('source_doc_uuid',source_doc_uuid,
                   'content_fingerprint',snapshot->'content_fingerprint',
                   'snapshot_sha256',encode(sha256(convert_to(snapshot::text,'UTF8')),'hex'))""",
-                {"receipt": canonical(receipt)}, unexpired=False, where_also="state='processing'")
+                {"receipt": canonical(receipt)})
             if updated != 1:
                 raise HistoryError(
                     "publication_lease_lost",
@@ -595,7 +605,7 @@ def publish_once(engine=None):
         )
         code = error["code"]
         with engine.begin() as conn:
-            OUTBOX.update(
+            _owned_update(
                 conn, row, """state=:state,error=CAST(:error AS jsonb),
                 lease_until=NULL,next_attempt_at=clock_timestamp()+(:retry_seconds * interval '1 second')""",
                 {
@@ -607,7 +617,6 @@ def publish_once(engine=None):
                     "error": canonical(error),
                     "retry_seconds": 3600 if invalid_input else 30,
                 },
-                unexpired=False, where_also="state='processing'",
             )
         return {
             "state": "resource_blocked"

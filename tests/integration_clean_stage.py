@@ -162,7 +162,7 @@ def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows
     assert rows(pg, "SELECT count(*) AS n FROM derived_profiles WHERE version_id=:v", v=ct)[0]["n"] == 2  # 旧行保留
 
 
-# ——规模化运行方式：分块认领、按输入复用、死信、水位（主持人：海量数据要够硬）——
+# ——规模化运行方式：SKIP LOCKED 领活、按输入复用、失败不挡别的版本、进度——
 
 
 def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
@@ -175,7 +175,7 @@ def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
     record = {"source": "MED", "id": "123", "title": "Same", "abstractText": "No change in the abstract."}
     _fetch_europe_pmc_raw(json.dumps(record), "reuse-1")
     _fetch_europe_pmc_raw(json.dumps({**record, "citedByCount": 7}), "reuse-2")  # 元数据变了，摘要没变
-    counts = clean_stage.process(chunk_seqs=1)
+    counts = clean_stage.process(batch=1)
     # 第二个版本只改了引用数：清洗器只读标题和摘要，输入相同，复用，不再清洗
     assert counts["profiled"] == 2 and counts["cleaned"] == 1 and counts["reused"] == 1 and len(calls) == 1
 
@@ -192,7 +192,7 @@ def test_identical_cleaner_input_on_another_version_is_reused(pg, monkeypatch):
     assert a[page_a]["clean"]["text"] == a[page_b]["clean"]["text"]
 
 
-def test_two_workers_never_process_the_same_chunk(pg, monkeypatch):
+def test_two_workers_never_process_the_same_version(pg, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
     from clean import clean_stage
@@ -201,52 +201,60 @@ def test_two_workers_never_process_the_same_chunk(pg, monkeypatch):
     for i in range(12):
         _fetch_study(f"NCT0999{i:04d}", f"conc-{i}")
     with ThreadPoolExecutor(3) as pool:
-        results = list(pool.map(lambda _: clean_stage.process(chunk_seqs=2), range(3)))
+        results = list(pool.map(lambda _: clean_stage.process(batch=2), range(3)))
     assert sum(r["profiled"] for r in results) == 12
     assert rows(pg, "SELECT count(*) AS n FROM derived_profiles")[0]["n"] == 12
     assert rows(pg, "SELECT count(DISTINCT version_id) AS n FROM derived_clean_text")[0]["n"] == 12
 
 
-def test_an_abandoned_chunk_is_reclaimed_after_its_lease(pg, monkeypatch):
+def test_a_version_locked_by_another_worker_is_skipped_until_it_lets_go(pg, monkeypatch):
     from clean import clean_stage
 
     allow(monkeypatch)
-    _fetch_study("NCT09998881", "lease-1")
-    chunk = clean_stage._claim(pg, clean_stage.stage_key(), 10, 60)  # 认领后进程“死了”
-    assert chunk and clean_stage.process()["profiled"] == 0  # 租约未到期：别人不碰
-    with pg.begin() as conn:
-        conn.execute(text("UPDATE derived_stage_chunks SET lease_until=clock_timestamp()-interval '1 second'"))
+    _fetch_study("NCT09998881", "lock-1")
+    with pg.connect() as other:  # another worker holds the version
+        other.begin()
+        other.execute(text("SELECT 1 FROM history_versions FOR NO KEY UPDATE"))
+        assert clean_stage.process()["profiled"] == 0
+        other.rollback()  # it stopped without writing anything: the lock goes with its transaction
     assert clean_stage.process()["profiled"] == 1
 
 
-def test_a_failing_chunk_is_dead_lettered_with_its_reason_and_retried_a_bounded_number_of_times(pg, monkeypatch):
+def test_a_failing_version_is_reported_does_not_hold_up_the_others_and_is_tried_again(pg, monkeypatch):
     from clean import clean_stage
 
     allow(monkeypatch)
-    _fetch_study("NCT09998882", "fail-1")
-    monkeypatch.setattr(clean_text, "clean_registry", lambda *a, **k: 1 / 0)
-    for _ in range(clean_stage.MAX_CHUNK_ATTEMPTS + 2):
-        clean_stage.process()
-    [chunk] = rows(pg, "SELECT state, attempts, error FROM derived_stage_chunks")
-    assert chunk["state"] == "failed" and chunk["attempts"] == clean_stage.MAX_CHUNK_ATTEMPTS
-    assert chunk["error"]["type"] == "ZeroDivisionError"
-    status = clean_stage.stage_status()
-    ct = next(s for s in status["sources"] if s["source_id"] == "clinicaltrials")
-    assert ct["failed"] == 1 and ct["lag"] == 1  # 失败不推进水位，积压如实可见
+    bad = _fetch_study("NCT09998882", "fail-1", summary="Synthetic summary the cleaner trips on.").version_ids[0]
+    _fetch_study("NCT09998883", "fail-2")
+    real = clean_text.clean_registry
+
+    def fails_on_one(facts, *args, **kwargs):
+        if kwargs.get("summary") == "Synthetic summary the cleaner trips on.":
+            raise ZeroDivisionError("synthetic cleaner fault")
+        return real(facts, *args, **kwargs)
+
+    monkeypatch.setattr(clean_text, "clean_registry", fails_on_one)
+    counts = clean_stage.process()
+    assert counts["profiled"] == 1 and counts["failed_versions"] == [
+        {"version_id": bad, "error": "ZeroDivisionError: synthetic cleaner fault"}]
+    assert clean_stage.process()["failed_versions"][0]["version_id"] == bad  # tried again the next round
+    monkeypatch.setattr(clean_text, "clean_registry", real)
+    assert clean_stage.process()["profiled"] == 1
 
 
-def test_watermark_and_lag(pg, monkeypatch):
+def test_stage_status_counts_what_is_done_and_what_is_left(pg, monkeypatch):
     from clean import clean_stage
 
     allow(monkeypatch)
     for i in range(5):
         _fetch_study(f"NCT0997{i:04d}", f"wm-{i}")
-    clean_stage.process(chunk_seqs=2, max_chunks=2)
-    ct = next(s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials")
-    assert ct["published_seq"] == 5 and ct["watermark"] == 4 and ct["lag"] == 1
-    clean_stage.process(chunk_seqs=2)
-    ct = next(s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials")
-    assert ct["watermark"] == 5 and ct["lag"] == 0 and ct["versions_per_second"]
+
+    def ct():
+        return next(s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials")
+
+    assert (ct()["published_seq"], ct()["versions"], ct()["profiled"], ct()["todo"]) == (5, 5, 0, 5)
+    clean_stage.process(batch=2)
+    assert (ct()["profiled"], ct()["waiting"], ct()["todo"]) == (5, 0, 0)
 
 
 def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch):
@@ -263,28 +271,7 @@ def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch)
     assert "summary_missing" in got[bare]["clean"]["warnings"]  # 没有摘要就如实报缺，不拿标题顶替
 
 
-# ——Codex r66 的两个反例（原样逻辑，断言写成验收）——
-def test_last_expired_lease_becomes_a_dead_letter_and_can_be_retried(pg, monkeypatch):
-    from clean import clean_stage
-
-    allow(monkeypatch)
-    _fetch_study("NCT09998883", "codex-last-lease")
-    key = clean_stage.stage_key()
-    for _ in range(clean_stage.MAX_CHUNK_ATTEMPTS):
-        assert clean_stage._claim(pg, key, 10, 60)
-        with pg.begin() as conn:
-            conn.execute(text("UPDATE derived_stage_chunks SET lease_until=clock_timestamp()-interval '1 second' "
-                              "WHERE stage_key=:k"), {"k": key})
-    clean_stage.process(max_chunks=1)
-    [chunk] = rows(pg, "SELECT state, attempts, error FROM derived_stage_chunks")
-    assert chunk["state"] == "failed" and chunk["error"]["type"] == "lease_exhausted"
-    [src] = [s for s in clean_stage.stage_status()["sources"] if s["source_id"] == "clinicaltrials"]
-    assert src["dead_letter"] == 1 and src["leased"] == 0 and src["lag"] == src["published_seq"]
-    assert clean_stage.retry_failed() == 1
-    assert clean_stage.process()["chunks"] == 1  # 受控重置后重新认领并完成
-    assert rows(pg, "SELECT state FROM derived_stage_chunks")[0]["state"] == "done"
-
-
+# ——Codex r66 的反例（原样逻辑，断言写成验收）——
 def test_unready_waiting_attachment_does_not_starve_a_ready_one(pg, monkeypatch, tmp_path):
     from collections import defaultdict
     from pathlib import Path

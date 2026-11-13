@@ -1465,33 +1465,23 @@ def test_same_file_twice_is_parsed_once(pg, tmp_path, monkeypatch):
     assert {got[first]["parse_method"], got[second]["parse_method"]} == {"mineru", "reused_same_sha256:mineru"}
 
 
-def test_claims_keep_two_workers_apart_and_expired_leases_are_reclaimed(pg, tmp_path, monkeypatch):
-    """Codex r59：认领前先查待办再在事务外解析，两个实例会重复解析同一版本。"""
-    from clean import derived_text
-
-    version, _ = _fetch_attachment(tmp_path, monkeypatch, "claim-1")
-    first = derived_text.claim(pg, version, lease_seconds=60)
-    assert first and derived_text.claim(pg, version, lease_seconds=60) is None
-    with pg.begin() as conn:  # 模拟持有者中断、租约过期
-        conn.execute(text("UPDATE derived_text_claims SET lease_until=clock_timestamp()-interval '1 second'"))
-    assert derived_text.claim(pg, version, lease_seconds=60) not in (None, first)
-
-
-def test_lost_lease_writes_nothing(pg, tmp_path, monkeypatch):
+def test_an_attachment_being_parsed_is_skipped_by_a_second_worker(pg, tmp_path, monkeypatch):
+    """Codex r59：两个实例不能同时解析同一版本。解析期间那一行锁着，另一个进程领活时跳过它。"""
     from clean import attachment_parse as ap
     from clean import derived_text
 
-    version, _ = _fetch_attachment(tmp_path, monkeypatch, "claim-2")
+    _fetch_attachment(tmp_path, monkeypatch, "claim-1")
+    second = []
 
-    def slow_parse(p):  # 解析期间租约被别人接走
-        with pg.begin() as conn:
-            conn.execute(text("UPDATE derived_text_claims SET lease_token='someone-else'"))
+    def slow_parse(p):  # 第一个进程还在解析：第二个进程来领活
+        second.append(derived_text.process(batch=5, retry_after_seconds=0))
         return {"success": True, "markdown": "# x", "error": ""}
 
     monkeypatch.setattr(ap, "_mineru", slow_parse)
-    assert derived_text.process(batch=5, retry_after_seconds=0)["lost_lease"] == 1
+    assert derived_text.process(batch=5, retry_after_seconds=0)["parsed"] == 1
+    assert second == [{"parsed": 0, "failed": 0, "unsupported": 0}]
     with pg.begin() as conn:
-        assert conn.execute(text("SELECT count(*) FROM derived_clean_text")).scalar_one() == 0
+        assert conn.execute(text("SELECT count(*) FROM derived_clean_text")).scalar_one() == 1
 
 
 def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_path, monkeypatch):
