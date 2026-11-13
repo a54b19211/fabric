@@ -1,4 +1,4 @@
-"""唯一采集框架（来源目录、增量窗口检查点、实时/回填）和登记差分处理器；不联网、不连库。"""
+"""唯一采集框架（来源目录、增量窗口检查点）和登记差分处理器；不联网、不连库。"""
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -59,7 +59,7 @@ def test_every_spec_declares_decision_and_rate_group():
         assert spec.rate_group and spec.min_interval_seconds > 0
 
 
-# ——调度：实时/回填、上限、旧键不变——
+# ——调度：旧键不变——
 
 
 def test_existing_realtime_watch_keeps_its_state_key():
@@ -67,39 +67,8 @@ def test_existing_realtime_watch_keeps_its_state_key():
 
     watch = ct_watch()
     legacy = watch.model_dump(mode="json")
-    legacy.pop("mode")
     legacy["request"].pop("known_stop")  # the field that came later does not move the key of a running watch
     assert _key(watch) == "source-watch:" + sha256(canonical(legacy))
-    assert _key(ct_watch(mode="backfill")) != _key(watch)
-
-
-def test_backfill_only_for_sources_with_reliable_full_paging():
-    ct_watch(mode="backfill")
-    with pytest.raises(ValueError):
-        SourceWatch.model_validate(
-            {"id": "w", "mode": "backfill", "request": {"source_id": "who_don", "query": "*"}}
-        )
-
-
-def test_realtime_watches_run_before_backfill(monkeypatch):
-    values = [
-        {"id": "full", "mode": "backfill", "request": {"source_id": "clinicaltrials", "query": "*"}},
-        {"id": "live", "request": {"source_id": "clinicaltrials", "query": "*"}},
-    ]
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(values))
-    assert [w.id for w in watches()] == ["live", "full"]
-
-
-def test_watch_limit_is_configurable_and_bounded(monkeypatch):
-    values = [{"id": f"w{i}", "request": {"source_id": "clinicaltrials", "query": f"q{i}"}} for i in range(9)]
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(values))
-    assert len(watches()) == 9  # 默认上限 32，旧上限 8 已放开
-    monkeypatch.setenv("DATAFABRIC_HISTORY_MAX_WATCHES", "8")
-    with pytest.raises(HistoryError):
-        watches()
-    monkeypatch.setenv("DATAFABRIC_HISTORY_MAX_WATCHES", "999")
-    with pytest.raises(HistoryError):
-        watches()
 
 
 def test_cadence_floor_is_each_sources_own_who_don_runs_every_15_minutes():
@@ -174,9 +143,7 @@ def test_checkpoint_resumes_after_downtime_with_overlap():
     assert "RANGE[2026-09-23,2026-11-04]" in request["query"]
 
 
-def test_backfill_and_fixed_ids_have_no_window():
-    request, start, end = cycle_request(ct_watch(mode="backfill"), {"window_checkpoint": NOW.isoformat()}, NOW)
-    assert request["query"] == "*" and start is None and end is None
+def test_fixed_ids_have_no_window():
     sec = SourceWatch.model_validate(
         {
             "id": "sec",
@@ -323,35 +290,9 @@ def test_three_stalled_reads_in_a_row_give_the_cycle_up_and_a_page_read_cleanly_
     assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
 
 
-def test_a_backfill_keeps_its_place_when_the_disk_is_low_or_the_reads_fail(monkeypatch):
-    """回填的续读位置是读了很久才到的：磁盘低水位、许可撤回不是这次读取的问题，不计失败；读取本身连续失败 3 次，
-    回填也不丢位置（丢了就从头读起），按间隔重试——放弃周期是实时刷新的办法。"""
-    from types import SimpleNamespace
-
-    cursor = {"cursor": "c", "read_count": 900}
-    for mode in ("backfill", "realtime"):
-        watch = ct_watch(mode=mode)
-        state = {"request": {"continuation": cursor}}
-        for _ in range(3):
-            _step(monkeypatch, watch, state, disk_low=True)
-        assert state["error"]["code"] == "source_watch_disk_low" and not state.get("fail_streak")
-        assert state["request"]["continuation"] == cursor  # 磁盘低水位多少次都不丢
-    broken = SimpleNamespace(state="failed", error={"code": "source_read_failed", "message": "x"}, coverage={})
-    backfill = ct_watch(mode="backfill")
-    state = {"request": {"continuation": cursor}}
-    for _ in range(4):
-        _step(monkeypatch, backfill, state, run=broken)
-    assert state["fail_streak"] == 4 and state["request"]["continuation"] == cursor and state["state"] == "failed"
-    realtime = ct_watch()
-    state = {"request": {"continuation": cursor}}
-    for _ in range(3):
-        _step(monkeypatch, realtime, state, run=broken)
-    assert "request" not in state and state["read_all"] is True  # 实时刷新：放弃这一周期，下个间隔重新规划
-
-
 def test_a_read_that_ends_without_a_cursor_is_counted_and_read_again_until_the_cycle_is_given_up(monkeypatch):
     """一次读取正常结束却没给续读位置（来源截断、没有窗口回执）：不能每个间隔都取回同一个读完的结果、永远报同一个错。
-    它按读取失败计数、换新 run 重读，连续 3 次实时刷新放弃这一周期，回填保留位置。走真实路径：_advance → _page_finished → _failed。"""
+    它按读取失败计数、换新 run 重读，连续 3 次放弃这一周期。走真实路径：_advance → _page_finished → _failed。"""
     from types import SimpleNamespace
 
     cut_short = SimpleNamespace(
@@ -366,12 +307,6 @@ def test_a_read_that_ends_without_a_cursor_is_counted_and_read_again_until_the_c
     _step(monkeypatch, ct_watch(), state, run=cut_short)
     assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
     assert state["error"]["code"] == "source_watch_no_cursor"  # 来源健康（WATCH_FIELDS 的 error）里还看得到原因
-    cursor = {"cursor": "c", "read_count": 900}
-    backfill = {"request": {"continuation": cursor}, "window_ended_at": NOW.isoformat()}
-    for _ in range(4):
-        _step(monkeypatch, ct_watch(mode="backfill"), backfill, run=cut_short)
-    assert backfill["fail_streak"] == 4 and backfill["request"]["continuation"] == cursor  # 回填不丢位置
-    assert "active_run_id" not in backfill
 
 
 def _gate_worker(args):
@@ -561,58 +496,14 @@ def test_change_id_is_stable_and_versioned():
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")
 
 
-def _history_rows(monkeypatch, rows):
-    """store.history.history_engine 的替身：stuck_items 的那条查询返回这些行。"""
-    from contextlib import contextmanager
-
-    from fetch import source_refresh
-
-    class Conn:
-        def execute(self, *args, **kwargs):
-            return self
-
-        def all(self):
-            return rows
-
-    class Engine:
-        @contextmanager
-        def begin(self):
-            yield Conn()
-
-    monkeypatch.setattr(source_refresh.history, "history_engine", lambda: Engine())
-
-
 def _unread(*urls):
     return [{"url": url, "reason": "HTTP 403"} for url in urls]
 
 
-def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypatch):
-    from fetch import source_refresh
-
-    # (读取范围, 是不是一轮的第一段, 这一段读不到的条目)，新的在前
-    rows = [("A", True, _unread("u1", "u2")), ("A", True, _unread("u1")), ("A", True, _unread("u1", "u3")),
-            ("A", True, _unread("u1")),
-            ("B", True, _unread("u1")), ("B", True, _unread("u1")),  # B 只有两轮：不够
-            ("C", True, _unread("u9")), ("C", True, None), ("C", True, _unread("u9"))]  # C 中间有一轮整次失败：连续数断了
-    _history_rows(monkeypatch, rows)
-    assert source_refresh.stuck_items("nmpa") == [{"url": "u1", "reason": "HTTP 403", "rounds": 3}]
-
-
-def test_a_round_of_several_segments_counts_as_one_round_for_the_stuck_items(monkeypatch):
-    from fetch import source_refresh
-
-    # 每轮两段：u1 总在第二段（False = 不是第一段）。按段数连续三次是不对的：最近三段里只有一段有它
-    rows = [("D", False, _unread("u1")), ("D", True, _unread("u2")), ("D", False, _unread("u1")), ("D", True, None),
-            ("D", False, _unread("u1")), ("D", True, None)]
-    _history_rows(monkeypatch, rows)
-    assert source_refresh.stuck_items("nmpa") == [{"url": "u1", "reason": "HTTP 403", "rounds": 3}]
-
-
-def test_a_cycle_with_unread_items_is_followed_by_a_cycle_that_reads_it_all_but_a_stuck_one_does_not_count(monkeypatch):
+def test_a_cycle_with_unread_items_is_followed_by_a_cycle_that_reads_it_all():
     from fetch import source_refresh
 
     pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    monkeypatch.setattr(source_refresh, "stuck_items", lambda source: [])
     unread = {"unread_items": _unread("u9")}
     state = {"request": {}}
     _page_finished(pubmed, state, {"next_continuation": {"cursor": "c", "read_count": 100}, **unread}, NOW)
@@ -625,8 +516,3 @@ def test_a_cycle_with_unread_items_is_followed_by_a_cycle_that_reads_it_all_but_
     assert state["read_all"] is False
     source_refresh._plan_cycle(pubmed, state, NOW)
     assert state["request"]["known_stop"] == 3  # and the one after a clean cycle stops at the known ones again
-    # an item that is already in the stuck list (a dead link) does not ask for another full read
-    monkeypatch.setattr(source_refresh, "stuck_items", lambda source: [{"url": "u9", "reason": "x", "rounds": 3}])
-    dead = {"request": {}}
-    _page_finished(pubmed, dead, {"stop_reason": "items_unread", **unread}, NOW)
-    assert dead["read_all"] is False and dead["state"] == "idle" and dead["last_success_at"]

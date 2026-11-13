@@ -4,8 +4,6 @@
 下一周期从“检查点 − 重叠天数”读起。停机多久就补多久，不会因为回看天数固定而漏掉停机期间的更新。
 没有检查点（首次运行或旧状态）时按 lookback_days 回看，与改造前行为一致。
 
-回填模式不加时间窗，按来源自己的续页标记读完整个范围；读到底后按周期重新对账。
-
 没有更新时间可过滤、但列表从新到旧的来源（目录里的 stop_at_known）也没有窗口：每个周期从列表第一页读起，连续读到
 KNOWN_STOP 条库里已有且没变的就停（读到旧的了）。上一周期有条目读不到（fetch.source_refresh 的 read_all）时，这一周期不许这样停，
 从头读满 SEGMENTS_PER_CYCLE 段。列表不大、旧条目会后补进来的来源（full_reread，如 fda_crl）也没有窗口，每个周期整份重读，不加 known_stop。
@@ -63,15 +61,15 @@ def first_unread(coverage: dict) -> str | None:
 
 
 def cycle_request(watch, state: dict, now: datetime) -> tuple[dict, datetime | None, datetime | None]:
-    """返回 (请求体, 窗口起点, 窗口终点)。回填和明确清单没有窗口，起止为 None。"""
+    """返回 (请求体, 窗口起点, 窗口终点)。明确清单没有窗口，起止为 None。"""
     request = watch.request.model_dump(mode="json")
     incremental = spec(watch.request.source_id).incremental
     kind = incremental.kind
     # 读明确清单（source_record_ids）本来就是读完这份清单，不加；上一周期有条目读不到（read_all）：这一周期整份读，不在“遇到已存的”就停
-    if (kind == "stop_at_known" and watch.mode == "realtime" and not request.get("source_record_ids")
+    if (kind == "stop_at_known" and not request.get("source_record_ids")
             and (incremental.by_group or not state.get("read_all"))):  # 分组的来源不用 read_all：读不到的组下个周期自然再读
         request["known_stop"] = KNOWN_STOP
-    if watch.mode == "backfill" or kind in ("fixed_ids", "stop_at_known", "full_reread") or request.get("source_record_ids"):
+    if kind in ("fixed_ids", "stop_at_known", "full_reread") or request.get("source_record_ids"):
         return request, None, None
     source = watch.request.source_id
     if source == "gdelt_doc":
