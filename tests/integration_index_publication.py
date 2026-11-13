@@ -668,7 +668,6 @@ def test_retrieval_binds_each_hit_to_the_version_visible_at_the_cutoff(pg):
     now = search(client)
     assert [(r["version_id"], r["text"]) for r in now["results"]] == [(v2, t2[:40])]
     assert now["excluded"]["counts"] == {"changed_at_cutoff": 1}
-    assert now["excluded"]["items"][0]["indexed_version_id"] == v1
     past = search(client, "public_history_reconstruction", datetime(2019, 6, 1, tzinfo=timezone.utc))
     assert [r["version_id"] for r in past["results"]] == [v1]
     assert past["results"][0]["available_at"].startswith("2019-01-01")
@@ -677,9 +676,9 @@ def test_retrieval_binds_each_hit_to_the_version_visible_at_the_cutoff(pg):
     assert before_any["results"] == [] and before_any["execution"]["insufficient"]
     # 只有通过校验的片段进了重排
     assert set(client.reranked) == {t1[:40], t2[:40]}
-    rerank = now["execution"]["rerank"]  # what went to the rerank model is counted in the receipt
-    assert (rerank["provider_calls"], rerank["documents"], rerank["input_chars"]) == (1, 1, len(t2[:40]))
-    assert (before_any["execution"]["rerank"]["state"], before_any["execution"]["rerank"]["input_chars"]) == ("not_run", 0)
+    [call] = now["execution"]["rerank"]["calls"]  # what went to the rerank model
+    assert (call["documents"], call["input_chars"]) == (1, len(t2[:40]))
+    assert before_any["execution"]["rerank"] == {"state": "not_run", "calls": []}
 
 
 def test_returned_evidence_uses_the_visible_version_not_the_representative(pg):
@@ -714,7 +713,7 @@ def test_retrieval_masks_withdrawal_revocation_and_unproven_history_immediately(
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='legacy_documents'"))
     revoked = search(client)
-    assert revoked["excluded"] == {"counts": {"not_readable": 1}, "items": []}  # 无权材料只给计数
+    assert revoked["excluded"] == {"counts": {"not_readable": 1}}  # 无权材料只给计数
     assert "Synthetic" not in json.dumps(revoked)
 
 
@@ -731,7 +730,7 @@ def test_crowded_candidates_report_insufficient_results_and_unlocatable_chunks(p
     assert result["excluded"]["counts"] == {"chunk_not_in_fixed_text": 1}
     assert result["results"][0]["locators"] or result["results"][0]["locator_kind"] is not None
     assert "this sentence" not in " ".join(client.reranked)
-    assert result["coverage"]["external_archive"]["entries_by_state"] == {"queued": 1}
+    assert result["coverage"] == {}
 
 
 def test_literal_search_over_a_huge_source_returns_query_budget(pg, monkeypatch):
@@ -829,16 +828,11 @@ def test_a_long_artifact_is_indexed_in_pieces_and_is_searchable_only_when_every_
     assert len({e["artifact_key"] for e in entries}) == 1 and len({e["remote_id"] for e in entries}) == len(entries)
     assert entries[0]["piece"]["start"] == 0 and entries[-1]["piece"]["end"] == len(full)
     client = SearchClient(pg)
-    assert process_one(client) == "ready"
-    cover = retrieval._coverage({"external_archive"})["external_archive"]
-    assert cover["partial_artifacts"] == 1 and cover["ready_artifacts"] == 0  # 只有一片 ready：不算整篇可检索
     for _ in range(len(entries)):
         process_one(client)
     assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
     for entry, body in zip(entries, client.bodies):
         assert body["piece"] == entry["piece"] and body["content"] == index_pieces.content(full, entry["piece"])
-    cover = retrieval._coverage({"external_archive"})["external_archive"]
-    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0
     # 命中第 2 片：换算回全篇偏移，读的是可见版本这份产物里的原文
     second = rows(pg, "SELECT * FROM index_publications WHERE piece_index=2")[0]
     piece_text = full[second["piece"]["start"]:second["piece"]["end"]]
@@ -928,8 +922,6 @@ def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan
             due(pg)  # 都处理过一轮了，再让它们到期复查
     assert states[0] == "disabled" and all(states[p["piece_index"]] == "ready" for p in pieces)
     assert client.disable_count == 1
-    cover = retrieval._coverage({"external_archive"})["external_archive"]
-    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0
 
 
 def test_a_new_piece_rule_adds_new_pieces_beside_the_old_ones_and_retires_them_after(pg, monkeypatch):
@@ -1004,21 +996,10 @@ def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypa
     with pg.begin() as conn:
         assert retrieval._serving_old(conn, old[0]["target_id"], old[0]["source_record_id"], artifact,
                                       old[0]["artifact_key"], old[0]["piece_key"])
-    cover = retrieval._coverage({"external_archive"})["external_archive"]
-    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0  # 旧计划整套 ready，覆盖全篇
-    old_ids = [r["id"] for r in old]
-    with pg.begin() as conn:  # 假设旧片不在：只有新计划的后几片 ready，覆盖不到全篇，不算整份可检索
-        conn.execute(text("UPDATE index_publications SET state='waiting' WHERE id=ANY(:ids)"), {"ids": old_ids})
-    cover = retrieval._coverage({"external_archive"})["external_archive"]
-    assert cover["ready_artifacts"] == 0 and cover["partial_artifacts"] == 1
-    with pg.begin() as conn:
-        conn.execute(text("UPDATE index_publications SET state='ready' WHERE id=ANY(:ids)"), {"ids": old_ids})
     run_only([r["id"] for r in new], "ready")
     states = run_only([r["id"] for r in old], "disabled")
     assert all(states[r["id"]] == "ready" for r in new) and all(states[r["id"]] == "disabled" for r in old)
     assert client.disable_count == len(old)
-    cover = retrieval._coverage({"external_archive"})["external_archive"]
-    assert cover["ready_artifacts"] == 1 and cover["partial_artifacts"] == 0  # 新计划整套 ready
     with pg.begin() as conn:
         assert not retrieval._serving_old(conn, old[0]["target_id"], old[0]["source_record_id"], artifact,
                                           old[0]["artifact_key"], old[0]["piece_key"])
@@ -1060,41 +1041,6 @@ def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, 
                                                   "schemaname=current_schema() AND tablename='index_publications'")}
         assert {"index_publications_artifact_piece_key", "index_publications_record_artifact_piece_key"} <= names
         assert not names & {"index_publications_artifact_piece", "index_publications_record_artifact_piece"}
-
-
-def test_ready_pieces_that_do_not_reach_the_verified_end_are_partial_coverage(pg, monkeypatch):
-    """Codex r84：只剩首片且 ready 时，现存片的最大终点不是全文长度；全篇长只取末片（序号 = 片数）的终点，
-    没有末片就是部分覆盖。首片加末片都 ready 而中间缺：仍是部分；整套齐了才是整份。"""
-    small_pieces(monkeypatch, chars=400)
-    long_document("SYNTHETIC-missing-tail")
-    scan()
-    pieces = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
-    assert len(pieces) >= 3
-    client = SearchClient(pg)
-    with pg.begin() as conn:
-        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+interval '1 day'"))
-    due_job(pg, pieces[0]["id"])
-    assert process_one(client) == "ready"
-    cover = lambda: retrieval._coverage({"external_archive"})["external_archive"]  # noqa: E731
-    with pg.begin() as conn:  # 只剩首片
-        kept = conn.execute(text("SELECT * FROM index_publications WHERE id<>:id"), {"id": pieces[0]["id"]})
-        others = [dict(r) for r in kept.mappings()]
-        conn.execute(text("UPDATE index_publications SET state='disabled' WHERE id<>:id"), {"id": pieces[0]["id"]})
-    got = cover()
-    assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
-    with pg.begin() as conn:  # 首片和末片 ready，中间缺
-        conn.execute(text("UPDATE index_publications SET state='ready' WHERE id=:id"), {"id": pieces[-1]["id"]})
-    got = cover()
-    assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
-    with pg.begin() as conn:  # 整套 ready
-        conn.execute(text("UPDATE index_publications SET state='ready' WHERE id=ANY(:ids)"),
-                     {"ids": [r["id"] for r in others]})
-    got = cover()
-    assert got["ready_artifacts"] == 1 and got["partial_artifacts"] == 0
-    with pg.begin() as conn:  # 只有首片这一行（其余行都不在）：末片不在，全篇长未知
-        conn.execute(text("DELETE FROM index_publications WHERE id<>:id"), {"id": pieces[0]["id"]})
-    got = cover()
-    assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
 
 
 def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):

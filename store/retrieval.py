@@ -8,12 +8,11 @@
   4. 命中块确实是这份固定正文里的一段（定位到偏移，再经段落定位回到原件）。
   返回的时间、原件摘要、画像、定位都取实际可见的版本；被索引的代表版本另外写明（indexed_as）。
 - 重排：只把通过校验的片段交给桥接 /rerank（同一套模型配置，报告用量）。
-- 如实：候选有上限，过滤后不足 top_k 就写明不足和各原因的计数；没被索引或没搜到不等于不存在。
+- 如实：候选有上限，过滤后不足 top_k 就写明不足和各剔除原因的条数；没被索引或没搜到不等于不存在。
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +28,6 @@ SCHEMA = "datafabric.retrieval.v1"
 MODES = ("current", "operational_replay", "public_history_reconstruction")
 CANDIDATES = 60  # 每个知识库一次召回的候选上限（桥接服务的上限）
 RERANK_PASSAGE_CHARS = 8000  # one passage is cut to this many characters before it is sent to the rerank model
-MAX_EXCLUDED_ITEMS = 50
 _FIXED_LINE = re.compile(r"\A\s*<!-- Fabric fixed version [0-9a-f]{64} -->\s*")
 _WITHDRAWN = {"withdrawn", "deleted", "retracted"}
 
@@ -117,20 +115,6 @@ def _locate_in(full, chunk, piece):
     return None
 
 
-class _Excluded:
-    """The excluded candidates: a count per reason, and the first MAX_EXCLUDED_ITEMS of the readable ones."""
-
-    def __init__(self):
-        self.counts, self.items = Counter(), []
-
-    def add(self, hit, reason, readable=True):
-        self.counts[reason] += 1
-        if readable and len(self.items) < MAX_EXCLUDED_ITEMS:
-            ident = hit["identity"]
-            self.items.append({"source_id": ident["source_id"], "source_record_id": ident["source_record_id"],
-                               "indexed_version_id": ident["version_id"], "reason": reason})
-
-
 def _by_source(candidates):
     """(source, is_demo) -> its candidates, in candidate order."""
     groups = {}
@@ -141,7 +125,7 @@ def _by_source(candidates):
 
 def _visible_records(source_id, is_demo, mode, cutoff, hits, excluded):
     """record -> its version visible in this mode at the cutoff; None when the whole group is excluded (the source
-    is not readable now, or the mode is not supported for it)."""
+    is not readable now, or the mode is not supported for it; excluded counts them by reason)."""
     records = sorted({h["identity"]["source_record_id"] for h in hits})
     try:
         visible = {}
@@ -149,12 +133,10 @@ def _visible_records(source_id, is_demo, mode, cutoff, hits, excluded):
             visible.update(history.visible_versions(source_id, is_demo, mode, cutoff, records[i:i + 200]))
     except HistoryError as exc:
         if exc.status == 403:  # 来源当前不可读：只计数，不回标题、正文、定位
-            for hit in hits:
-                excluded.add(hit, "not_readable", readable=False)
+            excluded["not_readable"] += len(hits)
             return None
         if exc.code == "graph_history_unsupported":
-            for hit in hits:
-                excluded.add(hit, "mode_unsupported_for_source")
+            excluded["mode_unsupported_for_source"] += len(hits)
             return None
         raise
     return visible
@@ -230,9 +212,8 @@ def _verified_item(hit, source_id, is_demo, mode, checked, serving):
         "published_at": fact["published_at"],
         "available_at": available.isoformat() if available else None,
         "proof": fact["proof"] if mode == "public_history_reconstruction" else None,
-        # 复现引用（v3 6.1）：可见版本、加工产物（处理器版本 + 正文摘要）、读到的片段、偏移与定位、片段摘要
+        # 复现引用（v3 6.1）：可见版本、加工产物（处理器版本 + 正文摘要）、读到的片段、偏移与定位
         "text": fixed["text"][start:end], "start": start, "end": end,
-        "text_sha256": hashlib.sha256(fixed["text"][start:end].encode()).hexdigest(),
         "locator_kind": fixed["locator_kind"], "locators": _overlapping(fixed["segments"], start, end),
         "artifact": {"artifact_key": key, "processor_version": processor, "text_sha256": digest,
                      # 处理器交接期：新产物的条目还没 ready，读的是这个版本在旧处理器下的产物
@@ -246,10 +227,10 @@ def _verified_item(hit, source_id, is_demo, mode, checked, serving):
 
 
 def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), target_ids=None):
-    """逐条校验候选 → (通过的条目, 剔除计数, 可读来源里剔除的条目)。target_ids：(来源, is_demo) → 索引目标，
+    """逐条校验候选 → (通过的条目, 各剔除原因的条数)。target_ids：(来源, is_demo) → 索引目标，
     处理器交接期判断旧条目是否仍在服务要用。"""
     target_ids = target_ids or {}
-    verified, excluded = [], _Excluded()
+    verified, excluded = [], Counter()
     for (source_id, is_demo), hits in _by_source(candidates).items():
         visible = _visible_records(source_id, is_demo, mode, cutoff, hits, excluded)
         if visible is None:
@@ -258,60 +239,10 @@ def verify(candidates, mode, cutoff, *, doc_categories=(), evidence_types=(), ta
         for hit in hits:
             checked = _verify_hit(hit, visible, state, doc_categories, evidence_types)
             if isinstance(checked, str):
-                excluded.add(hit, checked)
+                excluded[checked] += 1
                 continue
             verified.append(_verified_item(hit, source_id, is_demo, mode, checked, state[3]))
-    return verified, excluded.counts, excluded.items
-
-
-def _coverage(source_ids):
-    """各来源的索引覆盖，分两层计：物理条目（片）按状态；产物（一条记录的一份正文，可能有几片）整份可检索、
-    部分可检索的个数，以及整份可检索覆盖的记录数。
-    整份可检索 = 整篇条目 ready，或 ready 的片首尾相接覆盖全篇 [0, 全篇长)。全篇长只取可验证的末片（序号等于
-    片数的那一片，按分片规则它的终点就是全文长度，同一产物各计划相同）；没有末片的行，全篇长未知，不算整份
-    可检索，绝不从现存片的最大终点倒推全文（否则只剩首片时尾部缺失会被当成完整）。
-    按覆盖算、不按“现存的行都 ready”：新计划只建出、只 ready 了几片不算；交接期旧计划的整套片
-    仍 ready 时算（检索照样认它们）。worker 何时停用旧片另由当前计划的整套片判定（index.artifact_ready）。"""
-    with history.history_engine().begin() as conn:
-        rows = conn.execute(text("""
-            SELECT t.config->>'source_id' AS source_id,p.state,count(*) AS entries
-            FROM index_publications p JOIN index_targets t ON t.id=p.target_id
-            WHERE t.enabled AND t.config->>'source_id'=ANY(:sources) GROUP BY 1,2
-        """), {"sources": list(source_ids)}).mappings().all()
-        artifacts = conn.execute(text("""
-            WITH p AS (
-              SELECT t.config->>'source_id' AS source_id,p.source_record_id AS record,p.artifact_key AS artifact,
-                     p.state,p.piece IS NULL AS whole,(p.piece->>'start')::int AS s,(p.piece->>'end')::int AS e,
-                     (p.piece->>'index')=(p.piece->>'count') AS last
-              FROM index_publications p JOIN index_targets t ON t.id=p.target_id
-              WHERE t.enabled AND t.config->>'source_id'=ANY(:sources)),
-            a AS (
-              SELECT source_id,record,artifact,max(e) FILTER (WHERE last) AS length,bool_or(state='ready') AS some_ready
-              FROM p GROUP BY 1,2,3 HAVING bool_or(state<>'disabled')),
-            r AS (  -- ready 的片按起点排；reach：排在它前面的片到达的最远处
-              SELECT source_id,record,artifact,whole,s,e,max(e) OVER (PARTITION BY source_id,record,artifact
-                     ORDER BY s,e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS reach
-              FROM p WHERE state='ready'),
-            c AS (
-              SELECT source_id,record,artifact,bool_or(whole) AS whole_ready,
-                     bool_and(whole OR s<=COALESCE(reach,0)) AS gapless,max(e) AS reach_end
-              FROM r GROUP BY 1,2,3),
-            f AS (
-              SELECT a.source_id,a.record,a.some_ready,
-                     COALESCE(c.whole_ready OR (c.gapless AND c.reach_end=a.length),false) AS ready
-              FROM a LEFT JOIN c USING (source_id,record,artifact))
-            SELECT source_id,count(*) AS artifacts,count(*) FILTER (WHERE ready) AS ready_artifacts,
-                   count(*) FILTER (WHERE some_ready AND NOT ready) AS partial_artifacts,
-                   count(DISTINCT record) FILTER (WHERE ready) AS ready_records
-            FROM f GROUP BY 1
-        """), {"sources": list(source_ids)}).mappings().all()
-    out = {}
-    for row in rows:
-        out.setdefault(row["source_id"], {"entries_by_state": {}})["entries_by_state"][row["state"]] = row["entries"]
-    for row in artifacts:
-        out.setdefault(row["source_id"], {"entries_by_state": {}}).update(
-            {k: row[k] for k in ("artifacts", "ready_artifacts", "partial_artifacts", "ready_records")})
-    return out
+    return verified, excluded
 
 
 def _without_retired(sources):
@@ -374,42 +305,30 @@ def _best_per_passage(verified):
 
 
 def _rerank(client, query, configured, verified):
-    """Rerank the verified passages per knowledge base and scope and sort them in place (by recall score when
-    the rerank fails); returns the rerank receipt.
-
-    The receipt counts what was sent, and nothing is held back by the count: provider_calls (one request to the
-    bridge per knowledge base and scope, so also the batches), documents, and input_chars - the characters of the
-    passages after the cut to RERANK_PASSAGE_CHARS. A call that failed is counted, its characters were put on the
-    wire. Fabric does not retry; whether the bridge does is not reported, so retries is "unknown" once a call was made."""
-    sent = {"provider_calls": 0, "documents": 0, "input_chars": 0}
+    """通过校验的片段按（知识库, 业务范围）分组送桥接 /rerank，按分数排序；重排失败就按召回分数排。返回重排回执：
+    state，以及每次调用送了几段、多少字（截到 RERANK_PASSAGE_CHARS 之后）、模型和用量。"""
     if not verified:
-        return {"state": "not_run", "calls": [], **sent, "retries": 0}
-    calls = []
-    by_group = {}
+        return {"state": "not_run", "calls": []}
+    groups = {}
     for item in verified:
         target = next(t for t in configured if t.source_id == item["source_id"] and t.is_demo == item["is_demo"])
-        by_group.setdefault((target.knowledge_base_id, target.source_scope, target.is_demo), []).append(item)
+        groups.setdefault((target.knowledge_base_id, target.source_scope, target.is_demo), []).append(item)
+    calls = []
     try:
-        for (kb, scope, is_demo), items_ in by_group.items():
-            documents = [i["text"][:RERANK_PASSAGE_CHARS] for i in items_]
-            call = {"knowledge_base_id": kb, "source_scope": scope, "documents": len(documents),
-                    "input_chars": sum(map(len, documents))}
-            sent["provider_calls"] += 1
-            sent["documents"] += call["documents"]
-            sent["input_chars"] += call["input_chars"]
-            calls.append(call)
+        for (kb, scope, is_demo), items in groups.items():
+            documents = [i["text"][:RERANK_PASSAGE_CHARS] for i in items]
+            calls.append({"knowledge_base_id": kb, "source_scope": scope, "documents": len(documents),
+                          "input_chars": sum(map(len, documents))})
             answer = client.rerank({"knowledge_base_id": kb, "source_scope": scope, "is_demo": is_demo,
                                     "query_text": query, "documents": documents})
             for score in answer["scores"]:
-                items_[score["index"]]["rerank_score"] = score["relevance_score"]
-            call.update(rerank_model=answer.get("rerank_model"), usage=answer.get("usage"),
-                        usage_status=answer.get("usage_status"))
+                items[score["index"]]["rerank_score"] = score["relevance_score"]
+            calls[-1].update(rerank_model=answer.get("rerank_model"), usage=answer.get("usage"))
         verified.sort(key=lambda i: (-i["rerank_score"], i["version_id"], i["start"]))
-        outcome = {"state": "succeeded"}
+        return {"state": "succeeded", "calls": calls}
     except HistoryError as exc:
         verified.sort(key=lambda i: (-(i["recall_score"] or 0), i["version_id"], i["start"]))
-        outcome = {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion"}
-    return {**outcome, "calls": calls, **sent, "retries": "unknown"}
+        return {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion", "calls": calls}
 
 
 def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_categories=(), evidence_types=(),
@@ -427,7 +346,7 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
     client = client or index.WeKnoraIndexClient()
     try:
         candidates, recall = _recall(client, query, groups, scopes_of)
-        verified, counts, items = verify(candidates, mode, cutoff, doc_categories=doc_categories,
+        verified, counts = verify(candidates, mode, cutoff, doc_categories=doc_categories,
                                          evidence_types=evidence_types,
                                          target_ids={(t.source_id, t.is_demo): t.key() for t in configured})
         verified = _best_per_passage(verified)
@@ -439,14 +358,14 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
     return {
         "schema_version": SCHEMA, "query": query, "mode": mode, "cutoff": history._cutoff(cutoff).isoformat(),
         "top_k": top_k, "results": results, "excluded_sources": excluded,
-        "excluded": {"counts": dict(counts), "items": items},
+        "excluded": {"counts": dict(counts)},
         "execution": {"candidates": len(candidates), "verified": len(verified), "returned": len(results),
                       "insufficient": len(results) < top_k, "candidate_budget_per_knowledge_base": CANDIDATES,
                       "recall": recall, "rerank": rerank},
-        "coverage": _coverage({t.source_id for t in configured}),
+        "coverage": {},  # 索引覆盖不在这里算；各状态的条数见 GET /api/history/index/counts
         "limitations": [
             "命中只是指针：每条都按本次模式和截止时间回 Fabric 校验了来源许可、可见版本和固定正文",
             "候选有上限；过滤后不足 top_k 是这次召回的结果，不代表库里没有更多相关材料",
-            "没被索引或没搜到不等于不存在；覆盖见 coverage（ready 的才可检索）",
+            "没被索引或没搜到不等于不存在",
         ],
     }

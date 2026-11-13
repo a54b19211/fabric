@@ -1,4 +1,5 @@
-"""The characters a rerank sends are counted in its receipt, and the count holds nothing back (task book 02, 2.5)."""
+"""Rerank: verified passages go to the bridge once per knowledge base and scope, cut to RERANK_PASSAGE_CHARS, and are
+sorted by score; a failed rerank falls back to the recall order."""
 from store import retrieval
 from store.history_models import HistoryError
 from store.index_publication import IndexTarget
@@ -13,7 +14,7 @@ def passages(*sizes):
 
 
 class Provider:
-    """A rerank stand-in: scores every document, or fails."""
+    """A rerank stand-in: scores the documents in reverse order, or fails."""
 
     def __init__(self, fail=False):
         self.fail, self.sent = fail, []
@@ -22,34 +23,22 @@ class Provider:
         self.sent.append(body)
         if self.fail:
             raise HistoryError("index_http_503", "the rerank service did not answer", 503)
-        return {"scores": [{"index": n, "relevance_score": 1 - n / 100000} for n in range(len(body["documents"]))],
-                "rerank_model": {"model_id": "synthetic"}, "usage": None, "usage_status": "unknown"}
+        return {"scores": [{"index": n, "relevance_score": n / 10} for n in range(len(body["documents"]))],
+                "rerank_model": {"model_id": "synthetic"}, "usage": None}
 
 
-def test_the_receipt_counts_the_calls_the_batch_and_the_characters_after_the_cut():
-    provider = Provider()
-    receipt = retrieval._rerank(provider, "query", [TARGET], passages(9000, 100))
-    assert receipt["state"] == "succeeded"
-    assert (receipt["provider_calls"], receipt["documents"], receipt["input_chars"]) == (1, 2, 8100)  # 9000 is cut to 8000
-    assert receipt["retries"] == "unknown"  # Fabric sent once; whether the bridge retried is not reported
+def test_passages_are_cut_sent_once_per_knowledge_base_and_sorted_by_score():
+    provider, items = Provider(), passages(9000, 100)
+    receipt = retrieval._rerank(provider, "query", [TARGET], items)
+    assert receipt["state"] == "succeeded" and len(provider.sent) == 1
     [call] = receipt["calls"]
-    assert (call["knowledge_base_id"], call["documents"], call["input_chars"]) == ("kb-1", 2, 8100)
-    assert call["usage_status"] == "unknown"  # the provider's own usage stays as the bridge reported it
-    assert sum(map(len, provider.sent[0]["documents"])) == receipt["input_chars"]
-    idle = retrieval._rerank(provider, "query", [TARGET], [])
-    assert (idle["state"], idle["provider_calls"], idle["input_chars"], idle["retries"]) == ("not_run", 0, 0, 0)
+    assert (call["knowledge_base_id"], call["documents"], call["input_chars"]) == ("kb-1", 2, 8100)  # 9000 cut to 8000
+    assert [item["version_id"] for item in items] == ["v00001", "v00000"]  # by the rerank score
+    assert retrieval._rerank(provider, "query", [TARGET], []) == {"state": "not_run", "calls": []}
 
 
-def test_a_rerank_over_the_planned_twenty_million_characters_still_runs_and_is_counted():
-    provider = Provider()
-    receipt = retrieval._rerank(provider, "query", [TARGET], passages(*[8000] * 2600))  # 20.8 million characters
-    assert receipt["state"] == "succeeded" and receipt["input_chars"] == 2600 * 8000
-    assert len(provider.sent) == 1 and "rerank_budget_spent" not in str(receipt)
-
-
-def test_a_failed_rerank_is_counted_and_falls_back_to_the_recall_order():
+def test_a_failed_rerank_falls_back_to_the_recall_order():
     items = passages(500, 700)
     receipt = retrieval._rerank(Provider(fail=True), "query", [TARGET], items)
     assert (receipt["state"], receipt["fallback"]) == ("failed", "reciprocal_rank_fusion")
-    assert (receipt["provider_calls"], receipt["documents"], receipt["input_chars"]) == (1, 2, 1200)
     assert [item["version_id"] for item in items] == ["v00000", "v00001"]
