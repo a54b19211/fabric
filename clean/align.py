@@ -3,30 +3,31 @@
 两条路，结果分开统计（口径不同，混在一起会把药名的真实命中率稀释掉）：
 1. 编号字段（extra 里的 nct_id、pmid、doi、approval_number、cas_number）只做本地格式校验：CAS 核校验位、NCT 8 位、
    NDA/ANDA/BLA 6 位、PMID 1–8 位、DOI 10.xxxx/… 结构。不联网，结果稳定；合格只说明“格式对”，不说明权威库里有。
-2. 药名：先切成候选名（clean/drug_names.py），一个一个查，命中就停。每个候选名同时问几个权威库（authorities()：
-   PubChem、ChEMBL、OLS4 里的 ChEBI、UniProt、本地白名单，配了 DATAFABRIC_GSRS_URL 再加 GSRS），各库的结果用一种取舍策略
-   （STRATEGY，默认“来源分层”）选出一个——这就是她 resolve_identifier_multi 的意思，这里真正接上了。
-   某个库查不成（超时、429、5xx）记“降级”；所有库都降级时换候选名也不会好，就停。占位名（安慰剂、生理盐水）不查，
-   记 skipped，不进命中率的分母。
-每个候选名、每个库各自的结果都存下来（行里的 sources），离线可以换另外三种策略重算、用 platt_scale 校准，不用再联网。
+2. 药名：先切成候选名（clean/drug_names.py），一个一个查，命中就停。每个候选名按顺序问几个权威库（authorities()：
+   配了 DATAFABRIC_GSRS_URL 先问 GSRS，再问 PubChem、ChEMBL、OLS4 里的 ChEBI、UniProt、本地白名单）；GSRS 或 PubChem
+   查到了就不再问后面的库。问到的结果按“来源分层”选出一个（source_hierarchy）。
+   同一个进程里，同一个库、同一个候选名只问一次（_ANSWERS）；没查成的不记，下次再问。
+   某个库查不成（超时、429、5xx）记“降级”；所有联网的库都降级时换候选名也不会好，就停；一份资料里第一个药名就降级了，
+   其余药名不再问，直接记降级。占位名（安慰剂、生理盐水）不查，记 skipped，不进命中率的分母。
+每个候选名问到的各库结果都存下来（行里的 sources）。徐子雯论文里另外三种取舍策略、Platt 校准和命中率统计在
+ops/align_offline.py，拿存下的结果离线重算，不用再联网。
 
 一个结果（她叫“五元组”）是 dict：found、std_id（PUBCHEM:2244 这样带前缀）、authority（哪个库，她原来叫 source_id）、
 raw_value、resolved_value（库里的规范名）、confidence、candidates、degraded。
 出网只走 fetch/transport.py · get（按主机限速、超时、429 重试）；DATAFABRIC_HISTORY_FETCH_ENABLED=false 的实例不出网，
-药名全部记降级。
+只查本地白名单，查不到的记降级。
 """
 
 from __future__ import annotations
 
-import math
 import os
 import re
-from collections import Counter
 from urllib.parse import quote
 
 from clean import drug_names
 
-ALIGNER_VERSION = "datafabric.align.v1"  # 规则、来源清单或策略一改就升，旧结果按版本留在表里
+# 规则、来源清单或取舍一改就升，旧结果按版本留在表里。v2：GSRS/PubChem 命中就不问其余库
+ALIGNER_VERSION = "datafabric.align.v2"
 STRATEGY = "source_hierarchy"
 TIMEOUT = 5.0
 PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
@@ -44,10 +45,10 @@ LOCAL_NAMES = {
     "paracetamol": ("对乙酰氨基酚", "LOCAL:paracetamol"), "acetaminophen": ("对乙酰氨基酚", "LOCAL:paracetamol"),
     "头孢曲松": ("头孢曲松", "LOCAL:ceftriaxone"), "ceftriaxone": ("头孢曲松", "LOCAL:ceftriaxone"),
 }
-# 来源分层（数越小越权威：官方 > 人工策展 > 本地兜底）和证据加权用的权重
+# 来源分层：数越小越权威（官方 > 人工策展 > 本地兜底）
 TIERS = {"gsrs": 0, "pubchem": 1, "chembl": 1, "uniprot": 1, "ols4": 1, "format": 1, "local": 2, "none": 3}
-WEIGHTS = {"gsrs": 1.2, "pubchem": 1.0, "chembl": 1.0, "uniprot": 0.9, "ols4": 0.8, "format": 0.7, "local": 0.5}
-_STRUCTURED = ("NCT:", "PMID:", "DOI:", "NDA:", "ANDA:", "BLA:", "UNII:", "PUBCHEM:", "CHEMBL:", "UNIPROT:", "OLS4:")
+DECISIVE = ("gsrs", "pubchem")  # 这两个库查到了就不再问后面的库
+MAX_ANSWERS = 50000  # 进程内记住的答案最多这么多条，满了清空重来
 
 
 def result(raw, authority, std_id=None, resolved=None, confidence=0.0, candidates=(), degraded=False):
@@ -190,16 +191,31 @@ def local(name):
 
 
 def authorities():
-    """这次要问的库，顺序就是同分时的先后。不出网的实例只查本地白名单（其余记降级）。"""
+    """这次要问的库，按问的先后（也是同分时的先后）。不出网的实例只查本地白名单。"""
     from fetch.sources import public_fetch_enabled
 
     if not public_fetch_enabled():
         return [local]
-    online = [pubchem, chembl, ols4, uniprot] + ([gsrs] if os.environ.get("DATAFABRIC_GSRS_URL") else [])
-    return online + [local]
+    return ([gsrs] if os.environ.get("DATAFABRIC_GSRS_URL") else []) + [pubchem, chembl, ols4, uniprot, local]
 
 
-# ───────────── 3. 多来源取舍：四种策略 ─────────────
+_ANSWERS: dict = {}  # (查询函数, 候选名) → 这个库的答案；进程内复用
+
+
+def _ask(lookup, value):
+    """问一个库一个候选名：问过（而且查成了）就用记下的答案，降级的不记。"""
+    key = (lookup, value)
+    if key not in _ANSWERS:
+        answer = lookup(value)
+        if answer.get("degraded"):
+            return answer
+        if len(_ANSWERS) >= MAX_ANSWERS:
+            _ANSWERS.clear()
+        _ANSWERS[key] = answer
+    return _ANSWERS[key]
+
+
+# ───────────── 3. 多来源取舍：来源分层 ─────────────
 
 def _found(results):
     return [r for r in results if r.get("found") and r.get("std_id")]
@@ -219,35 +235,6 @@ def _pick(best, peers, confidence, candidates):
                      best.get("resolved_value") or best["std_id"], round(confidence, 4)), "candidates": candidates}
 
 
-def majority_vote(results):
-    """多数投票：得票最多的编号胜出；置信度 = 得票占比 × 这组的平均置信度。"""
-    found = _found(results)
-    if not found:
-        return _none_found(results)
-    counts = Counter(r["std_id"] for r in found)
-    top, votes = counts.most_common(1)[0]
-    peers = [r for r in found if r["std_id"] == top]
-    best = max(peers, key=lambda r: r.get("confidence") or 0)
-    average = sum(r.get("confidence") or 0 for r in peers) / len(peers)
-    return _pick(best, peers, votes / len(found) * average,
-                 [{"std_id": k, "votes": v} for k, v in counts.most_common()])
-
-
-def evidence_weighted(results):
-    """证据加权：每个编号累加 置信度 × 来源权重，取最大；置信度 = 它占总证据的比例。"""
-    found = _found(results)
-    if not found:
-        return _none_found(results)
-    weight = {}
-    for r in found:
-        weight[r["std_id"]] = weight.get(r["std_id"], 0.0) + (r.get("confidence") or 0) * WEIGHTS.get(r["authority"], 1.0)
-    top = max(weight, key=weight.get)
-    peers = [r for r in found if r["std_id"] == top]
-    best = max(peers, key=lambda r: r.get("confidence") or 0)
-    ranked = sorted(({"std_id": k, "evidence": round(v, 4)} for k, v in weight.items()), key=lambda x: -x["evidence"])
-    return _pick(best, peers, weight[top] / (sum(weight.values()) or 1.0), ranked)
-
-
 def source_hierarchy(results):
     """来源分层：最权威一层的库优先，同层看置信度，再同就按问的先后。"""
     found = _found(results)
@@ -260,72 +247,39 @@ def source_hierarchy(results):
                  [{"std_id": r["std_id"], "tier": TIERS.get(r["authority"], 99)} for r in found])
 
 
-def _structural(std_id):
-    s = str(std_id or "").upper()
-    return 3 if s.startswith("CAS:") else 2 if s.startswith(_STRUCTURED) else 1 if s.startswith("LOCAL:") else 0
-
-
-def structural_criterion(results):
-    """结构判据优先：自带校验位的（CAS）最强，其次结构化编号，本地兜底最弱；同结构看置信度。"""
-    found = _found(results)
-    if not found:
-        return _none_found(results)
-    best = max(found, key=lambda r: (_structural(r["std_id"]), r.get("confidence") or 0))
-    peers = [r for r in found if r["std_id"] == best["std_id"]]
-    return _pick(best, peers, best.get("confidence") or 0,
-                 [{"std_id": r["std_id"], "structural": _structural(r["std_id"])} for r in found])
-
-
-STRATEGIES = {"majority_vote": majority_vote, "evidence_weighted": evidence_weighted,
-              "source_hierarchy": source_hierarchy, "structural_criterion": structural_criterion}
-
-
-def platt_scale(scores, labels, max_iter=5000, lr=0.1, tol=1e-6):
-    """Platt 校准：用梯度下降拟合 P(对 | 分数) = 1 / (1 + exp(-(a·分数 + b)))，返回 (a, b)。离线评估用。"""
-    if len(scores) != len(labels) or not scores:
-        raise ValueError("scores 和 labels 要一样长且不为空")
-    a = b = 0.0
-    for _ in range(max_iter):
-        ga = gb = 0.0
-        for s, y in zip(scores, labels):
-            p = 1.0 / (1.0 + math.exp(-(a * s + b)))
-            ga += (p - y) * s
-            gb += p - y
-        ga, gb = ga / len(scores), gb / len(scores)
-        a, b = a - lr * ga, b - lr * gb
-        if abs(ga) < tol and abs(gb) < tol:
-            break
-    return a, b
-
-
-def platt_predict(scores, a, b):
-    return [1.0 / (1.0 + math.exp(-(a * s + b))) for s in scores]
-
-
 # ───────────── 4. 一份资料的对齐 ─────────────
 
-def align_name(name, ask, strategy=STRATEGY):
-    """一个药名：候选名逐个问 ask 里的每个库、按策略取舍，命中就停。返回一行对齐结果（带每个候选名各库的原始结果）。"""
+def _unasked(name, *, skipped, degraded=False):
+    """没去问的药名：占位名（skipped），或同一份资料里前一个药名已经查不成（degraded）。"""
+    return {**result(name, "none", degraded=degraded), "candidate": "", "rule": "", "candidates_tried": 0,
+            "skipped": skipped, "strategy": STRATEGY, "sources": []}
+
+
+def align_name(name, ask):
+    """一个药名：候选名逐个问 ask 里的库、按来源分层取舍，命中就停。返回一行对齐结果（带每个候选名各库的原始结果）。"""
     tried = []
     chosen = result(name, "none")
     for value, rule in drug_names.candidates(name):
-        answers = [lookup(value) for lookup in ask]
+        answers = []
+        for lookup in ask:
+            answers.append(_ask(lookup, value))
+            if answers[-1]["found"] and answers[-1]["authority"] in DECISIVE:
+                break
         tried.append({"candidate": value, "rule": rule, "results": answers})
-        chosen = STRATEGIES[strategy](answers)
+        chosen = source_hierarchy(answers)
         if chosen["found"]:
             return {**chosen, "raw_value": name, "candidate": value, "rule": rule, "candidates_tried": len(tried),
-                    "skipped": False, "strategy": strategy, "sources": tried}
+                    "skipped": False, "strategy": STRATEGY, "sources": tried}
         if chosen["degraded"]:
             break  # 联网的库都没查成：换名字也没用，只会放大等待
     if not tried:  # 没有能查的候选名（空的、只剩残片）：和占位名一样不进分母
-        return {**result(name, "none"), "candidate": "", "rule": "", "candidates_tried": 0, "skipped": True,
-                "strategy": strategy, "sources": []}
+        return _unasked(name, skipped=True)
     return {**chosen, "raw_value": name, "candidate": "", "rule": "", "candidates_tried": len(tried), "skipped": False,
-            "strategy": strategy, "sources": tried}
+            "strategy": STRATEGY, "sources": tried}
 
 
-def align(doc, ask=None, strategy=STRATEGY):
-    """(药名 → 对齐行, 编号字段 → 格式校验行)。ask 不给就是 authorities()；测试和离线重算时传自己的查询函数。"""
+def align(doc, ask=None):
+    """(药名 → 对齐行, 编号字段 → 格式校验行)。ask 不给就是 authorities()；测试时传自己的查询函数。"""
     extra = doc.get("extra") or {}
     identifiers = {}
     for field, kind in IDENTIFIER_FIELDS.items():
@@ -333,21 +287,13 @@ def align(doc, ask=None, strategy=STRATEGY):
         if isinstance(raw, str) and raw.strip():
             identifiers[field] = {**check_format(kind, raw.strip()), "raw_value": raw, "id_type": kind}
     ask = authorities() if ask is None else ask
-    names = {}
+    names, down = {}, False
     for name in drug_names.names_of(doc)[:drug_names.MAX_NAMES]:
         if drug_names.is_placeholder(name):
-            names[name] = {**result(name, "none"), "candidate": "", "rule": "", "candidates_tried": 0,
-                           "skipped": True, "strategy": strategy, "sources": []}
+            names[name] = _unasked(name, skipped=True)
+        elif down:  # 前一个药名所有联网的库都没查成：这次断网了，其余药名不再一个个等超时
+            names[name] = _unasked(name, skipped=False, degraded=True)
         else:
-            names[name] = align_name(name, ask, strategy)
+            names[name] = align_name(name, ask)
+            down = names[name]["degraded"]
     return names, identifiers
-
-
-def summarize(rows: dict) -> dict:
-    """命中率：matched = found 且 std_id 非空；skipped（占位名）不进分母。"""
-    rows = [r for r in (rows or {}).values() if isinstance(r, dict)]
-    skipped = sum(1 for r in rows if r.get("skipped"))
-    matched = sum(1 for r in rows if not r.get("skipped") and r.get("found") and str(r.get("std_id") or "").strip())
-    eligible = len(rows) - skipped
-    return {"total": len(rows), "eligible": eligible, "skipped": skipped, "matched": matched,
-            "match_rate": round(matched / eligible, 4) if eligible else 0.0}

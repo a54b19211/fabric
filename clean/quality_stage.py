@@ -1,14 +1,18 @@
 """质量段：给画像过的版本打徐子雯的五维质量分，编号对齐、字段清洗结果和血缘一起存下。
 雷达读的清洗正文、编号、画像一个字不动；分数只追加；“隔离”只是等级，不拦截，所有版本照常建索引、给雷达。
 
-从哪读起：process()。它一批一批地取“有当前画像、还没有当前评分器版本分数”的版本（新抓到的先做），每个版本：
+从哪读起：process()。一轮先查一次“有当前画像、还没有当前评分器版本分数”的版本号（新抓到的先做，最多 TODO_LIMIT 个），
+再 BATCH 个一组取字段，每个版本：
   document()   版本 → 一份资料 doc（键和徐子雯原来的 parsed_result 一样；markdown 就是这个版本的清洗正文）
   score_one()  记“解析”血缘 → 字段清洗（clean/fields.py，记“清洗”血缘）→ L3 规范化（记“规范化”血缘）
                → 编号对齐（clean/align.py，药名要联网，记“对齐”血缘）→ 五维打分和结构校验（clean/quality.py）
   _write()     写 derived_quality_scores（一个版本、一个评分器版本一行）和 derived_authority_resolutions
                （一个版本、一个对齐版本下，每个药名、每个编号字段一行）
-联网只在对齐，放在数据库事务外面；一轮有时间上限。这个版本在当前对齐版本下已经对齐过（库里有行）就用库里的，不再联网：
-只换评分口径（升 SCORER_VERSION）时不用重新查网。多个进程同时跑可能重复查网，但表里不会重复（主键）。
+领活：一个版本一个短事务，先用 FOR UPDATE SKIP LOCKED 锁住它的画像行（别的进程正在做就跳过，不重复联网），
+再对齐、打分、写，提交时放锁。联网时只占着这一行锁，不挡清洗和抓取。
+这个版本在当前对齐版本下已经对齐过（库里有行）就用库里的，不再联网：只换评分口径（升 SCORER_VERSION）时不用重新查网。
+药名没查成（降级）的版本不存，下一轮再查；这一轮也就当作断网了，之后只做不用联网的版本（没有药名、或已经对齐过的）。
+一轮有时间上限（run/clean.py --quality-seconds）。
 process_versions() 只做指定的几个版本（main_etl.py 用）；scores_for() 把一页版本的分数读给
 /api/history/clean-text?quality=true。常驻：run/clean.py --loop 每轮清洗完顺带跑一次。
 """
@@ -25,7 +29,8 @@ from sqlalchemy import text
 from clean import align, attachment_parse, clean_text, drug_names, fields, profile, quality
 from store.history_models import make_uuid
 
-BATCH = 50
+BATCH = 50  # 一次取几个版本的字段
+TODO_LIMIT = 2000  # 一轮最多领几个版本（领活的那条查询每轮只跑一次）
 CT_DRUG_TYPES = {"DRUG", "BIOLOGICAL", "COMBINATION_PRODUCT"}  # ClinicalTrials 干预里算药名的类型
 
 _FIELDS = """
@@ -48,9 +53,15 @@ _TODO_SQL = """
     SELECT v.version_id FROM history_versions v
     JOIN derived_profiles p ON p.version_id = v.version_id AND p.processor_version = :prof
                            AND p.text_processor_version = ANY(:texts)
-    WHERE NOT """ + _SCORED + """ AND NOT (v.version_id = ANY(:skip))
+    WHERE NOT """ + _SCORED + """
     ORDER BY v.first_seen_at DESC, v.version_id LIMIT :n"""
-_BY_IDS_SQL = _FIELDS + " WHERE v.version_id = ANY(:ids) AND NOT " + _SCORED
+_BY_IDS_SQL = _FIELDS + " WHERE v.version_id = ANY(:ids) AND NOT " + _SCORED + " ORDER BY v.first_seen_at DESC"
+# 锁住一个版本的画像行：别的进程锁着（正在打分）就拿不到；锁到之后再看一眼还没分数（别人可能刚写完）
+_CLAIM_SQL = """
+    SELECT 1 FROM derived_profiles p
+    WHERE p.version_id = :v AND p.processor_version = :prof AND p.text_processor_version = :tpv
+      AND NOT EXISTS (SELECT 1 FROM derived_quality_scores q WHERE q.version_id = p.version_id AND q.scorer_version = :sv)
+    FOR UPDATE OF p SKIP LOCKED"""
 
 
 def _params(**more):
@@ -246,33 +257,58 @@ def _stored(conn, version_ids):
 
 
 def _lookup_failed(names):
-    """有药名问了联网的库、却一个都没查成（超时、限流）。这样的版本这次不存，下一轮再查：表只追加，存下了就改不掉，
-    一次断网不该永久算成“没对上”。不出网的实例只问本地白名单，照常存（记降级）。"""
-    return any(found.get("degraded") and any(answer["authority"] != "local" for tried in found.get("sources") or []
-                                             for answer in tried["results"])
-               for found in names.values())
+    """有药名没查成（降级：超时、限流、不出网）。这样的版本这次不存，等查得成的时候再来：表只追加，存下了就改不掉，
+    一次断网不该永久算成“没对上”。"""
+    return any(found.get("degraded") for found in names.values())
+
+
+def _needs_network(row):
+    """这个版本对齐时要不要联网：有不是占位名的药名。"""
+    return any(not drug_names.is_placeholder(name) for name in drug_names.names_of(document(row)))
+
+
+def _counts():
+    # offline：这一轮已经有药名查不成，之后只做不用联网的版本；deferred：因此留到下一轮的版本数
+    return {"scored": 0, "aligned": 0, "alignment_reused": 0, "levels": {}, "failed_versions": [], "deferred": 0,
+            "offline": False}
+
+
+def _score_one_claimed(engine, row, done, ask, counts):
+    """一个版本一个事务：锁住它的画像行（拿不到就是别的进程在做，返回 None），算（对齐可能联网）、写。
+    返回这个版本的分数；药名没查成时记进 failed_versions、不写，返回 None。"""
+    with engine.begin() as conn:
+        claim = {"v": row["version_id"], "tpv": row["text_pv"], **_params()}
+        if conn.execute(text(_CLAIM_SQL), claim).first() is None:
+            return None
+        scored_at = datetime.now(timezone.utc)
+        doc, result = score_one(row, scored_at.date(), stored=done, ask=ask)
+        if done is None and _lookup_failed(doc["authority_resolutions"]):
+            counts["offline"] = True
+            counts["failed_versions"].append({"version_id": row["version_id"],
+                                              "error": "lookup_failed: 药名在权威库都没查成，下一轮再查"})
+            return None
+        _write(conn, row, doc, result, scored_at, fresh=done is None)
+        return result
 
 
 def _score_rows(engine, rows, counts, ask, began=None, budget=None):
-    """逐个版本：算（对齐可能联网，事务外）、写（一个版本一个短事务）。做不成的记进 failed_versions，本轮不再取它。"""
+    """逐个版本打分；做不成的记进 failed_versions。这一轮断网了，要联网的版本就留到下一轮。"""
     with engine.begin() as conn:
         stored = _stored(conn, [r["version_id"] for r in rows])
     for row in rows:
         if began is not None and time.monotonic() - began >= budget:
             break
+        done = stored.get(row["version_id"])
+        if counts["offline"] and done is None and _needs_network(row):
+            counts["deferred"] += 1
+            continue
         try:
-            scored_at = datetime.now(timezone.utc)
-            done = stored.get(row["version_id"])
-            doc, result = score_one(row, scored_at.date(), stored=done, ask=ask)
-            if done is None and _lookup_failed(doc["authority_resolutions"]):
-                counts["failed_versions"].append({"version_id": row["version_id"],
-                                                  "error": "lookup_failed: 联网的权威库都没查成，下一轮再查"})
-                continue
-            with engine.begin() as conn:
-                _write(conn, row, doc, result, scored_at, fresh=done is None)
+            result = _score_one_claimed(engine, row, done, ask, counts)
         except Exception as exc:  # noqa: BLE001 -- 一个版本做不成不挡别的版本
             counts["failed_versions"].append({"version_id": row["version_id"],
                                               "error": (type(exc).__name__ + ": " + str(exc))[:300]})
+            continue
+        if result is None:
             continue
         counts["scored"] += 1
         counts["alignment_reused" if done is not None else "aligned"] += 1
@@ -280,19 +316,21 @@ def _score_rows(engine, rows, counts, ask, began=None, budget=None):
 
 
 def process(*, batch=BATCH, time_budget_seconds=60, ask=None):
-    """一批一批地给还没有当前评分器版本分数的版本打分，直到没有活或到时间；返回计数。"""
+    """给还没有当前评分器版本分数的版本打分，直到没有活或到时间；返回计数。领活的查询一轮只跑一次。"""
     from store.history import history_engine
 
     engine = history_engine()
     began = time.monotonic()
-    counts = {"scored": 0, "aligned": 0, "alignment_reused": 0, "levels": {}, "failed_versions": []}
-    while time.monotonic() - began < time_budget_seconds:
-        skip = [f["version_id"] for f in counts["failed_versions"]]
-        with engine.begin() as conn:
-            ids = conn.execute(text(_TODO_SQL), _params(skip=skip, n=batch)).scalars().all()
-            rows = [dict(r) for r in conn.execute(text(_BY_IDS_SQL), _params(ids=list(ids))).mappings()] if ids else []
-        if not rows:
+    counts = _counts()
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout='120000ms'"))
+        ids = conn.execute(text(_TODO_SQL), _params(n=TODO_LIMIT)).scalars().all()
+    for start in range(0, len(ids), batch):
+        if time.monotonic() - began >= time_budget_seconds:
             break
+        with engine.begin() as conn:
+            rows = [dict(r) for r in conn.execute(text(_BY_IDS_SQL), _params(ids=list(ids[start:start + batch])))
+                    .mappings()]
         _score_rows(engine, rows, counts, ask, began, time_budget_seconds)
     return counts
 
@@ -302,7 +340,7 @@ def process_versions(version_ids, ask=None):
     from store.history import history_engine
 
     engine = history_engine()
-    counts = {"scored": 0, "aligned": 0, "alignment_reused": 0, "levels": {}, "failed_versions": []}
+    counts = _counts()
     with engine.begin() as conn:
         rows = [dict(r) for r in conn.execute(text(_BY_IDS_SQL), _params(ids=list(version_ids))).mappings()]
     if rows:

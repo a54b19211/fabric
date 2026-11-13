@@ -6,6 +6,7 @@ from datetime import date
 import pytest
 
 from clean import align, drug_names, fields, quality, quality_stage
+from ops import align_offline
 from store.history_models import make_uuid
 
 TODAY = date(2026, 11, 14)
@@ -33,9 +34,9 @@ def test_the_four_strategies_choose_and_all_authorities_down_is_degraded():
     pubchem = align.result("aspirin", "pubchem", "PUBCHEM:2244", "2-acetyloxybenzoic acid", 0.6)
     local = align.result("aspirin", "local", "LOCAL:aspirin", "阿司匹林", 0.7)
     assert align.source_hierarchy([local, pubchem])["std_id"] == "PUBCHEM:2244"  # 层级先于置信度
-    assert align.structural_criterion([local, pubchem])["std_id"] == "PUBCHEM:2244"
-    assert align.majority_vote([local, pubchem, local])["std_id"] == "LOCAL:aspirin"
-    assert align.evidence_weighted([local, pubchem])["std_id"] == "PUBCHEM:2244"  # 0.6×1.0 > 0.7×0.5
+    assert align_offline.structural_criterion([local, pubchem])["std_id"] == "PUBCHEM:2244"
+    assert align_offline.majority_vote([local, pubchem, local])["std_id"] == "LOCAL:aspirin"
+    assert align_offline.evidence_weighted([local, pubchem])["std_id"] == "PUBCHEM:2244"  # 0.6×1.0 > 0.7×0.5
     down = align.source_hierarchy([align.result("x", "pubchem", degraded=True), align.result("x", "ols4", degraded=True)])
     assert down["degraded"] and not down["found"]
 
@@ -45,22 +46,29 @@ def test_alignment_stops_at_the_first_hit_and_when_every_authority_is_down():
 
     def etanercept_only(name):
         asked.append(name)
-        return align.result(name, "chembl", "CHEMBL:CHEMBL1201572", "ETANERCEPT", 0.9) if name == "Etanercept" \
-            else align.result(name, "chembl")
+        return align.result(name, "chembl", "CHEMBL:CHEMBL1201572", "ETANERCEPT", 0.9) if name == "Etanercept"             else align.result(name, "chembl")
 
     names, _ = align.align({"extra": {"drug_name": "Enbrel (Etanercept); Placebo"}}, ask=[etanercept_only])
     hit = names["Enbrel (Etanercept)"]
     assert (hit["found"], hit["candidate"], hit["rule"], hit["candidates_tried"]) == (True, "Etanercept", "inner_alias", 2)
     assert names["Placebo"]["skipped"] and asked == ["Enbrel (Etanercept)", "Etanercept"]  # 占位名不查
     assert len(hit["sources"]) == 2  # 每个候选名各库的原始结果都留着，离线可换策略重算
+    align.align({"extra": {"drug_name": "Enbrel (Etanercept)"}}, ask=[etanercept_only])
+    assert len(asked) == 2  # 同一个库、同一个候选名只问一次
+
+    def pubchem_hit(name):
+        return align.result(name, "pubchem", "PUBCHEM:5743", name, 0.9)
+
+    names, _ = align.align({"extra": {"drug_name": "Dexamethasone"}}, ask=[pubchem_hit, etanercept_only])
+    assert names["Dexamethasone"]["std_id"] == "PUBCHEM:5743" and len(asked) == 2  # PubChem 命中就不问后面的库
 
     asked.clear()
     down = [lambda name: asked.append(name) or align.result(name, "pubchem", degraded=True), align.local]
-    names, _ = align.align({"extra": {"drug_name": "Enbrel (Etanercept)"}}, ask=down)
-    # 联网的库连不上（本地白名单照常答“没有”）：记降级，不再换名字；这样的版本这次不存
-    assert names["Enbrel (Etanercept)"]["degraded"] and asked == ["Enbrel (Etanercept)"]
-    assert quality_stage._lookup_failed(names)
-    assert align.summarize(names) == {"total": 1, "eligible": 1, "skipped": 0, "matched": 0, "match_rate": 0.0}
+    names, _ = align.align({"extra": {"drug_name": "Enbrel (Etanercept); Nivolumab"}}, ask=down)
+    # 联网的库连不上（本地白名单照常答“没有”）：记降级，不再换名字，第二个药名也不再问；这样的版本这次不存
+    assert names["Enbrel (Etanercept)"]["degraded"] and names["Nivolumab"]["degraded"]
+    assert asked == ["Enbrel (Etanercept)"] and quality_stage._lookup_failed(names)
+    assert align_offline.summarize(names) == {"total": 2, "eligible": 2, "skipped": 0, "matched": 0, "match_rate": 0.0}
 
 
 def test_field_cleaning_keeps_chinese_punctuation_and_l3_converts_units():

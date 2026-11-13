@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from integration_clean_stage import rows
 from integration_history import pg, pg_engine  # noqa: F401  -- 隔离库夹具
+from sqlalchemy import text
 
 from clean import align, clean_stage, quality, quality_stage
 from store import history as store
@@ -72,3 +73,34 @@ def test_a_new_scorer_version_rescores_without_asking_the_authorities_again(pg, 
     counts = quality_stage.process(ask=[no_network])
     assert (counts["scored"], counts["alignment_reused"], counts["failed_versions"]) == (1, 1, [])
     assert len(rows(pg, "SELECT 1 FROM derived_quality_scores WHERE version_id = :v", v=version)) == 2  # 旧分数保留
+
+
+def test_when_the_authorities_are_down_nothing_degraded_is_stored_and_the_round_goes_on(pg):
+    without_names = nmpa_page("qs-plain", "")
+    second = nmpa_page("qs-second", "Nivolumab")
+    first = nmpa_page("qs-first", "Pembrolizumab")  # 最新的先做
+    mine = [without_names, second, first]
+    clean_stage.process(batch=50)
+    asked = []
+
+    def down(name):
+        asked.append(name)
+        return align.result(name, "pubchem", degraded=True)
+
+    counts = quality_stage.process(ask=[down])
+    # 第一个有药名的版本查不成：不存、当作断网；后一个有药名的留到下一轮，没有药名的照常打分
+    assert [f["version_id"] for f in counts["failed_versions"]] == [first] and asked == ["Pembrolizumab"]
+    assert (counts["offline"], counts["deferred"], counts["scored"]) == (True, 1, 1)
+    assert rows(pg, "SELECT version_id FROM derived_quality_scores WHERE version_id = ANY(:ids)", ids=mine) == [
+        {"version_id": without_names}]
+    assert rows(pg, "SELECT 1 FROM derived_authority_resolutions WHERE degraded AND version_id = ANY(:ids)", ids=mine) == []
+
+
+def test_a_version_another_process_is_scoring_is_skipped(pg):
+    version = nmpa_page("qs-locked", "Aspirin Tablets 100 mg")
+    clean_stage.process(batch=50)
+    with pg.connect() as other:
+        other.execute(text("SELECT 1 FROM derived_profiles WHERE version_id = :v FOR UPDATE"), {"v": version})
+        assert quality_stage.process(ask=[align.local])["scored"] == 0  # 锁着：别的进程在做，跳过
+        other.rollback()
+    assert quality_stage.process(ask=[align.local])["scored"] == 1
