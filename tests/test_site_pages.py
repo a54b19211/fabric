@@ -347,7 +347,33 @@ def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_ima
     assert nccn_fetcher._render(Fetcher(), "https://www.nccn.org/x", nccn_fetcher.DETAIL_READY) == "page"
     [(url, options)] = seen
     assert options["network_idle"] is False and options["disable_resources"] is True
-    assert options["wait_selector"] == "h4" and options["timeout"] == 30000 and options["retries"] == 4
+    assert options["wait_selector"] == "h4" and options["timeout"] == 20000 and options["retries"] == 1
+
+
+def test_nccn_a_render_that_hangs_is_tried_again_in_a_new_browser_and_the_last_failure_is_the_one_raised():
+    """卡在坏地址上的那次渲染 20 秒放弃，重来；每次重来都是新的 fetch 调用（新浏览器，换一次域名解析）。"""
+    from biz_rules.extractors.nccn import nccn_fetcher
+
+    calls = []
+
+    class Fetcher:
+        def __init__(self, hangs):
+            self.hangs = hangs
+
+        def fetch(self, url, **options):
+            calls.append(url)
+            if len(calls) <= self.hangs:
+                raise TimeoutError(f"net::ERR_TIMED_OUT {len(calls)}")
+            return "page"
+
+    assert nccn_fetcher._render(Fetcher(hangs=3), "https://www.nccn.org/x", "h4") == "page" and len(calls) == 4
+    calls.clear()
+    try:
+        nccn_fetcher._render(Fetcher(hangs=99), "https://www.nccn.org/x", "h4")
+    except TimeoutError as exc:
+        assert str(exc).endswith(str(nccn_fetcher.RENDER_TRIES)) and len(calls) == nccn_fetcher.RENDER_TRIES
+    else:
+        raise AssertionError("the last failure should be raised")
 
 
 # ── Roche 新闻稿（roche）────────────────────────────────────────────────
