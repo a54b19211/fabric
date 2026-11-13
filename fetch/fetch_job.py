@@ -44,7 +44,8 @@ def enqueue_fetch(run):
 
 
 def history_fetch_job(run_id: str, attempt: int):
-    """RQ 作业本身：取任务 → 读来源 → 存版本。读不了的原因记在任务上。"""
+    """RQ 作业本身：取任务 → 读来源 → 存版本。读不了的原因记在任务上；别的异常（程序错误）也把任务记成失败，
+    不让它一直停在 running。"""
     try:
         request = history.job_input(run_id, attempt)
         result = history.finish_fetch(run_id, attempt, read_public(request))
@@ -52,4 +53,7 @@ def history_fetch_job(run_id: str, attempt: int):
     except HistoryError as exc:
         if exc.code != "stale_attempt":
             history.fail_job(run_id, attempt, exc.code, exc.message)
+        raise
+    except Exception as exc:
+        history.fail_job(run_id, attempt, "job_crashed", type(exc).__name__)
         raise
