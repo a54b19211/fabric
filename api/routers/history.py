@@ -100,21 +100,6 @@ def require_admin(
     return "history-admin"
 
 
-def require_graph_query(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-):
-    token = _credential(credentials)
-    expected = os.environ.get("DATAFABRIC_GRAPH_QUERY_TOKEN", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail={
-            "code": "graph_query_not_configured", "message": "当前图查询尚未配置"
-        })
-    if not hmac.compare_digest(token, expected):
-        raise HTTPException(status_code=403, detail={
-            "code": "graph_query_credential_required", "message": "需要当前图查询凭据"
-        })
-
-
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)

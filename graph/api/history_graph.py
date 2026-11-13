@@ -1,4 +1,4 @@
-"""唐组图谱在 /api/history 下的接口：固定图版本的邻域、实体解析、路径、子图，原生图捕获，图发布状态，PrimeKG。
+"""唐组图谱在 /api/history 下的接口：固定图版本的邻域、实体解析、路径、子图，原生图捕获，图发布状态。
 雷达只用 /graph/{version_id}/resolve。"""
 
 from datetime import datetime
@@ -7,38 +7,14 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.routers.history import BoundedHistoryRoute, _call, require_admin, require_graph_query, require_read
+from api.routers.history import BoundedHistoryRoute, _call, require_admin, require_read
 from graph.publish import history_graph
-from graph.publish.graph_query import (
-    PrimeKGLookupResult,
-    PrimeKGResult,
-    lookup_primekg,
-    query_primekg,
-)
 from graph.publish.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
-from graph.publish.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGLookup, PrimeKGQuery
+from graph.publish.reviewed_graph import GraphNeighborhood, GraphResolution
 from store import history as store
 from store.history_models import Mode, RunView
 
 router = APIRouter(prefix="/api/history", tags=["图谱"], route_class=BoundedHistoryRoute)
-
-
-@router.post(
-    "/graph/primekg/lookup", response_model=PrimeKGLookupResult,
-    dependencies=[Depends(require_graph_query)],
-)
-def primekg_lookup(body: PrimeKGLookup):
-    return _call(lookup_primekg, body)
-
-
-@router.post(
-    "/graph/primekg/capture", response_model=PrimeKGResult,
-    dependencies=[Depends(require_graph_query)],
-)
-def primekg_capture(
-    body: PrimeKGQuery, idempotency_key: str = Header(alias="Idempotency-Key")
-):
-    return _call(query_primekg, body, idempotency_key)
 
 
 @router.get(
