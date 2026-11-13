@@ -1,5 +1,5 @@
 """Pydantic 模型导出"""
-from api.schemas.request import (
+from graph.api.schemas.request import (
     BatchApproveEntitiesRequest,
     BatchApproveRelationsRequest,
     BatchRejectEntitiesRequest,
@@ -10,7 +10,7 @@ from api.schemas.request import (
     ResolveMergeRequest,
     ReviewActionRequest,
 )
-from api.schemas.response import (
+from graph.api.schemas.response import (
     AttachmentItem,
     DisambigCandidate,
     DisambigInfo,

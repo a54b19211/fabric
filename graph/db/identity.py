@@ -530,7 +530,7 @@ def refresh_link_dependencies(session, log):
     log.after_snapshot = after
 
 def merge_dictionary_identities(session, keeper_dict_id, absorbed_dict_ids, field_decisions, reviewer, note='', review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     reviewer = require_trusted_review_context(review_context)
     absorbed_dict_ids = list(dict.fromkeys(absorbed_dict_ids))
     if not absorbed_dict_ids or keeper_dict_id in absorbed_dict_ids:
@@ -596,7 +596,7 @@ def merge_dictionary_identities(session, keeper_dict_id, absorbed_dict_ids, fiel
 
 
 def link_entity(session, entity, target_dict_id, reviewer, note='', review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     reviewer = require_trusted_review_context(review_context)
     dictionary_ids = sorted({value for value in (entity.dict_id, target_dict_id) if value})
     dictionaries = session.query(EntityDict).filter(EntityDict.id.in_(dictionary_ids)).order_by(EntityDict.id).populate_existing().with_for_update().all()
@@ -618,7 +618,7 @@ def link_entity(session, entity, target_dict_id, reviewer, note='', review_conte
 
 
 def rollback_identity_merge(session, merge_log_id, reason='', review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     reviewer = require_trusted_review_context(review_context)
     log = session.query(EntityMergeLog).filter(EntityMergeLog.id == merge_log_id).populate_existing().with_for_update().first()
     if log is None or log.is_rolled_back:
@@ -677,7 +677,7 @@ def rollback_identity_merge(session, merge_log_id, reason='', review_context=Non
 
 
 def resolve_link_proposal(proposal_id, status, reviewer, note='', session=None, review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     reviewer = require_trusted_review_context(review_context)
     if status not in ('approved', 'rejected', 'withdrawn'):
         raise ValueError('Invalid proposal decision')
@@ -751,7 +751,7 @@ def get_primekg_mapping_proposals(status='pending', dict_id=None, limit=100, ses
 
 
 def resolve_primekg_mapping_proposal(proposal_id, status, reviewer, note='', session=None, review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     reviewer = require_trusted_review_context(review_context)
     if status not in ('approved', 'rejected', 'withdrawn'):
         raise ValueError('Invalid mapping decision')

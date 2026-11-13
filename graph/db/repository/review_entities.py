@@ -121,7 +121,7 @@ def _dedup_extracted_entities_by_dict_id(session, dict_id: int, keeper_id: int) 
 
 def _authorized_reviewer(reviewer, confirm_identity, basis, review_context):
     """Identity confirmation needs a trusted review context and a stated basis; plain approval a human reviewer."""
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import require_human_reviewer
     if confirm_identity:
         reviewer = require_trusted_review_context(review_context)
@@ -230,7 +230,7 @@ def _approval_after_state(ent, target, target_id, confirm_identity, basis, valid
 
 def approve_entity_with_alias_writeback(entity_id, reviewer, note='', dict_id=None, force_new=False,
                                         confirm_identity=False, basis='', evidence=None, session=None, review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import link_entity, use_session, validate_evidence
     reviewer = _authorized_reviewer(reviewer, confirm_identity, basis, review_context)
     expected, expected_target_id, expected_target, recorded_evidence, allowed_sources = _approval_snapshots(

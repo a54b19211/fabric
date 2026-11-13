@@ -325,10 +325,12 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
     from fastapi.testclient import TestClient
 
     from api.routers.history import router
+    from graph.api.history_graph import router as history_graph_router
 
     source, target = databases
     app = FastAPI()
     app.include_router(router)
+    app.include_router(history_graph_router)
     from unittest.mock import patch
 
     # Endpoint uses the same actual source/target engines, not a fake successful read.
@@ -512,7 +514,7 @@ def test_extra_write_failure_rolls_back_document_and_capture_in_same_source_tran
 
 
 def test_dictionary_qualification_withdrawal_dirties_referencing_graph_only(databases, monkeypatch):
-    from api.review_auth import principal_from_token
+    from graph.api.review_auth import principal_from_token
     from graph.db import repository
     source, _target = databases
     value = snapshot("dict-qualification")

@@ -19,6 +19,7 @@ from integration_history import pg, pg_engine  # noqa: F401 -- shared PG fixture
 from sqlalchemy import text
 
 from api.routers.history import router
+from graph.api.history_graph import router as history_graph_router
 from graph.publish import graph_publish, graph_query
 from graph.publish.reviewed_graph import PrimeKGQuery
 from store import history as store
@@ -148,6 +149,7 @@ def graph_api(pg, monkeypatch):
     ))
     app = FastAPI()
     app.include_router(router)
+    app.include_router(history_graph_router)
     with TestClient(app) as client:
         yield SimpleNamespace(client=client, state=state, engine=pg, app=app)
 

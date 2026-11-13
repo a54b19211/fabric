@@ -7,8 +7,8 @@ from loguru import logger
 from sqlalchemy import false, func, or_
 from sqlalchemy.orm import aliased
 
-from api.review_auth import optional_review_principal, require_review_principal
-from api.schemas.request import (
+from graph.api.review_auth import optional_review_principal, require_review_principal
+from graph.api.schemas.request import (
     BatchApproveEntitiesRequest,
     BatchApproveRelationsRequest,
     BatchRejectEntitiesRequest,
@@ -23,7 +23,7 @@ from api.schemas.request import (
     ReviewActionRequest,
     RollbackMergeRequest,
 )
-from api.schemas.response import (
+from graph.api.schemas.response import (
     CompareEntitiesResponse,
     DictCandidateItem,
     DictCandidateListResponse,

@@ -300,7 +300,7 @@ def resolve_merge(
     resolution: accept_new | keep_existing | custom
     custom 时需要传 resolved_value。
     """
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import use_session
     reviewer = require_trusted_review_context(review_context)
     if resolution not in ('accept_new', 'keep_existing', 'custom') or (resolution == 'custom' and resolved_value is None):
@@ -362,7 +362,7 @@ def batch_resolve_merges(
     批量解决合并冲突。一次请求解决同 dict_id 下所有冲突字段。
     decisions: [{merge_id, resolution, resolved_value?}]
     """
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import use_session
     reviewer = require_trusted_review_context(review_context)
     for decision in decisions:
@@ -600,7 +600,7 @@ def merge_entities(keeper_dict_id, absorbed_dict_ids, field_decisions, reviewer=
 
 
 def rollback_merge(merge_log_id, reason='', session=None, review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import rollback_identity_merge, use_session
     require_trusted_review_context(review_context)
     with use_session(session) as active:

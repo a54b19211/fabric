@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from api.review_auth import principal_from_token
+from graph.api.review_auth import principal_from_token
 from graph.db import repository as repo
 from graph.db.identity import auditable_identity, get_object_evidence
 from graph.db.models import (
@@ -524,7 +524,7 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from api.routers import review
+    from graph.api import review
     doc_uuid = 'http-evidence-' + uuid4().hex
     raw = 'Synthetic Company A sponsors Synthetic Company B.'
     evidence = freeze_document(doc_uuid, raw)
@@ -690,7 +690,7 @@ def test_current_review_evidence_cannot_borrow_appended_unreviewed_version(sessi
 
 
 def test_review_lists_include_recorded_second_source_without_copying_mentions(session, monkeypatch):
-    from api.routers import review
+    from graph.api import review
     from graph.db.identity import record_evidence
     first, second = 'first-list-' + uuid4().hex, 'second-list-' + uuid4().hex
     records = [{'entity_type': 'Company', 'entity_name': target.canonical_data['name'], 'dict_id': target.id,

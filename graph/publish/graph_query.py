@@ -5,6 +5,7 @@ from typing import Literal
 
 from sqlalchemy import text
 
+from graph.publish import history_graph
 from graph.publish.graph_publish import _read_primekg, capture_primekg, publish_primekg
 from graph.publish.reviewed_graph import GraphNeighborhood, PrimeKGLookup, PrimeKGQuery
 from store import history as store
@@ -45,7 +46,7 @@ def _result(request, run):
         cutoff = store._now(conn)
     if native is None:
         raise HistoryError("graph_not_published", "查询图版本尚不可读取", 409)
-    result = store.read_graph_neighborhood(
+    result = history_graph.read_graph_neighborhood(
         run.version_ids[0], "primekg_graph", native, False, "current", cutoff,
         seed_ids=["primekg." + request.node_source + "|" + request.seed_id],
         max_depth=1, max_nodes=100, max_edges=200,

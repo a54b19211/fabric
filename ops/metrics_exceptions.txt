@@ -15,12 +15,12 @@
 # ---- (b) The team's older shared code ----
 # Code the team wrote before this round: under 40% of each function's lines come from the rebuild line (under
 # 10% for all but five of them). Each entry names the split it needs.
-api/routers/agent.py:get_pipeline_overview  133/27  review-console endpoint that assembles one response from several queries; split by response section
-api/routers/agent.py:list_merge_candidates  85/18  review-console endpoint that assembles one response from several queries; split by response section
-api/routers/documents.py:get_document  73/24  document endpoint with many optional filters and joins in one query builder; split filter parsing from the query
-api/routers/documents.py:list_documents  82/22  document endpoint with many optional filters and joins in one query builder; split filter parsing from the query
-api/routers/extraction.py:trigger_extraction  96/14  legacy extraction trigger, retires with the old extraction queue (audit 1.4)
-api/routers/review.py:get_review_stats  98/10  review graph/statistics endpoint building the whole view in one pass; split per view section
+graph/api/agent.py:get_pipeline_overview  133/27  review-console endpoint that assembles one response from several queries; split by response section
+graph/api/agent.py:list_merge_candidates  85/18  review-console endpoint that assembles one response from several queries; split by response section
+graph/api/documents.py:get_document  73/24  document endpoint with many optional filters and joins in one query builder; split filter parsing from the query
+graph/api/documents.py:list_documents  82/22  document endpoint with many optional filters and joins in one query builder; split filter parsing from the query
+graph/api/extraction.py:trigger_extraction  96/14  legacy extraction trigger, retires with the old extraction queue (audit 1.4)
+graph/api/review.py:get_review_stats  98/10  review graph/statistics endpoint building the whole view in one pass; split per view section
 fetch/extractors/dates.py:normalize_date  109/18  date normaliser with one branch per accepted format; table-driven rewrite
 fetch/document_evidence.py:attach_document_evidence  71/35  evidence attachment: one branch per source/material kind; split per kind
 graph/extraction/extraction_prompts.py:get_pubmed_extraction_prompt  88/21  prompt text builder, long because of the embedded schema description; move the text to data

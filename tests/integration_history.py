@@ -14,6 +14,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from api.routers.history import router
+from graph.api.history_graph import router as history_graph_router
+from graph.publish import history_graph
 from store import history as store
 from store.history_models import (
     ArchiveImport,
@@ -396,6 +398,7 @@ def test_fetch_attempt_cas_prevents_stale_publish(pg):
 def test_http_auth_real_demo_receipt_and_raw_permissions(pg, monkeypatch):
     app = FastAPI()
     app.include_router(router)
+    app.include_router(history_graph_router)
     client = TestClient(app)
     assert client.get("/api/history/sources").status_code == 401
     read = {"Authorization": "Bearer test-reader-only"}
@@ -648,7 +651,7 @@ def test_graph_roundtrip_unicode_quote_and_idempotency(pg, monkeypatch):
     assert graph.edges[0].evidence[0].quote == "药物甲靶向蛋白乙。"
     assert graph.nodes[0].identity_status == "confirmed"
     assert _publish_fixture_graph(observation, "graph-fixture").version_ids == run.version_ids
-    result = store.read_graph_neighborhood(
+    result = history_graph.read_graph_neighborhood(
         run.version_ids[0],
         "reviewed_graph",
         payload["source_record_id"],
@@ -661,7 +664,7 @@ def test_graph_roundtrip_unicode_quote_and_idempotency(pg, monkeypatch):
     assert len(result.edges) == 1 and result.edges[0].target.id == "20"
     assert result.graph_ref.version_id == run.version_ids[0]
     assert result.coverage.scope == "selected_published_subgraph"
-    resolved = store.read_graph_resolution(
+    resolved = history_graph.read_graph_resolution(
         run.version_ids[0],
         "reviewed_graph",
         payload["source_record_id"],
@@ -720,6 +723,7 @@ def test_graph_dependencies_revoke_normal_version_raw_and_neighborhood(pg, monke
     assert "reviewed_graph" not in available and "legacy_documents" not in available
     app = FastAPI()
     app.include_router(router)
+    app.include_router(history_graph_router)
     client = TestClient(app)
     params = {
         "source_id": "reviewed_graph",
@@ -860,7 +864,7 @@ def test_primekg_only_replays_background_after_local_first_seen(pg, monkeypatch)
             {"id": run.version_ids[0]},
         ).scalar_one()
         now = store._now(conn)
-    result = store.read_graph_resolution(
+    result = history_graph.read_graph_resolution(
         run.version_ids[0],
         "primekg_graph",
         row["source_record_id"],
@@ -1758,6 +1762,7 @@ def test_gdelt_leads_are_listed_by_window_with_the_receipts_of_the_windows(pg, m
     assert refused.value.code == "invalid_window"
     app = FastAPI()
     app.include_router(router)
+    app.include_router(history_graph_router)
     over_http = TestClient(app).get("/api/history/records", headers={"Authorization": "Bearer test-reader-only"}, params={
         "source_id": "gdelt_doc", "is_demo": "false", "mode": "operational_replay", "cutoff": now.isoformat(),
         "window_start": "2026-10-30T00:00:00Z", "window_end": "2026-10-30T00:30:00Z"})

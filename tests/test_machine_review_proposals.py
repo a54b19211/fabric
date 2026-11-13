@@ -67,7 +67,7 @@ def test_failed_save_is_reported_and_cannot_claim_a_saved_proposal():
 
 
 def test_api_serialization_preserves_proposal_meaning_and_counts():
-    from api.routers.agent import AgentReviewResult, DocumentReviewResponse
+    from graph.api.agent import AgentReviewResult, DocumentReviewResponse
     proposal = AgentReviewResult(decision="proposal_approved", decision_type="proposal",
                                  proposed_decision="approved", applied=False,
                                  review_status="pending", proposal_saved=True)
@@ -102,7 +102,7 @@ def test_document_history_counts_proposals_separately():
 
 
 def test_document_endpoint_keeps_proposal_counts_and_does_not_change_status():
-    from api.routers import agent
+    from graph.api import agent
 
     proposal = {"decision": "proposal_approved", "decision_type": "proposal",
                 "proposed_decision": "approved", "applied": False,
@@ -124,7 +124,7 @@ def test_document_endpoint_keeps_proposal_counts_and_does_not_change_status():
 
 
 def test_persisted_run_and_stats_expose_suggestions_as_suggestions():
-    from api.routers import agent
+    from graph.api import agent
 
     with patch.object(agent, "get_agent_run", return_value={"decision": "proposal_approved"}), \
          patch.object(agent, "get_agent_stats", return_value={"entity_review": {"proposal_approved": 1}}):
@@ -225,7 +225,7 @@ def test_conflict_graph_without_a_structured_proposal_escalates_instead_of_inven
 
 
 def test_conflict_endpoint_serializes_proposal_value_and_persisted_history():
-    from api.routers import agent
+    from graph.api import agent
 
     result = {"decision": "proposal_accept_new", "decision_type": "proposal",
               "proposed_decision": "accept_new", "resolved_value": "PHASE3", "applied": False,

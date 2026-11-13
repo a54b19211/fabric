@@ -29,7 +29,7 @@ def get_pending_review_relations(limit: int = 50) -> list[dict]:
 
 
 def approve_relation(id, reviewer, note='', evidence=None, session=None, review_context=None):
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import (
         auditable_entity_identity,
         auditable_identity,
@@ -128,7 +128,7 @@ def reject_relation(id: int, reviewer: str, note: str = "") -> None:
 def batch_approve_relations(source_doc_uuid='', source_site='', reviewer='', note='',
                             min_confidence=0.0, review_context=None):
     """Apply the same fixed-evidence and endpoint checks to every selected relation."""
-    from api.review_auth import require_trusted_review_context
+    from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import use_session
     from store.history_models import HistoryError
     reviewer = require_trusted_review_context(review_context)

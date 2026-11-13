@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from api.routers import research
+from graph.api import research
 from graph.db.models import Document
 
 

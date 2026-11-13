@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy import and_, false, func, or_
 
 from api.routers.history import require_admin
-from api.schemas.request import ExtractionTriggerRequest, PendingExtractRequest
-from api.schemas.response import (
+from graph.api.schemas.request import ExtractionTriggerRequest, PendingExtractRequest
+from graph.api.schemas.response import (
     ExtractionStatsResponse,
     ExtractionStatusResponse,
     ExtractionTriggerResponse,

@@ -1,5 +1,1 @@
-# -*- coding: utf-8 -*-
-"""路由模块导出"""
-from api.routers import agent, documents, extraction, review, weknora
-
-__all__ = ["documents", "extraction", "review", "weknora", "agent"]
+"""雷达读的接口：历史资料 history.py、测量 measurements.py。"""

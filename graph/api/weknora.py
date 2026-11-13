@@ -2,8 +2,8 @@
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
-from api.schemas.request import FullGraphSyncRequest, GraphSyncRequest
-from api.schemas.response import GraphSyncResponse, GraphSyncStatsResponse, GraphSyncStatusCount
+from graph.api.schemas.request import FullGraphSyncRequest, GraphSyncRequest
+from graph.api.schemas.response import GraphSyncResponse, GraphSyncStatsResponse, GraphSyncStatusCount
 from graph.db.repository import (
     batch_mark_entity_dict_failed,
     batch_mark_entity_dict_synced,

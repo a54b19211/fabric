@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.exception_logger import ExceptionLogger
-from api.routers import agent, documents, extraction, history, measurements, research, review, weknora
+from api.routers import history, measurements
+from graph.api import agent, documents, extraction, history_graph, research, review, weknora
 
 app = FastAPI(
     title="ZK Data Fabric 审核后台 API",
@@ -45,6 +46,7 @@ app.include_router(weknora.router)
 app.include_router(agent.router)
 app.include_router(research.router)
 app.include_router(history.router)
+app.include_router(history_graph.router)
 app.include_router(measurements.router)
 
 

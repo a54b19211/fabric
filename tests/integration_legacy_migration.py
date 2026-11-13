@@ -292,9 +292,9 @@ def test_a_new_graph_package_may_not_cite_a_retired_source_and_an_old_one_still_
     old = _publish_fixture_graph(observation, "before-retirement")  # the bridge and its refusal are open (fixture)
     assert old.version_ids
     # the refusal is back in force; the writer stays open so the same documents are adopted again (idempotently)
-    from store import history
+    from graph.publish import history_graph
 
-    monkeypatch.setattr(history, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
+    monkeypatch.setattr(history_graph, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
     with pytest.raises(HistoryError) as error:
         _publish_fixture_graph(observation, "after-retirement")
     assert error.value.code == "graph_evidence_retired_source" and "legacy_documents" in error.value.message

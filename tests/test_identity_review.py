@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from api.schemas.request import ReviewActionRequest
+from graph.api.schemas.request import ReviewActionRequest
 from graph.db.models import EntityDict, EntityRelation, ExtractedEntity
 
 
@@ -65,7 +65,7 @@ def test_persistence_models_include_immutable_source_reference_and_unknown_dates
 def test_client_name_is_not_a_trusted_review_identity(monkeypatch):
     import json
 
-    from api.review_auth import ReviewPrincipal, principal_from_token, require_trusted_review_context
+    from graph.api.review_auth import ReviewPrincipal, principal_from_token, require_trusted_review_context
     monkeypatch.setenv('DATAFABRIC_REVIEW_TOKENS', json.dumps({'fixture-token': 'server-owned-reviewer'}))
     with pytest.raises(ValueError, match='trusted'):
         require_trusted_review_context('human')
@@ -96,7 +96,7 @@ def test_sensitive_api_rejects_client_claimed_human_without_review_token(path, p
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from api.routers.review import router
+    from graph.api.review import router
     monkeypatch.delenv('DATAFABRIC_REVIEW_TOKENS', raising=False)
     app = FastAPI()
     app.include_router(router)
@@ -147,8 +147,8 @@ def test_patch_changes_invalidate_existing_confirmation_and_relation_review(monk
     from contextlib import contextmanager
     from unittest.mock import MagicMock
 
-    from api.routers import review
-    from api.schemas.request import PatchEntityRequest, PatchRelationRequest
+    from graph.api import review
+    from graph.api.schemas.request import PatchEntityRequest, PatchRelationRequest
     row = ExtractedEntity(entity_data={'id': 'old'}, review_status='approved',
         identity_confirmed_by='old-human', identity_confirmed_at=datetime.now(timezone.utc),
         identity_confirmation_basis='Old identifier checked')

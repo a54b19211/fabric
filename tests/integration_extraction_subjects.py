@@ -12,7 +12,7 @@ NCT = "NCT09997001"
 
 
 def _setup(monkeypatch):
-    import api.routers.documents as documents_api
+    import graph.api.documents as documents_api
     import graph.db.repository as repository
     import graph.db.session
     import graph.extraction.extraction_flow as flow
@@ -72,7 +72,7 @@ def test_a_history_only_version_reaches_pending_review_and_v1_stays_v1(databases
         assert outbox == 0
 
     # 详情页按引用读回同一份清洗正文
-    import api.routers.documents as documents_api
+    import graph.api.documents as documents_api
 
     detail = documents_api.get_document(queued["uuid"])
     assert detail.history_ref["version_id"] == v1 and "RECRUITING" in detail.raw_content
@@ -143,7 +143,7 @@ def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    import api.routers.documents as documents_api
+    import graph.api.documents as documents_api
     from graph.db.extraction_subjects import enqueue_version
     from graph.extraction.extraction_rq_job import extraction_job
     from store import history
