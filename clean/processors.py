@@ -2,7 +2,7 @@
 
 A processor's applicability is a predicate over the source (not a list kept beside it): the sources with attachments are
 the collection catalog's, the registry-difference sources are the ones named here, the sources that are never cleaned
-are the graph sources. The capabilities Fabric publishes per source (fetch.source_capabilities) and the
+are the graph sources. The capabilities Fabric publishes per source (store.source_listing) and the
 processing stages (clean.clean_stage, clean.registry_changes) read these names, so there is one list to change.
 """
 
@@ -20,8 +20,6 @@ REGISTRY_DIFF_SOURCES = frozenset({"clinicaltrials"})
 # narrative sources whose cleaned text is read for measurements (datafabric.measure_extract); one at a time, each
 # behind its acceptance slice (WHO DON case counts first)
 MEASURE_SOURCES = ("who_don",)
-# who says what kind of material a record is: Fabric's document evidence (fetch.document_evidence), not the reader
-MATERIAL_KIND_SOURCE = "fabric_document_evidence"
 
 
 def _attachment_sources() -> frozenset[str]:
@@ -57,13 +55,3 @@ def processor(name: str) -> Processor:
 def applicable(source_id: str) -> dict[str, str]:
     """processor name -> version, for the processors that apply to this source."""
     return {item.name: item.version for item in PROCESSORS if item.applies(source_id)}
-
-
-def definition() -> list[dict]:
-    """The static declaration, for the definition digest: names, versions, artifact kinds, and the sources each applies
-    to among those given by the collection catalog and the graph sources."""
-    from fetch.catalog import CATALOG
-
-    sources = sorted({*CATALOG, *UNCLEANED_SOURCES, "external_archive", "legacy_documents"})
-    return [{"name": item.name, "version": item.version, "artifact": item.artifact,
-             "sources": [s for s in sources if item.applies(s)]} for item in PROCESSORS]

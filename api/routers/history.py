@@ -21,7 +21,6 @@ from graph.publish.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
 from graph.publish.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGLookup, PrimeKGQuery
 from store import history as store
 from store.history_models import (
-    BUSINESS_TYPES,
     ArchiveImport,
     FetchRequest,
     HistoryError,
@@ -143,14 +142,9 @@ def _call(function, *args, **kwargs):
 
 
 class SourceList(BaseModel):
-    business_types: list[str]
+    capabilities_version: str
     sources: list[dict]
-    # added with the per-source capabilities; a consumer that reads only `sources` is unaffected
-    capabilities_version: str | None = None
-    definition_sha256: str | None = None
-    receipt_sha256: str | None = None
-    retired_sources: list[dict] = []
-    unavailable_sources: list[dict] = []
+    retired_sources: list[dict]
 
 
 class RetryRequest(BaseModel):
@@ -160,9 +154,7 @@ class RetryRequest(BaseModel):
 
 @router.get("/sources", response_model=SourceList, dependencies=[Depends(require_read)])
 def sources():
-    receipt = _call(store.sources_receipt)
-    receipt.pop("readable_source_ids")  # for in-process callers; the receipt lists what is readable per source
-    return {"business_types": list(BUSINESS_TYPES), **receipt}
+    return _call(store.sources_receipt)
 
 
 @router.post(

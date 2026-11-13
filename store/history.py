@@ -104,15 +104,14 @@ def _source(conn, source_id, *, lock=False, _seen=None):
 
 
 def sources_receipt():
-    """The source list as published (store.source_listing): sources, retired_sources, unavailable_sources with their
-    capabilities, the two digests, and readable_source_ids (every source readable now, retired ones included)."""
-    from fetch.retired_sources import RETIRED
+    """GET /api/history/sources (store.source_listing): the readable sources and the retired ones, each with its
+    name and the capabilities the radar reads."""
     from store import source_listing
 
     with history_engine().begin() as conn:
-        rows = list(conn.execute(text("SELECT * FROM history_sources ORDER BY source_id")).mappings())
-        lifecycle = source_listing.lifecycle(conn, sorted(RETIRED))
-    return source_listing.listing(rows, lifecycle, allowed_sources(), _catalog_dependencies)
+        rows = list(conn.execute(text(
+            "SELECT source_id, read_enabled, catalog FROM history_sources ORDER BY source_id")).mappings())
+    return source_listing.listing(rows, allowed_sources(), _catalog_dependencies)
 
 
 def list_sources():

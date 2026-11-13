@@ -41,17 +41,8 @@ def test_a_new_attachment_source_gets_the_attachment_processor_without_another_e
     assert "attachment_parse" in processors.applicable("brand_new_site")
 
 
-def test_the_definition_lists_each_processor_with_the_sources_it_applies_to():
-    definition = {item["name"]: item for item in processors.definition()}
-    assert definition["registry_diff"]["sources"] == ["clinicaltrials"]
-    assert "reviewed_graph" not in definition["clean_text"]["sources"]
-    assert set(definition["attachment_parse"]["sources"]) >= {"pubmed", "local_files", "nmpa"}
-
-
 def test_measurements_are_read_from_the_declared_sources_only():
     assert processors.MEASURE_SOURCES == ("who_don",)
     assert processors.applicable("who_don")["measure_extract"] == "datafabric.measure_extract.v6"
     assert "measure_extract" not in processors.applicable("clinicaltrials")
     assert "measure_extract" not in processors.applicable("reviewed_graph")
-    definition = {item["name"]: item for item in processors.definition()}
-    assert definition["measure_extract"]["sources"] == ["who_don"]

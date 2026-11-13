@@ -98,7 +98,9 @@ def readable_sources() -> set[str]:
     from store import history
 
     try:
-        return set(history.sources_receipt()["readable_source_ids"])
+        receipt = history.sources_receipt()
+        return {item["source_id"] for item in receipt["sources"] + receipt["retired_sources"]
+                if item["capabilities"]["readable"]}
     except Exception:  # noqa: BLE001
         return set()
 
