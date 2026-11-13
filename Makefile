@@ -8,9 +8,6 @@ PYTHON ?= 3.10
 EXTRACTION_CONTRACT_WHEELS ?= ../extraction-contract/dist
 # the shared model transport wheel (built in the sibling llm-transport checkout; hash in the lock)
 LLM_TRANSPORT_WHEELS ?= ../llm-transport/dist
-# the real-checker integration tests run the BioCheck rules from a BioCheck checkout in its own venv
-BIOCHECK_SRC ?= ../clean-biocheck
-BIOCHECK_PYTHON ?= $(BIOCHECK_SRC)/.venv/bin/python
 VENV ?= .venv
 PY = $(VENV)/bin/python
 LOCK_INPUTS = requirements.txt requirements-contract.txt requirements-llm-transport.txt
@@ -37,8 +34,7 @@ venv:
 test: venv
 	$(PY) -m pytest
 test-integration: venv
-	PYTHON=$(abspath $(PY)) BIOCHECK_SRC=$(abspath $(BIOCHECK_SRC)) BIOCHECK_PYTHON=$(abspath $(BIOCHECK_PYTHON)) \
-	  bash ops/run_integration_tests.sh
+	PYTHON=$(abspath $(PY)) bash ops/run_integration_tests.sh
 lint: venv
 	$(PY) -m ruff check .
 metrics: venv

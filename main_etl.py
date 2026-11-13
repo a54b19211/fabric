@@ -82,13 +82,12 @@ def report_fetch(run_id):
 
 
 def clean(run_id):
-    """洗：对这次抓取留下的版本，一次写好干净正文、编号、画像，并登记建索引的待办和核验任务。规则在 clean/ 目录。"""
+    """洗：对这次抓取留下的版本，一次写好干净正文、编号、画像，并登记建索引的待办。规则在 clean/ 目录。"""
     if not run_id:
         raise SystemExit("清洗要知道处理哪次抓取留下的版本：请加 --run <运行号>")
     c = clean_stage.process_versions(history.read_run(run_id).version_ids)
     return (f"新清洗 {c['cleaned']} 份正文、沿用旧结果 {c['reused']} 份、等附件正文 {c['waiting_for_attachment_text']} 份；"
-            f"这些版本都有了画像（共 {c['profiled']} 份，已有的直接沿用），登记了 {c.get('index_enqueued', 0)} 个建索引待办、"
-            f"{c.get('checks_enqueued', 0)} 个核验任务")
+            f"这些版本都有了画像（共 {c['profiled']} 份，已有的直接沿用），登记了 {c.get('index_enqueued', 0)} 个建索引待办")
 
 
 def counted(items):

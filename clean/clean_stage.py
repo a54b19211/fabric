@@ -7,8 +7,7 @@ stage_status() 给出各来源的进度；for_versions() 把一页版本的产�
 
 读写的表：读 history_versions 和 history_sources；用 derived_stage_chunks（按来源和发表序号分块的认领与结果）和
 derived_stage_waiting（附件还没解析完的等待表）做工作队列；写 derived_clean_text（清洗正文）、derived_identifiers（编号）、
-derived_profiles（画像）。写画像的同一个事务里还会给 index_publications（建索引待办）和 derived_extraction_check_tasks
-（编号、画像的核验任务）排活。
+derived_profiles（画像）。写画像的同一个事务里还会给 index_publications（建索引待办）排活。
 
 原有说明里的事实：
 
@@ -371,11 +370,6 @@ def _write_rows(conn, clean_rows, id_rows, profile_rows, counts):
 
         counts["index_enqueued"] = counts.get("index_enqueued", 0) + enqueue_versions(
             conn, [row["v"] for row in profile_rows])
-        # v3 6.2: the extraction-consistency checks of these products, registered in the same transaction
-        from clean.extraction_checks import enqueue as enqueue_checks
-
-        counts["checks_enqueued"] = counts.get("checks_enqueued", 0) + enqueue_checks(
-            conn, [(row["v"], row["tpv"]) for row in profile_rows])
 
 
 def _process_waiting(engine, key, counts, limit=500):

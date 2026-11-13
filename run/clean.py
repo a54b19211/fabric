@@ -6,7 +6,7 @@
 
 读写的表：本文件自己不碰表，都经 clean/clean_stage.py：读 history_versions 和 history_sources；用 derived_stage_chunks 和
 derived_stage_waiting 做工作队列；写 derived_clean_text、derived_identifiers、derived_profiles，并在同一事务里给
-index_publications 和 derived_extraction_check_tasks 排活。
+index_publications 排活。
 
 用法：python -m run.clean --once
       python -m run.clean --loop --poll-seconds 60

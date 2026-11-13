@@ -19,16 +19,11 @@
 # PYTHON           the interpreter with the locked dependencies (default .venv/bin/python, `make venv`)
 # ITEST_PREFIX     container name prefix (default fabric-itest)
 # ITEST_MANIFEST   the container manifest (default .test-artifacts/fabric-itest-<run id>.containers.jsonl in the checkout, git-ignored)
-# BIOCHECK_SRC     a BioCheck checkout for the real-checker tests (default ../clean-biocheck; without one
-#                  those tests are reported as skipped)
-# BIOCHECK_PYTHON  the interpreter of that checkout (default $BIOCHECK_SRC/.venv/bin/python)
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 PY=${PYTHON:-$ROOT/.venv/bin/python}
 PREFIX=${ITEST_PREFIX:-fabric-itest}
-BIOCHECK_SRC=${BIOCHECK_SRC:-$ROOT/../clean-biocheck}
-BIOCHECK_PYTHON=${BIOCHECK_PYTHON:-$BIOCHECK_SRC/.venv/bin/python}
 PG_IMAGE=paradedb/paradedb:v0.25.11-pg17
 REDIS_IMAGE=redis:7.4-alpine
 [ -x "$PY" ] || { echo "no interpreter at $PY: run make venv first" >&2; exit 2; }
@@ -156,12 +151,6 @@ for t in $TARGETS; do
   esac
 done
 export PYTHONDONTWRITEBYTECODE=1
-if [ -f "$BIOCHECK_SRC/app/service.py" ]; then
-  export DATAFABRIC_TEST_BIOCHECK_SRC=$BIOCHECK_SRC DATAFABRIC_TEST_BIOCHECK_PYTHON=$BIOCHECK_PYTHON
-  echo "BioCheck checkout for the real-checker tests: $BIOCHECK_SRC"
-else
-  echo "no BioCheck checkout at $BIOCHECK_SRC: the real-checker tests are skipped"
-fi
 OPTS="-p no:cacheprovider -o addopts= -q -rfEs"
 FWD="$PY $ROOT/ops/unix_forward.py"
 FAILED=""
