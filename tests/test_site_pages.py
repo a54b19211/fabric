@@ -80,6 +80,14 @@ def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_ol
     assert profile["use_simple_fetch"] is True  # 静态 HTML，简单请求读，不开浏览器
 
 
+def test_fda_press_body_is_the_release_itself_not_the_page_header():
+    """详情页（2026-11-14 存的 <main>）：正文取 div[role=main]（徐子雯 11-13 修正），从“For Immediate Release”起；
+    原来落到 main article，开头多出“FDA News Release / 标题 / More Press Announcements”。"""
+    got = SITE_PROFILES["fda_press"]["detail_extractor"](page("fda_press_detail.html"))
+    assert got["title"].startswith("FDA Approves First Factor") and got["publish_date"] == "2026-11-09"
+    assert got["body_text"].startswith("For Immediate Release:") and "More Press Announcements" not in got["body_text"]
+
+
 # ── FDA 药品安全通讯（fda_drug_safety）───────────────────────────────────
 
 def test_fda_drug_safety_list_is_one_static_table_read_with_a_plain_request_in_a_single_page():
