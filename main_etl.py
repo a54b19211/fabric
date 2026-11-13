@@ -8,6 +8,7 @@
 
     抓  fetch()    按来源目录读一个来源，原件原样存成版本     → history_runs（这次抓取）、history_versions（原件，只追加）
     洗  clean()    出干净正文、找编号、做画像                 → derived_clean_text、derived_identifiers、derived_profiles
+        quality()  徐子雯的字段清洗、编号对齐、五维质量分       → derived_quality_scores、derived_authority_resolutions
         measure()  从清洗正文里读数字（目前只有 who_don 可测）  → derived_measure_runs / _windows，测量对象 derived_measurements
     存  index()    清洗正文送进知识库 WeKnora（配置了才做）     → index_publications 的待办，正文进 WeKnora
 
@@ -16,6 +17,7 @@
     清洗正文  去掉导航、样式后的干净文字，检索和测量读的都是它。
     编号      NCT 试验号、国药准字、PMID、DOI 这类登记号、文号。
     画像      资料是什么类型、来自哪类来源、正文全不全。
+    质量分    完整、准确、及时、权威、可追溯五个维度加权的 0~1 分和等级；“隔离”只是等级，不拦住任何资料。
     待办      表里等着常驻程序处理的一行；各步靠它衔接，不必互相等。
 
   线上不是这样跑的：每一步是 run/ 里的一个常驻程序（ops/systemd/ 里的服务），按表里的待办分段做。
@@ -25,8 +27,10 @@
     python main_etl.py --source nmpa --max 5                 # 抓 nmpa 5 条，后面各步都跑一遍
     python main_etl.py --source clinicaltrials               # 来源目录里能抓的来源都行（本地导入 local_files 除外）
     python main_etl.py --only clean --run <运行号>            # 只清洗之前某次抓取留下的版本
+    python main_etl.py --only quality --run <运行号>          # 只给它们打质量分（要先清洗过）
   环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（历史库）；
-  index 要 DATAFABRIC_INDEX_TARGETS、WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN；measure 的模型路线要 DATAFABRIC_MEASURE_LLM_*。
+  index 要 DATAFABRIC_INDEX_TARGETS、WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN；measure 的模型路线要 DATAFABRIC_MEASURE_LLM_*；
+  quality 的药名对齐要联网（PubChem、ChEMBL、OLS4、UniProt），DATAFABRIC_HISTORY_FETCH_ENABLED=false 时记“降级”照样打分。
   附件随抓取一起下载（预算用完的记成 not_attempted）；附件的正文由常驻的 run/attachments.py 解析，这里不跑。
 """
 
@@ -34,14 +38,14 @@ import argparse
 import time
 from collections import Counter
 
-from clean import clean_stage
+from clean import clean_stage, quality_stage
 from fetch import catalog
 from fetch.fetch_job import history_fetch_job
 from run.measure import run_round as measure_round
 from store import history, index_publication
 from store.history_models import FetchRequest, HistoryError
 
-STEPS = ("fetch", "clean", "measure", "index")
+STEPS = ("fetch", "clean", "quality", "measure", "index")
 STATES = {"completed": "完成", "partial": "部分完成（读满 --max 条或到截止时间就停，来源还没读完，这是正常的）", "failed": "失败"}
 STOPS = {"upstream_exhausted": "来源读完了", "record_budget": "读满了 --max 条", "page_budget": "翻满了页数上限",
          "deadline": "到了 --deadline 截止时间",
@@ -88,6 +92,17 @@ def clean(run_id):
             f"这些版本都有了画像（共 {c['profiled']} 份，已有的直接沿用），登记了 {c.get('index_enqueued', 0)} 个建索引待办")
 
 
+def quality(run_id):
+    """洗：徐子雯的那一段——字段清洗、L3 规范化、编号对齐（药名联网）、五维打分，写分数表和对齐表。规则在 clean/fields.py、
+    clean/align.py、clean/quality.py，由 clean/quality_stage.py 串起来；清洗正文不动，“隔离”不拦截。"""
+    if not run_id:
+        raise SystemExit("打分要知道处理哪次抓取留下的版本：请加 --run <运行号>")
+    c = quality_stage.process_versions(history.read_run(run_id).version_ids)
+    failed = f"；{len(c['failed_versions'])} 份没打成（{c['failed_versions'][0]['error']}）" if c["failed_versions"] else ""
+    return (f"打分 {c['scored']} 份（{counted(Counter(c['levels']).elements()) or '无'}），新对齐 {c['aligned']} 份、"
+            f"沿用已有对齐 {c['alignment_reused']} 份；已经打过分的直接沿用{failed}")
+
+
 def counted(items):
     return "、".join(f"{name} {n}" for name, n in Counter(items).items())
 
@@ -129,6 +144,8 @@ def main(source, max_records, deadline, only=None, run_id=None):
             run_id = fetch(source, max_records, deadline)
         if on("clean"):
             print("clean  ", clean(run_id))
+        if on("quality"):
+            print("quality", quality(run_id))
     except HistoryError as exc:
         raise SystemExit(f"失败：{exc.message}（{exc.code}）") from None
     if on("measure"):
@@ -143,7 +160,7 @@ if __name__ == "__main__":
     parser.add_argument("--max", type=int, default=5, dest="max_records", help="最多抓几条（1~100），默认 5")
     parser.add_argument("--deadline", type=int, default=120, help="抓取的截止秒数（5~120），默认 120；网页站点一页常要 30 秒")
     parser.add_argument("--only", choices=STEPS, help="只跑这一步")
-    parser.add_argument("--run", help="清洗用：之前某次抓取的运行号（单独跑 clean 时必填）")
+    parser.add_argument("--run", help="清洗、打分用：之前某次抓取的运行号（单独跑 clean 或 quality 时必填）")
     args = parser.parse_args()
     if not (1 <= args.max_records <= 100 and 5 <= args.deadline <= 120):
         parser.error("--max 要在 1~100，--deadline 要在 5~120")

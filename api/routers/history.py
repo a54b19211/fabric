@@ -274,12 +274,23 @@ def clean_text_route(
     cutoff: datetime,
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
     processor_version: str | None = None,
+    quality: bool = False,
 ):
     """一页版本的清洗正文（带定位）、编号和画像（分类、四维质量、分流）。v3 3.3。
-    processor_version：只取这个处理器版本的产物（v3 6.1 按引用回读）；不给就是当前处理器。"""
+    processor_version：只取这个处理器版本的产物（v3 6.1 按引用回读）；不给就是当前处理器。
+    quality=true：看得到的版本另带 quality（徐子雯的五维质量分和编号对齐，clean/quality_stage.py；还没打分是 null）。
+    不加这个参数时返回和以前一样（雷达不加）。"""
     from clean.clean_stage import for_versions
 
-    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, processor_version)
+    result = _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, processor_version)
+    if quality:
+        from clean.quality_stage import scores_for
+
+        scores = _call(scores_for, version_ids)
+        for version_id, entry in result["versions"].items():
+            if entry["state"] != "not_visible_or_not_processed":
+                entry["quality"] = scores.get(version_id)
+    return result
 
 
 class SearchRequest(BaseModel):
