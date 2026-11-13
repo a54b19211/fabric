@@ -1014,6 +1014,11 @@ def test_nccn_a_detail_page_that_cannot_be_read_is_noted_and_no_list_only_versio
         "title": "", "version": "2.2026", "attachment_links": [pdf],
         "sections": [{"section_name": "Guidelines", "pdfs": [pdf]}]})
     monkeypatch.setitem(site_crawler.SITE_PROFILES["nccn"]["api"], "categories", ["Supportive Care"])
+
+    def no_download(*args, **kwargs):  # 附件下载不是这个测试要查的：不连外网，只当这个附件没下载成功（记缺口，不存版本）
+        raise ValueError("no network in unit tests")
+
+    monkeypatch.setattr(site_crawler, "_download", no_download)
     batch = read_public(FetchRequest(source_id="nccn", query="records", max_records=5))
     assert [u["url"] for u in batch["unread_items"]] == ["https://www.nccn.org/g/0"]
     assert len(batch["records"]) == 1 and batch["error"]["code"] == "items_unread"  # 只有读到了详情页的那一篇存了
