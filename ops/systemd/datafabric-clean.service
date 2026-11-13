@@ -1,12 +1,16 @@
 [Unit]
-Description=Data-Fabric clean stage: clean text, identifiers and profiles of new versions
+Description=Data-Fabric clean stage: clean text, identifiers, profiles and registry diffs of new versions, then quality scores
 After=network.target
 StartLimitIntervalSec=0
 
-# What it does: takes batches of history_versions without a current profile, writes derived_clean_text,
-# derived_identifiers and derived_profiles, and in the same transaction queues the index work (read run/clean.py).
-# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL (the history database).
-# Several copies may run at once: batches are claimed with SELECT ... FOR NO KEY UPDATE SKIP LOCKED.
+# What it does (read run/clean.py): takes batches of history_versions without a current profile, writes derived_clean_text,
+# derived_identifiers, derived_profiles and the registry diffs, and in the same transaction queues the index work; then,
+# for up to --quality-seconds (default 60), scores profiled versions (Xu's five dimensions, drug names asked of
+# PubChem, ChEMBL, OLS4, UniProt): derived_quality_scores, derived_authority_resolutions.
+# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL (the history database); DATAFABRIC_GSRS_URL optional.
+# Several copies may run at once: batches are claimed with SELECT ... FOR NO KEY UPDATE SKIP LOCKED, scores one version
+# at a time with SELECT ... FOR UPDATE SKIP LOCKED.
+# Paths: WorkingDirectory and the python below are this host's checkout and venv; change both for another deployment.
 # Status: python -m run.clean --status
 
 [Service]
