@@ -264,15 +264,13 @@ def test_primekg_stays_candidate_until_trusted_identity_and_checked_evidence(ses
 
 
 def test_migration_runner_executes_v021_transactionally_and_tracks_it_once(engine, monkeypatch):
-    from migration import migrate
+    from migration import app_ledger, runner
     migration = Path(__file__).resolve().parents[1] / 'migration' / 'versions' / 'V035__identity_evidence.sql'
-    monkeypatch.setattr(migrate, 'get_engine', lambda: engine)
-    monkeypatch.setattr(migrate, '_collect_migrations', lambda: [migration])
-    migrate.run_migrations()
-    migrate.run_migrations()
+    runner.apply('app', engine)
+    runner.apply('app', engine)
     with engine.begin() as conn:
         row = conn.execute(text("SELECT count(*),min(checksum) FROM schema_migrations WHERE version='V035'")).one()
-    assert row[0] == 1 and row[1] == migrate._checksum(migration.read_text())
+    assert row[0] == 1 and row[1] == app_ledger._checksum(migration.read_text())
 
 
 @pytest.fixture(scope='module')
@@ -287,11 +285,8 @@ def real_history_engine():
     with admin.begin() as conn:
         conn.exec_driver_sql('CREATE SCHEMA IF NOT EXISTS ' + schema)
     scoped = create_engine(url, connect_args={'options': '-csearch_path=' + schema})
-    from unittest.mock import patch
-
-    from migration import history as migration
-    with patch.object(migration, 'history_engine', lambda: scoped):
-        migration.migrate_history()
+    from migration import runner
+    runner.apply('history', scoped)
     yield scoped
     scoped.dispose()
     admin.dispose()
@@ -449,15 +444,14 @@ def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, pri
 
 
 def test_complete_migration_stream_preserves_postgresql_function_bodies(engine, monkeypatch):
-    from migration import migrate
+    from migration import runner
     schema = 'opus_identity_migrations_' + uuid4().hex[:10]
     os.environ['DATAFABRIC_IDENTITY_MIGRATION_SCHEMA_RESULT'] = schema
     with engine.begin() as conn:
         conn.exec_driver_sql('CREATE SCHEMA ' + schema)
     scoped = create_engine(engine.url, connect_args={'options': '-csearch_path=' + schema + ',public'})
-    monkeypatch.setattr(migrate, 'get_engine', lambda: scoped)
-    migrate.run_migrations()
-    migrate.run_migrations()
+    runner.apply('app', scoped)
+    runner.apply('app', scoped)
     with scoped.begin() as conn:
         versions = conn.execute(text('SELECT version FROM schema_migrations ORDER BY version')).scalars().all()
         assert versions == [f'V{index:03}' for index in range(1, 36)]

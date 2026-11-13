@@ -46,7 +46,6 @@ core_engine/agent_runner.py:AgentRunner.run_document_review  122/31  legacy grap
 core_engine/agent_runner.py:AgentRunner.run_entity_merge_stream  191/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
 core_engine/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merge agent graph assembly
 core_engine/api_router.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
-core_engine/authority_client.py:resolve_identifier  102/21  authority-service identifier resolution with fallbacks inline
 core_engine/cloud_api_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
 core_engine/router.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
 db/history.py:_read_filters  79/22  history store queries and validators with many optional filters inline

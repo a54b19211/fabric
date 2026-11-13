@@ -202,7 +202,7 @@ JSON
   DATAFABRIC_HISTORY_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18736/fabric_demo_test \
   DATAFABRIC_HISTORY_REDIS_URL=redis://127.0.0.1:18737/0 \
   DATAFABRIC_HISTORY_ADMIN_TOKEN=synthetic-admin-$R DATAFABRIC_HISTORY_READ_TOKEN=synthetic-read-$R \
-  DATAFABRIC_DEMO_RUNTIME_OUTPUT_DIR=$RUN PRE="$PY -m migration.history" \
+  DATAFABRIC_DEMO_RUNTIME_OUTPUT_DIR=$RUN PRE="$PY -m migration.runner --db history --apply" \
     group "demo group:$DEMO" in_ns "$DEMO"
 fi
 if [ -n "$RT" ]; then

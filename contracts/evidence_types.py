@@ -1,8 +1,8 @@
-"""证据类型的唯一注册表：来源目录（collection.catalog）、加工画像（processing.profile）和
-业务验收（contracts.acceptance）都只引用这里，不各自另写一套词表。
+"""证据类型的唯一注册表：来源目录（collection.catalog）和加工画像（processing.profile）都只引用这里，
+不各自另写一套词表。
 
 三层东西分开列，不混用：
-- 大类（CATEGORIES）：v3 1.4 的十二类业务证据。业务验收的 required_evidence 只能用大类。
+- 大类（CATEGORIES）：v3 1.4 的十二类业务证据。
 - 细类（FINE_TYPES）：来源目录和画像实际使用的类型，每个细类写明映射到哪个大类。
   一个来源可以覆盖多个细类，也就可以覆盖多个大类。
   没有合适大类的细类（指南、药物数据库、统计测量、内部台账、资助信息、综述等）保留原细类，

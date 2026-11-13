@@ -19,7 +19,7 @@ from sqlalchemy.engine import make_url
 from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
 from db import history as store
 from flows import history_fetch as flow
-from migration import history as migration
+from migration import runner
 
 
 def original(native="SYNTHETIC-DEMO-1", summary="SYNTHETIC original report"):
@@ -75,10 +75,9 @@ def demo(isolated_pg, monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "false")
     monkeypatch.setenv("DATAFABRIC_HISTORY_READ_TOKEN", "r5-test-read-only")
     monkeypatch.setattr(store, "history_engine", lambda: isolated_pg)
-    monkeypatch.setattr(migration, "history_engine", lambda: isolated_pg)
     forbidden = Mock(side_effect=AssertionError("Demo cannot contact public sources"))
     monkeypatch.setattr(flow, "read_public", forbidden)
-    migration.migrate_history()
+    runner.apply("history", store.history_engine())
     with isolated_pg.begin() as conn:
         conn.execute(text("TRUNCATE history_versions,history_runs CASCADE"))
         conn.execute(text("UPDATE history_sources SET published_seq=0,read_enabled=true"))

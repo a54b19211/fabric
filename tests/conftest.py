@@ -50,25 +50,6 @@ def mock_get_session():
 
 
 @pytest.fixture(autouse=True)
-def _block_chembl_network(monkeypatch):
-    """默认屏蔽 ChEMBL 在线查询，保证单测不触网、结果确定。
-
-    为什么必须要有：`resolve_identifier` 的 drug_name 通路现在是
-    PubChem → ChEMBL → 本地白名单 三级。历史上只 mock 了 PubChem 的测试，
-    在「PubChem 确认未命中」时会真的去请求 EBI —— 测试变慢、依赖外网、
-    还可能因限流把 degraded 翻成 True 而随机失败。
-
-    需要验证 ChEMBL 分支的测试自己 monkeypatch 覆盖（fixture 先于测试体执行，
-    测试体里的 setattr 会生效）。
-    """
-    from core_engine import authority_client
-
-    monkeypatch.setattr(
-        authority_client, "_fetch_chembl_molecule", lambda _name, _timeout: None
-    )
-
-
-@pytest.fixture(autouse=True)
 def _own_rate_dir(monkeypatch, tmp_path):
     """The rate gate and the outbound counters keep their state in DATAFABRIC_RATE_DIR. A test gets an empty one,
     so it neither waits for another test's last request nor inherits its counts."""

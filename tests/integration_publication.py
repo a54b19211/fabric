@@ -16,7 +16,6 @@ from test_publication import snapshot
 from biz_rules.schemas import ConfidenceInfo, MetadataEnvelope, ProvenanceInfo
 from db import history, publication
 from db.models import Base, Document, EntityDict, EntityRelation, ExtractedEntity
-from migration import history as history_migration
 from migration import runner
 
 
@@ -45,7 +44,6 @@ def databases(monkeypatch):
     Base.metadata.create_all(source)
     monkeypatch.setattr(publication, "publication_engine", lambda: source)
     monkeypatch.setattr(history, "history_engine", lambda: target)
-    monkeypatch.setattr(history_migration, "history_engine", lambda: target)
     monkeypatch.setenv(
         "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
         '["clinicaltrials","legacy_documents","reviewed_graph","external_archive"]',
@@ -55,7 +53,7 @@ def databases(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_IS_DEMO", "true")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_NAMESPACE", "synthetic.publication")
-    history_migration.migrate_history()
+    runner.apply("history", history.history_engine())
     assert runner.main(["--db", "publication", "--apply"]) == 0
     import db.session
 

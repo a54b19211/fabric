@@ -42,10 +42,6 @@ from db.repository.canonical import (  # noqa: F401
     process_entity_merge,
 )
 from db.repository.documents import (  # noqa: F401
-    _collect_authority_rows,
-    _opt_float,
-    _opt_int,
-    _opt_str,
     _parse_ts,
     _upsert_doc_extra_in_session,
     get_attachments,
@@ -54,7 +50,6 @@ from db.repository.documents import (  # noqa: F401
     get_pending_extraction,
     reset_stale_extractions,
     update_extraction_status,
-    upsert_authority_resolutions,
     upsert_doc_extra,
     upsert_document,
 )

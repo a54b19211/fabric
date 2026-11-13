@@ -14,12 +14,11 @@
     1. 候选链按顺序取第一个非空值；全空返回 ""（不抛异常）
     2. 单路径映射保持原语义（回归保护）
     3. fda_api_enforcement：openfda 有值时取规范名，无值时整段描述兜底
-       —— 兜底时**不截断**，截断由 drug_name_normalizer 负责，两者职责分离
+       —— 兜底时**不截断**
     4. fda 的 approval_number 能从 openfda.application_number.0 取到，
        并能在 validate_extra 后保留（否则 T3 标识符对齐在 fda 上是 0 输入）
 """
 
-import pytest
 
 from biz_rules.schemas import EXTRA_MODEL_MAP, validate_extra
 from config.sites.fda.api_drug_label import CONFIG as LABEL_CFG
@@ -104,9 +103,7 @@ def test_enforcement_drug_name_prefers_structured_name():
 def test_enforcement_drug_name_falls_back_without_truncation():
     """openfda 为空时整段描述兜底，且**不在此处截断**。
 
-    截断属于 biz_rules.drug_name_normalizer 的职责（它同时记录 rule 以便
-    论文统计归一规则贡献）。若映射层先截断，归一器就看不到原文，
-    「哪条规则贡献了多少命中」将无法回溯。
+    映射层先截断，后面就看不到原文了。
     """
     spec = ENFORCEMENT_CFG["field_map"]["drug_name"]
     got = _get_nested(RECORD_WITHOUT_OPENFDA, spec)
@@ -184,19 +181,3 @@ def test_label_extra_model_registered():
     }
 
 
-@pytest.mark.parametrize(
-    "raw,valid",
-    [("NDA020779", True), ("ANDA040422", True), ("M012", False), ("NDA0207", False)],
-)
-def test_approval_number_format_validation(raw, valid):
-    """approval_number 走本地格式校验（零网络）：NDA/ANDA/BLA + 6 位。
-
-    真实数据里 3 条有 openfda 的召回记录中，2 条形如 NDA020779 / ANDA040422
-    能通过，1 条形如 M012（openFDA 的旧式编号）不通过 —— 这是诚实的负例，
-    不应为了凑命中率放宽正则。
-    """
-    from core_engine.authority_client import resolve_identifier
-
-    res = resolve_identifier(raw, id_type="application_number")
-    assert res["found"] is valid
-    assert res["source_id"] == ("format" if valid else "none")

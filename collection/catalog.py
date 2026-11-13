@@ -1,8 +1,7 @@
 """唯一采集框架的来源目录：每个来源一份声明。
 
 调度（db.source_refresh）、限速（collection.rate）、增量窗口（collection.windows）、读取插件、
-来源许可目录（biz_rules.history_sources 按它生成站点来源的许可项）、加工层的文档类型和业务验收
-（contracts.acceptance 的来源状态）都只读这里。业务需要但还没接的来源也登记在这里（declared）。
+来源许可目录（biz_rules.history_sources 按它生成站点来源的许可项）、加工层的文档类型都只读这里。业务需要但还没接的来源也登记在这里（declared）。
 证据细类（evidence_types）和内容覆盖层级（coverage 的键）只用 contracts.evidence_types 的注册表。学生扩源时改这里、加必要的解析插件和契约样例，不动调度、
 图谱和雷达核心。
 
@@ -84,12 +83,11 @@ class CollectionSpec:
     notes: str = ""
     # 供给系统：同一系统经不同端点/栏目供给的来源编号写同一个值（如 openFDA 的说明书、召回、CRL）。
     # 只记录供给重叠，不判断独立性：两个端点不能仅凭接口不同算两份独立证实，但同一主机上没有
-    # 共同样本/试验来源的两项研究也不因此合并。独立与否由 contracts.acceptance 按原始研究/披露主体、
-    # 固定材料、引用/转载关系、同源组判断。空 = 自成一个供给系统；不回退到限速组或主机名。
+    # 共同样本/试验来源的两项研究也不因此合并。空 = 自成一个供给系统；不回退到限速组或主机名。
     supply_system: str = ""
     # 可能收录/镜像的其他来源编号（如 Europe PMC 官方收录 PubMed/MEDLINE 内容）。只说明“两边可能有同一条
-    # 记录”，不说明“是同一来源”：记录是否同一份仍按 PMID/DOI 等记录级编号判断
-    # （contracts.acceptance.same_record），不把整个库当成一份，也不进 supply_system 的供给重叠。
+    # 记录”，不说明“是同一来源”：记录是否同一份仍按 PMID/DOI 等记录级编号判断，不把整个库当成一份，
+    # 也不进 supply_system 的供给重叠。
     may_include: tuple[str, ...] = ()
     # 这个来源编号实际覆盖的数据集/端点
     datasets: tuple[str, ...] = ()

@@ -24,7 +24,7 @@ CONFIG = {
         # 药名候选链：openfda 结构化名优先（规范通用名/品牌名），整段产品描述兜底。
         # 此前单映射 product_description，导致 drug_name 是 200 字的包装+企业+NDC
         # 描述，既不是药名、也无法直接送权威库（只能靠归一器截断）。
-        # 注意：兜底时保留原值不动，截断由 biz_rules.drug_name_normalizer 负责。
+        # 注意：兜底时保留原值不动，不截断。
         "drug_name":    [
             "openfda.generic_name.0",
             "openfda.brand_name.0",

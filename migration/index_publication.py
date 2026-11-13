@@ -8,7 +8,7 @@
 
 读写的表：读 derived_clean_text、derived_profiles、derived_identifiers、history_versions（取正文和检索元数据）；
 读写 index_publications（索引作业和状态）、index_targets（索引目标）以及领取轮转、发送限速、闸门统计用的 index_claim_cursor、
-index_send_bucket、index_gate_stats。索引表由 History 角色安装：python -m migration.history（= python -m migration.runner --db history --apply）。
+index_send_bucket、index_gate_stats。索引表由 History 角色安装：python -m migration.runner --db history --apply。
 
 用法：python -m migration.index_publication worker -c 4     # 跑 worker（4 个线程），Ctrl-C 停
 """

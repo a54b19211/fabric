@@ -22,7 +22,7 @@ from biz_rules.history_models import (
     archive_manifest_hash,
 )
 from db import history as store
-from migration import history as migration
+from migration import runner
 
 
 def date(value):
@@ -101,8 +101,7 @@ def pg(pg_engine, monkeypatch):
     legacy_bridge.open_old_writer(monkeypatch)  # these tests drive the old legacy writer (cutover mode)
     monkeypatch.setenv("DATAFABRIC_HISTORY_ADMIN_TOKEN", "test-admin-only")
     monkeypatch.setattr(store, "history_engine", lambda: pg_engine)
-    monkeypatch.setattr(migration, "history_engine", lambda: pg_engine)
-    migration.migrate_history()
+    runner.apply("history", store.history_engine())
     with pg_engine.begin() as conn:
         conn.execute(text(
             "TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,"
@@ -1662,7 +1661,7 @@ def test_migration_leaves_a_seeded_row_alone_and_the_list_shows_the_declared_des
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET catalog=catalog || CAST(:m AS jsonb) WHERE source_id='nmpa'"),
                      {"m": json.dumps({"name": "旧说明", "acquisition_channel": "legacy_database", "access": "kept"})})
-    migration.migrate_history()
+    runner.apply("history", store.history_engine())
     with pg.begin() as conn:
         catalog = conn.execute(text("SELECT catalog FROM history_sources WHERE source_id='nmpa'")).scalar_one()
     assert catalog["name"] == "旧说明" and catalog["access"] == "kept"  # the row is the snapshot taken when it was seeded

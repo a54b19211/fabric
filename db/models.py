@@ -1,5 +1,5 @@
 """
-SQLAlchemy ORM 模型 —— 与 db/schema.sql 保持一致（v3）
+SQLAlchemy ORM 模型 —— 与迁移 migration/versions 保持一致（v3）
 10张表，无外键约束，关联由业务层保证。
 
 设计原则：
@@ -168,7 +168,7 @@ class EntityDict(Base):
 class EntityAlias(Base):
     """实体别名查找表，所有名称打平到这里，消歧只需查一列。
 
-    name_embedding 列（pgvector, vector(1024)）由 db/schema.sql 和 V001 定义。
+    name_embedding 列（pgvector, vector(1024)）由 V001 定义。
     """
     __tablename__ = "entity_aliases"
 

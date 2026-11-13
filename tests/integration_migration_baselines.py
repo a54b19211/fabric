@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from migration import migrate
+from migration import app_ledger, manifests, runner
 
 REPO = Path(__file__).resolve().parents[1]
 REBUILD_LINE, TEAM_LINE = "c9ed485", "d316aad"
@@ -72,8 +72,7 @@ def old_module(commit, tmp_path, name, monkeypatch, attribute, engine):
 
 
 def run_today(monkeypatch, engine):
-    monkeypatch.setattr(migrate, "get_engine", lambda: engine)
-    migrate.run_migrations()
+    runner.apply("app", engine)
 
 
 def seed(engine, *, authority):
@@ -177,8 +176,8 @@ def test_a_rebuild_line_database_upgrades_in_place(pg, target, tmp_path, monkeyp
     with engine.begin() as conn:
         versions = [v for (v,) in conn.execute(text("SELECT version FROM schema_migrations ORDER BY version"))]
         assert versions == [f"V{n:03}" for n in range(1, 36)]
-        assert conn.execute(text(f"SELECT count(*) FROM {migrate.RENUMBERED_TABLE}")).scalar_one() == 0
-        assert conn.execute(text(f"SELECT count(*) FROM {migrate.SHARED_SLOT_TABLE}")).scalar_one() == 0
+        assert conn.execute(text(f"SELECT count(*) FROM {app_ledger.RENUMBERED_TABLE}")).scalar_one() == 0
+        assert conn.execute(text(f"SELECT count(*) FROM {app_ledger.SHARED_SLOT_TABLE}")).scalar_one() == 0
     assert diff(fingerprint(engine, schema), target) == {}
 
 
@@ -196,13 +195,13 @@ def test_a_team_line_database_keeps_its_records_and_gets_the_rebuild_migrations(
     same_rows(engine, before)
     with engine.begin() as conn:
         renumbered = {tuple(r) for r in conn.execute(text(
-            f"SELECT recorded_version,recorded_description,current_file FROM {migrate.RENUMBERED_TABLE}"))}
+            f"SELECT recorded_version,recorded_description,current_file FROM {app_ledger.RENUMBERED_TABLE}"))}
         assert renumbered == {("V020", "doc authority resolution", "V033__doc_authority_resolution.sql"),
                               ("V021", "doc authority skipped", "V034__doc_authority_skipped.sql"),
                               ("V022", "weknora index", "V020__weknora_index.sql"),
                               ("V023", "identity evidence", "V035__identity_evidence.sql")}
         shared = [tuple(r) for r in conn.execute(text(
-            f"SELECT version,description,slot_held_by FROM {migrate.SHARED_SLOT_TABLE} ORDER BY version"))]
+            f"SELECT version,description,slot_held_by FROM {app_ledger.SHARED_SLOT_TABLE} ORDER BY version"))]
         assert shared == [("V021", "history version rank", "doc authority skipped"),
                           ("V022", "registry changes", "weknora index"),
                           ("V023", "derived clean text", "identity evidence")]
@@ -224,7 +223,7 @@ def test_an_unknown_or_superseded_record_is_refused_and_nothing_is_written(pg, m
         conn.execute(text("INSERT INTO schema_migrations(version,description,checksum) VALUES (:v,:d,:c)"),
                      dict(zip("vdc", row)))
         before = [tuple(r) for r in conn.execute(text("SELECT * FROM schema_migrations"))]
-    with pytest.raises(migrate.MigrationStateError) as refused:
+    with pytest.raises(app_ledger.MigrationStateError) as refused:
         run_today(monkeypatch, engine)
     assert expected in str(refused.value) and row[0] in str(refused.value)
     with engine.begin() as conn:
@@ -236,7 +235,7 @@ def test_the_known_migration_table_covers_every_file_today():
     from migration.known_migrations import KNOWN
 
     current = {(row[0], row[1], row[2]) for row in KNOWN if row[3] == "current"}
-    for path in migrate._collect_migrations():
-        version, description = migrate._parse_filename(path)
-        assert (version, description, migrate._checksum(path.read_text(encoding="utf-8"))) in current, path.name
+    for path in sorted(manifests.VERSIONS_DIR.glob("V*.sql")):
+        version, description = app_ledger._parse_filename(path)
+        assert (version, description, app_ledger._checksum(path.read_text(encoding="utf-8"))) in current, path.name
     assert json.dumps(KNOWN)  # plain data

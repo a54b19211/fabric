@@ -76,7 +76,7 @@ def get_session() -> Generator[Optional[Session], None, None]:
 def init_db():
     """
     建表（如果表不存在）。
-    等价于执行 db/schema.sql，但通过 ORM 元数据驱动，幂等安全。
+    通过 ORM 元数据建表，幂等安全。
     """
     engine = get_engine()
     if engine is None:

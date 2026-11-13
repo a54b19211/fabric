@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from migration import migrate
+from migration import manifests, sqltext
 
-VERSIONS = Path(migrate.__file__).parent / "versions"
+VERSIONS = manifests.VERSIONS_DIR
 GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "sql_split_golden.json").read_text())
-split = migrate._split_sql
+split = sqltext.split_sql
 
 
 def digest(statements):

@@ -13,7 +13,7 @@ from biz_rules import source_capabilities as caps
 from biz_rules.history_sources import SOURCE_CATALOG
 from collection import catalog
 from db import history as store
-from migration import history as migration
+from migration import runner
 from processing import registry
 
 DERIVED_GRAPHS = {"reviewed_graph", "primekg_graph"}
@@ -26,8 +26,7 @@ TARGETS = [{"source_instance": "synthetic.index.pg", "source_id": source, "is_de
 def library(pg, monkeypatch):
     _, engine = pg("listing")
     monkeypatch.setattr(store, "history_engine", lambda: engine)
-    monkeypatch.setattr(migration, "history_engine", lambda: engine)
-    migration.migrate_history()
+    runner.apply("history", store.history_engine())
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted([*SOURCE_CATALOG, "legacy_documents"])))
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", json.dumps(TARGETS))
     with engine.begin() as conn:
@@ -218,7 +217,7 @@ def test_seeding_never_rewrites_an_existing_row(library):
     with library.begin() as conn:
         conn.execute(text("UPDATE history_sources SET catalog = catalog || CAST(:m AS jsonb) WHERE source_id='pubmed'"),
                      {"m": json.dumps({"name": "snapshot"})})
-    migration.migrate_history()
+    runner.apply("history", store.history_engine())
     with library.begin() as conn:
         assert conn.execute(text("SELECT catalog->>'name' FROM history_sources WHERE source_id='pubmed'")
                             ).scalar_one() == "snapshot"

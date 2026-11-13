@@ -11,19 +11,17 @@ from pathlib import Path
 import pytest
 
 from collection.catalog import CATALOG, SPECS
-from contracts import acceptance as acc
 from contracts import evidence_types as et
 from processing import profile as pf
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_categories_are_the_twelve_of_v3_1_4_and_acceptance_uses_them():
+def test_categories_are_the_twelve_of_v3_1_4():
     assert list(et.CATEGORIES) == [
         "registry", "regulatory_decision", "primary_research", "preprint", "conference", "company_disclosure",
         "financial", "policy", "official_notice", "media", "social", "patent",
     ]
-    assert acc.EVIDENCE_TYPES is et.CATEGORIES
 
 
 def test_every_fine_type_maps_to_a_category_or_says_unmapped():
