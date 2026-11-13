@@ -16,7 +16,6 @@ from integration_history import (  # noqa: F401  -- 复用隔离库夹具和发�
 from sqlalchemy import text
 
 from clean import clean_text
-from store import data_objects as do
 from store import history as store
 from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
@@ -135,20 +134,6 @@ def test_attachments_are_profiled_on_their_parsed_text_and_failed_ones_quarantin
     assert ok["profile"]["doc_type"] == "attachment"
     failed = clean_stage.for_versions("nmpa", False, [bad], "current", NOW())["versions"][bad]
     assert failed["profile"]["route"] == "quarantine"
-
-
-def test_stored_clean_text_fits_the_data_contract(pg, monkeypatch):
-    from clean import clean_stage
-
-    allow(monkeypatch)
-    ct = _fetch_study("NCT09990012", "cs-contract").version_ids[0]
-    clean_stage.process(batch=50)
-    got = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW())["versions"][ct]
-    obj = do.from_clean_text({**got["clean"], "version_id": ct}, source_id="clinicaltrials",
-                             record_id=got["source_record_id"], seen=got["first_seen_at"],
-                             proof=got.get("proof_available_at"))
-    assert isinstance(obj, do.CleanText) and obj.inputs[0].version_id == ct
-    assert obj.locators[0].kind == "json_pointer"
 
 
 def test_derived_tables_are_append_only(pg, monkeypatch):

@@ -1,17 +1,16 @@
-"""The measurement objects of the processing layer (clean.measurement_reads), their reading coverage
-(clean.measure_runs.coverage) and the change feed a consumer follows (Radar's series_sync). Read routes take the same
-reader credential and parameters as /clean-text; every read checks the source permission at that moment."""
+"""测量对象的两个读接口（雷达 series_sync 读，实现在 clean/measurement_reads.py）：一页版本的测量对象，和对象事件的
+变更流。读者凭据和参数与 /clean-text 相同，每次读都查来源此刻的许可。"""
 
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, ConfigDict, Field
 
-from api.routers.history import BoundedHistoryRoute, _call, require_admin, require_read
+from api.routers.history import _call, require_read
+from clean.measurement_reads import changes, for_versions
 from store.history_models import Mode
 
-router = APIRouter(prefix="/api/history", tags=["历史资料"], route_class=BoundedHistoryRoute)
+router = APIRouter(prefix="/api/history", tags=["历史资料"])
 
 
 @router.get("/measurements", dependencies=[Depends(require_read)])
@@ -23,11 +22,8 @@ def measurements_route(
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
     include_history: bool = False,
 ):
-    """The measurement objects of visible versions (datafabric.data_objects.v2), each with what its check found
-    (check.status: consistent, inconsistent or unchecked) and its state at the cutoff folded from its events; by
-    default only those current for the mode."""
-    from clean.measurement_reads import for_versions
-
+    """这些版本在截止时间可见的测量对象，每个带它的核验标记（check.status）和由事件折叠出的状态；
+    默认只给当前的，include_history 也给已被取代的。"""
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, include_history=include_history)
 
 
@@ -37,49 +33,5 @@ def measurement_changes_route(
     after_seq: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ):
-    """The events of measurement objects after a sequence number, in commit order (created, superseded, rechecked,
-    corrected, retracted, correction withdrawn), with the versions that produced them."""
-    from clean.measurement_reads import changes
-
+    """after_seq 之后的对象事件（created、superseded_by_processor、superseded_by_producer），按提交顺序。"""
     return _call(changes, is_demo, after_seq=after_seq, limit=limit)
-
-
-@router.get("/measurements/{measurement_id}", dependencies=[Depends(require_read)])
-def measurement_route(measurement_id: str, is_demo: bool, mode: Mode, cutoff: datetime):
-    """One fixed object, also when superseded or not current; 404 version_not_found when not visible at the cutoff."""
-    from clean.measurement_reads import read_one
-
-    return _call(read_one, measurement_id, is_demo, mode, cutoff)
-
-
-@router.get("/measure-coverage", dependencies=[Depends(require_read)])
-def measure_coverage_route(
-    source_id: str,
-    is_demo: bool,
-    mode: Mode,
-    cutoff: datetime,
-    version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
-):
-    """Per version and route: the reading run's state, the windows read, the windows its list left out and every owed
-    window (partial = a coverage gap); where both routes read the same artifact, whether their readings agree."""
-    from clean.measure_runs import coverage
-
-    return _call(coverage, source_id, is_demo, version_ids, mode, cutoff)
-
-
-class IdentityBinding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    graph_source_id: str = Field(min_length=1, max_length=80)
-    graph_record_id: str = Field(min_length=1, max_length=400)
-    graph_version_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    namespace: str = Field(min_length=1, max_length=160)
-    identity_id: str = Field(min_length=1, max_length=400)
-
-
-@router.post("/measurements/{measurement_id}/identities", dependencies=[Depends(require_admin)])
-def bind_identity_route(measurement_id: str, body: IdentityBinding):
-    """Bind the object of a measurement to an identity confirmed in a fixed graph package whose evidence is this
-    mention (409 otherwise: a name, alias or candidate is no identity)."""
-    from clean.measurement_identity import bind
-
-    return _call(bind, measurement_id, **body.model_dump())

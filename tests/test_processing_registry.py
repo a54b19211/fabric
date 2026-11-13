@@ -50,7 +50,7 @@ def test_the_definition_lists_each_processor_with_the_sources_it_applies_to():
 
 def test_measurements_are_read_from_the_declared_sources_only():
     assert processors.MEASURE_SOURCES == ("who_don",)
-    assert processors.applicable("who_don")["measure_extract"] == "datafabric.measure_extract.v5"
+    assert processors.applicable("who_don")["measure_extract"] == "datafabric.measure_extract.v6"
     assert "measure_extract" not in processors.applicable("clinicaltrials")
     assert "measure_extract" not in processors.applicable("reviewed_graph")
     definition = {item["name"]: item for item in processors.definition()}

@@ -8,7 +8,7 @@
 
     抓  fetch()    按来源目录读一个来源，原件原样存成版本     → history_runs（这次抓取）、history_versions（原件，只追加）
     洗  clean()    出干净正文、找编号、做画像                 → derived_clean_text、derived_identifiers、derived_profiles
-        measure()  从清洗正文里读数字（目前只有 who_don 可测）  → derived_measure_runs / _windows / _readings
+        measure()  从清洗正文里读数字（目前只有 who_don 可测）  → derived_measure_runs / _windows，测量对象 derived_measurements
     存  index()    清洗正文送进知识库 WeKnora（配置了才做）     → index_publications 的待办，正文进 WeKnora
 
   先认识这几个词：
@@ -96,7 +96,7 @@ def counted(items):
 
 
 def measure():
-    """洗：从清洗正文里抽读数，读数落进表里。模型路线和规则路线（默认开）都关着时什么也不做。"""
+    """洗：从清洗正文里抽读数，读数直接写成测量对象（标“未核”）。模型路线和规则路线（默认开）都关着时什么也不做。"""
     counts = measure_round()
     if counts.get("state") == "disabled":
         return "没有开启测量（没配模型路线，规则路线也关了），跳过"

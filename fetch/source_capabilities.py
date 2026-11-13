@@ -83,7 +83,7 @@ def _measurements(applied, source_id):
         return None
     from extraction_contract import CHECKER_V17, CONTRACT_V3
 
-    from store.data_objects import CONTRACT_VERSION_V2
+    from clean.measure_runs import CONTRACT as CONTRACT_VERSION_V2
 
     return {"processor": applied["measure_extract"], "contract": CONTRACT_VERSION_V2,
             "checker": CHECKER_V17, "check_contract": CONTRACT_V3,
