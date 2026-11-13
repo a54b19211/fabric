@@ -21,7 +21,7 @@ from biz_rules.history_models import (
 from biz_rules.timestamps import parse_timestamp
 from collection import rate, transport
 from collection.catalog import CATALOG, WATCHABLE, spec
-from collection.windows import SEGMENTS_PER_CYCLE, cycle_request, first_unread
+from collection.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE, cycle_request, first_unread
 from db import history, publication
 
 
@@ -137,7 +137,8 @@ def _page_finished(watch, state, coverage, now):
     停在出站上限的读取带着原因结束这一周期（_hold_at_ceiling）。其他没有续读位置的提前停止都是错误，除了按窗口读的
     （GDELT）：它的回执写明哪些区间可能被截断、哪些窗口没读到，周期带着这些缺口结束，检查点移到第一个没读到的窗口。
     “遇到已存的就停”的来源一个周期最多读 SEGMENTS_PER_CYCLE 段就收工记成功：第一次读一个很深的来源（空库）不会
-    一个周期接一个周期地读下去，更老的交给回填（ops/backfill_source.py）。"""
+    一个周期接一个周期地读下去，更老的交给回填（ops/backfill_source.py）。分组读取的来源（港交所、NCCN）不按段数收工：
+    一个周期读完全部的组，每组读多少由 collection.windows.GROUP_LIMIT 管。"""
     state["last_page_at"] = now.isoformat()
     state["last_coverage"] = coverage
     state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
@@ -145,13 +146,13 @@ def _page_finished(watch, state, coverage, now):
         state["unclean"] = True  # 这一周期有条目读不到：周期收尾时记下，下一周期整份重读（read_all）
     if coverage.get("stop_reason") in rate.CEILING_STOPS and "window_coverage" not in coverage:
         return _hold_at_ceiling(watch, state, coverage, now)
-    capped = (watch.mode == "realtime" and spec(watch.request.source_id).incremental.kind == "stop_at_known"
-              and state["cycle_pages"] >= SEGMENTS_PER_CYCLE)
+    capped = _cycle_is_full(watch, state)
     if coverage.get("next_continuation"):
         if _stalled(state, coverage):
             raise HistoryError("source_watch_no_progress", "续读位置没有前进，这一段一个版本也没读到；下个间隔再试", 503)
         if not capped:
             state["request"]["continuation"] = coverage["next_continuation"]
+            _known_stop_again(watch, state)
             state["state"] = "paging"
             state["next_check_at"] = now.isoformat()
             return
@@ -179,6 +180,19 @@ def _page_finished(watch, state, coverage, now):
     state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
     state["read_all"] = state.pop("unclean", False)
     state.pop("request", None)
+
+
+def _cycle_is_full(watch, state):
+    """“遇到已存的就停”的实时刷新这一周期已经读够了 SEGMENTS_PER_CYCLE 段。分组读取的来源不按段数：一个周期读完全部的组。"""
+    incremental = spec(watch.request.source_id).incremental
+    return (watch.mode == "realtime" and incremental.kind == "stop_at_known" and not incremental.by_group
+            and state["cycle_pages"] >= SEGMENTS_PER_CYCLE)
+
+
+def _known_stop_again(watch, state):
+    """分组读取的来源：失败后重读（_read_all_next_time）只管那一段，下一段又按组停在已存的。"""
+    if spec(watch.request.source_id).incremental.by_group and watch.mode == "realtime" and not watch.request.source_record_ids:
+        state["request"]["known_stop"] = KNOWN_STOP
 
 
 def _unread_not_stuck(source_id, coverage):
@@ -211,7 +225,8 @@ READ_FAILURES = ("source_watch_failed", "source_watch_no_progress", "source_watc
 
 def _read_all_next_time(state):
     """这一页的读取失败了：下一次重试不许“遇到已存的就停”。前面几条是已存的，停在它们上面，就把后面没存的跳过去了；
-    往后读，没存的才会再碰到、补上。（读到了但有条目读不到的，不在这里：周期收尾时记 read_all，下一周期整份重读。）"""
+    往后读，没存的才会再碰到、补上。（读到了但有条目读不到的，不在这里：周期收尾时记 read_all，下一周期整份重读；
+    分组读取的来源不整份重读，读不到的组下个周期自然再读。）"""
     state["request"]["known_stop"] = 0
 
 

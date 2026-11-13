@@ -9,6 +9,9 @@
 没有更新时间可过滤、但列表从新到旧的来源（目录里的 stop_at_known）也没有窗口：每个周期从列表第一页读起，连续读到
 KNOWN_STOP 条库里已有且没变的就停（读到旧的了）。上一周期有条目读不到（db.source_refresh 的 read_all）时，这一周期不许这样停，
 从头读满 SEGMENTS_PER_CYCLE 段。列表不大、旧条目会后补进来的来源（full_reread，如 fda_crl）也没有窗口，每个周期整份重读，不加 known_stop。
+分组读取的来源（stop_at_known 且 by_group：港交所一家公司一组，NCCN 一份指南一组）：“读到旧的就停”只停这一组；组读不到时下个周期
+自然再读，不需要 read_all；一个周期读完全部的组，不受 SEGMENTS_PER_CYCLE 限制，但每组最多读最新的 GROUP_LIMIT 条
+（第一次读，库里什么都没有，不会把每家公司的全部历史都读下来），更老的交给回填。
 
 GDELT 没有续页，窗口读取按整点：一个周期读 [检查点, 当前整点)，不读还没走完的这一小时，也不回看重叠。
 读取没读完时（预算或出站额度用完）从第一个没读到的窗口起点继续（first_unread）；读到了但最细窗口仍满额的区间
@@ -24,6 +27,7 @@ from collection.catalog import spec
 
 KNOWN_STOP = 3  # 连续读到这么多条“已存且没变”的，就当读到旧的了（老 ETL 是 1 条；3 条能容忍置顶的老条目）
 SEGMENTS_PER_CYCLE = 5  # “遇到已存的就停”的来源，一个刷新周期最多读这么多段（每段最多 max_records 条）；更老的交给回填
+GROUP_LIMIT = 10  # 分组读取的来源，一个刷新周期每组最多读最新的这么多条（港交所实测 172 家公司一周最多 9 条）；更老的交给回填
 
 
 def window_start(watch, state: dict, now: datetime) -> datetime:
@@ -61,10 +65,11 @@ def first_unread(coverage: dict) -> str | None:
 def cycle_request(watch, state: dict, now: datetime) -> tuple[dict, datetime | None, datetime | None]:
     """返回 (请求体, 窗口起点, 窗口终点)。回填和明确清单没有窗口，起止为 None。"""
     request = watch.request.model_dump(mode="json")
-    kind = spec(watch.request.source_id).incremental.kind
+    incremental = spec(watch.request.source_id).incremental
+    kind = incremental.kind
     # 读明确清单（source_record_ids）本来就是读完这份清单，不加；上一周期有条目读不到（read_all）：这一周期整份读，不在“遇到已存的”就停
     if (kind == "stop_at_known" and watch.mode == "realtime" and not request.get("source_record_ids")
-            and not state.get("read_all")):
+            and (incremental.by_group or not state.get("read_all"))):  # 分组的来源不用 read_all：读不到的组下个周期自然再读
         request["known_stop"] = KNOWN_STOP
     if watch.mode == "backfill" or kind in ("fixed_ids", "stop_at_known", "full_reread") or request.get("source_record_ids"):
         return request, None, None

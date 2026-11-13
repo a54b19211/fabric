@@ -173,12 +173,14 @@ def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
     return {**SITE_PROFILES["hkex"]["api"], "companies": HKEX_COMPANIES, **(overrides or {})}, sent
 
 
-def _hkex_read(monkeypatch, overrides=None, rows_of=None):
-    """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告, 发出的请求参数)。"""
+def _hkex_read(monkeypatch, overrides=None, rows_of=None, start=0):
+    """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告，不含每家公司开头的 GroupStart, 发出的请求参数)。"""
     from biz_rules.extractors import hkex_fetcher
+    from biz_rules.history_models import GroupStart
 
     api, sent = _hkex_stub(monkeypatch, overrides, rows_of)
-    return list(hkex_fetcher.fetch_hkex_announcements(api)), sent
+    items = list(hkex_fetcher.fetch_hkex_announcements(api, start))
+    return [item for item in items if not isinstance(item, GroupStart)], sent
 
 
 def test_hkex_end_date_defaults_to_today_and_is_sent_as_yyyymmdd(monkeypatch):
@@ -239,6 +241,22 @@ def test_hkex_company_that_cannot_be_read_is_given_as_unreadable_with_its_name_a
     assert announcement["stock_code"] == "01177"
 
 
+def test_hkex_a_company_is_a_group_and_a_read_can_start_at_any_company_without_asking_for_the_ones_before(monkeypatch):
+    """每家公司开头给一个 GroupStart(第几家)，先于这家公司的请求（请求时间到了，续读位置就是这一家）；
+    从第 start 家读起，前面的公司不发请求。"""
+    from biz_rules.extractors import hkex_fetcher
+    from biz_rules.history_models import GroupStart
+
+    api, sent = _hkex_stub(monkeypatch)
+    items = list(hkex_fetcher.fetch_hkex_announcements(api))
+    assert [i for i in items if isinstance(i, GroupStart)] == [GroupStart(0), GroupStart(1)]
+    assert items.index(GroupStart(1)) == 2 and len(sent) == 2  # 第 0 组：GroupStart + 一条公告（展示文件跳过），第 1 组在后
+    api, sent = _hkex_stub(monkeypatch)
+    rest = list(hkex_fetcher.fetch_hkex_announcements(api, 1))
+    assert [i for i in rest if isinstance(i, GroupStart)] == [GroupStart(1)] and len(rest) == 2
+    assert rest[1]["stock_code"] == "01177" and len(sent) == 1 and sent[0]["stockId"] == 6833
+
+
 def test_hkex_a_joint_announcement_under_two_companies_is_given_once(monkeypatch):
     """联合公告会出现在几家公司名下，指向同一个 PDF：同一个文件只给一次，不然同一条记录一次读两遍。"""
     rows = {1000001102: HKEX_ROWS[:1], 6833: HKEX_ROWS[:1]}
@@ -261,6 +279,48 @@ def test_nccn_detail_attaches_only_the_pdfs_that_can_be_downloaded_and_leaves_ou
     assert [a["url"].rsplit("/", 1)[1] for a in parsed["attachment_links"]] == ["all-patient.pdf", "ALL-es-patient.pdf"]
 
 
+def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_guideline_without_rendering_the_ones_before(monkeypatch):
+    """序号跨分类、去重后数：第二个分类里和第一个分类重复的指南不占序号。从第 start 份读起：前面的分类列表页还要渲染（数序号、
+    去重靠它），前面指南的详情页不渲染。"""
+    import scrapling.fetchers
+
+    from biz_rules.extractors.nccn import nccn_fetcher
+    from biz_rules.history_models import GroupStart
+
+    by_category = {"1": ["a0", "a1", "a2"], "2": ["a0", "b1", "b2"]}  # 第 2 类的 a0 和第 1 类重复
+    rendered = []
+
+    class Fetcher:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch(self, url, **kwargs):
+            rendered.append(url)
+            return url
+
+    def parse(page, cat_num, cat_name):
+        return [{"title": g, "version": "1.2026", "detail_url": f"https://www.nccn.org/{g}", "guideline_id": g,
+                 "category_name": cat_name} for g in by_category[cat_num]]
+
+    monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", Fetcher)
+    monkeypatch.setattr(nccn_fetcher, "_parse_rendered_list", parse)
+    monkeypatch.setattr(nccn_fetcher, "extract_nccn_detail",
+                        lambda page: {"title": "t", "version": "1.2026", "attachment_links": [], "sections": []})
+    api = {"categories": ["Treatment by Cancer Type", "Detection, Prevention, and Risk Reduction"]}
+
+    def read(start):
+        rendered.clear()
+        items = list(nccn_fetcher.iter_nccn(api, start))
+        groups = [i.index for i in items if isinstance(i, GroupStart)]
+        records = [i["guideline_id"] for i in items if isinstance(i, dict)]
+        details = [u.rsplit("/", 1)[1] for u in rendered if "category_" not in u]  # 渲染过的详情页
+        return groups, records, details
+
+    assert read(0) == ([0, 1, 2, 3, 4], ["a0", "a1", "a2", "b1", "b2"], ["a0", "a1", "a2", "b1", "b2"])
+    assert read(3) == ([3, 4], ["b1", "b2"], ["b1", "b2"])  # a0..a2 的详情页没有渲染
+    assert [u for u in rendered if "category_" in u] == [f"https://www.nccn.org/guidelines/category_{n}" for n in (1, 2)]
+
+
 def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_images():
     """页面挂着很多第三方脚本，等“网络空闲”一页要一两分钟：列表页等指南链接、详情页等 section 小标题出现就够了。"""
     from biz_rules.extractors.nccn import nccn_fetcher
@@ -275,7 +335,7 @@ def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_ima
     assert nccn_fetcher._render(Fetcher(), "https://www.nccn.org/x", nccn_fetcher.DETAIL_READY) == "page"
     [(url, options)] = seen
     assert options["network_idle"] is False and options["disable_resources"] is True
-    assert options["wait_selector"] == "h4" and options["timeout"] == 45000
+    assert options["wait_selector"] == "h4" and options["timeout"] == 30000 and options["retries"] == 4
 
 
 # ── Roche 新闻稿（roche）────────────────────────────────────────────────

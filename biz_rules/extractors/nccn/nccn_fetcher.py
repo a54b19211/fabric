@@ -6,6 +6,8 @@
   3. 对每条指南渲染详情页，按 section（Guidelines / Evidence Blocks / Frameworks /
      Guidelines for Patients / International）提取所有 PDF 链接 + 版本号
   4. yield 标准记录 dict（uuid/title/markdown/structured_data/attachment_links/...）
+一份指南是一组（collection.site_crawler 的分组读取）：每份开头给一个 GroupStart(第几份)，从第 start 份读起，续读时前面
+的指南不再渲染详情页（分类列表页要渲染：要靠它数出序号，并跨分类去重）。
 """
 
 import re
@@ -14,7 +16,7 @@ from typing import Iterator
 from loguru import logger
 
 from biz_rules.extractors.nccn.nccn import extract_nccn_detail
-from biz_rules.history_models import ItemUnreadable, make_uuid
+from biz_rules.history_models import GroupStart, ItemUnreadable, make_uuid
 
 BASE_URL = "https://www.nccn.org"
 
@@ -31,6 +33,8 @@ _NAME_TO_NUM = {v[0]: k for k, v in CATEGORIES.items()}
 
 # 列表页等到指南链接出现、详情页等到各 section 的小标题（h4）出现，内容就齐了：不等“网络空闲”（页面挂着很多第三方脚本，
 # 空闲要一两分钟，实测一页 88-141 秒），也不加载图片、字体、样式（只要文字和链接）。
+# 一次正常渲染 10-16 秒。www.nccn.org 解析到两个 Cloudflare 地址，从 zktest 连其中一个 TLS 握手永远不通（实测一半的连接
+# 卡住）：卡住的那次不等 45 秒，30 秒放弃重来，最多 4 次（每次换连接，全卡住的概率约 6%）。
 LIST_READY = 'a[href*="guidelines-detail"]'
 DETAIL_READY = "h4"
 
@@ -38,7 +42,7 @@ DETAIL_READY = "h4"
 def _render(fetcher, url: str, ready_selector: str):
     """渲染一页：等 ready_selector 出现，不等网络空闲、不加载图片等资源。"""
     return fetcher.fetch(url, network_idle=False, disable_resources=True, wait_selector=ready_selector,
-                         timeout=45000, retries=2)
+                         timeout=30000, retries=4)
 
 
 def _extract_year(version: str) -> str:
@@ -171,13 +175,14 @@ def _read_item(fetcher, item: dict) -> dict:
     }
 
 
-def iter_nccn(api_cfg: dict) -> Iterator[dict]:
+def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
     """
     NCCN 指南采集器。
 
     api_cfg 字段：
       - categories:       要抓取的分类名列表，默认全部 4 个分类
       - max_per_category: 每个分类最多抓取条数，0 = 全量（默认 0）
+    start：从第几份指南读起（跨分类、去重后的序号，从 0 起）。
     """
     cat_names: list[str] = api_cfg.get("categories", [v[0] for v in CATEGORIES.values()])
     max_per_cat: int = api_cfg.get("max_per_category", 0)
@@ -190,6 +195,7 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
         return
 
     seen_globally: set = set()   # 跨分类去重
+    total = 0                    # 前面的分类一共有几份指南（去重后）
 
     for cat_name in cat_names:
         cat_num = _NAME_TO_NUM.get(cat_name)
@@ -215,7 +221,11 @@ def iter_nccn(api_cfg: dict) -> Iterator[dict]:
 
         logger.info(f"[NCCN] 分类 '{cat_name}' 有效条目 {len(items)} 条")
 
-        for item in items:
+        first, total = total, total + len(items)  # 这个分类的指南是第 first 到 total-1 份
+        for number, item in enumerate(items, first):
+            if number < start:
+                continue  # 前面的指南上一段读过了
+            yield GroupStart(number)
             try:
                 record = _read_item(fetcher, item)
             except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录

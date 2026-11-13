@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -47,6 +47,14 @@ class ItemUnreadable(HistoryError):
     def __init__(self, url: str, reason: str):
         super().__init__("item_unreadable", f"{reason} | {url}")
         self.url, self.reason = url, reason
+
+
+class GroupStart(NamedTuple):
+    """A fetcher that reads group by group (HKEX: one company is a group; NCCN: one guideline) yields this before the
+    items of group number `index`, counted from 0. collection.site_crawler keeps it in the continuation (group, and
+    which item of the group), so a read goes on from that group without going through the earlier ones again."""
+
+    index: int
 
 
 def make_uuid(identifier: str) -> str:

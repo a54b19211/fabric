@@ -11,6 +11,7 @@ CONFIG = {
     "name": "港交所披露易",
     "source_type": "api",
     "api_fetcher": fetch_hkex_announcements,
+    "by_group": True,  # 一家公司一组：续读位置记第几家公司，“遇到已存的就停”按公司算（collection.site_crawler）
 
     "api": {
         # 标题搜索页“更多”按钮背后的 JSON 接口；一次请求读完一家公司从 from_date 起的全部公告，见 hkex_fetcher

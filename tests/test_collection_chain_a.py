@@ -26,19 +26,19 @@ def ct_watch(**extra):
 STOP_AT_KNOWN = {
     "pubmed", "chictr", "nmpa", "cde", "cde_xxgk", "cde_zdyz", "phirda_industry", "phirda_policy", "phirda_rd",
     "phirda_healthcare_reform", "fda_press", "fda_drug_safety", "fda_api_drug_label", "fda_api_enforcement",
-    "fiercepharma", "roche",
+    "fiercepharma", "roche", "hkex", "nccn",  # 最后两个分组读：一家公司、一份指南一组
 }
 
 
 def test_watchable_set_is_the_earlier_five_and_the_newest_first_lists():
     # 改造前写死的四个来源，加上按整点读取的 GDELT，再加列表从新到旧、靠“遇到已存的就停”增量读的来源；
-    # 港交所、NCCN 这个办法用不了，不进（原因写在目录里）；本地导入不对外抓，不进
+    # 港交所、NCCN 分组读，也进；本地导入不对外抓，不进
     earlier = {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts", "gdelt_doc"}
     assert catalog.WATCHABLE == earlier | STOP_AT_KNOWN | {"fda_crl"}
     assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.kind == "stop_at_known"} == STOP_AT_KNOWN
     assert catalog.spec("fda_crl").incremental.kind == "full_reread"  # 成批公布的旧信会排在读过的新信后面：整份重读
-    for source in ("hkex", "nccn", "local_files"):
-        assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
+    assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.by_group} == {"hkex", "nccn"}
+    assert "local_files" in catalog.FETCHABLE and "local_files" not in catalog.WATCHABLE
 
 
 def test_blocked_and_declared_sources_are_visible_gaps_not_fetchable():
@@ -130,7 +130,7 @@ def test_cadence_floor_is_each_sources_own_who_don_runs_every_15_minutes():
 
 
 def test_a_source_without_an_incremental_key_cannot_be_watched(monkeypatch):
-    for source in ("hkex", "nccn", "local_files"):
+    for source in ("local_files",):
         monkeypatch.setenv(
             "DATAFABRIC_HISTORY_WATCHES", json.dumps([{"id": "p", "request": {"source_id": source, "query": "records"}}])
         )
@@ -269,6 +269,28 @@ def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalle
     moved = {"request": {"continuation": {"cursor": "c", "read_count": 0}}}
     _page_finished(pubmed, moved, {**more, "adopted_count": 100}, NOW)
     assert moved["state"] == "paging"
+
+
+def test_a_grouped_cycle_reads_all_its_groups_and_a_failed_segment_is_read_in_full_only_once():
+    from collection.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE
+    from db.source_refresh import _read_all_next_time
+
+    hkex = SourceWatch.model_validate({"id": "h", "request": {"source_id": "hkex", "query": "records"}})
+    more = {"next_continuation": {"cursor": "c", "read_count": 3}, "upstream_pagination_exhausted": False}
+    state = {"request": {"known_stop": KNOWN_STOP}, "cycle_pages": SEGMENTS_PER_CYCLE + 20}  # 远过 5 段，照样读下去
+    _page_finished(hkex, state, more, NOW)
+    assert state["state"] == "paging" and state["request"]["continuation"] == more["next_continuation"]
+    _read_all_next_time(state)  # 一段读失败了：重读这一段不许停在已存的（前面几条可能是失败的那次存下的）
+    assert state["request"]["known_stop"] == 0
+    _page_finished(hkex, state, {**more, "next_continuation": {"cursor": "d", "read_count": 9}}, NOW)
+    assert state["request"]["known_stop"] == KNOWN_STOP  # 下一段又按公司停在已存的，不是整个周期都整读
+    done = {"request": {"known_stop": KNOWN_STOP}, "cycle_pages": 30}
+    _page_finished(hkex, done, {"upstream_pagination_exhausted": True}, NOW)
+    assert done["state"] == "idle" and done["last_success_at"]  # 读完全部公司，周期收工
+    # 上一周期有公司读不到：下个周期不整份重读（每家公司的“已存就停”互不相干，读不到的下个周期自然再读）
+    assert cycle_request(hkex, {"read_all": True}, NOW)[0]["known_stop"] == KNOWN_STOP
+    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+    assert cycle_request(pubmed, {"read_all": True}, NOW)[0]["known_stop"] == 0  # 一份有顺序的列表才整份重读
 
 
 def _step(monkeypatch, watch, state, *, run=None, disk_low=False):

@@ -79,9 +79,10 @@ def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
         assert source in catalog.FETCHABLE and source in catalog.WATCHABLE  # 列表从新到旧：遇到已存的就停
         assert spec.incremental.kind == "stop_at_known"
         assert spec.verified is False  # 迁入旧代码，本系统未对原站实测
-    for source in ("hkex", "nccn"):  # 这个办法用不了的：还是不进固定刷新，原因写在目录里
-        assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
-        assert catalog.spec(source).incremental.semantics
+    for source in ("hkex", "nccn"):  # 分组读：一家公司、一份指南一组，一个周期读完全部的组
+        assert source in catalog.WATCHABLE and catalog.spec(source).backfill
+        assert catalog.spec(source).incremental.kind == "stop_at_known" and catalog.spec(source).incremental.by_group
+        assert site_crawler.SITE_PROFILES[source]["by_group"]  # 站点配置的拉取函数也是按组给的
 
 
 
@@ -1251,3 +1252,93 @@ def test_budget_known_counts_consecutive_known_only():
     off = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
     off.is_known = lambda item: True
     assert [off.known(item) for item in "abcdef"] == [False] * 6  # known_stop=0：从不停
+
+
+# ——分组读取（港交所一家公司一组、NCCN 一份指南一组）：续读位置是第几组和组内第几条，“已存的就停”按组算——
+
+
+def _grouped(monkeypatch, groups, fetched=None):
+    """一个接口站点，条目分成几组（groups[g] 是这一组的条目数）。拉取函数和真的一样：从第 start 组读起，每组开头给 GroupStart。
+    fetched 记下每次从第几组读起。"""
+    from biz_rules.history_models import GroupStart
+
+    def fetcher(cfg, start):
+        if fetched is not None:
+            fetched.append(start)
+        for g in range(start, len(groups)):
+            yield GroupStart(g)
+            for i in range(groups[g]):
+                yield {"id": f"g{g}-{i}", "t": f"第{g}组第{i}条", "d": "2026-01-01", "u": f"https://x.invalid/{g}/{i}"}
+
+    profile = {"source_type": "api", "api": {}, "uid_field": "id", "by_group": True,
+               "field_map": {"title": "t", "publish_date": "d", "source_url": "u"}, "api_fetcher": fetcher}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_enforcement", profile)
+    return profile
+
+
+def _raw_ids(batch):
+    return [json.loads(r.raw_content)["raw"]["id"] for r in batch["records"]]
+
+
+def test_a_grouped_site_goes_on_from_its_group_and_item_without_the_groups_before(fake_web, monkeypatch):
+    fetched = []
+    _grouped(monkeypatch, [5, 5, 5], fetched)
+    first = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=7))
+    assert _raw_ids(first) == [f"g0-{i}" for i in range(5)] + ["g1-0", "g1-1"] and first["stop_reason"] == "record_budget"
+    assert json.loads(first["next_continuation"]["cursor"]) == {"i": 2, "a": 0, "p": 0, "g": 1}  # 第 1 组的第 2 条
+    second = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100,
+                                      continuation=first["next_continuation"]))
+    assert _raw_ids(second) == [f"g1-{i}" for i in range(2, 5)] + [f"g2-{i}" for i in range(5)]
+    assert second["upstream_pagination_exhausted"] and second["next_continuation"] is None
+    assert fetched == [0, 1]  # 第二段从第 1 组读起，没有把第 0 组再读一遍
+
+
+def test_a_grouped_site_stops_at_known_records_in_each_group_and_goes_on_with_the_next_group(fake_web, monkeypatch, stored):
+    from biz_rules.history_models import make_uuid as _make_uuid
+
+    _grouped(monkeypatch, [6, 6, 6])
+    for g in (0, 1):  # 第 0、1 组：前两条是新的，其余已存；第 2 组全是新的
+        stored.update(_make_uuid(f"fda_api_enforcement:g{g}-{i}") for i in range(2, 6))
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100, known_stop=3))
+    # 每组：两条新的 + 连续三条已存的就停（第 5 条没有去读）；第 2 组读完
+    assert _raw_ids(batch) == [f"g{g}-{i}" for g in (0, 1) for i in range(5)] + [f"g2-{i}" for i in range(6)]
+    assert batch["stop_reason"] == "upstream_exhausted" and batch["next_continuation"] is None and batch["error"] is None
+
+
+def test_a_grouped_incremental_read_takes_at_most_group_limit_items_per_group(fake_web, monkeypatch, stored):
+    monkeypatch.setattr(site_crawler, "GROUP_LIMIT", 2)
+    _grouped(monkeypatch, [5, 5])
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100, known_stop=3))
+    assert _raw_ids(batch) == ["g0-0", "g0-1", "g1-0", "g1-1"]  # 更老的交给回填
+    backfill = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100))
+    assert len(backfill["records"]) == 10  # 回填（known_stop=0）不受限
+
+
+def test_a_group_that_cannot_be_read_does_not_stop_the_next_group_and_a_stop_while_asking_for_a_group_keeps_that_group(
+        fake_web, monkeypatch):
+    from biz_rules.history_models import GroupStart, ItemUnreadable
+
+    def fetcher(cfg, start):
+        yield GroupStart(0)
+        yield ItemUnreadable("https://x.invalid/company/0", "读取失败：TimeoutError")
+        yield GroupStart(1)
+        yield {"id": "g1-0", "t": "一", "d": "2026-01-01", "u": "https://x.invalid/1/0"}
+        yield GroupStart(2)
+        raise transport.Stop("deadline")  # 要第 2 组的数据时时间到了
+
+    profile = {"source_type": "api", "api": {}, "uid_field": "id", "by_group": True,
+               "field_map": {"title": "t", "publish_date": "d", "source_url": "u"}, "api_fetcher": fetcher}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_enforcement", profile)
+    batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100))
+    assert _raw_ids(batch) == ["g1-0"] and batch["unread_items"][0]["url"] == "https://x.invalid/company/0"
+    assert batch["stop_reason"] == "deadline"
+    assert json.loads(batch["next_continuation"]["cursor"]) == {"i": 0, "a": 0, "p": 0, "g": 2}  # 下一段从第 2 组读起
+
+
+def test_a_grouped_site_that_gives_no_item_at_all_is_the_empty_list_alarm_but_an_empty_tail_is_not(fake_web, monkeypatch):
+    _grouped(monkeypatch, [0, 0, 0])
+    first = FetchRequest(source_id="fda_api_enforcement", query="records")
+    assert read_public(first)["error"]["code"] == "list_empty"
+    cont = {"scope_hash": first.scope_hash(), "cursor": json.dumps({"i": 0, "a": 0, "p": 0, "g": 1}), "read_count": 1}
+    tail = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", continuation=cont))
+    assert tail["error"] is None and tail["upstream_pagination_exhausted"]

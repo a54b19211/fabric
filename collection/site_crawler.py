@@ -18,6 +18,9 @@ biz_rules/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_c
 列表一条都没解析到（列表页改版、接口改格式的样子）不算读完，标成失败（list_empty）；“解析到了但全是已存的”是正常读到旧的了。
 增量读取（FetchRequest.known_stop）：每读完一条父记录（页面或接口记录）问一次 transport.Budget.known，已存且没变的父记录
 不再下载它的附件（上一轮存过了）；连续够 known_stop 条就以 reached_known 停，不给续读位置。
+分组读取（站点配置里 "by_group": True：港交所一家公司一组，NCCN 一份指南一组）：拉取函数在每一组开头给一个
+GroupStart(第几组)，并从续读位置所在的那一组读起，不重放前面的组。续读位置多一个 "g"（第几组），"i" 是组内第几条。
+“连续读到已存的就停”按组算：这一组读到旧的了，丢掉它剩下的条目，接着读下一组，一个周期读完全部的组。
 
 读取方式（FetchRequest.query）：
 - "by_url"，source_record_ids=详情页 URL：重抓这些页面及其附件；
@@ -42,9 +45,10 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
-from biz_rules.history_models import ArchiveRecord, HistoryError, ItemUnreadable, make_uuid, source_time
+from biz_rules.history_models import ArchiveRecord, GroupStart, HistoryError, ItemUnreadable, make_uuid, source_time
 from collection import transport
 from collection.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
+from collection.windows import GROUP_LIMIT
 
 WEB_SCHEMA = "datafabric.web_capture.v1"
 RECORD_SCHEMA = "datafabric.site_record.v1"
@@ -211,7 +215,8 @@ class _Reader:
         # 本次读取里读不到的条目（网址 + 原因），同样只记在读取结果里，不存版本
         self.unread: list[dict] = []
         self.unread_in_a_row = 0  # 连续读不到的条数；读到一条就清零
-        self.position = 0  # 读到第几个父项了；停下时的续读位置指向它
+        self.position = 0  # 读到第几个父项了（分组读取：这一组里第几条）；停下时的续读位置指向它
+        self.group = 0  # 分组读取：读到第几组了；不分组的站点一直是 0
         # 浏览器里只放行目标站点（及其子域）的请求，第三方的广告、统计、cookie 横幅直接中止、不占请求预算
         budget.site_host = _site_host(self.site)
 
@@ -388,8 +393,9 @@ def _site_results(reader, query):
             raise HistoryError("unknown_query", "接口站点只支持 query=records")
         from core_engine.api_router import to_result
 
-        for raw in profile["api_fetcher"](profile.get("api", {})):
-            if isinstance(raw, ItemUnreadable):  # 拉取函数读不到这一条、接着往下读了：原样传下去
+        fetch = profile["api_fetcher"]
+        for raw in fetch(profile.get("api", {}), reader.group) if profile.get("by_group") else fetch(profile.get("api", {})):
+            if isinstance(raw, ItemUnreadable | GroupStart):  # 读不到这一条、接着往下读了 / 新的一组：原样传下去
                 yield raw, None
                 continue
             parsed, kept = to_result(reader.site, profile, raw)
@@ -404,11 +410,12 @@ def _site_results(reader, query):
 
 
 def _cursor(request):
+    """续读位置 → (第几个父项, 第几个附件, 页面版本是否已保存, 第几组)。"""
     if not request.continuation:
-        return 0, 0, False
+        return 0, 0, False, 0
     try:
         value = json.loads(request.continuation.cursor)
-        return int(value["i"]), int(value["a"]), bool(value.get("p"))
+        return int(value["i"]), int(value["a"]), bool(value.get("p")), int(value.get("g", 0))
     except (ValueError, KeyError, TypeError):
         raise HistoryError("invalid_cursor", "续读位置无效") from None
 
@@ -421,7 +428,7 @@ def read_site(request) -> dict:
 
 def _read_named(request, reader, start):
     """query=by_url / stored_attachments：父项就是请求里的记录号，按顺序读。"""
-    start_i, start_a, start_recorded = start
+    start_i, start_a, start_recorded = start[:3]
     for url in request.source_record_ids:
         if not _on_site(reader.site, url):
             raise HistoryError("url_outside_site", "链接不属于该来源站点")
@@ -443,27 +450,43 @@ def _read_named(request, reader, start):
 
 
 def _read_site_records(request, reader, start):
-    """接口站点和表格页站点：父项是站点给出的各条结果，续读时从头重放。"""
-    start_i, start_a, start_recorded = start
+    """接口站点和表格页站点：父项是站点给出的各条结果，续读时从头重放。分组读取的站点（by_group）不重放：拉取函数从续读位置
+    所在的那一组读起，组内前 start_i 条上一段读过了，丢掉；这一组读到旧的了（或读够 GROUP_LIMIT 条）就丢掉它剩下的，到下一组。"""
+    start_i, start_a, start_recorded, group = start
+    by_group = reader.profile.get("by_group")
+    position, skipping, yielded = -1, False, False  # position：这一组（不分组的站点是整个结果）里第几条
     with closing(_site_results(reader, request.query)) as results:
-        for position, (parsed, raw) in enumerate(results):
-            if position >= start_i:  # 前面的是重放：续读位置只往前走，重放途中停下也不倒退
-                reader.position = position
+        for parsed, raw in results:
+            if isinstance(parsed, GroupStart):
+                reader.group, position, skipping = parsed.index, -1, False
+                reader.position = start_i if parsed.index == group else 0
+                reader.budget.known_run = 0  # “连续几条已存”按组数
+                continue
+            yielded, position = True, position + 1
+            if skipping or (reader.group == group and position < start_i):
+                continue  # 丢掉的：这一组已经够了；或前面的是重放：续读位置只往前走，重放途中停下也不倒退
+            reader.position = position
+            try:
                 if isinstance(parsed, ItemUnreadable):  # 读不到：不存版本，记下，接着读下一条
                     reader.skip(parsed)
                 else:
-                    first = position == start_i
+                    first = reader.group == group and position == start_i
                     reader.site_record(parsed, raw, skip_attachments=start_a if first else 0,
                                        record_page=not (first and start_recorded))
-                # 拉取函数在循环来要下一条时才去读它：停在那里，就从那一条接着读
-                reader.position = position + 1
-    if reader.position == 0:
+            except transport.Stop as stop:
+                if not (by_group and stop.reason == transport.KNOWN):
+                    raise
+                skipping = True  # 这一组读到旧的了
+            # 拉取函数在循环来要下一条时才去读它：停在那里，就从那一条接着读
+            reader.position = position + 1
+            skipping = skipping or bool(by_group and request.known_stop and position + 1 >= GROUP_LIMIT)
+    if not (yielded or start_i or group):
         raise HistoryError("list_empty", LIST_EMPTY)
 
 
 def _read_detail_pages(request, reader, start):
     """列表网页站点：父项是列表入口通向的各个详情页。"""
-    start_i, start_a, start_recorded = start
+    start_i, start_a, start_recorded = start[:3]
     if request.query not in reader.profile.get("start_urls", []):
         raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
     seen = -1
@@ -495,18 +518,19 @@ def _why(exc) -> str:
 
 def _stopped_at(reader, start):
     """在父项中途停下（不是附件中途）的续读位置。还没走到起点那一项（重放时停下），位置原样不动，不倒退。"""
-    return start if reader.position == start[0] else (reader.position, 0, False)
+    return start if (reader.group, reader.position) == (start[3], start[0]) else (reader.position, 0, False)
 
 
 def _read(request, reader) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
-    续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录）, "a": 该父项下第几个附件,
-    "p": 1 表示这个父项的页面版本已经保存、续读时只为拿附件链接重取页面}。重放到续读位置途中停下，位置原样不动。"""
+    续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录；分组读取是组内第几条）, "a": 该父项下第几个附件,
+    "p": 1 表示这个父项的页面版本已经保存、续读时只为拿附件链接重取页面, "g": 分组读取时第几组（0 不写）}。
+    重放到续读位置途中停下，位置原样不动。"""
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
-    start = (0, 0, False)
+    start = (0, 0, False, 0)
     try:
         start = _cursor(request)
-        reader.position = start[0]
+        reader.position, reader.group = start[0], start[3]
         if request.query in {"by_url", "stored_attachments"}:
             _read_named(request, reader, start)
         elif reader.profile.get("source_type") == "api" or reader.profile.get("source_type") == "table_page":
@@ -542,8 +566,8 @@ def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
     if resume and error is None:
         next_continuation = {
             "scope_hash": request.scope_hash(),
-            "cursor": json.dumps({"i": resume[0], "a": resume[1], "p": int(resume[2])}),
-            "read_count": resume[0],
+            "cursor": json.dumps({"i": resume[0], "a": resume[1], "p": int(resume[2]), **({"g": reader.group} if reader.group else {})}),
+            "read_count": reader.group or resume[0],  # 读到第几组 / 第几条
         }
     return {
         "records": [r for r in reader.records if r is not None],

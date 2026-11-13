@@ -3,6 +3,8 @@
 接口：披露易“标题搜索”页上“更多”按钮背后的 JSON 接口 titleSearchServlet.do（GET）。参数 rowRange 是一次返回的最大条数
 （页面每点一次“更多”加 100；服务端上限 10000）：传 10000，一次请求就拿到这家公司从 from_date 起的全部公告
 （实测 239 条、1392 条都是一次请求），不用翻页、不用按日期分段。结果按发放时间从新到旧。
+一家公司是一组（collection.site_crawler 的分组读取）：每家公司开头给一个 GroupStart(第几家)，从第 start 家读起，
+续读不用把前面的公司再请求一遍。
 以前 POST 页面 titlesearch.xhtml，只能拿到最新 100 条，还把“文件类型”栏当成了标题。
 """
 
@@ -16,7 +18,7 @@ from urllib.parse import urljoin
 import requests
 from loguru import logger
 
-from biz_rules.history_models import HistoryError, ItemUnreadable
+from biz_rules.history_models import GroupStart, HistoryError, ItemUnreadable
 from config.sites.hkex_pharma_list_auto import PHARMA_COMPANIES
 
 SITE = "https://www1.hkexnews.hk"
@@ -97,14 +99,16 @@ def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
     return rows
 
 
-def fetch_hkex_announcements(api_config: Dict) -> Iterator[Dict]:
-    """从港交所披露易拉取上市公司公告，一条一条给。读不到的公司给一个 ItemUnreadable（写明哪家、为什么，采集插件记下它、
-    不存版本），接着读下一家。"""
+def fetch_hkex_announcements(api_config: Dict, start: int = 0) -> Iterator[Dict]:
+    """从港交所披露易拉取上市公司公告，一条一条给，从第 start 家公司读起。每家公司开头先给 GroupStart（再发请求，请求超时
+    停在这里，续读位置就是这一家）。读不到的公司给一个 ItemUnreadable（写明哪家、为什么，采集插件记下它、不存版本），接着读下一家。"""
     companies = api_config.get("companies", PHARMA_COMPANIES)
     skip_headlines, skip_titles = api_config.get("skip_headlines", ()), api_config.get("skip_titles", ())
-    logger.info(f"[HKEX] 公司数量: {len(companies)}")
-    seen = set()  # 联合公告会出现在几家公司名下，同一个文件只给一次
-    for company in companies:
+    logger.info(f"[HKEX] 公司数量: {len(companies)}，从第 {start} 家读起")
+    seen = set()  # 联合公告会出现在几家公司名下，同一个文件只给一次（续读后只管这一次读取里读到的）
+    for number in range(start, len(companies)):
+        company = companies[number]
+        yield GroupStart(number)
         try:
             rows = _read_company(api_config, company)
         except HistoryError as exc:

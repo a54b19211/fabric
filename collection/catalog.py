@@ -28,7 +28,7 @@ IncrementalKind = Literal[
     "source_updated_window",  # 来源自己的“更新日期”字段按窗口过滤
     "modified_window",  # 来源 API 的修改时间参数（updated_since/until）
     "fixed_ids",  # 只读明确清单，没有变更流
-    "stop_at_known",  # 没有可过滤的更新时间，但列表从新到旧：每轮从头读，连续读到已存且没变的就停（collection.windows）
+    "stop_at_known",  # 没有可过滤的更新时间，但列表从新到旧：每轮从头读，连续读到已存且没变的就停（collection.windows）；分组的按组停
     "full_reread",  # 没有可过滤的更新时间，列表顺序也靠不住（旧条目会后补进来）：每轮整份重读，没变的版本不重复存
     "none",  # 尚无可靠增量键，只能快照加对账
 ]
@@ -43,6 +43,9 @@ class Incremental:
     overlap_days: int = 2
     # 固定刷新（db.source_refresh）的最短间隔。一轮至少一次请求，有每日上限的来源要声明一个它的上限撑得住的下限。
     min_cadence_seconds: int = 3600
+    # stop_at_known 按组算（站点配置里也写了 "by_group": True）：每一组各自从新到旧，“连续读到已存的就停”只停这一组，
+    # 一个周期读完全部的组（不受 SEGMENTS_PER_CYCLE 限制），读不到的组下个周期自然再读（不用整份重读）
+    by_group: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,23 +115,28 @@ _NEWEST_FIRST = Incremental(
 _FULL_REREAD = Incremental(
     "full_reread", None, "每轮整份重读（列表不大）；没有更新时间可过滤，新公布的条目也可能日期很旧，不能靠“遇到已存的就停”"
 )
-# 这个办法用不了的来源（还是 kind="none"，不进固定刷新），原因写在这里，目录里如实可见
-_NOT_WATCHED = {
-    "hkex": "公告按 183 家公司各自从新到旧，“遇到已存的就停”停在第一家就漏掉其余；一轮要 183 次请求、约 6 分钟，"
-    "一次读取最长 120 秒，续读又要从头重放，读不完",
-    "nccn": "指南清单没有时间顺序，新版本只是某一条的版本号变了，必须整份重读；一轮约一百次页面渲染，"
-    "一次读取最长 120 秒，续读又要从头重放，读不完",
-}
+# 分组读取的来源（站点配置里写了 "by_group": True）：一组一组地读，续读位置记第几组，不用把前面的组再读一遍
+_BY_COMPANY = Incremental(
+    "stop_at_known", None,
+    "按公司分组：每家公司的公告各自从新到旧，每家连续读到 3 条已存且没变的就停、接着读下一家，一个周期读完全部公司；"
+    "没有更新时间可过滤，旧公告被改动读不到", by_group=True,
+)
+_BY_GUIDELINE = Incremental(
+    "stop_at_known", None,
+    "按指南分组：清单没有时间顺序，每个周期按序号把全部指南的详情页读一遍；已存且没变的指南不再下载附件，"
+    "新版本（版本号变了）重新存", by_group=True,
+)
+
 
 def _site(source_id, name, *, evidence, decisions, group, coverage, notes="", interval=2.0, supply_system="",
-          datasets=()):
-    """站点插件（site_crawler）的来源：已接通、未经本系统对原站实测；能不能进固定刷新看 _NOT_WATCHED。
+          datasets=(), incremental=_NEWEST_FIRST, backfill=False):
+    """站点插件（site_crawler）的来源：已接通、未经本系统对原站实测；增量读法默认是 _NEWEST_FIRST（列表从新到旧）。
     group 是限速组（主机名后缀），interval 是同一限速组里两次请求的最短间隔（秒）。"""
-    incremental = Incremental("none", None, _NOT_WATCHED[source_id]) if source_id in _NOT_WATCHED else _NEWEST_FIRST
     return CollectionSpec(
         source_id=source_id, name=name, status="active", plugin="site_crawler", evidence_types=evidence,
         decisions=decisions, incremental=incremental, rate_group=group, min_interval_seconds=interval,
         coverage=coverage, verified=False, notes=notes, supply_system=supply_system, datasets=datasets,
+        backfill=backfill,
     )
 
 
@@ -270,7 +278,7 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
     # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件用站点配置里的浏览器抓取器运行。后来用
     # ops/check_sources.py 对原站真抓过多轮（chictr、nmpa、cde 等都读得到），verified 要不要改 True 由主持人定，
     # 这里仍是 False。没有更新时间可过滤；列表从新到旧的站点按“遇到已存的就停”进固定刷新（_NEWEST_FIRST），
-    # 用不了的写在 _NOT_WATCHED。
+    # 港交所、NCCN 分组读（_BY_COMPANY、_BY_GUIDELINE）。
     # 附件：详情页附件各成独立版本，正文由加工层 attachment_parse（自部署 MinerU）产出。
     CollectionSpec(
         source_id="chictr",
@@ -341,11 +349,14 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
           "同属 openFDA 供给系统",
           supply_system="openfda", datasets=("api.fda.gov/drug/enforcement.json",)),
     _site("hkex", "港交所披露易", evidence=("corporate_filing",), decisions=("A", "C"), group="hkexnews.hk",
-          coverage={"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, notes="query=records；医药公司清单见站点配置"),
+          coverage={"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, incremental=_BY_COMPANY, backfill=True,
+          notes="query=records；医药公司清单见站点配置。固定刷新每个周期读完全部公司，每家最多读最新的 GROUP_LIMIT 条"
+          "（collection.windows），更老的用 ops/backfill_source.py hkex 补"),
     _site("fiercepharma", "Fierce Pharma（RSS）", evidence=("industry_media",), decisions=("A", "C"), group="fiercepharma.com",
           coverage={"metadata": "RSS 条目", "fulltext": "文章页"}, notes="query=records；行业媒体，不是独立证实来源"),
     _site("nccn", "NCCN 临床实践指南", evidence=("guideline",), decisions=("B",), group="nccn.org",
-          coverage={"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, notes="query=records；许可未核实"),
+          coverage={"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, incremental=_BY_GUIDELINE, backfill=True,
+          notes="query=records；许可未核实"),
     _site("roche", "Roche Media Releases", evidence=("company_disclosure",), decisions=("A",), group="roche.com",
           coverage={"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}, notes="query=records；企业披露，不是独立无偏来源"),
     CollectionSpec(
