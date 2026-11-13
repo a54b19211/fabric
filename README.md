@@ -1,11 +1,10 @@
 # ZK_Data Fabric：抓 → 洗 → 存
 
-把药学相关的公开资料（监管公告、临床登记、文献、企业披露、新闻……）**抓**下来，**洗**成干净正文、编号和画像，
+把药学相关的公开资料（监管公告、临床登记、文献、企业披露、新闻……）**抓**下来，**洗**成干净正文、编号、画像和质量分，
 按版本**存**进 History 库并送进知识库 WeKnora。雷达只经 HTTP 接口（`api/`）读这些结果。
 
 - **正式运行**：`systemctl --user start datafabric-{publisher,history-worker,clean,index,measure,history}`（`ops/systemd/` 的 6 个服务，各起 `run/` 里的一个常驻程序，见下）
-- **调试一个来源**：`python main_etl.py --source nmpa --max 5`（会写库，先指向临时库，见“怎么跑”）
-- **跑测试**：`make test`
+- **调试一个来源**：`python main_etl.py --source nmpa --max 5`（会写库，先指向临时库，见“怎么跑”）；**跑测试**：`make test`
 
 ## 目录
 
@@ -13,10 +12,10 @@
 |---|---|
 | `main_etl.py` | 一个来源从抓到存的全过程，从上往下一步一个函数；调试和学习从这里读起 |
 | `fetch/` 抓 | 来源目录 `catalog.py`、每类来源的读法 `sources.py`、网站读取 `site_crawler.py`、站点配置 `sites/`、详情页提取 `extractors/`、出网 `transport.py`、采集任务 `fetch_job.py`、定时刷新 `source_refresh.py` |
-| `clean/` 洗 | 正文 `clean_text.py`、编号 `identifiers.py`、画像 `profile.py`，由 `clean_stage.py` 按版本批量做；附件解析、登记差分、测量读数 |
+| `clean/` 洗 | 正文 `clean_text.py`、编号 `identifiers.py`、画像 `profile.py`，由 `clean_stage.py` 按版本批量做；徐子雯的字段清洗 `fields.py`、编号对齐 `align.py`（药名 `drug_names.py`）、质量分 `quality.py`，由 `quality_stage.py` 批量做；附件解析、登记差分、测量读数 |
 | `store/` 存 | History 库：存版本和读版本 `history.py`、数据形状 `history_models.py`、送知识库 `index_publication.py`、检索 `retrieval.py`、迁移 `migrations/` |
 | `api/` 对外 | 雷达读的 HTTP 接口：`api/routers/history.py`（`/api/history/*`）和 `measurements.py` |
-| `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗 `clean.py`、附件 `attachments.py`、索引 `index.py`、测量 `measure.py` |
+| `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗和打分 `clean.py`、附件 `attachments.py`、索引 `index.py`、测量 `measure.py` |
 | `graph/` 图谱 | 对象库、模型抽取、消歧、人工审核、图发布和审核页面及其接口（唐组维护，徐组不用读） |
 | `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、服务文件 `systemd/`、代码门槛 |
 | `tests/` | 测试 |
@@ -28,6 +27,12 @@
 相同就不存；不同就存一个新版本，旧版本的 `replaced_by` 指向它。原件只追加，A→B→A 是第三个版本。
 附件文件按 sha256 去重；定时刷新连续读到 3 条“已存且没变”就停。
 
+## 质量分（徐子雯的那一段，`clean/quality_stage.py`）
+
+画像过的版本再走一遍她的“洗”：字段清洗和 L3 规范化（`fields.py`）→ 编号对齐（`align.py`：编号字段本地查格式；药名切成候选名
+问 PubChem、ChEMBL、OLS4、UniProt，按“来源分层”取舍，各库结果都存下）→ 五维打分（`quality.py`），写 `derived_quality_scores`
+（带 `scorer_version`）和 `derived_authority_resolutions`。清洗正文一字不动，“隔离”只是等级、不拦截；`/clean-text?quality=true` 带出分数。
+
 ## 怎么跑
 
 环境：CPython 3.10、uv 0.13.0。`make venv` 只按 `requirements.lock` 装（契约包和模型传输包从旁边的
@@ -38,7 +43,7 @@
 ```bash
 export DATAFABRIC_HISTORY_DATABASE_URL=postgresql://…/临时库
 python -m store.migrations.runner --db history --apply    # 建表（--plan 只列出还没跑的迁移）
-python main_etl.py --source nmpa --max 5                  # 抓 5 条 → 清洗 → 测量 → 送知识库（没配就跳过）
+python main_etl.py --source nmpa --max 5                  # 抓 5 条 → 清洗 → 打分 → 测量 → 送知识库（没配就跳过）
 python main_etl.py --source clinicaltrials                # 来源目录里能抓的来源都行
 ```
 
@@ -48,21 +53,19 @@ python main_etl.py --source clinicaltrials                # 来源目录里能�
 |---|---|---|
 | datafabric-publisher | `python -m run.scheduler` | 到点给各来源建采集任务，放进队列 |
 | datafabric-history-worker | `rq worker … extraction` | 执行采集任务（`fetch/fetch_job.py`），原件存成版本 |
-| datafabric-clean | `python -m run.clean --loop` | 新版本的正文、编号、画像 |
+| datafabric-clean | `python -m run.clean --loop` | 新版本的正文、编号、画像；之后给画像过的版本打质量分（每轮 60 秒） |
 | datafabric-index | `python -m run.index` | 清洗正文送进 WeKnora |
 | datafabric-measure | `python -m run.measure` | 从 WHO 通报正文读数字（未核的读数也带标记往下流） |
 | datafabric-history | `uvicorn api.main:app` | HTTP 接口 |
 
-附件正文解析 `python -m run.attachments --loop` 现在没有服务文件，要用时手动起。
-
-主要环境变量：`DATAFABRIC_HISTORY_DATABASE_URL`（History 库）、`DATAFABRIC_HISTORY_READ_TOKEN` / `DATAFABRIC_HISTORY_ADMIN_TOKEN`
+附件正文解析 `python -m run.attachments --loop` 现在没有服务文件，要用时手动起。主要环境变量：`DATAFABRIC_HISTORY_DATABASE_URL`（History 库）、`DATAFABRIC_HISTORY_READ_TOKEN` / `DATAFABRIC_HISTORY_ADMIN_TOKEN`
 （读接口 / 写接口凭据）、`DATAFABRIC_HISTORY_WATCHES`（定时刷新哪些来源）、`DATAFABRIC_HISTORY_REDIS_URL`（采集队列）、
 `DATAFABRIC_INDEX_TARGETS`、`WEKNORA_KDD_URL`、`WEKNORA_KDD_TOKEN`（知识库）。一个来源能不能读，看 `history_sources.read_enabled`。
 NCCN 走代理：设 `DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（zktest 上的 mihomo），只有站点配置里写了 `proxy_env` 的站点用代理。
-`DATAFABRIC_HISTORY_FETCH_ENABLED=false` 时这个实例不出网（只读已存的版本）。
+`DATAFABRIC_HISTORY_FETCH_ENABLED=false` 时这个实例不出网（只读已存的版本；药名对齐记“降级”）。
 
-升级旧库：迁移 V042 给 `history_versions` 加 `fingerprint`、`replaced_by` 两列并按发布序号补好 `replaced_by`；
-之后跑一次 `python ops/backfill_fingerprint.py` 补旧版本的指纹（不补也能用：比较时当场算）。
+升级旧库：V042 给 `history_versions` 加 `fingerprint`、`replaced_by` 并补好 `replaced_by`，之后跑一次
+`python ops/backfill_fingerprint.py` 补旧版本的指纹（不补也能用：比较时当场算）；V043、V044 新建质量分表和对齐表。
 
 测试和检查：`make test`（单元测试，不连库）、`make lint`、`make metrics`（函数 80 行、复杂度 20 的门槛）、
 `make test-integration`（起临时 PostgreSQL/Redis 容器，跑完删掉）、`make check-lock`（要连 PyPI；zktest 上临时加
@@ -74,7 +77,7 @@ NCCN 走代理：设 `DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（zktest 上�
 2. 抓：`fetch/catalog.py`（有哪些来源）→ `fetch/fetch_job.py` 的 `history_fetch_job` → `fetch/sources.py` 的
    `read_public` → 网站走 `fetch/site_crawler.py`，站点知识在 `fetch/sites/<站点>.py` 和 `fetch/extractors/`。
 3. 存版本：`store/history.py` 的 `finish_fetch` → `_publish`（上面“版本怎么定”）。
-4. 洗：`clean/clean_stage.py` 的 `process` → `clean_text.py`、`identifiers.py`、`profile.py`。
+4. 洗：`clean/clean_stage.py` 的 `process` → `clean_text.py`、`identifiers.py`、`profile.py`；质量分 `clean/quality_stage.py`。
 5. 送知识库和对外：`store/index_publication.py`，`api/routers/history.py`。
 
 一份资料经过哪些文件、函数和表，见 [docs/代码地图.md](docs/代码地图.md)。学生不用读 `tests/`。
@@ -88,13 +91,10 @@ NCCN 走代理：设 `DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（zktest 上�
 3. 在 `fetch/catalog.py` 的 `SPECS` 里加一行 `_site(...)`：来源编号、名称、证据类型、业务判断、限速组和间隔、覆盖说明
    （有附件写 `attachments`）；许可和名称只写这一处。默认按“列表从新到旧、遇到已存的就停”刷新；列表不是从新到旧的，
    写 `incremental=_FULL_REREAD`（每轮整份重读）。
-4. 跑 `make test`。
-5. 让库认识它：临时库上 `python -m store.migrations.runner --db history --apply`（给 `history_sources` 补一行）；
-   要定时刷新的写进 `DATAFABRIC_HISTORY_WATCHES`。
-6. 真抓：`python main_etl.py --source <站点> --max 5`，再 `python ops/check_sources.py <站点> --rounds 3 --incremental`
+4. 跑 `make test`；让库认识它：临时库上 `python -m store.migrations.runner --db history --apply`（给 `history_sources`
+   补一行）；要定时刷新的写进 `DATAFABRIC_HISTORY_WATCHES`。
+5. 真抓：`python main_etl.py --source <站点> --max 5`，再 `python ops/check_sources.py <站点> --rounds 3 --incremental`
    （第二、三轮应停在 reached_known，不重复存版本）；照 `tests/test_site_pages.py` 存一页夹具，补一个提取测试。
 
-## 其他
-
-- 徐子雯代码的对接方案：[docs/徐子雯对接方案.html](docs/徐子雯对接方案.html)
-- 设计、决定和交接记录在 `/home/zk_test/zk_projects/雷达设计文档/`，代码目录里只放代码。
+徐子雯代码怎么并进来的（她每个功能在主线哪里）：[docs/徐子雯对接方案.html](docs/徐子雯对接方案.html)。
+设计、决定和交接记录在 `/home/zk_test/zk_projects/雷达设计文档/`，代码目录里只放代码。
