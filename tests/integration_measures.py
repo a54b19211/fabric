@@ -223,6 +223,15 @@ def test_a_failed_window_is_retried_and_then_owed(db, fake):
     assert rows(db, "SELECT state, reason FROM derived_measure_runs") == [{"state": "partial", "reason": "windows_owed"}]
 
 
+def test_a_fault_of_a_route_fails_its_window_not_the_worker(db, monkeypatch):
+    who_version()
+    monkeypatch.setattr(mx, "rules_measures", lambda *args: 1 / 0)
+    counts = measure.run_round(model=None, with_rules=True)
+    assert counts["windows"]["failed"] >= 1 and counts["windows"]["idle"] == 1
+    errors = {r["error"] for r in rows(db, "SELECT error FROM derived_measure_window_attempts")}
+    assert errors == {"route_error:ZeroDivisionError"}
+
+
 def test_a_window_another_worker_holds_is_skipped(db, fake):
     who_version()
     runs.plan(model=fake.model(), with_rules=False)

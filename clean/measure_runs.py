@@ -146,31 +146,40 @@ def process_once(*, model=None, with_rules=True, client: httpx.Client | None = N
         return {"state": _read(conn, w, art, model, client)}
 
 
+def _measures(w, art, model, client):
+    """(measures, skipped, output, error) the window's route read: the rules, or one model call."""
+    window = (w["start_char"], w["end_char"])
+    if mx.route_of(w["producer_identity"]) == mx.RULES:
+        return (*mx.rules_measures(art["text"], art["segments"], window, w["source_record_id"]), None, None)
+    owned = client is None
+    client = client or httpx.Client(follow_redirects=False, trust_env=False)
+    try:
+        measures, output, error = mx.model_measures(model, w["title"], art["text"], window, client)
+        return measures, [], output, error
+    finally:
+        if owned:
+            client.close()
+
+
 def _read(conn, w, art, model, client):
     """Read the window by its run's route, store the readings and objects, release the window; its new state."""
-    window, skipped, output, error = (w["start_char"], w["end_char"]), [], None, None
-    if mx.route_of(w["producer_identity"]) == mx.RULES:
-        measures, skipped = mx.rules_measures(art["text"], art["segments"], window, w["source_record_id"])
-    else:
-        owned = client is None
-        client = client or httpx.Client(follow_redirects=False, trust_env=False)
-        try:
-            measures, output, error = mx.model_measures(model, w["title"], art["text"], window, client)
-        finally:
-            if owned:
-                client.close()
+    asked = int(mx.route_of(w["producer_identity"]) == mx.MODEL)  # model requests sent for the window
+    try:
+        measures, skipped, output, error = _measures(w, art, model, client)
+    except Exception as exc:  # noqa: BLE001 - a fault of a route fails its window (retried, then owed), not the worker
+        measures, skipped, output, error = [], [], None, ("failed", f"route_error:{type(exc).__name__}")
     if error:
-        _attempt(conn, w, error[0], error=error[1], output=output, requests=1)
+        _attempt(conn, w, error[0], error=error[1], output=output, requests=asked)
         return _release(conn, w, *error)
     ids, not_built = [], list(skipped)
     for n, m in enumerate(measures):
-        reading, why = mx.reading_of(m, art["text"], window)
+        reading, why = mx.reading_of(m, art["text"], (w["start_char"], w["end_char"]))
         if why:
             not_built.append({"measure": n, "reason": why})
         else:
             ids.append(_store(conn, w, reading, m))
-    _attempt(conn, w, "sent", output=output, requests=0 if output is None else 1, found=len(measures),
-             reading_ids=ids, not_built=not_built)
+    _attempt(conn, w, "sent", output=output, requests=asked, found=len(measures), reading_ids=ids,
+             not_built=not_built)
     return _release(conn, w, "sent")
 
 
