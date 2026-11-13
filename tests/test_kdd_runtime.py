@@ -62,31 +62,28 @@ def test_reported_source_failure_exits_nonzero(monkeypatch, state):
     assert exc.value.code == 1
 
 
-def test_index_worker_rotates_job_classes_and_survives_unavailable_database(monkeypatch):
-    from collections import Counter
+def test_index_worker_keeps_going_after_an_outage_and_sleeps_only_when_idle(monkeypatch):
+    from store import index_publication as index
 
-    from store import index_publication
+    answers = [RuntimeError("synthetic database outage"), {"ready": 2}, {}]
+    slept = []
 
-    claims, scans = [], []
+    def work_once(*, client):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
-    def process_once(*, classes):
-        claims.append(tuple(classes))
-        if len(claims) == 3:
-            raise RuntimeError("synthetic database outage")
-        return {"state": "ready"}
+    class Stop:
+        def is_set(self):
+            return False
 
-    def scan():
-        scans.append(True)
-        raise RuntimeError("synthetic scan outage")
+        def wait(self, seconds):
+            slept.append(seconds)
 
-    monkeypatch.setattr(index_publication, "process_once", process_once)
-    monkeypatch.setattr(index_publication, "scan_committed", scan)
-    counts = index_publication.run_worker(concurrency=1, rounds=8, idle_seconds=0, scan_every_seconds=0)
-    assert len(scans) == 8 and sum(counts[0].values()) == 8 and counts[0]["unavailable"] == 8
-    # 扫描失败的轮次不处理作业；扫描恢复后按 T-30 的 8 格轮转：每轮先试本格的类，空了依次让给其余各类
-    monkeypatch.setattr(index_publication, "scan_committed", lambda: None)
-    claims.clear()
-    counts = index_publication.run_worker(concurrency=1, rounds=8, idle_seconds=0, scan_every_seconds=1e9)
-    assert counts[0] == {"ready": 7, "unavailable": 1} and len(claims) == 8
-    assert all(set(c) == {"F", "P", "R", "B", "C"} for c in claims)
-    assert Counter(c[0] for c in claims) == {"F": 2, "P": 3, "R": 1, "B": 1, "C": 1}
+    monkeypatch.setattr(index, "targets", lambda: [])
+    monkeypatch.setattr(index, "scan_committed", lambda: None)
+    monkeypatch.setattr(index, "work_once", work_once)
+    monkeypatch.setattr(index, "WeKnoraIndexClient", lambda: type("Client", (), {"close": lambda self: None})())
+    assert index.run_worker(rounds=3, idle_seconds=7, stop=Stop()) == {"unavailable": 1, "ready": 2}
+    assert slept == [7, 7]  # after the outage and when nothing was due; not after a busy round

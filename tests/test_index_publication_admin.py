@@ -127,10 +127,9 @@ def test_retry_schedules_only_blocked_jobs(db):
     assert params == {"id": JOB} and len(conn.queries) == 1
 
 
-@pytest.mark.parametrize("state, leased, reason", [("ready", False, "not_blocked"), ("blocked", True, "leased")])
-def test_retry_reports_why_nothing_was_scheduled(db, state, leased, reason):
-    db(Result(rowcount=0), Result([{"state": state, "leased": leased}]))
-    assert index.retry(JOB) == {"id": JOB, "scheduled": False, "state": state, "reason": reason}
+def test_retry_reports_why_nothing_was_scheduled(db):
+    db(Result(rowcount=0), Result([{"state": "ready"}]))
+    assert index.retry(JOB) == {"id": JOB, "scheduled": False, "state": "ready", "reason": "not_blocked"}
 
 
 def test_retry_unknown_or_malformed_id(db):

@@ -1,17 +1,15 @@
-"""正文进 WeKnora 的唯一路径（v3 3.6）：清洗产物 → 索引待办 → 桥接服务 → WeKnora。
+"""正文进 WeKnora：清洗正文 → 索引待办（index_publications）→ 桥接服务（WeKnora-kdd-bridge）→ WeKnora。
 
-- 索引单元是一条记录的一份清洗正文：(目标, 记录, artifact_key = 处理器版本:正文摘要)，代表版本是最先产出
-  这份正文的版本。以清洗段的画像为准——画像基于哪一份正文（一般版本是 clean.clean_text，附件是
-  clean.attachment_parse），就索引哪一份。
-- 历史版本不因“现在不是头版”失去检索资格：更正、撤回不停用索引，检索时由 Fabric 按模式和截止时间判定
-  此刻可见的版本（store.retrieval）。只有两种情况停用：来源撤权（revoked）；处理器升级后该记录已没有任何版本
-  的当前产物是这份正文（superseded）。
-- 入队只有一个函数 enqueue_versions：清洗段写画像时同一事务调用（新增）；worker 每轮按 published_seq 水位
+从哪读起：run_worker() 是常驻循环，一轮做两件事：scan_committed() 补扫待办，work_once() 领一批到期待办逐条处理。
+- 待办：一条 = (索引目标, 记录, 一份清洗正文[, 太长时的一片])。同一记录里清洗正文相同的版本只建一条，代表版本是最先
+  产出这份正文的版本。入队只有 enqueue_versions：清洗段写画像时同一事务调用；scan_committed 按 published_seq 水位
   补扫已画像而还没有待办的版本（回填、新加的目标）。ON CONFLICT 去重，两条路不会重复。
-- 执行是独立的 worker（python -m run.index worker），不挂在发表循环上；
-  新增（first_seen 在 FRESH_DAYS 天内）优先，回填保底。
-- 清单带检索元数据（来源、记录、版本、时间、证明、文档类型、证据类型、编号），桥接服务写进 WeKnora，
-  命中原样带回。命中只是指针：回 Fabric 校验后才给模型读（store.retrieval）。
+- 处理（_handle）：先判这条该不该在（_wanted）。该在：桥接还没绑定就上传，按回执记下 knowledge_id、是否 ready；
+  不该在：请桥接撤下。出错记下原因、退避重试，连续 MAX_ATTEMPTS 次后停在 blocked（管理页可以放回重试）。
+- 历史版本不因“现在不是头版”撤下：更正、撤回之后，检索时由 Fabric 按模式和截止时间核对此刻可见的版本
+  （store.retrieval）。只有两种情况撤下：来源撤权或目标停用（revoked）；处理器升级后这份正文已不是该记录任何版本的
+  当前产物（superseded，等替代它的正文整份 ready 后再撤，不撤掉最后的入口）。
+- 清单（manifest）就是发给桥接的请求体（不含正文），入队时冻结；正文在发送时按 artifact_key 从 derived_clean_text 取。
 """
 
 import json
@@ -26,20 +24,21 @@ from sqlalchemy import text
 
 from fetch.observations import OBSERVATION_PARSER
 from store import history, index_pieces
-from store.history_models import (
-    HistoryError,
-    HistoryRecord,
-    Model,
-    canonical,
-    sha256,
-)
-from store.lease import LeaseQueue, backoff, vacant
+from store.history_models import HistoryError, HistoryRecord, Model, canonical, sha256
 from store.timestamps import parse_timestamp
 from store.weknora_index_client import WeKnoraIndexClient, publication_id
 
-FRESH_DAYS = 3
+FRESH_DAYS = 3  # first_seen 在这几天内的版本算新增（lane=new），比回填先上传
 MAX_IDENTIFIERS = 50
 TOMBSTONES = ("withdrawn", "deleted", "retracted")
+BATCH = 20  # 一轮领几条
+CLAIM_SECONDS = 600  # 领到的条目先推后这么久：进程中途退出，它们 10 分钟后自动重新到期
+MAX_ATTEMPTS = 6  # 连续出错这么多次就停（blocked）
+POLL_SECONDS = 15  # 桥接还在解析、或还没停用完：过 15 秒再查
+HOLD_SECONDS = 300  # 等替代它的正文 ready：5 分钟后再看
+RECHECK_SECONDS = 86400  # ready 的每天复查一次（来源撤权、目标停用时撤下）
+PARSING = {"pending", "processing", "finalizing"}
+PARSE_ENDED = {"completed", "failed", "cancelled"}
 
 
 class IndexTarget(Model):
@@ -177,56 +176,42 @@ def metadata(record, proof_available_at, artifact, identifiers):
     return {k: v for k, v in values.items() if v not in (None, [], "")}
 
 
+# 桥接（WeKnora-kdd-bridge 的 Publication，extra=forbid）认识的字段。清单就是请求体（发送时加上 content）；
+# 这次改动之前入队的清单里还多几项只留在本地的说明字段，发送时按这个名单滤掉
+BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256", "artifact_key",
+                 "piece", "is_demo", "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata",
+                 "title")
+
+
 def _manifest(target, record, artifact, meta, piece=None):
-    if target["source_id"] != record.source_id or target["is_demo"] is not record.is_demo:
-        raise HistoryError("index_source_space_mismatch", "索引目标与固定原件来源空间不一致", 409)
-    identity = {
-        "source_instance": target["source_instance"], "source_id": record.source_id,
-        "source_record_id": record.source_record_id, "version_id": record.version_id,
-        "raw_sha256": record.raw_sha256,
-    }
+    """发给桥接的请求体（正文 content 发送时再加），入队时冻结在 index_publications.manifest。"""
+    locator = {"source_instance": target.source_instance, "source_id": record.source_id,
+               "source_record_id": record.source_record_id, "version_id": record.version_id}
     return {
-        **identity, "knowledge_base_id": target["knowledge_base_id"], "is_demo": target["is_demo"],
-        "source_scope": target["source_scope"],
-        "raw_locator": {k: identity[k] for k in identity if k != "raw_sha256"},
+        **locator, "raw_sha256": record.raw_sha256, "raw_locator": dict(locator),
+        "knowledge_base_id": target.knowledge_base_id, "is_demo": target.is_demo, "source_scope": target.source_scope,
         "title": (record.title or record.source_record_id)[:255],
         # 实际上传的正文：不分片时就是整份产物；分片时是这一片（上下文前缀 + 全篇里的一段）
         "content_sha256": piece["sha256"] if piece else artifact["text_sha256"],
         **({"piece": piece} if piece else {}),
-        # 正文是哪一份产物：命中能回指“版本 + 这份正文”，附件还回指父页面
-        "artifact_key": artifact_key(artifact), "processor_version": artifact["processor_version"],
-        "artifact_sha256": artifact["text_sha256"], "locator_kind": artifact.get("locator_kind"),
-        "parent_record_id": (record.facts or {}).get("parent_record_id"),
-        "metadata": meta,
+        "artifact_key": artifact_key(artifact), "metadata": meta,
     }
 
 
-# 桥接服务（extensions/kdd Publication，extra=forbid）认识的字段；Fabric 清单里其余的说明字段只留在本地
-# is_demo：演示目标的发布必须带上（桥接按它隔离演示与真实知识库；不带等于真实）
-BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256", "artifact_key",
-                 "piece", "is_demo", "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata")
-
-
-def _bridge_body(row, content):
-    """发给桥接的请求体。is_demo 取自索引目标（权威，不依赖清单是何时冻结的）。"""
-    manifest = row["manifest"]
-    body = {k: manifest[k] for k in BRIDGE_FIELDS if k in manifest}
-    return {**body, "is_demo": bool(row["config"]["is_demo"]), "title": manifest["title"][:255], "content": content}
+def _body(row, content):
+    return {**{k: v for k, v in row["manifest"].items() if k in BRIDGE_FIELDS}, "content": content}
 
 
 def _enqueue(conn, target, record, artifact, meta, pieces):
     """一条（目标, 记录, 产物）的索引待办：同一记录里清洗正文相同的版本只建一条，代表版本是最先产出这份正文的
-    版本。检索时由 Fabric 按模式和截止时间找出此刻可见的版本，它的当前产物就是这份正文才返回（store.retrieval）。
-    复用键 (目标, 记录, 产物) 由数据库唯一索引保证（V028 index_publications_record_artifact）：两个事务同时入队
-    同一份正文时，后一个等前一个提交后什么也不做，代表版本一经建立就不变。
-    太长的产物分片（store.index_pieces）：一片一个物理条目，唯一键带上分片身份键（规则、序号、范围、
-    片摘要）；一次放得下的不分片，身份与原来一致。
-    新建后，同一记录的其他待办尽快复查（处理器升级后旧产物会被判为 superseded 并停用，记录保留）。"""
+    版本。复用键 (目标, 记录, 产物, 片) 由数据库唯一索引保证（V028）：两个事务同时入队同一份正文时，后一个什么也不做。
+    太长的产物分片（store.index_pieces）：一片一个物理条目；一次放得下的不分片。
+    新建后，同一记录的其他待办尽快复查（处理器升级后旧产物会被判为 superseded 并撤下，记录保留）。"""
     key = artifact_key(artifact)
     lane = "new" if (datetime.now(record.first_seen_at.tzinfo) - record.first_seen_at).days < FRESH_DAYS else "backfill"
     inserted = 0
     for piece in pieces or [None]:
-        manifest = _manifest(target.model_dump(), record, artifact, meta, piece)
+        manifest = _manifest(target, record, artifact, meta, piece)
         piece_key = index_pieces.key(piece)
         ident = [target.key(), record.version_id, key] + ([piece_key] if piece else [])
         inserted += conn.execute(text("""
@@ -281,6 +266,17 @@ def enqueue_versions(conn, version_ids, *, configured=None):
     return count
 
 
+def _readable(conn, source_id):
+    """来源此刻可读（许可与开关）；撤权的返回 False，其他错误照常抛出。"""
+    try:
+        history._source(conn, source_id)
+    except HistoryError as exc:
+        if exc.status == 403:
+            return False
+        raise
+    return True
+
+
 def _sync_targets(conn, configured):
     for target in configured:
         conn.execute(text("""
@@ -307,14 +303,8 @@ def scan_committed(*, batch_size=100):
                 text("SELECT * FROM index_targets WHERE id=:id FOR UPDATE SKIP LOCKED"),
                 {"id": target.key()},
             ).mappings().first()
-            if row is None:
+            if row is None or not _readable(conn, target.source_id):
                 continue
-            try:
-                history._source(conn, target.source_id)
-            except HistoryError as exc:
-                if exc.status == 403:
-                    continue
-                raise
             versions = conn.execute(text("""
                 SELECT version_id,published_seq FROM history_versions
                 WHERE source_id=:source AND is_demo=:demo AND published_seq>:seq
@@ -328,585 +318,188 @@ def scan_committed(*, batch_size=100):
                 """), {"seq": versions[-1]["published_seq"], "id": target.key()})
     return {"enqueued": count, "configured_targets": len(configured)}
 
-# 认领租约：长于最慢的一次桥接调用（停用最长 180 秒，加状态核对和余量）。租约短于调用就必然在结果落库前
-# 失效，结果写不进去。
-LEASE_SECONDS = 300
-JOBS = LeaseQueue("index_publications", ("id",))
-# Claiming also moves the next check past the lease (see _claim) and stamps the row.
-_CLAIM_ALSO = "next_check_at=clock_timestamp()+make_interval(secs=>:_lease_seconds),updated_at=clock_timestamp()"
-_CLAIM_ROW = {"alias": "p", "columns": "p.*,t.config,t.enabled", "also_set": _CLAIM_ALSO}
+
+# ---- worker: 领一批 → 逐条发给桥接 → 记结果 ----------------------------------------------------------------
+
+_CLAIM = """
+SELECT p.*,t.config,t.enabled FROM index_publications p JOIN index_targets t ON t.id=p.target_id
+WHERE p.state<>'disabled' AND p.next_check_at<=clock_timestamp() AND {which}
+ORDER BY p.next_check_at,p.id LIMIT :n FOR UPDATE OF p SKIP LOCKED
+"""
+# 先领发出过的（查解析进度、撤下、复查），再领没发出过的（上传，新增先于回填）：查进度不会被一大批待上传的挡住；
+# 在解析中的多了，一批里留给上传的位置就少，上传自然慢下来
+_CLAIM_ORDER = ("p.first_send_at IS NOT NULL", "p.first_send_at IS NULL AND p.lane='new'",
+                "p.first_send_at IS NULL AND p.lane<>'new'")
 
 
-def _claim(lane=None, sent=None):
-    """下一个到期作业。lane=new/backfill、sent=True/False 只在那一类里找（各有部分索引）；None 不限。
-    认领同时把下次检查推到租约之后：处理超时、进程中断的作业排到后面，不会每次都被最先认领、挡住其后的
-    整个队列（隔离实测：120 秒租约下慢停用一再失租、反复重发，1,312 条 indexing 一直轮不到）。
-    正常结束时 _finish 另定下次检查。"""
-    where = ""
-    if lane is not None:
-        where += " AND p.lane=:lane"
-    if sent is not None:
-        where += " AND p.first_send_at IS NOT NULL" if sent else " AND p.first_send_at IS NULL"
+def _claim(batch):
+    """领一批到期待办（FOR UPDATE SKIP LOCKED：别的进程正在领的跳过），领到的下次检查推后 CLAIM_SECONDS。"""
+    rows = []
     with history.history_engine().begin() as conn:
-        return JOBS.claim(conn, lease_seconds=LEASE_SECONDS, **_CLAIM_ROW,
-                          joins="JOIN index_targets t ON t.id=p.target_id",
-                          where="p.next_check_at<=clock_timestamp()" + where, params={"lane": lane},
-                          order_by="p.next_check_at,p.id")
+        for which in _CLAIM_ORDER:
+            if len(rows) < batch:
+                rows += conn.execute(text(_CLAIM.format(which=which)), {"n": batch - len(rows)}).mappings().all()
+        if rows:
+            conn.execute(text(
+                "UPDATE index_publications SET next_check_at=clock_timestamp()+make_interval(secs=>:s) "
+                "WHERE id=ANY(:ids)"), {"s": CLAIM_SECONDS, "ids": [r["id"] for r in rows]})
+    return [dict(r) for r in rows]
 
 
-# ---- T-30 scheduling ------------------------------------------------------------------------------------
-# Job classes, mutually exclusive (decided in this order, from the row's own fields):
-#   R retire: disabling, or no longer wanted (desired_state not active/unknown) and not yet disabled
-#   P poll:   sent (send evidence) and not settled: confirm, bind, recover, or retry an upload proven rejected
-#   F first upload (lane new) / B backfill first upload (lane backfill): never sent
-#   C recheck: ready, blocked or disabled entries checked again on their schedule
-# Every class has a guaranteed share of each worker's turns (ROTATION); an empty class gives its turn to the next.
-_SENT = "(p.first_send_at IS NOT NULL OR p.knowledge_id IS NOT NULL OR p.receipt<>'{}'::jsonb)"
-# An upload stops counting as in flight only when it is settled: ready / disabled, or (not being sent again)
-# its parse ended upstream or it was proven rejected before anything was created. blocked, waiting or an
-# expired lease never release it - the remote outcome may still be open.
-# Evidence about the current attempt only: the receipt's latest physical attempt must be a
-# later one than the attempt known when this upload was reserved (attempt_floor, 0 when none was known), and its
-# outcome must be the evidence itself - "rejected" for a rejection, "uploaded" for an ended parse. in_flight or
-# unknown attempts, stale receipts saved after a lost response, and receipts without last_attempt release nothing;
-# only ready / disabled do.
-_LAST = "COALESCE((p.receipt->'last_attempt'->>'attempt')::int,0)>COALESCE(p.attempt_floor,0)"
-_OUTCOME = "COALESCE(p.receipt->'last_attempt'->>'outcome','')"
-_RELEASED = ("(p.state IN ('ready','disabled') OR (p.state<>'sending' AND " + _LAST + " AND ("
-             "(COALESCE(p.receipt->>'upload_status','')='rejected' AND p.knowledge_id IS NULL AND "
-             + _OUTCOME + " IN ('rejected','rejected_observed')) OR "
-             "(COALESCE(p.receipt->>'parse_status','') IN ('completed','failed','cancelled') AND "
-             + _OUTCOME + "='uploaded'))))")
-_RETIRE = "(p.state='disabling' OR (COALESCE(p.desired_state,'active') NOT IN ('active','unknown') AND p.state<>'disabled'))"
-CLASS_SQL = {
-    "R": _RETIRE,
-    "P": f"(NOT {_RETIRE} AND p.state IN ('queued','sending','indexing','waiting') AND {_SENT})",
-    "F": f"(NOT {_RETIRE} AND p.lane IS DISTINCT FROM 'backfill' AND p.state IN ('queued','waiting') AND NOT {_SENT})",
-    "B": f"(NOT {_RETIRE} AND p.lane='backfill' AND p.state IN ('queued','waiting') AND NOT {_SENT})",
-    "C": f"(NOT {_RETIRE} AND p.state IN ('ready','blocked','disabled'))",
-}
-CLASS_OF = ("CASE WHEN " + CLASS_SQL["R"] + " THEN 'R' WHEN " + CLASS_SQL["P"] + " THEN 'P' WHEN " + CLASS_SQL["F"]
-            + " THEN 'F' WHEN " + CLASS_SQL["B"] + " THEN 'B' WHEN " + CLASS_SQL["C"] + " THEN 'C' END")
-# One worker thread's turns: first uploads 2, polls 3, retire 1, backfill 1, recheck 1 of every 8.
-ROTATION = ("F", "P", "R", "F", "P", "B", "C", "P")
-UPLOAD_CLASSES = ("F", "B")
-
-
-def _env_number(name, default, cast=int):
+def work_once(*, client=None, batch=BATCH):
+    """领一批到期待办，逐条处理并写回结果。返回 {结果状态: 条数}；空字典表示没有到期的。"""
+    owned = client is None
+    client = client or WeKnoraIndexClient()
+    counts = {}
     try:
-        value = cast(os.environ.get(name) or default)
-    except ValueError:
-        raise HistoryError("index_target_configuration", name + " 必须是正数", 503) from None
-    if value <= 0:
-        raise HistoryError("index_target_configuration", name + " 必须是正数", 503)
-    return value
+        for row in _claim(batch):
+            try:
+                result = _handle(row, client)
+            except Exception as exc:  # noqa: BLE001 -- 记下原因，退避重试，有限次数后停
+                result = _failed(row, exc)
+            _save(row, result)
+            counts[result["state"]] = counts.get(result["state"], 0) + 1
+    finally:
+        if owned:
+            client.close()
+    return counts
 
 
-def limits():
-    """The shared upload budget of one knowledge base: entries / characters / bytes in flight, and the send
-    bucket (uploads per minute, burst)."""
-    return {"max_inflight": _env_number("DATAFABRIC_INDEX_MAX_INFLIGHT", 200),
-            "max_inflight_chars": _env_number("DATAFABRIC_INDEX_MAX_INFLIGHT_CHARS", 20_000_000),
-            "max_inflight_bytes": _env_number("DATAFABRIC_INDEX_MAX_INFLIGHT_BYTES", 60_000_000),
-            "uploads_per_minute": _env_number("DATAFABRIC_INDEX_UPLOADS_PER_MINUTE", 60, float),
-            "burst": _env_number("DATAFABRIC_INDEX_UPLOAD_BURST", 10, float)}
+def _handle(row, client):
+    """一条待办的结果（还没写库）：{state, delay[, knowledge_id, error, attempts]}。"""
+    row["desired_state"] = wanted = _wanted(row)
+    if wanted == "retiring":
+        return {"state": row["state"], "delay": HOLD_SECONDS}  # 替代它的正文还没整份 ready：保留，不联网
+    if wanted != "active":
+        return _withdraw(row, client, wanted)
+    if row["state"] == "ready":
+        return {"state": "ready", "delay": RECHECK_SECONDS}  # 还该在，已经 ready：不联网
+    if row["state"] == "blocked":  # 停住的不再上传（等管理页放回重试）；每天看一次要不要撤下
+        return {"state": "blocked", "attempts": row["attempts"], "error": row["error"], "delay": RECHECK_SECONDS}
+    return _publish(row, client)
 
 
-# An upload whose size is unknown (sent before sizes were recorded and not recoverable from its content) is never
-# counted as zero: it blocks new uploads of its knowledge base until its size is known or it settles. The current
-# single-upload limit used in the sums is no proof for an old upload, only a placeholder for display.
-_SIZE = ("COALESCE(sum(COALESCE(p.sent_chars,:uc)),0),COALESCE(sum(COALESCE(p.sent_bytes,:ub)),0),"
-         "count(*) FILTER (WHERE p.sent_chars IS NULL OR p.sent_bytes IS NULL)")
+def _never_sent(row):
+    # 改造前的行可能有知识编号、回执而没有首次发送时间：那也算发出过
+    return row["first_send_at"] is None and not row["knowledge_id"] and not row["receipt"]
 
 
-def _unknown_size():
-    return {"uc": index_pieces.MAX_CHARS, "ub": index_pieces.MAX_BYTES}
-
-
-def _inflight(conn, kb, exclude=None):
-    """(entries, chars, bytes, entries of unknown size) in flight for a knowledge base."""
-    return conn.execute(text(
-        "SELECT count(*)," + _SIZE + " FROM index_publications p "
-        "WHERE p.manifest->>'knowledge_base_id'=:kb AND p.state NOT IN ('ready','disabled') AND " + _SENT
-        + " AND NOT " + _RELEASED + (" AND p.id<>:id" if exclude else "")
-    ), {"kb": kb, "id": exclude, **_unknown_size()}).one()
-
-
-def _uploaded(conn, kb):
-    """What the physical uploads of a knowledge base carried so far, counted and never limited by the count. An
-    entry is sent again when the bridge proved the first upload rejected before anything was created; the bridge
-    numbers every attempt and attempt_floor is the number of earlier ones known when this upload was reserved, so an
-    entry was sent attempt_floor + 1 times, each time with the same body (sent_chars). An entry sent without a
-    recorded size is counted apart, not guessed. WeKnora batches and retries its embedding requests itself and
-    reports neither."""
-    row = conn.execute(text(
-        "SELECT count(*) FILTER (WHERE sent_chars IS NOT NULL) AS entries,"
-        "COALESCE(sum(COALESCE(attempt_floor,0)) FILTER (WHERE sent_chars IS NOT NULL),0) AS retried_uploads,"
-        "COALESCE(sum(sent_chars),0) AS first_chars,COALESCE(sum(sent_chars*COALESCE(attempt_floor,0)),0) AS retried_chars,"
-        "count(*) FILTER (WHERE sent_chars IS NULL) AS unsized_entries "
-        "FROM index_publications WHERE manifest->>'knowledge_base_id'=:kb AND first_send_at IS NOT NULL"
-    ), {"kb": kb}).mappings().one()
-    return {"uploads": int(row["entries"] + row["retried_uploads"]), "chars": int(row["first_chars"] + row["retried_chars"]),
-            "retried_uploads": int(row["retried_uploads"]), "retried_chars": int(row["retried_chars"]),
-            "unsized_entries": row["unsized_entries"], "embedding_requests": "unknown"}
-
-
-def _gated(conn, lim):
-    """{knowledge base: reason} where no new upload may start now: in-flight entries or size full, or no token."""
-    out = {}
-    for kb, n, c, b, unknown in conn.execute(text(
-        "SELECT p.manifest->>'knowledge_base_id'," "count(*)," + _SIZE + " FROM index_publications p "
-        "WHERE p.state NOT IN ('ready','disabled') AND " + _SENT + " AND NOT " + _RELEASED + " GROUP BY 1"
-    ), _unknown_size()):
-        if n >= lim["max_inflight"]:
-            out[kb] = "inflight_entries"
-        elif unknown:
-            out[kb] = "inflight_size_unknown"
-        elif c >= lim["max_inflight_chars"] or b >= lim["max_inflight_bytes"]:
-            out[kb] = "inflight_size"
-    for (kb,) in conn.execute(text(
-        "SELECT knowledge_base_id FROM index_send_bucket "
-        "WHERE LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0)<1"
-    ), {"burst": lim["burst"], "rate": lim["uploads_per_minute"]}):
-        out.setdefault(kb, "send_rate")
-    return out
-
-
-def _gate_closed(conn, kb, reason):
-    """A gate seen closed while uploads wait: count the denial (per observation) and open a wall-clock interval
-    (closed_since) for the reason and for "any" - the interval, not the number of threads that saw it, is the
-    blocked time, so concurrent workers do not add it up twice."""
-    for r in (reason, "any"):
-        conn.execute(text("""
-            INSERT INTO index_gate_stats(knowledge_base_id,reason,denials,blocked_seconds,last_at,closed_since)
-            VALUES (:kb,:r,1,0,clock_timestamp(),clock_timestamp())
-            ON CONFLICT (knowledge_base_id,reason) DO UPDATE SET denials=index_gate_stats.denials+1,
-              last_at=clock_timestamp(),closed_since=COALESCE(index_gate_stats.closed_since,clock_timestamp())
-        """), {"kb": kb, "r": r})
-
-
-def _gate_open(conn, kb):
-    """The gate seen open: close every open interval of this knowledge base into blocked_seconds."""
-    conn.execute(text("""
-        UPDATE index_gate_stats SET blocked_seconds=blocked_seconds+EXTRACT(EPOCH FROM clock_timestamp()-closed_since),
-          closed_since=NULL WHERE knowledge_base_id=:kb AND closed_since IS NOT NULL
-    """), {"kb": kb})
-
-
-def _reserve(row, content, receipt=None):
-    """Before one physical upload (a first upload or the retry of one proven rejected): under the knowledge
-    base's advisory lock - shared by every worker and process - check the in-flight entries, characters and
-    bytes, take a send token, and mark the job sending with its size and the bridge's latest known attempt
-    (attempt_floor: only evidence about a later attempt can settle this one), all in one transaction. Returns
-    None when granted, or the reason it was not (nothing is sent then)."""
-    floor = int(((receipt or {}).get("last_attempt") or {}).get("attempt") or 0)
-    kb, lim = row["manifest"]["knowledge_base_id"], limits()
-    chars, size = len(content), len(content.encode())
-    with history.history_engine().begin() as conn:
-        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "index_kb:" + kb})
-        n, c, b, unknown = _inflight(conn, kb, exclude=row["id"])
-        reason = None
-        if n + 1 > lim["max_inflight"]:
-            reason = "inflight_entries"
-        elif unknown:
-            reason = "inflight_size_unknown"  # an earlier upload of unknown size: no new one until it is known
-        elif n and (c + chars > lim["max_inflight_chars"] or b + size > lim["max_inflight_bytes"]):
-            reason = "inflight_size"  # one upload alone may exceed the size budget, never two together
-        if reason is None:
-            bucket = conn.execute(text(
-                "SELECT LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0) "
-                "FROM index_send_bucket WHERE knowledge_base_id=:kb FOR UPDATE"
-            ), {"kb": kb, "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalar()
-            tokens = lim["burst"] if bucket is None else float(bucket)
-            if tokens < 1:
-                reason = "send_rate"
-            conn.execute(text("""
-                INSERT INTO index_send_bucket(knowledge_base_id,tokens,refilled_at) VALUES (:kb,:t,clock_timestamp())
-                ON CONFLICT (knowledge_base_id) DO UPDATE SET tokens=:t,refilled_at=clock_timestamp()
-            """), {"kb": kb, "t": tokens if reason else tokens - 1})
-        if reason:
-            _gate_closed(conn, kb, reason)
-            return reason
-        _gate_open(conn, kb)
-        if JOBS.update(conn, row, "first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',"
-                       "sent_chars=:chars,sent_bytes=:size,attempt_floor=:floor,updated_at=clock_timestamp()",
-                       {"chars": chars, "size": size, "floor": floor}) != 1:
-            raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
-    return None
-
-
-def _claim_class(klass):
-    """The next due job of one class: the source served least recently in this class first, then by due time.
-    An upload class skips knowledge bases whose gate is closed, so their jobs do not burn turns."""
-    with history.history_engine().begin() as conn:
-        gated = {}
-        if klass in UPLOAD_CLASSES:
-            # the gate before the claim: knowledge bases with due uploads are seen closed or open, and recorded
-            gated = _gated(conn, limits())
-            waiting = [kb for (kb,) in conn.execute(text(
-                "SELECT DISTINCT p.manifest->>'knowledge_base_id' FROM index_publications p "
-                "WHERE p.next_check_at<=clock_timestamp() AND " + vacant("p") + " AND " + CLASS_SQL[klass]))]
-            for kb in waiting:
-                if kb in gated:
-                    _gate_closed(conn, kb, gated[kb])
-                else:
-                    _gate_open(conn, kb)
-        row = JOBS.claim(
-            conn, lease_seconds=LEASE_SECONDS, **_CLAIM_ROW, params={"k": klass, "gated": list(gated)},
-            joins="JOIN index_targets t ON t.id=p.target_id "
-                  "LEFT JOIN index_claim_cursor c ON c.class=:k AND c.source_id=t.config->>'source_id'",
-            where="p.next_check_at<=clock_timestamp() AND " + CLASS_SQL[klass]
-                  + " AND NOT (p.manifest->>'knowledge_base_id' = ANY(:gated))",
-            order_by="c.last_claimed_at NULLS FIRST,p.next_check_at,p.id")
-        if row is None:
-            return None
-        conn.execute(text("""
-            INSERT INTO index_claim_cursor(class,source_id,last_claimed_at) VALUES (:k,:s,clock_timestamp())
-            ON CONFLICT (class,source_id) DO UPDATE SET last_claimed_at=clock_timestamp()
-        """), {"k": klass, "s": row["config"]["source_id"]})
-        return dict(row, job_class=klass)
-
-
-def rotation_gaps():
-    """Per class, the longest run of claims between two of its turns in ROTATION, from any starting phase (F at
-    turns 0 and 3: 5). With a fixed set of S_k sources holding due jobs of class k, its gate open and every
-    claim bounded (lease LEASE_SECONDS), a due job with a jobs ahead of it in its source is claimed within
-    (a + 1) * S_k * gap_k claims of one worker thread; new jobs arriving in other classes do not change it."""
-    out = {}
-    for k in dict.fromkeys(ROTATION):
-        at = [i for i, c in enumerate(ROTATION) if c == k]
-        out[k] = max((at[(j + 1) % len(at)] - at[j]) % len(ROTATION) or len(ROTATION) for j in range(len(at)))
-    return out
-
-
-def scheduler_status():
-    """Observable progress per class x source (due, leased, oldest due wait, last claim) and per knowledge base
-    (in flight against its budget, send tokens, gate denials and blocked time, characters uploaded), plus the last
-    hour's first sends, ready and failures."""
-    lim = limits()
-    with history.history_engine().begin() as conn:
-        classes = [dict(r) for r in conn.execute(text(
-            "SELECT " + CLASS_OF + " AS class,t.config->>'source_id' AS source_id,"
-            "count(*) FILTER (WHERE p.next_check_at<=clock_timestamp() AND (p.lease_until IS NULL OR "
-            "p.lease_until<clock_timestamp())) AS due,"
-            "count(*) FILTER (WHERE p.lease_until>=clock_timestamp()) AS leased,"
-            "EXTRACT(EPOCH FROM clock_timestamp()-min(p.next_check_at) FILTER (WHERE p.next_check_at<=clock_timestamp()"
-            " AND (p.lease_until IS NULL OR p.lease_until<clock_timestamp()))) AS oldest_due_seconds,"
-            "max(c.last_claimed_at) AS last_claimed_at "
-            "FROM index_publications p JOIN index_targets t ON t.id=p.target_id "
-            "LEFT JOIN index_claim_cursor c ON c.source_id=t.config->>'source_id' AND c.class=(" + CLASS_OF + ") "
-            "GROUP BY 1,2 ORDER BY 1,2")).mappings()]
-        kbs = sorted({r for (r,) in conn.execute(text(
-            "SELECT DISTINCT manifest->>'knowledge_base_id' FROM index_publications"))} - {None})
-        budget = []
-        for kb in kbs:
-            n, c, b, unknown = _inflight(conn, kb)
-            tokens = conn.execute(text(
-                "SELECT LEAST(:burst,tokens+EXTRACT(EPOCH FROM clock_timestamp()-refilled_at)*:rate/60.0) "
-                "FROM index_send_bucket WHERE knowledge_base_id=:kb"
-            ), {"kb": kb, "burst": lim["burst"], "rate": lim["uploads_per_minute"]}).scalar()
-            gates = {r["reason"]: {"denials": r["denials"], "blocked_seconds": round(float(r["blocked"]), 1),
-                                   "closed_since": r["closed_since"].isoformat() if r["closed_since"] else None,
-                                   "last_at": r["last_at"].isoformat() if r["last_at"] else None}
-                     for r in conn.execute(text(
-                         "SELECT reason,denials,last_at,closed_since,blocked_seconds+COALESCE(EXTRACT(EPOCH FROM "
-                         "clock_timestamp()-closed_since),0) AS blocked FROM index_gate_stats WHERE knowledge_base_id=:kb"
-                     ), {"kb": kb}).mappings()}
-            budget.append({"knowledge_base_id": kb, "inflight": {"entries": n, "chars": int(c), "bytes": int(b),
-                                                                 "unknown_size_entries": unknown},
-                           "send_tokens": None if tokens is None else round(float(tokens), 2), "gate": gates,
-                           "uploaded": _uploaded(conn, kb)})
-        hour = conn.execute(text(
-            "SELECT count(*) FILTER (WHERE first_send_at>clock_timestamp()-interval '1 hour') AS first_sends,"
-            "count(*) FILTER (WHERE ready_at>clock_timestamp()-interval '1 hour') AS ready,"
-            "count(*) FILTER (WHERE error IS NOT NULL AND updated_at>clock_timestamp()-interval '1 hour') AS failed "
-            "FROM index_publications")).mappings().one()
-    for r in classes:
-        r["oldest_due_seconds"] = None if r["oldest_due_seconds"] is None else round(float(r["oldest_due_seconds"]), 1)
-        r["last_claimed_at"] = r["last_claimed_at"].isoformat() if r["last_claimed_at"] else None
-    return {"rotation": list(ROTATION), "rotation_gaps": rotation_gaps(), "limits": lim, "classes": classes,
-            "knowledge_bases": budget,
-            "last_hour": dict(hour)}
-
-
-def never_sent(row):
-    """确认从没发出过：首次发送时间、远端知识编号、回执都没有，状态是 queued，或是因此在本地停用的 disabled
-    （之后每次复查仍不联网）。改造前有 ready 而 first_send_at 为空的行、发出后丢了回执的
-    waiting / sending 行都不算，一律先向桥接对账。"""
-    return (row["first_send_at"] is None and not row["knowledge_id"] and not row["receipt"]
-            and row["state"] in ("queued", "disabled"))
-
-
-def _current_state(row):
-    """这条索引还该不该在：来源撤权或目标停用 → revoked；这份正文仍是该记录某个版本的当前产物 → active；
-    不再是了（处理器升级、改造前的投影待办） → 替代产物都 ready 后 superseded，之前 retiring（保留、不上传）。更正、撤回不在这里停用——历史版本仍要能被旧截止时间检索到，
-    此刻能不能返回由检索时的校验按模式和截止时间判定（store.retrieval）。"""
+def _wanted(row):
+    """这条待办现在该不该在 WeKnora 里：active 该在；revoked 来源撤权或目标停用；superseded 这份正文（或这一片）
+    已被替代；retiring 将被替代，但替代它的正文还没整份 ready（先上后下，不撤掉最后的入口）。"""
     target = row["config"]
     with history.history_engine().begin() as conn:
-        enabled = conn.execute(
-            text("SELECT enabled FROM index_targets WHERE id=:id"), {"id": row["target_id"]}
-        ).scalar_one()
-        if not enabled:
+        if not row["enabled"] or not _readable(conn, target["source_id"]):
             return "revoked"
-        try:
-            history._source(conn, target["source_id"])
-        except HistoryError as exc:
-            if exc.status == 403:
-                return "revoked"
-            raise
         versions = [v for (v,) in conn.execute(text(
-            "SELECT version_id FROM " + history._VERSIONS + " "
-            "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
-            "AND " + history._ROLE + "!='context_reference'"
+            "SELECT version_id FROM " + history._VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
+            "AND source_record_id=:native AND " + history._ROLE + "!='context_reference'"
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
         mine = current.get(row["artifact_key"])
-        if mine is not None:
-            # 产物是当前的，还要这一片属于当前分片计划：整篇条目而现在要分片、分片规则或范围
-            # 已换的片，由按当前计划建的片替代。没发出过或没 ready 过的直接 superseded（超预算的整篇永远到不了
-            # ready）；已经 ready 的等当前计划的整套片全部 ready 再停用（先上后下）
-            if row["piece_key"] in index_pieces.keys(mine["text"], mine.get("segments") or []):
-                return "active"
-            if never_sent(row) or row["state"] != "ready":
-                return "superseded"
-            replacements = [mine]
-        else:
-            # 这份正文（处理器升级前的产物，或改造前按投影正文建的待办）已不是任何版本的当前产物。
-            # 没发出过的直接停用；发出过的，等该记录的当前产物都整份可检索后再停用，不撤掉最后的入口；
-            # 在那之前原样保留、不再上传（retiring）。检索时照样逐条校验。
-            if never_sent(row):
-                return "superseded"
-            replacements = list(current.values())
-            if not replacements:
-                # 还没有任何当前产物可替代它（新版本的清洗或画像还没做完，例如画像处理器刚升级）：不撤掉最后的
-                # 入口；“全部替代产物已 ready”在一个替代都没有时不能算成立
-                return "retiring"
-        done = all(artifact_ready(conn, row["target_id"], row["source_record_id"], a) for a in replacements)
-        return "superseded" if done else "retiring"
+        if mine is not None and row["piece_key"] in index_pieces.keys(mine["text"], mine.get("segments") or []):
+            return "active"
+        # 从没发出过的，或者产物还是当前的、只是分片计划换了而这一片没 ready 过的：直接替代
+        if _never_sent(row) or (mine is not None and row["state"] != "ready"):
+            return "superseded"
+        replacements = [mine] if mine is not None else list(current.values())
+        if replacements and all(artifact_ready(conn, row["target_id"], row["source_record_id"], a)
+                                for a in replacements):
+            return "superseded"
+        return "retiring"
 
 
-def _sent(row):
+def _withdraw(row, client, reason):
+    """撤下一条：从没发出过的只在本地停用；发出过的请桥接逐块停用，桥接确认停完才算 disabled。"""
+    if _never_sent(row):
+        return {"state": "disabled", "delay": RECHECK_SECONDS}
+    receipt = client.disable(row["remote_id"], reason)
+    done = (receipt.get("source_status") == "disabled" and receipt.get("vector_count") == 0
+            and receipt.get("index_status") == receipt.get("vector_status") == "disabled"
+            and receipt.get("parse_status") in PARSE_ENDED)
+    return {"state": "disabled" if done else "disabling", "delay": POLL_SECONDS}
+
+
+def _publish(row, client):
+    """该在的一条：先向桥接查回执（发过而没收到回执的不重复裸传），还没绑定就上传，再按回执定状态。"""
     with history.history_engine().begin() as conn:
-        if JOBS.update(conn, row, "first_send_at=COALESCE(first_send_at,clock_timestamp()),"
-                       "state='sending',updated_at=clock_timestamp()") != 1:
-            raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
+        full = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
+    content = index_pieces.content(full, row["piece"]) if row["piece"] else full
+    if not content.strip():
+        raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
+    if not index_pieces.fits(content):
+        return _stopped("index_content_budget", "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，记为覆盖缺口"
+                        % (len(content), len(content.encode())))
+    receipt = client.status(row["remote_id"])
+    if not (receipt and receipt.get("knowledge_id") and receipt.get("binding_status") == "bound"):
+        _mark_sent(row["id"])
+        receipt = client.publish(_body(row, content))
+    return _settled(receipt)
 
 
-def _validate_receipt(row, receipt):
-    expected = row["manifest"]
-    if (
-        receipt.get("is_demo", False) is not row.get("config", {}).get("is_demo", expected.get("is_demo", False))
-        or receipt.get("publication_id") != row["remote_id"]
-        or receipt.get("knowledge_base_id") != expected["knowledge_base_id"]
-        or receipt.get("source_scope") != expected["source_scope"]
-        or receipt.get("content_sha256") != expected["content_sha256"]
-        or any((receipt.get("identity") or {}).get(k) != expected[k]
-               for k in ["source_instance", "source_id", "source_record_id", "version_id", "raw_sha256"])
-        or receipt.get("raw_locator") != expected["raw_locator"]
-        or (receipt.get("identity") or {}).get("artifact_key") != expected.get("artifact_key")
-        or (receipt.get("identity") or {}).get("piece") != expected.get("piece")
-    ):
-        raise HistoryError("index_binding_mismatch", "索引回执与固定原件不符", 409)
+def _settled(receipt):
+    """桥接回执 → 结果。ready：上传、解析、向量、索引、绑定都完成；还在解析就过一会儿再查。"""
+    if receipt.get("index_status") == "budget_exceeded":  # 上游分出的块超过桥接的核验预算：重试也不会好
+        return _stopped("index_chunk_budget", "实际块数超过核验预算（%s 块），记为覆盖缺口" % receipt.get("chunk_count"))
+    if receipt.get("source_status") != "active":
+        if receipt.get("source_change_type") == "disabled_upstream" and receipt.get("parse_status") in PARSING:
+            return {"state": "indexing", "delay": POLL_SECONDS}
+        raise HistoryError("index_upstream_disabled", "索引已停用，须明确恢复授权后再启用", 409)
+    ready = (bool(receipt.get("knowledge_id")) and receipt.get("upload_status") == "uploaded"
+             and receipt.get("parse_status") in {"completed", "finalizing"}
+             and receipt.get("vector_status") == receipt.get("index_status") == "ready"
+             and receipt.get("binding_status") == "bound")
+    return {"state": "ready" if ready else "indexing", "knowledge_id": receipt.get("knowledge_id"),
+            "delay": RECHECK_SECONDS if ready else POLL_SECONDS}
 
 
-def _finish(row, state, desired, *, receipt=None, error=None, delay=30, final=False):
-    """final：重试也不会好（超出上传或分块核验预算）——直接受阻，记明原因和覆盖缺口，不进入无休止的 indexing。"""
-    attempts = max(row["attempts"] + 1, 6 if final else 0) if error else 0
-    if error:
-        delay = backoff(attempts, base=10, cap=3600)
-        if attempts >= 6:
-            state = "blocked"
-            if desired != "active":
-                delay = 3600  # 清理失败每小时核对一次；不再上传资料。
+def _stopped(code, message):
+    """重试也不会好的：直接停在 blocked，记明原因（原件与清洗产物都保留）。"""
+    return {"state": "blocked", "attempts": MAX_ATTEMPTS, "error": {"code": code, "message": message},
+            "delay": RECHECK_SECONDS}
+
+
+def _failed(row, exc):
+    """出错：记下原因，退避重试（20 秒起翻倍，最多 1 小时），连续 MAX_ATTEMPTS 次后停在 blocked。"""
+    attempts = row["attempts"] + 1
+    if isinstance(exc, HistoryError):
+        error = {"code": exc.code, "message": exc.message}
+    else:
+        error = {"code": "index_unavailable", "message": "索引处理暂不可用，稍后重试"}
+    return {"state": "blocked" if attempts >= MAX_ATTEMPTS else "waiting", "attempts": attempts, "error": error,
+            "delay": min(3600, 10 * 2 ** attempts)}
+
+
+def _mark_sent(job_id):
+    """上传之前先记下“发出过”：万一请求发出后进程退出，下次先向桥接对账，不当作没发过。"""
     with history.history_engine().begin() as conn:
-        released = JOBS.release(conn, row, """state=:state,desired_state=:desired,
-              receipt=COALESCE(CAST(:receipt AS jsonb),receipt),
-              knowledge_id=COALESCE(:knowledge,knowledge_id),error=CAST(:error AS jsonb),attempts=:attempts,
+        conn.execute(text(
+            "UPDATE index_publications SET first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',"
+            "updated_at=clock_timestamp() WHERE id=:id"), {"id": job_id})
+
+
+def _save(row, result):
+    """写回一条的结果；刚变 ready 时，同一记录里等着交接的其他正文的条目马上复查。"""
+    with history.history_engine().begin() as conn:
+        conn.execute(text("""
+            UPDATE index_publications SET state=:state,desired_state=:desired,error=CAST(:error AS jsonb),
+              attempts=:attempts,knowledge_id=COALESCE(:knowledge,knowledge_id),
               ready_at=CASE WHEN :state='ready' THEN COALESCE(ready_at,clock_timestamp()) ELSE ready_at END,
-              next_check_at=clock_timestamp()+make_interval(secs=>:delay),updated_at=clock_timestamp()""",
-            {"state": state, "desired": desired, "receipt": canonical(receipt) if receipt is not None else None,
-             "knowledge": receipt.get("knowledge_id") if receipt else None,
-             "error": canonical(error) if error else None, "attempts": attempts, "delay": delay})
-        if released != 1:
-            raise HistoryError("index_lease_lost", "迟到索引回执未覆盖当前处理资格", 409)
-        if state == "ready" and row["state"] != "ready":
-            # 刚能检索：同一记录里等着交接的其他产物的条目马上复查（同一产物的其他片不用叫醒）
+              next_check_at=clock_timestamp()+make_interval(secs=>:delay),updated_at=clock_timestamp()
+            WHERE id=:id
+        """), {"id": row["id"], "state": result["state"], "desired": row["desired_state"],
+               "error": canonical(result["error"]) if result.get("error") else None,
+               "attempts": result.get("attempts", 0), "knowledge": result.get("knowledge_id"),
+               "delay": result["delay"]})
+        if result["state"] == "ready" and row["state"] != "ready":
             conn.execute(text(
                 "UPDATE index_publications SET next_check_at=clock_timestamp() WHERE target_id=:t "
                 "AND source_record_id=:n AND artifact_key<>:k AND state<>'disabled'"
             ), {"t": row["target_id"], "n": row["source_record_id"], "k": row["artifact_key"]})
-    return {"id": row["id"], "state": state, "desired_state": desired}
-
-
-def _hold(row, seconds):
-    """不联网、不改状态，过一会儿再看（受阻作业等权限/头版变化；改造前的待办等新产物 ready）。"""
-    with history.history_engine().begin() as conn:
-        if JOBS.release(conn, row, "next_check_at=clock_timestamp()+make_interval(secs=>:seconds)",
-                        {"seconds": seconds}) != 1:
-            raise HistoryError("index_lease_lost", "索引处理资格已改变", 409)
-    return {"id": row["id"], "state": row["state"], "desired_state": row["desired_state"]}
-
-
-def process_once(*, client=None, classes=None, lane=None, sent=None):
-    """处理一个到期作业。默认按作业类别（T-30：classes 依次尝试，空的让给下一类）；lane/sent 仍可显式指定
-    （旧调用，先在那一类里找，没有就退到同 lane，再退到不限）。"""
-    row = _claim_next(classes, lane, sent)
-    if row is None:
-        return {"state": "idle"}
-    attempt = _Attempt(row, client)
-    owned = client is None
-    try:
-        return _process_job(attempt)
-    except HistoryError as exc:
-        if exc.code == "index_lease_lost":
-            return {"id": row["id"], "state": "lease_lost"}
-        return _finish(row, "waiting", attempt.desired, receipt=attempt.verified_receipt,
-                       error={"code": exc.code, "message": exc.message})
-    except Exception:
-        return _finish(row, "waiting", attempt.desired, receipt=attempt.verified_receipt,
-                       error={"code": "index_unavailable", "message": "索引处理暂不可用；已发送请求保留对账状态"})
-    finally:
-        if owned and attempt.client is not None:
-            attempt.client.close()
-
-
-def _claim_next(classes, lane, sent):
-    """The next due job: by job class in rotation order, or (lane/sent given) in that lane and sent kind,
-    then the lane, then any. None when nothing is due."""
-    if lane is None and sent is None:
-        for klass in dict.fromkeys(classes or ROTATION):
-            row = _claim_class(klass)
-            if row is not None:
-                return row
-        return None
-    for want in dict.fromkeys(((lane, sent), (lane, None), (None, None))):
-        row = _claim(*want)
-        if row is not None:
-            return row
-    return None
-
-
-class _Attempt:
-    """One processing of a claimed job. The failure handling of process_once records what the steps had
-    reached: the state the job should be in (desired), the last receipt that passed validation, and the
-    bridge client once one is in use."""
-
-    def __init__(self, row, client):
-        self.row, self.client = row, client
-        self.desired = "unknown"
-        self.verified_receipt = None
-
-
-def _process_job(attempt):
-    """The steps of one job: decide the wanted state, settle what needs no network, then read the bridge's
-    receipt and either disable the entry or publish it."""
-    row = attempt.row
-    attempt.desired = desired = _current_state(row)
-    if "is_demo" in row["manifest"] and row["manifest"]["is_demo"] is not row["config"]["is_demo"]:
-        raise HistoryError("index_source_space_mismatch", "索引意图与目标空间不一致", 409)
-    offline = _settle_offline(row, desired)
-    if offline is not None:
-        return offline
-    attempt.client = client = attempt.client or WeKnoraIndexClient()
-    receipt = client.status(row["remote_id"])
-    if receipt is not None:
-        _validate_receipt(row, receipt)
-        attempt.verified_receipt = receipt
-    if desired != "active":
-        return _disable(row, client, receipt, desired)
-    return _publish_active(attempt, receipt)
-
-
-def _settle_offline(row, desired):
-    """The outcome reached without calling the bridge, or None to go on. A blocked job whose wanted state
-    changed starts counting its attempts again."""
-    if desired != "active" and never_sent(row):
-        return _finish(row, "disabled", desired, delay=300)  # 确认从没发出过：不联网，直接停用
-    if desired == "retiring":
-        return _hold(row, 300)  # 等替代产物 ready（先上后下），不联网
-    if row["state"] == "blocked":
-        if desired == row["desired_state"] and desired == "active":
-            return _hold(row, 60)  # 不无限重发失败请求；保留错误，继续检查是否需要清理
-        if desired != row["desired_state"]:
-            row["attempts"] = 0
-    return None
-
-
-def _disable(row, client, receipt, desired):
-    """Withdraw an entry that was sent: only once the bridge knows it, and disabled only when confirmed."""
-    if receipt is None:
-        raise HistoryError("index_disable_unknown", "曾发送的索引结果未知，尚不能确认停用", 409)
-    receipt = client.disable(row["remote_id"], desired)
-    _validate_receipt(row, receipt)
-    confirmed = (
-        receipt.get("source_status") == "disabled"
-        and receipt.get("index_status") == receipt.get("vector_status") == "disabled"
-        and receipt.get("parse_status") in {"completed", "failed", "cancelled"}
-        and receipt.get("vector_count") == 0
-    )
-    return _finish(row, "disabled" if confirmed else "disabling", desired, receipt=receipt, delay=300 if confirmed else 15)
-
-
-def _publish_active(attempt, receipt):
-    """An entry that should be active: check its content against the frozen manifest, upload it when the bridge
-    does not have it bound, then settle on the validated receipt."""
-    row, client, desired = attempt.row, attempt.client, attempt.desired
-    with history.history_engine().begin() as conn:
-        full = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
-    content = index_pieces.content(full, row["piece"]) if row.get("piece") else full
-    if not content.strip():
-        raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
-    if not index_pieces.fits(content):
-        # 改造前冻结的整篇清单、或分片规则之外的超长内容：不上传，记缺口（原件与清洗产物都保留）
-        return _finish(row, "blocked", desired, final=True, error={
-            "code": "index_content_budget", "message": "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，"
-            "记为覆盖缺口" % (len(content), len(content.encode()))})
-    if sha256(content) != row["manifest"]["content_sha256"]:
-        raise HistoryError("index_content_changed", "清洗产物与冻结摘要不符", 409)
-    if receipt is None or not receipt.get("knowledge_id") or receipt.get("binding_status") != "bound":
-        # GET先核对。服务端以同一固定publication_id保留意图并恢复，不能二次裸上传。
-        # 桥接还不知道这条（首传），或明确记为建档前拒收（重传）：这才是一次物理上传，无论哪一类作业领到，
-        # 都先过同一个原子在途预算和共享发送令牌（T-30）。补绑定、对账找回只是 GET/补投影，不占名额。
-        physical = receipt is None or (receipt.get("upload_status") == "rejected" and not receipt.get("knowledge_id"))
-        if physical:
-            denied = _reserve(row, content, receipt)
-            if denied:
-                return _hold(row, 15)
-        else:
-            _sent(row)
-        receipt = client.publish(_bridge_body(row, content))
-    _validate_receipt(row, receipt)
-    attempt.verified_receipt = receipt
-    return _settle_published(row, receipt, desired)
-
-
-def _settle_published(row, receipt, desired):
-    """The job's state from a validated publish receipt, after re-checking the wanted state."""
-    # 网络请求期间可能撤权/换头版；不能以旧资格确认ready。
-    latest = _current_state(row)
-    if latest in ("revoked", "superseded"):
-        return _finish(row, "disabling", latest, receipt=receipt, delay=0)
-    if receipt.get("index_status") == "budget_exceeded":
-        # 上游实际分出的块数超过桥接核验预算：按新分片规则重新计划之前不会好，不无休止等待
-        return _finish(row, "blocked", desired, receipt=receipt, final=True, error={
-            "code": "index_chunk_budget", "message": "实际块数超过核验预算（%s 块），记为覆盖缺口"
-            % receipt.get("chunk_count")})
-    if receipt.get("source_status") != "active":
-        if (receipt.get("source_change_type") == "disabled_upstream"
-                and receipt.get("parse_status") in {"pending", "processing", "finalizing"}):
-            return _finish(row, "indexing", "active", receipt=receipt, delay=15)
-        raise HistoryError("index_upstream_disabled", "索引已停用，须明确恢复授权后再启用", 409)
-    ready = (
-        bool(receipt.get("knowledge_id")) and receipt.get("upload_status") == "uploaded"
-        and receipt.get("parse_status") in {"completed", "finalizing"}
-        and receipt.get("vector_status") == receipt.get("index_status") == "ready"
-        and receipt.get("binding_status") == "bound"
-    )
-    return _finish(row, "ready" if ready else "indexing", "active", receipt=receipt, delay=60 if ready else 15)
 
 
 def configured():
-    """有索引目标配置，或库里还有目标（配置移除＝停止使用，旧绑定仍要撤回对账）。"""
+    """有索引目标配置，或库里还有目标（配置移除＝停止使用，旧条目仍要撤下）。"""
     if os.environ.get("DATAFABRIC_INDEX_TARGETS"):
         return True
     if not os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL"):
@@ -917,38 +510,33 @@ def configured():
         return conn.execute(text("SELECT EXISTS(SELECT 1 FROM index_targets)")).scalar_one()
 
 
-def run_worker(*, concurrency=2, scan_every_seconds=30.0, idle_seconds=5.0, stop=None, rounds=None):
-    """独立的索引 worker：concurrency 个线程各自认领、处理；线程 0 每 scan_every_seconds 做一次回填扫描。
-    stop（threading.Event）置位或跑满 rounds 轮后返回各线程的处理计数。"""
-    if not 1 <= concurrency <= 32:
-        raise HistoryError("index_budget", "索引并发须为1至32")
-    targets()  # a configuration naming a retired source stops the worker here, not at the first search
+def run_worker(*, idle_seconds=5.0, scan_every_seconds=30.0, stop=None, rounds=None):
+    """常驻 worker：一轮先按间隔补扫（scan_committed），再领一批待办处理（work_once）；没活、或库暂不可用，就睡
+    idle_seconds。stop（threading.Event）置位或跑满 rounds 轮后返回各结果的计数。"""
+    targets()  # 配置错误（例如配了已退役的来源）在这里就停，不等到第一次检索
     stop = stop or threading.Event()
-    counts = [dict() for _ in range(concurrency)]
-
-    def loop(slot):
-        last_scan, n = 0.0, 0
+    client = WeKnoraIndexClient()
+    counts, last_scan, n = {}, None, 0
+    try:
         while not stop.is_set() and (rounds is None or n < rounds):
             n += 1
             try:
-                if slot == 0 and time.monotonic() - last_scan >= scan_every_seconds:
+                if last_scan is None or time.monotonic() - last_scan >= scan_every_seconds:
                     last_scan = time.monotonic()
                     scan_committed()
-                turn = (slot + n) % len(ROTATION)
-                state = process_once(classes=ROTATION[turn:] + ROTATION[:turn])["state"]
-            except Exception:  # noqa: BLE001 -- 库或配置暂不可用：待办与水位都在库里，稍后再来
-                state = "unavailable"
-            counts[slot][state] = counts[slot].get(state, 0) + 1
-            if state in {"idle", "unavailable"}:
+                done = work_once(client=client)
+            except Exception:  # noqa: BLE001 -- 库或配置暂不可用：待办和水位都在库里，稍后再来
+                done = {"unavailable": 1}
+            for state, k in done.items():
+                counts[state] = counts.get(state, 0) + k
+            if not done or "unavailable" in done:
                 stop.wait(idle_seconds)
-
-    threads = [threading.Thread(target=loop, args=(slot,), name="index-%d" % slot, daemon=True)
-               for slot in range(concurrency)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    finally:
+        client.close()
     return counts
+
+
+# ---- 管理页（graph/frontend 的索引发布页）：列表、计数、重试 -----------------------------------------------
 
 # index_publications.state 的全部取值（流水线总览和管理页按这个顺序显示）
 STATES = ("queued", "sending", "indexing", "ready", "waiting", "blocked", "disabling", "disabled")
@@ -971,6 +559,11 @@ def _cursor(value):
         return moment, _job_id(key)
     except (ValueError, AttributeError, HistoryError):
         raise HistoryError("index_cursor", "索引列表续页标记无效", 422) from None
+
+
+_LISTED = ("id", "target_id", "version_id", "source_record_id", "remote_id", "state", "desired_state", "knowledge_id",
+           "receipt", "error", "attempts", "first_send_at", "next_check_at", "updated_at", "artifact_key", "lane",
+           "piece_index", "piece", "created_at", "ready_at")
 
 
 def status(*, limit=100, state=None, source_id=None, cursor=None):
@@ -997,28 +590,12 @@ def status(*, limit=100, state=None, source_id=None, cursor=None):
             + (" WHERE " + " AND ".join(where) if where else "")
             + " ORDER BY p.updated_at DESC,p.id DESC LIMIT :limit"
         ), params).mappings().all()
-        more = len(rows) > limit
-        rows = rows[:limit]
-        result = []
-        for row in rows:
-            permitted = True
-            try:
-                history._source(conn, row["config"]["source_id"])
-            except HistoryError as exc:
-                if exc.status != 403:
-                    raise
-                permitted = False
-            result.append({k: row[k] for k in [
-                "id","target_id","version_id","source_record_id","remote_id","state","desired_state",
-                "knowledge_id","receipt","error","attempts","first_send_at","next_check_at","updated_at",
-            ]} | {"artifact_key": row.get("artifact_key") or "", "lane": row.get("lane"),
-                  "piece_index": row.get("piece_index"), "piece": row.get("piece"),
-                  "created_at": row.get("created_at"), "ready_at": row.get("ready_at"),
-                  "title": (row["manifest"] or {}).get("title"),
-                  "source": row["config"], "read_permitted": permitted})
-        last = rows[-1] if more else None
-        return {"items": result,
-                "next_cursor": last["updated_at"].isoformat() + "|" + last["id"] if last else None}
+        items = [{k: row.get(k) for k in _LISTED} | {"title": (row["manifest"] or {}).get("title"),
+                                                     "source": row["config"],
+                                                     "read_permitted": _readable(conn, row["config"]["source_id"])}
+                 for row in rows[:limit]]
+    last = rows[limit - 1] if len(rows) > limit else None
+    return {"items": items, "next_cursor": last["updated_at"].isoformat() + "|" + last["id"] if last else None}
 
 
 def state_counts():
@@ -1029,22 +606,16 @@ def state_counts():
 
 
 def retry(key):
-    """把受阻（blocked）的作业放回待重试：尝试次数清零、立即到期，由索引 worker 处理；
-    处理时仍先向桥接服务核对已发请求，不会二次裸上传。其余状态不动，如实返回当前状态。"""
+    """把停住（blocked）的作业放回待重试：尝试次数清零、立即到期，由索引 worker 处理（处理时仍先向桥接查回执，
+    不会二次裸上传）。其余状态不动，如实返回当前状态。"""
     key = _job_id(key)
     with history.history_engine().begin() as conn:
-        result = conn.execute(text("""
-            UPDATE index_publications SET state='waiting',attempts=0,next_check_at=clock_timestamp(),
-              updated_at=clock_timestamp()
-            WHERE id=:id AND state='blocked' AND (lease_until IS NULL OR lease_until<clock_timestamp())
-        """), {"id": key})
-        if result.rowcount == 1:
+        if conn.execute(text(
+            "UPDATE index_publications SET state='waiting',attempts=0,next_check_at=clock_timestamp(),"
+            "updated_at=clock_timestamp() WHERE id=:id AND state='blocked'"
+        ), {"id": key}).rowcount == 1:
             return {"id": key, "scheduled": True, "state": "waiting"}
-        row = conn.execute(text(
-            "SELECT state,(lease_until IS NOT NULL AND lease_until>=clock_timestamp()) AS leased "
-            "FROM index_publications WHERE id=:id"
-        ), {"id": key}).mappings().first()
-        if row is None:
-            raise HistoryError("index_publication_not_found", "没有这条索引作业", 404)
-        reason = "leased" if row["state"] == "blocked" and row["leased"] else "not_blocked"
-        return {"id": key, "scheduled": False, "state": row["state"], "reason": reason}
+        found = conn.execute(text("SELECT state FROM index_publications WHERE id=:id"), {"id": key}).mappings().first()
+    if found is None:
+        raise HistoryError("index_publication_not_found", "没有这条索引作业", 404)
+    return {"id": key, "scheduled": False, "state": found["state"], "reason": "not_blocked"}

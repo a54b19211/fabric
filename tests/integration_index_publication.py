@@ -128,6 +128,11 @@ def due_job(pg, job_id):
         conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp() WHERE id=:id"), {"id": job_id})
 
 
+def process_one(client=None):
+    """领一条到期待办处理掉，返回它的结果状态；没有到期的返回 idle。"""
+    return next(iter(index.work_once(client=client, batch=1)), "idle")
+
+
 def receipt_for(body):
     return {"publication_id": publication_id(body), "is_demo": body["is_demo"],
             "knowledge_id": "knowledge-" + publication_id(body),
@@ -177,6 +182,8 @@ class JournalClient:
     def disable(self, pid, reason):
         self.events.append(("disable", pid, reason))
         self.disable_count += 1
+        if pid not in self.journal:
+            raise IndexServiceError("index_http_404", "synthetic: the bridge does not know this publication", 404)
         self.journal[pid].update(source_status="disabled", index_status="disabled", vector_status="disabled", vector_count=0,
                                  parse_status=self.disable_parse)
         return copy.deepcopy(self.journal[pid])
@@ -189,7 +196,7 @@ def ready_job(pg):
     version = add_document()
     scan()
     client = JournalClient()
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     return version, client
 
 
@@ -257,16 +264,16 @@ def test_unknown_committed_post_reconciles_before_replay_and_keeps_one_knowledge
     scan()
     client = JournalClient()
     client.after_commit = IndexServiceError("index_timeout", "synthetic lost ACK", 504)
-    assert index.process_once(client=client)["state"] == "waiting"
+    assert process_one(client) == "waiting"
     first = job(pg)
     assert first["first_send_at"] is not None
     due(pg)
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     assert [event[0] for event in client.events] == ["get", "post", "get"]
     assert client.upload_count == 1
     assert job(pg)["knowledge_id"]
     due(pg)
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     assert client.upload_count == 1
 
 
@@ -275,72 +282,45 @@ def test_active_missing_receipt_replays_only_same_reserved_identity_after_get(pg
     scan()
     client = JournalClient()
     client.after_commit = IndexServiceError("index_timeout", "synthetic lost ACK", 504)
-    assert index.process_once(client=client)["state"] == "waiting"
+    assert process_one(client) == "waiting"
     client.hide_next_status = True
     due(pg)
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     assert [event[0] for event in client.events] == ["get", "post", "get", "post"]
     assert client.bodies[0] == client.bodies[1]
     assert client.upload_count == 1
 
 
-def test_process_interrupt_preserves_send_intent_and_expired_lease_recovers(pg):
+def test_a_worker_that_dies_after_sending_is_reconciled_when_the_entry_comes_due_again(pg):
     add_document()
     scan()
     client = JournalClient()
     client.after_commit = ProcessStopped("synthetic abrupt worker exit after remote commit")
     with pytest.raises(ProcessStopped):
-        index.process_once(client=client)
+        process_one(client)
     saved = job(pg)
     assert saved["first_send_at"] is not None and saved["state"] == "sending"
-    assert saved["lease_token"]
-    assert index.process_once(client=client)["state"] == "idle"
-    with pg.begin() as conn:  # the lease's time has passed (claiming moved the next check to the lease's end)
-        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second',"
-                          "next_check_at=clock_timestamp()-interval '1 second'"))
-    assert index.process_once(client=client)["state"] == "ready"
-    assert client.upload_count == 1
-    assert job(pg)["lease_token"] is None
+    assert process_one(client) == "idle"  # claiming moved its next check CLAIM_SECONDS ahead
+    due(pg)
+    assert process_one(client) == "ready"
+    assert client.upload_count == 1 and [e[0] for e in client.events] == ["get", "post", "get"]
 
 
-def test_expired_worker_cannot_send_or_confirm_new_owners_lease(pg):
-    add_document()
-    scan()
-    stale = index._claim()
-    with pg.begin() as conn:  # the lease's time has passed (claiming moved the next check to the lease's end)
-        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second',"
-                          "next_check_at=clock_timestamp()-interval '1 second'"))
-    current = index._claim()
-    assert stale["lease_token"] != current["lease_token"]
-    for operation in (lambda: index._sent(stale), lambda: index._finish(stale, "ready", "active")):
-        with pytest.raises(HistoryError) as error:
-            operation()
-        assert error.value.code == "index_lease_lost"
-    assert job(pg)["lease_token"] == current["lease_token"]
-    index._finish(current, "indexing", "active")
-    assert job(pg)["lease_token"] is None
-
-
-def test_revocation_waits_for_terminal_parse_and_keeps_auditing_after_disable(pg):
+def test_revocation_withdraws_and_waits_for_the_bridge_to_finish(pg):
     version, client = ready_job(pg)
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
     client.disable_parse = "processing"
     due(pg)
-    result = index.process_once(client=client)
-    assert result["state"] == "disabling" and result["desired_state"] == "revoked"
+    assert process_one(client) == "disabling" and job_state(pg, job(pg)["id"]) == ("disabling", "revoked")
     client.disable_parse = "completed"
     due(pg)
-    assert index.process_once(client=client)["state"] == "disabled"
-    pid = job(pg)["remote_id"]
-    client.journal[pid].update(index_status="pending", vector_status="ready", vector_count=2)
+    assert process_one(client) == "disabled"
     due(pg)
-    assert index.process_once(client=client)["state"] == "disabled"
-    assert client.disable_count == 3
-    assert job(pg)["receipt"]["vector_count"] == 0
+    assert process_one(client) == "idle" and client.disable_count == 2  # disabled is final
 
 
-def test_revocation_during_remote_upload_cannot_confirm_ready(pg):
+def test_revocation_during_an_upload_is_withdrawn_at_the_next_check(pg):
     add_document()
     scan()
     client = JournalClient()
@@ -353,11 +333,9 @@ def test_revocation_during_remote_upload_cannot_confirm_ready(pg):
         return receipt
 
     client.publish = publish_then_revoke
-    first = index.process_once(client=client)
-    assert first["state"] == "disabling" and first["desired_state"] == "revoked"
-    assert job(pg)["receipt"]["source_status"] == "active"
+    assert process_one(client) == "ready"
     due(pg)
-    assert index.process_once(client=client)["state"] == "disabled"
+    assert process_one(client) == "disabled" and job_state(pg, job(pg)["id"]) == ("disabled", "revoked")
     assert client.upload_count == 1 and client.disable_count == 1
 
 
@@ -367,13 +345,12 @@ def test_blocked_job_does_no_http_until_revocation_requires_cleanup(pg):
         conn.execute(text("UPDATE index_publications SET state='blocked',attempts=6,desired_state='active',error='{}'::jsonb"))
     before = len(client.events)
     due(pg)
-    index.process_once(client=client)
+    assert process_one(client) == "blocked"
     assert len(client.events) == before
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
     due(pg)
-    result = index.process_once(client=client)
-    assert result["state"] == "disabled" and result["desired_state"] == "revoked"
+    assert process_one(client) == "disabled" and job_state(pg, job(pg)["id"]) == ("disabled", "revoked")
     assert client.disable_count == 1
 
 
@@ -387,16 +364,15 @@ def test_cleanup_remains_due_after_retry_limit_and_recovers_when_service_returns
         raise IndexServiceError("index_unavailable", "synthetic temporary cleanup outage", 503)
 
     client.disable = unavailable_disable
-    for _ in range(6):
+    for _ in range(index.MAX_ATTEMPTS):
         due(pg)
-        result = index.process_once(client=client)
-    assert result["state"] == "blocked" and result["desired_state"] == "revoked"
+        state = process_one(client)
+    assert state == "blocked" and job_state(pg, job(pg)["id"]) == ("blocked", "revoked")
     assert client.journal[job(pg)["remote_id"]]["source_status"] == "active"
     client.disable = original_disable
     due(pg)
-    recovered = index.process_once(client=client)
-    assert recovered["state"] == "disabled"
-    assert job(pg)["receipt"]["source_status"] == "disabled"
+    assert process_one(client) == "disabled"
+    assert client.journal[job(pg)["remote_id"]]["source_status"] == "disabled"
 
 
 def test_removing_environment_target_keeps_cleanup_for_existing_publication(pg, monkeypatch):
@@ -405,7 +381,7 @@ def test_removing_environment_target_keeps_cleanup_for_existing_publication(pg, 
     monkeypatch.setattr(index, "WeKnoraIndexClient", lambda: client)
     due(pg)
     index.scan_committed()
-    index.process_once()
+    process_one()
     assert rows(pg, "SELECT enabled FROM index_targets")[0]["enabled"] is False
     assert job(pg)["state"] == "disabled" and job(pg)["desired_state"] == "revoked"
     assert client.disable_count == 1
@@ -418,12 +394,12 @@ def test_corrections_keep_history_indexed_and_each_text_is_indexed_once(pg):
     scan()
     client = JournalClient()
     for _ in range(2):
-        assert index.process_once(client=client)["state"] == "ready"
+        assert process_one(client) == "ready"
     corrected = add_document(available="2021-01-01", title="Synthetic trial, corrected wording")
     scan()
     due(pg)
     for _ in range(3):
-        index.process_once(client=client)
+        process_one(client)
     states = {r["version_id"]: r["state"] for r in rows(pg, "SELECT version_id,state FROM index_publications")}
     assert states == {newer: "ready", older: "ready", corrected: "ready"}
     assert client.disable_count == 0 and client.upload_count == 3
@@ -454,11 +430,11 @@ def test_withdrawal_does_not_disable_the_indexed_text(pg, monkeypatch):
     active = add_collected()
     scan()
     client = JournalClient()
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     add_collected(withdrawn=True)
     scan()
     due(pg)
-    index.process_once(client=client)
+    process_one(client)
     assert job(pg, active)["state"] == "ready"
     assert client.upload_count == 1 and client.disable_count == 0
 
@@ -466,37 +442,19 @@ def test_withdrawal_does_not_disable_the_indexed_text(pg, monkeypatch):
 def test_sent_then_revoked_missing_remote_is_not_confirmed_disabled(pg):
     add_document()
     scan()
-    claimed = index._claim()
-    index._sent(claimed)
-    index._finish(claimed, "waiting", "active")
+    index._mark_sent(job(pg)["id"])  # sent, but the bridge never got it
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
     client = JournalClient()
     due(pg)
-    result = index.process_once(client=client)
-    assert result["state"] == "waiting" and result["desired_state"] == "revoked"
-    assert job(pg)["error"]["code"] == "index_disable_unknown"
-    assert [entry[0] for entry in client.events] == ["get"]
-
-
-def test_conflicting_receipt_is_rejected_before_any_recovery_post(pg):
-    add_document()
-    scan()
-    saved = job(pg)
-    wrong = receipt_for(saved["manifest"])
-    wrong.update(binding_status="pending", knowledge_id=None)
-    wrong["identity"]["raw_sha256"] = "f" * 64
-    client = JournalClient()
-    client.journal[saved["remote_id"]] = wrong
-    result = index.process_once(client=client)
-    assert result["state"] == "waiting"
-    assert job(pg)["error"]["code"] == "index_binding_mismatch"
-    assert [entry[0] for entry in client.events] == ["get"]
+    assert process_one(client) == "waiting" and job_state(pg, job(pg)["id"]) == ("waiting", "revoked")
+    assert job(pg)["error"]["code"] == "index_http_404"
+    assert [entry[0] for entry in client.events] == ["disable"]
 
 
 def test_a_sent_job_is_confirmed_even_behind_a_backlog_of_new_uploads(pg):
     """Live 2026-11-03: thousands of queued uploads were due earlier, so sent jobs waiting 15 s for their
-    check never came up again and nothing turned ready."""
+    check never came up again and nothing turned ready. Sent entries are claimed before uploads."""
     class Parsing(JournalClient):
         parsing = True
 
@@ -511,7 +469,7 @@ def test_a_sent_job_is_confirmed_even_behind_a_backlog_of_new_uploads(pg):
     client = Parsing()
     first = add_document("SYNTHETIC-sent")
     scan()
-    assert index.process_once(client=client)["state"] == "indexing"
+    assert process_one(client) == "indexing"
     client.parsing = False
     client.journal[publication_id(client.bodies[0])].update(receipt_for(client.bodies[0]))  # parsed now
     for i in range(30):
@@ -520,9 +478,9 @@ def test_a_sent_job_is_confirmed_even_behind_a_backlog_of_new_uploads(pg):
     with pg.begin() as conn:  # the backlog became due before the sent job's next check
         conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 hour' WHERE version_id<>:v"), {"v": first})
         conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp() WHERE version_id=:v"), {"v": first})
-    assert index.process_once(client=client, lane="new", sent=True)["state"] == "ready"
+    assert process_one(client) == "ready"
     assert job(pg, first)["state"] == "ready"
-    assert index.process_once(client=client, lane="new", sent=False)["state"] in {"ready", "indexing"}
+    assert process_one(client) in {"ready", "indexing"}
 
 
 def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
@@ -547,7 +505,7 @@ def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
         assert conn.execute(text("SELECT count(*) FROM derived_profiles WHERE version_id=:v AND processor_version=:p"),
                             {"v": version, "p": profile_module.PROCESSOR_VERSION}).scalar_one() == 1
     client = JournalClient()
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     assert set(client.bodies[0]) <= set(index.BRIDGE_FIELDS) | {"title", "content"}
     assert client.bodies[0]["is_demo"] is True  # 演示目标：桥接按它隔离演示与真实知识库
     assert client.bodies[0]["metadata"] == meta
@@ -584,47 +542,15 @@ def test_clean_processor_upgrade_hands_over_only_after_the_new_entry_is_ready(pg
     new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
     assert new["artifact_key"].startswith("synthetic.clean_text.v99:") and new["version_id"] == version
     due_job(pg, old["id"])
-    assert index.process_once(client=client)["state"] == "ready"  # 新的还没 ready：旧的保留（retiring，不联网）
-    assert client.disable_count == 0
-    assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": old["id"]})[0]["state"] == "ready"
+    assert process_one(client) == "ready"  # 新的还没 ready：旧的保留（retiring，不联网）
+    assert client.disable_count == 0 and job_state(pg, old["id"]) == ("ready", "retiring")
     due_job(pg, new["id"])
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     # 新条目刚 ready：旧条目马上复查，判 superseded 并停用
-    assert index.process_once(client=client)["desired_state"] == "superseded"
+    assert process_one(client) == "disabled"
     states = {r["id"]: (r["state"], r["desired_state"]) for r in rows(pg, "SELECT * FROM index_publications")}
     assert states == {old["id"]: ("disabled", "superseded"), new["id"]: ("ready", "active")}
     assert client.disable_count == 1
-
-
-def test_pre_36_projection_entries_hand_over_and_never_sent_ones_stay_local(pg):
-    """改造前按投影正文建的待办（artifact_key 为空）：r72 有 ready 而 first_send_at 为空的行，须对账后停用；
-    确认没发出过的直接停用，不联网。"""
-    version = add_document("SYNTHETIC-legacy")
-    scan()
-    artifact_job = job(pg)
-    legacy_manifest = {**artifact_job["manifest"], "content_sha256": "c" * 64}
-    for key in ("artifact_key", "processor_version", "artifact_sha256", "locator_kind", "parent_record_id", "metadata"):
-        legacy_manifest.pop(key, None)
-    legacy_remote = publication_id(legacy_manifest)
-    client = JournalClient()
-    client.journal[legacy_remote] = receipt_for(legacy_manifest)
-    with pg.begin() as conn:  # r72 的样子：ready、有知识编号和回执，但 first_send_at 为空
-        conn.execute(text("""
-            INSERT INTO index_publications (id,target_id,version_id,source_record_id,remote_id,manifest,artifact_key,
-              state,knowledge_id,receipt)
-            VALUES (:id,:t,:v,:n,:r,CAST(:m AS jsonb),'','ready','knowledge-legacy',CAST(:receipt AS jsonb))
-        """), {"id": "d" * 64, "t": artifact_job["target_id"], "v": version, "n": artifact_job["source_record_id"],
-               "r": legacy_remote, "m": canonical(legacy_manifest), "receipt": canonical(client.journal[legacy_remote])})
-    due_job(pg, "d" * 64)
-    before = len(client.events)
-    index.process_once(client=client)  # 产物条目还没 ready：旧条目保留（retiring），不联网
-    assert len(client.events) == before
-    assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": "d" * 64})[0]["state"] == "ready"
-    due_job(pg, artifact_job["id"])
-    assert index.process_once(client=client)["state"] == "ready"
-    result = index.process_once(client=client)
-    assert result["desired_state"] == "superseded" and result["state"] == "disabled"
-    assert ("disable", legacy_remote, "superseded") in client.events
 
 
 def test_never_sent_entry_is_disabled_locally_without_network(pg):
@@ -634,25 +560,21 @@ def test_never_sent_entry_is_disabled_locally_without_network(pg):
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
     client = JournalClient()
-    result = index.process_once(client=client)
-    assert result == {"id": saved["id"], "state": "disabled", "desired_state": "revoked"}
+    assert process_one(client) == "disabled" and job_state(pg, saved["id"]) == ("disabled", "revoked")
     assert client.events == []
-    assert job(pg, version)["state"] == "disabled"
-    # 隔离实测发现（3.6）：本地停用后每 5 分钟复查一次，复查时仍认得“从没发出过”，不去桥接对账
-    for _ in range(2):
-        due(pg)
-        assert index.process_once(client=client)["state"] == "disabled"
+    due(pg)
+    assert process_one(client) == "idle"  # disabled is final: no later check goes to the bridge
     assert client.events == [] and job(pg, version)["attempts"] == 0 and job(pg, version)["error"] is None
 
 
-def test_worker_threads_take_lanes_until_everything_is_ready(pg, monkeypatch):
+def test_the_worker_loop_sends_every_due_entry_until_ready(pg, monkeypatch):
     for i in range(6):
         add_document(f"SYNTHETIC-worker-{i}")
     scan()
     client = JournalClient()
     monkeypatch.setattr(index, "WeKnoraIndexClient", lambda: client)
-    counts = index.run_worker(concurrency=2, rounds=8, idle_seconds=0, scan_every_seconds=1e9)
-    assert sum(c.get("ready", 0) for c in counts) >= 6
+    counts = index.run_worker(rounds=3, idle_seconds=0, scan_every_seconds=1e9)
+    assert counts == {"ready": 6}
     assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
     assert client.upload_count == 6
 
@@ -676,9 +598,8 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
     profile()
     queued = job(pg, version)
     assert queued["artifact_key"].startswith(ap.PROCESSOR_VERSION + ":")
-    assert queued["manifest"]["parent_record_id"] == "https://www.nmpa.gov.cn/xxgk/ggtg/1.html"
     client = JournalClient()
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     assert client.bodies[-1]["content"].endswith("国药准字H00000000。")
     scan()  # 再扫描不重复建待办
     assert len(rows(pg, "SELECT * FROM index_publications")) == 1
@@ -841,12 +762,12 @@ def test_search_stays_available_until_the_replacement_is_ready(pg, monkeypatch):
     profile()
     new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
     due_job(pg, old["id"])
-    index.process_once(client=journal)  # 旧条目 retiring：保留、不联网
+    process_one(journal)  # 旧条目 retiring：保留、不联网
     during = search(client)
     assert [(r["version_id"], r["artifact"]["handover"]) for r in during["results"]] == [(version, True)]
     assert during["results"][0]["artifact"]["artifact_key"] == old["artifact_key"]
     due_job(pg, new["id"])
-    assert index.process_once(client=journal)["state"] == "ready"
+    assert process_one(journal) == "ready"
     after = search(client)
     assert after["results"] == [] and after["excluded"]["counts"] == {"changed_at_cutoff": 1}
 
@@ -909,11 +830,11 @@ def test_a_long_artifact_is_indexed_in_pieces_and_is_searchable_only_when_every_
     assert len({e["artifact_key"] for e in entries}) == 1 and len({e["remote_id"] for e in entries}) == len(entries)
     assert entries[0]["piece"]["start"] == 0 and entries[-1]["piece"]["end"] == len(full)
     client = SearchClient(pg)
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     cover = retrieval._coverage({"external_archive"})["external_archive"]
     assert cover["partial_artifacts"] == 1 and cover["ready_artifacts"] == 0  # 只有一片 ready：不算整篇可检索
     for _ in range(len(entries)):
-        index.process_once(client=client)
+        process_one(client)
     assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
     for entry, body in zip(entries, client.bodies):
         assert body["piece"] == entry["piece"] and body["content"] == index_pieces.content(full, entry["piece"])
@@ -935,7 +856,7 @@ def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
     long_document()
     scan()
     client = SearchClient(pg)
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     old = job(pg)
     # 处理器升级，同时分片上限变小：新产物要分几片进索引
     small_pieces(monkeypatch)
@@ -944,16 +865,16 @@ def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
     new = [r for r in rows(pg, "SELECT * FROM index_publications WHERE id<>:i ORDER BY piece_index", {"i": old["id"]})]
     assert len(new) >= 2
     due_job(pg, new[0]["id"])
-    assert index.process_once(client=client)["state"] == "ready"  # 新产物只 ready 了一片
+    assert process_one(client) == "ready"  # 新产物只 ready 了一片
     due_job(pg, old["id"])
-    index.process_once(client=client)
+    process_one(client)
     assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": old["id"]})[0]["state"] == "ready"
     assert client.disable_count == 0  # 新产物没有整份 ready：旧条目保留
     for entry in new[1:]:
         due_job(pg, entry["id"])
-        index.process_once(client=client)
+        process_one(client)
     due_job(pg, old["id"])
-    assert index.process_once(client=client)["desired_state"] == "superseded"
+    assert process_one(client) == "disabled" and job_state(pg, old["id"]) == ("disabled", "superseded")
     assert client.disable_count == 1
 
 
@@ -967,9 +888,8 @@ def test_over_budget_whole_entries_are_replaced_and_chunk_budget_is_blocked_not_
                           "receipt='{}'::jsonb"))
     due(pg)
     plain = JournalClient()
-    result = index.process_once(client=plain)
     # 没发出过：由当前分片计划替代，直接本地停用，不上传、不联网，也不无休止 indexing
-    assert result["state"] == "disabled" and result["desired_state"] == "superseded" and plain.events == []
+    assert process_one(plain) == "disabled" and job_state(pg, job(pg)["id"])[1] == "superseded" and plain.events == []
     small_pieces(monkeypatch, chars=100000)
 
     class TooManyChunks(JournalClient):
@@ -981,8 +901,7 @@ def test_over_budget_whole_entries_are_replaced_and_chunk_budget_is_blocked_not_
     with pg.begin() as conn:
         conn.execute(text("UPDATE index_publications SET state='queued',attempts=0,error=NULL"))
     due(pg)
-    result = index.process_once(client=TooManyChunks())
-    assert result["state"] == "blocked" and job(pg)["error"]["code"] == "index_chunk_budget"
+    assert process_one(TooManyChunks()) == "blocked" and job(pg)["error"]["code"] == "index_chunk_budget"
 
 
 def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan(pg, monkeypatch):
@@ -991,7 +910,7 @@ def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan
     version = long_document()
     scan()
     client = SearchClient(pg)
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     whole = job(pg)
     small_pieces(monkeypatch)  # 现在这份产物要分片
     with pg.begin() as conn:
@@ -999,14 +918,14 @@ def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan
     pieces = rows(pg, "SELECT * FROM index_publications WHERE piece_index>0 ORDER BY piece_index")
     assert len(pieces) >= 3 and {p["artifact_key"] for p in pieces} == {whole["artifact_key"]}
     due_job(pg, whole["id"])
-    index.process_once(client=client)  # 整篇已 ready：新片还没全 ready，保留（retiring），不撤掉入口
+    process_one(client)  # 整篇已 ready：新片还没全 ready，保留（retiring），不撤掉入口
     assert rows(pg, "SELECT state FROM index_publications WHERE id=:i", {"i": whole["id"]})[0]["state"] == "ready"
     assert client.disable_count == 0
     for _ in range(60):
         states = {r["piece_index"]: r["state"] for r in rows(pg, "SELECT piece_index,state FROM index_publications")}
         if states[0] == "disabled" and all(states[p["piece_index"]] == "ready" for p in pieces):
             break
-        if index.process_once(client=client)["state"] == "idle":
+        if process_one(client) == "idle":
             due(pg)  # 都处理过一轮了，再让它们到期复查
     assert states[0] == "disabled" and all(states[p["piece_index"]] == "ready" for p in pieces)
     assert client.disable_count == 1
@@ -1024,7 +943,7 @@ def test_a_new_piece_rule_adds_new_pieces_beside_the_old_ones_and_retires_them_a
     scan()
     client = SearchClient(pg)
     old = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
-    while index.process_once(client=client)["state"] != "idle":
+    while process_one(client) != "idle":
         pass
     assert {r["state"] for r in rows(pg, "SELECT state FROM index_publications")} == {"ready"}
     monkeypatch.setattr(index_pieces, "RULE", "datafabric.index_piece.v2-synthetic")
@@ -1039,7 +958,7 @@ def test_a_new_piece_rule_adds_new_pieces_beside_the_old_ones_and_retires_them_a
         states = {r["id"]: r["state"] for r in rows(pg, "SELECT id,state FROM index_publications")}
         if all(states[r["id"]] == "disabled" for r in old) and all(states[r["id"]] == "ready" for r in new):
             break
-        if index.process_once(client=client)["state"] == "idle":
+        if process_one(client) == "idle":
             due(pg)
     assert all(states[r["id"]] == "disabled" for r in old) and all(states[r["id"]] == "ready" for r in new)
     assert client.disable_count == len(old)
@@ -1054,7 +973,7 @@ def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypa
     version = long_document()
     scan()
     client = SearchClient(pg)
-    while index.process_once(client=client)["state"] != "idle":
+    while process_one(client) != "idle":
         pass
     old = rows(pg, "SELECT * FROM index_publications ORDER BY piece_index")
     small_pieces(monkeypatch, chars=120)  # 同一规则、同一产物，切点变了，片数更多
@@ -1073,7 +992,7 @@ def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypa
             with pg.begin() as conn:
                 conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+CASE WHEN "
                                   "id=ANY(:ids) THEN interval '0' ELSE interval '1 day' END"), {"ids": ids})
-            while index.process_once(client=client)["state"] != "idle":
+            while process_one(client) != "idle":
                 pass
             states = {r["id"]: r["state"] for r in rows(pg, "SELECT id,state FROM index_publications")}
             if all(states[i] == until for i in ids):
@@ -1122,7 +1041,7 @@ def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, 
     long_document()
     scan()
     client = SearchClient(pg)
-    while index.process_once(client=client)["state"] != "idle":
+    while process_one(client) != "idle":
         pass
     query = "SELECT id,remote_id,manifest,receipt,state,piece,piece_key FROM index_publications ORDER BY id"
     before = rows(pg, query)
@@ -1156,7 +1075,7 @@ def test_ready_pieces_that_do_not_reach_the_verified_end_are_partial_coverage(pg
     with pg.begin() as conn:
         conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()+interval '1 day'"))
     due_job(pg, pieces[0]["id"])
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     cover = lambda: retrieval._coverage({"external_archive"})["external_archive"]  # noqa: E731
     with pg.begin() as conn:  # 只剩首片
         kept = conn.execute(text("SELECT * FROM index_publications WHERE id<>:id"), {"id": pieces[0]["id"]})
@@ -1179,32 +1098,6 @@ def test_ready_pieces_that_do_not_reach_the_verified_end_are_partial_coverage(pg
     assert got["ready_artifacts"] == 0 and got["partial_artifacts"] == 1
 
 
-def test_a_job_that_overruns_its_lease_goes_behind_the_others_and_the_lease_covers_the_slowest_call(pg):
-    """Isolated run: a slow disable (up to 180 s) under a 120 s lease lost its lease every time, kept its old
-    next_check_at and was claimed first again, so the jobs behind it never ran. The lease now outlasts the
-    slowest bridge call, and claiming a job moves its next check past the lease."""
-    import inspect
-
-    from store import weknora_index_client
-
-    assert "seconds=180" in inspect.getsource(weknora_index_client.WeKnoraIndexClient.disable)
-    assert index.LEASE_SECONDS > 180 + 20
-    first = add_document("SYNTHETIC-lease-a")
-    second = add_document("SYNTHETIC-lease-b")
-    scan()
-    with pg.begin() as conn:
-        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 hour' "
-                          "WHERE version_id=:v"), {"v": first})
-        conn.execute(text("UPDATE index_publications SET next_check_at=clock_timestamp()-interval '1 minute' "
-                          "WHERE version_id=:v"), {"v": second})
-    claimed = index._claim()
-    assert claimed["version_id"] == first
-    with pg.begin() as conn:  # the worker died or overran: its lease is gone, the result never recorded
-        conn.execute(text("UPDATE index_publications SET lease_until=clock_timestamp()-interval '1 second' "
-                          "WHERE id=:i"), {"i": claimed["id"]})
-    assert index._claim()["version_id"] == second  # not the same job again at the head of the queue
-
-
 def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
     """v3 6.2 bumped the profile version: until versions are profiled again no artifact is current, and a sent
     entry must then be kept (retiring), not disabled because "every replacement is ready" held vacuously."""
@@ -1213,7 +1106,7 @@ def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
     version, client = ready_job(pg)
     monkeypatch.setattr(profile_module, "PROCESSOR_VERSION", "datafabric.profile.v999")
     due(pg)
-    index.process_once(client=client)
+    process_one(client)
     saved = job(pg)
     assert saved["state"] == "ready" and saved["desired_state"] != "superseded"  # kept, nothing sent to disable
 
@@ -1262,7 +1155,7 @@ def test_an_index_target_naming_a_retired_source_is_a_configuration_error_found_
 
 def test_a_new_artifact_still_parsing_or_failed_never_replaces_the_old_entry(pg, monkeypatch):
     """T-26（Codex 708）：同一 raw version 升级清洗处理器。新产物在 WeKnora 还在解析或解析失败时，旧条目照常服务
-    （handover），新条目不算可检索；新产物 ready 后旧条目才停用，旧条目的知识编号和回执保留，旧命中不再采用。"""
+    （handover），新条目不算可检索；新产物 ready 后旧条目才停用，旧条目的知识编号保留，旧命中不再采用。"""
     from clean import clean_text
 
     version, journal = ready_job(pg)
@@ -1300,22 +1193,20 @@ def test_a_new_artifact_still_parsing_or_failed_never_replaces_the_old_entry(pg,
     for parse in ("processing", "failed"):
         client.parse = parse
         due_job(pg, new["id"])
-        seen.append(index.process_once(client=client)["state"])
+        seen.append(process_one(client))
         due_job(pg, old["id"])
-        index.process_once(client=client)  # the old entry: retiring, kept, no network
-        assert job_state(pg, old["id"]) == ("ready", "active") and job_state(pg, new["id"])[0] != "ready"
+        process_one(client)  # the old entry: retiring, kept, no network
+        assert job_state(pg, old["id"]) == ("ready", "retiring") and job_state(pg, new["id"])[0] != "ready"
         seen.append(job_state(pg, new["id"])[0])
         assert serving() == [(version, old["artifact_key"], True)]  # still the old artifact, said so
     assert "ready" not in seen and client.disable_count == 0
     client.parse = "completed"
-    with pg.begin() as conn:  # WeKnora parsed it on a retry
-        conn.execute(text("UPDATE index_publications SET attempts=0 WHERE id=:i"), {"i": new["id"]})
     due_job(pg, new["id"])
-    assert index.process_once(client=client)["state"] == "ready"
+    assert process_one(client) == "ready"
     due_job(pg, old["id"])
-    assert index.process_once(client=client)["desired_state"] == "superseded"
-    kept = rows(pg, "SELECT state, knowledge_id, receipt FROM index_publications WHERE id=:i", {"i": old["id"]})[0]
-    assert kept["state"] == "disabled" and kept["knowledge_id"] == old["knowledge_id"] and kept["receipt"]
+    assert process_one(client) == "disabled" and job_state(pg, old["id"]) == ("disabled", "superseded")
+    kept = rows(pg, "SELECT knowledge_id FROM index_publications WHERE id=:i", {"i": old["id"]})[0]
+    assert kept["knowledge_id"] == old["knowledge_id"]
     after = search(client)
     assert after["results"] == [] and after["excluded"]["counts"] == {"changed_at_cutoff": 1}
 

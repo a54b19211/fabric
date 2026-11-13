@@ -105,16 +105,17 @@ def measure():
 
 
 def index(rounds=20):
-    """存：把清洗正文送进知识库（WeKnora）。没配置知识库时什么也不做；最多处理 rounds 个到期的待办。"""
+    """存：把清洗正文送进知识库（WeKnora）。没配置知识库时什么也不做；先补扫待办，再最多处理 rounds 批到期的待办。"""
     if not index_publication.configured():
         return "没有配置知识库（DATAFABRIC_INDEX_TARGETS），跳过"
-    done = []
+    index_publication.scan_committed()  # 第一次跑时登记索引目标，并补上清洗时还没能登记的待办
+    done = Counter()
     for _ in range(rounds):
-        state = index_publication.process_once()["state"]
-        if state == "idle":
+        batch = index_publication.work_once()
+        if not batch:
             break
-        done.append(state)
-    return f"处理了 {len(done)} 个待办（{counted(done)}）" if done else "没有到期的待办，跳过"
+        done.update(batch)
+    return f"处理了 {sum(done.values())} 个待办（{counted(done.elements())}）" if done else "没有到期的待办，跳过"
 
 
 def main(source, max_records, deadline, only=None, run_id=None):
