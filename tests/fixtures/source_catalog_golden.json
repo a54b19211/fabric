@@ -264,23 +264,6 @@
    "不保证原站覆盖、原日期语义或专业结论"
   ]
  },
- "drugbank": {
-  "name": "DrugBank",
-  "business_types": [
-   "drug_database"
-  ],
-  "acquisition_channel": "site_plugin",
-  "access": "explicit_source_allowlist",
-  "license_url": null,
-  "history_coverage": "本系统采用后的不可变版本；不是原站历史档案",
-  "native_id": "详情页 URL；接口记录/表格为 uuid5(站点:记录键)；附件为 父记录#attachment=链接",
-  "read_scope": "按需读取或按列表入口续页；旧库存按 6.3 迁入各真实来源",
-  "limitations": [
-   "需管理员逐源许可",
-   "插件未对原站实测（verified=False）",
-   "不保证原站覆盖、原日期语义或专业结论"
-  ]
- },
  "fda_api_drug_label": {
   "name": "openFDA 药品说明书（drug/label）",
   "business_types": [

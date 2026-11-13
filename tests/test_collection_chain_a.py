@@ -32,12 +32,12 @@ STOP_AT_KNOWN = {
 
 def test_watchable_set_is_the_earlier_five_and_the_newest_first_lists():
     # 改造前写死的四个来源，加上按整点读取的 GDELT，再加列表从新到旧、靠“遇到已存的就停”增量读的来源；
-    # 港交所、NCCN、DrugBank 这个办法用不了，不进（原因写在目录里）；本地导入不对外抓，不进
+    # 港交所、NCCN 这个办法用不了，不进（原因写在目录里）；本地导入不对外抓，不进
     earlier = {"who_don", "europe_pmc", "clinicaltrials", "sec_companyfacts", "gdelt_doc"}
     assert catalog.WATCHABLE == earlier | STOP_AT_KNOWN | {"fda_crl"}
     assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.kind == "stop_at_known"} == STOP_AT_KNOWN
     assert catalog.spec("fda_crl").incremental.kind == "full_reread"  # 成批公布的旧信会排在读过的新信后面：整份重读
-    for source in ("hkex", "nccn", "drugbank", "local_files"):
+    for source in ("hkex", "nccn", "local_files"):
         assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
 
 

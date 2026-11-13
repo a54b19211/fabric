@@ -118,7 +118,6 @@ _NOT_WATCHED = {
     "一次读取最长 120 秒，续读又要从头重放，读不完",
     "nccn": "指南清单没有时间顺序，新版本只是某一条的版本号变了，必须整份重读；一轮约一百次页面渲染，"
     "一次读取最长 120 秒，续读又要从头重放，读不完",
-    "drugbank": "需要 DrugBank API 凭据与许可（还没有）；药物库没有时间顺序",
 }
 
 def _site(source_id, name, *, evidence, decisions, group, coverage, notes="", interval=2.0, supply_system="",
@@ -349,8 +348,6 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
           coverage={"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, notes="query=records；许可未核实"),
     _site("roche", "Roche Media Releases", evidence=("company_disclosure",), decisions=("A",), group="roche.com",
           coverage={"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}, notes="query=records；企业披露，不是独立无偏来源"),
-    _site("drugbank", "DrugBank", evidence=("drug_database",), decisions=("A",), group="drugbank.com", interval=1.0,
-          coverage={"metadata": "药物条目接口"}, notes="query=records；需要 DrugBank API 凭据与许可，未核实"),
     CollectionSpec(
         source_id="cninfo",
         name="巨潮资讯（沪深北公告与财报）",

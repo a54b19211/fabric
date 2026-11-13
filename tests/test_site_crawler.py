@@ -79,7 +79,7 @@ def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
         assert source in catalog.FETCHABLE and source in catalog.WATCHABLE  # 列表从新到旧：遇到已存的就停
         assert spec.incremental.kind == "stop_at_known"
         assert spec.verified is False  # 迁入旧代码，本系统未对原站实测
-    for source in ("hkex", "nccn", "drugbank"):  # 这个办法用不了的：还是不进固定刷新，原因写在目录里
+    for source in ("hkex", "nccn"):  # 这个办法用不了的：还是不进固定刷新，原因写在目录里
         assert source in catalog.FETCHABLE and source not in catalog.WATCHABLE
         assert catalog.spec(source).incremental.semantics
 
@@ -668,16 +668,6 @@ def test_requests_and_curl_redirects_are_gated_per_hop(monkeypatch):
     assert budget.requests == 2 and budget.bytes == 4
 
 
-def test_drugbank_without_an_api_key_is_a_failed_read_that_says_so(monkeypatch):
-    """No key used to end the fetcher silently, which read as "source read to the end, nothing there"."""
-    monkeypatch.delenv("DRUGBANK_API_KEY", raising=False)
-    monkeypatch.setitem(site_crawler.SITE_PROFILES["drugbank"]["api"], "api_key", "")
-    batch = read_public(FetchRequest(source_id="drugbank", query="records"))
-    assert batch["error"]["code"] == "source_not_configured" and "没配 DrugBank API Key" in batch["error"]["message"]
-    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
-    assert batch["records"] == []
-
-
 def test_failed_site_read_keeps_the_real_reason_without_secrets(fake_web, monkeypatch):
     """The reason used to be the class name only ("站点读取失败：TimeoutError"). Now it is the first line of the
     error message; the rest of the browser's call log, URL query strings and key=value pairs stay out."""
@@ -765,21 +755,6 @@ def test_openfda_404_past_the_last_skip_page_is_still_the_normal_end(monkeypatch
     batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=10))
     assert len(batch["records"]) == 1 and batch["error"] is None
     assert batch["upstream_pagination_exhausted"] and batch["stop_reason"] == "upstream_exhausted"
-
-
-@pytest.mark.parametrize(("answer", "reason"), [
-    (lambda: _http(401, {"error": "Unauthorized"}), "HTTP 401"),
-    (lambda: (_ for _ in ()).throw(__import__("httpx").ReadTimeout("read timed out")), "ReadTimeout"),
-])
-def test_drugbank_http_errors_and_timeouts_are_failed_reads_without_the_key(monkeypatch, answer, reason):
-    import httpx
-
-    monkeypatch.setitem(site_crawler.SITE_PROFILES["drugbank"]["api"], "api_key", "test-key-0000")
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: answer())
-    batch = read_public(FetchRequest(source_id="drugbank", query="records"))
-    assert batch["error"]["code"] == "source_read_failed" and f"DrugBank 读取失败：{reason}" in batch["error"]["message"]
-    assert "test-key-0000" not in batch["error"]["message"]
-    assert batch["stop_reason"] == "source_failed" and not batch["upstream_pagination_exhausted"]
 
 
 class _RochePage:

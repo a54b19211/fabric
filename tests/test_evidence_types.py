@@ -172,7 +172,6 @@ def test_profile_gives_category_alongside_doc_type(source, kw, doc_type, categor
 
 def test_profile_lists_categories_of_the_source():
     assert run("europe_pmc")["evidence_categories"] == ["primary_research", "unmapped", "preprint"]
-    assert run("drugbank")["evidence_categories"] == ["unmapped"]
     assert run("nmpa")["evidence_categories"] == ["official_notice", "regulatory_decision"]
     assert run("some_future_source")["evidence_categories"] == []
 

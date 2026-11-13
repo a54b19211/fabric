@@ -6,7 +6,7 @@
   加 --rounds N 每个来源抓 N 次（--twice 就是 --rounds 2）。
   加 --incremental 按固定刷新的读法抓（连续读到 3 条已存且没变的就停）：第一次和平常一样，第二次起"停止原因"应该是
   reached_known、版本数只有 3 个左右。只对目录里增量键是 stop_at_known 的来源生效；别的来源（有更新窗口的，或没有固定
-  刷新的 hkex、nccn、drugbank）照常整抓。
+  刷新的 hkex、nccn）照常整抓。
 怎么跑（仓库根目录，用本仓的 .venv；来源一个接一个跑，不并发，不给对方网站压力）：
   python ops/check_sources.py                          # 全部来源，各抓一次
   python ops/check_sources.py nmpa chictr --twice      # 只测这两个，各抓两次
@@ -16,7 +16,7 @@
   DATAFABRIC_HISTORY_DATABASE_URL  必设。这个命令会写库（每次抓取留下运行记录和版本），一定要指向临时库，别连线上库；
                                    库先建好表：python -m migration.runner --db history --apply
   DATAFABRIC_HISTORY_SOURCE_ALLOWLIST  不用设，命令把它设成这次要测的来源。
-  按来源另有：DRUGBANK_API_KEY（没有就如实显示"缺 Key"）等。GDELT 有每小时请求额度，被限流也如实显示。
+  GDELT 有每小时请求额度，被限流也如实显示。
 有来源没抓到（失败，或一个版本都没有）时，表打完以退出码 1 结束。表打在标准输出，日志在标准错误输出（只想看表加 2>/dev/null）。
 """
 
