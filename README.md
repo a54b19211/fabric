@@ -3,7 +3,7 @@
 把药学相关的公开资料（监管公告、临床登记、文献、企业披露、新闻……）**抓**下来，**洗**成干净正文、编号和画像，
 按版本**存**进 History 库并送进知识库 WeKnora。雷达只经 HTTP 接口（`api/`）读这些结果。
 
-- **正式运行**：`systemctl --user start 'datafabric-*'`（`ops/systemd/` 的 7 个服务，各起 `run/` 里的一个常驻程序，见下）
+- **正式运行**：`systemctl --user start datafabric-{publisher,history-worker,clean,index,measure,checks,history}`（`ops/systemd/` 的 7 个服务，各起 `run/` 里的一个常驻程序，见下）
 - **调试一个来源**：`python main_etl.py --source nmpa --max 5`（会写库，先指向临时库，见“怎么跑”）
 - **跑测试**：`make test`
 
