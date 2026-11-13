@@ -2,7 +2,7 @@
 领活用 SELECT ... FOR NO KEY UPDATE SKIP LOCKED，可多进程并行：别的进程正在处理的版本直接跳过。
 
 从哪读起：process()。它按来源一批一批地领还没画像的版本（_process_batch），一批的活在 _process_rows 里：_prepare_rows
-选出清洗的输入，_version_text 清洗（见过的输入直接复用），_write_rows 批量写入。process_versions() 只处理指定的几个版本，
+选出清洗的输入，_version_text 清洗（这个版本已经洗过就用那份正文），_write_rows 批量写入。process_versions() 只处理指定的几个版本，
 给 main_etl.py 单次调试用；stage_status() 给出各来源的进度；for_versions() 把一页版本的产物读给 API。命令行入口是
 run/clean.py。
 
@@ -13,8 +13,8 @@ run/clean.py。
 运行方式（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）：
 - 领活：一批 = 一个来源里还没有当前画像、也不在等附件正文的版本，按 published_seq 先后；领到的版本行锁到这批写完。
   整批写不成时逐个重做，做不成的版本记在返回的 failed_versions 里，本轮跳过，下一轮再试。
-- 按输入复用：清洗器的输入算 input_sha256，同一清洗器版本下见过的输入直接复用结果（EPMC 平均每篇 8 个版本、
-  大多正文未变）。版本级结果行照常写，接口与契约不变。
+- 已经洗过的不重洗：这个版本在当前清洗器版本下已有正文（derived_clean_text 有 (version_id, processor_version)
+  这一行），就用那份正文重算编号和画像（例如只有画像处理器升级时）。每份正文只留一个摘要 text_sha256。
 - 一批一次读（只取所需字段，原件只在 EPMC 和网页版本上读）、一次事务批量写。
 - 附件没解析完记 derived_stage_waiting，不卡住别的版本；之后每次运行先补做。
 - stage_status() 给出每个来源的版本数、已画像数、等附件的数和还没做的数。
@@ -58,26 +58,23 @@ BATCH = 200  # 一批（一个事务）处理几个版本
 
 def stage_key() -> str:
     """阶段键 = 本阶段用到的所有处理器版本（等附件正文的记录按它分开）。"""
-    parts = [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION, identifiers.PROCESSOR_VERSION,
-             profile.PROCESSOR_VERSION]
-    return "clean_stage:" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:24]
+    return "clean_stage:" + "+".join([clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION,
+                                      identifiers.PROCESSOR_VERSION, profile.PROCESSOR_VERSION])
 
 
 def _cleaner_input(row):
-    """(清洗器的输入, 定位基准)。输入决定结果：同样的输入不重算（v3 3.3“原文没变就复用”）。"""
+    """(清洗器的输入, 定位基准)。"""
     source, facts = row["source_id"], row["facts"] or {}
     if source == "clinicaltrials":
         # 摘要直接取原件 briefSummary：投影在没有摘要时用标题顶替，拿它当摘要会把标题定位到摘要路径上
         return {"facts": facts, "locators": row["locators"] or {}, "summary": row.get("brief_summary")}, \
             "registry_fields"
     if source == "europe_pmc":
-        # 只取清洗器用到的字段：只改引用数等元数据的新版本（EPMC 平均每篇 8 个版本）输入相同，直接复用。
-        # 定位用 JSON 路径（/title、/abstractText），不随其他字段变化移动，在每个版本上都能回指。
+        # 只取清洗器用到的字段。定位用 JSON 路径（/title、/abstractText），不随其他字段变化移动，在每个版本上都能回指。
         try:
             data = json.loads(row["raw"] or "{}")
         except ValueError:
-            return {"invalid_raw_sha256": hashlib.sha256((row["raw"] or "").encode()).hexdigest(),
-                    "raw": row["raw"] or ""}, "raw_json"
+            return {"raw": row["raw"] or ""}, "raw_json"
         return {"title": data.get("title"), "abstractText": data.get("abstractText")}, "literature_fields"
     if source == "who_don":
         # from the raw JSON: the projection's clean_text flattened <table> and has no title heading
@@ -102,9 +99,8 @@ _ANCHORS = {
 
 
 def _anchored(segments, basis):
-    """这一版本自己的定位基准写进每段（返回新列表，不改传入的段——复用的结果可能被多个版本共用）。
-    同样的正文可以来自不同基准（站点原件的 /parsed/markdown 与库存冻结件的投影 /clean_text）：内容复用，
-    定位按当前版本重建。"""
+    """这一版本自己的定位基准写进每段（返回新列表，不改传入的段）。同样的正文可以来自不同基准（站点原件的
+    /parsed/markdown 与库存冻结件的投影 /clean_text）：定位按当前版本写。"""
     anchor = _ANCHORS.get(basis)
     if not anchor:
         return segments or []
@@ -115,10 +111,6 @@ def _anchored(segments, basis):
             seg = {**seg, "source": {**anchor, "start": src["start"], "end": src["end"]}}
         out.append(seg)
     return out
-
-
-def _run_cleaner(source, inp, basis):
-    return _clean_by_basis(source, inp, basis)
 
 
 def _clean_by_basis(source, inp, basis):
@@ -180,13 +172,13 @@ _BY_VERSION_IDS_SQL = _FIELDS + " WHERE version_id=ANY(:ids)"
 
 
 def _process_rows(conn, key, rows, counts):
-    """一批版本：清洗（按输入复用）、编号、画像，批量写入。附件没解析完的记等待表。"""
+    """一批版本：清洗（已经洗过的用那份正文）、编号、画像，批量写入。附件没解析完的记等待表。"""
     work = [r for r in rows if r["record_kind"] != "graph" and r["source_id"] not in SKIP_SOURCES]
-    prepared, inputs = _prepare_rows(conn, key, work, counts)
-    _reuse_cleaned(conn, inputs)
+    prepared = _prepare_rows(conn, key, work, counts)
+    cleaned = _cleaned(conn, [r["version_id"] for r, basis, _ in prepared if basis is not None])
     clean_rows, id_rows, profile_rows = [], [], []
-    for r, basis, sha, extra in prepared:
-        body, text_pv, warnings, parse_status = _version_text(r, basis, sha, extra, inputs, counts, clean_rows)
+    for r, basis, extra in prepared:
+        body, text_pv, warnings, parse_status = _version_text(r, basis, extra, cleaned, counts, clean_rows)
         found = identifiers.extract(body) if body else []
         for hit in found:
             id_rows.append({"v": r["version_id"], "pv": identifiers.PROCESSOR_VERSION, "tpv": text_pv,
@@ -198,12 +190,11 @@ def _process_rows(conn, key, rows, counts):
 
 
 def _prepare_rows(conn, key, work, counts):
-    """(prepared, inputs): per version (row, basis, input sha, cleaner input) or, for an attachment,
-    (row, None, None, its final parse result); inputs maps every input sha to None. An attachment whose parse
-    is not final yet goes into the waiting table instead, in row order."""
+    """Per version (row, basis, cleaner input), or for an attachment (row, None, its final parse result). An
+    attachment whose parse is not final yet goes into the waiting table instead, in row order."""
     attachments = [r["version_id"] for r in work if (r["facts"] or {}).get("role") == "attachment"]
     finals = _final_attachment_texts(conn, attachments)
-    prepared, inputs = [], {}
+    prepared = []
     for r in work:
         if (r["facts"] or {}).get("role") == "attachment":
             done = finals.get(r["version_id"])
@@ -213,41 +204,36 @@ def _prepare_rows(conn, key, work, counts):
                     "ON CONFLICT DO NOTHING"), {"k": key, "v": r["version_id"]})
                 counts["waiting_for_attachment_text"] += 1
                 continue
-            prepared.append((r, None, None, done))
+            prepared.append((r, None, done))
             continue
         inp, basis = _cleaner_input(r)
-        sha = hashlib.sha256(json.dumps(inp, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        inputs[sha] = None
-        prepared.append((r, basis, sha, inp))
-    return prepared, inputs
+        prepared.append((r, basis, inp))
+    return prepared
 
 
-def _reuse_cleaned(conn, inputs):
-    """已有结果（同样输入、同一清洗器版本）直接复用：fills inputs[sha] for every input already cleaned."""
-    if inputs:
-        for hit in conn.execute(text(
-            "SELECT DISTINCT ON (input_sha256) input_sha256,text,segments,language,warnings FROM derived_clean_text "
-            "WHERE input_sha256=ANY(:shas) AND processor_version=:pv"
-        ), {"shas": list(inputs), "pv": clean_text.PROCESSOR_VERSION}).mappings():
-            inputs[hit["input_sha256"]] = {"text": hit["text"], "segments": hit["segments"], "language": hit["language"],
-                                           "warnings": hit["warnings"], "processor_version": clean_text.PROCESSOR_VERSION}
+def _cleaned(conn, version_ids):
+    """这些版本在当前清洗器版本下已有的正文 {version_id: 行}：“已经洗过”按 (version_id, processor_version) 判断。"""
+    if not version_ids:
+        return {}
+    return {row["version_id"]: dict(row) for row in conn.execute(text(
+        "SELECT DISTINCT ON (version_id) version_id,text,warnings FROM derived_clean_text "
+        "WHERE version_id=ANY(:ids) AND processor_version=:pv ORDER BY version_id, attempt DESC"
+    ), {"ids": list(version_ids), "pv": clean_text.PROCESSOR_VERSION}).mappings()}
 
 
-def _version_text(r, basis, sha, extra, inputs, counts, clean_rows):
-    """(body, text processor version, warnings, parse status) of one prepared version. A cleaned version
-    (basis given) is cleaned or reused by its input sha and its derived_clean_text row is appended to
-    clean_rows; an attachment's text comes from the processing layer."""
+def _version_text(r, basis, extra, cleaned, counts, clean_rows):
+    """(body, text processor version, warnings, parse status) of one prepared version. A version this cleaner
+    version already cleaned keeps that text; otherwise it is cleaned and its derived_clean_text row is appended to
+    clean_rows. An attachment's text comes from the processing layer."""
     if basis is None:  # 附件：正文来自加工层
-        done = extra
-        body = done["text"] if done["status"] == "parsed" else ""
-        return body, attachment_parse.PROCESSOR_VERSION, [], done["status"]
-    result = inputs.get(sha)
-    if result is None:
-        result = _run_cleaner(r["source_id"], extra, basis)
-        inputs[sha] = result
-        counts["cleaned"] += 1
-    else:
+        body = extra["text"] if extra["status"] == "parsed" else ""
+        return body, attachment_parse.PROCESSOR_VERSION, [], extra["status"]
+    done = cleaned.get(r["version_id"])
+    if done is not None:
         counts["reused"] += 1
+        return done["text"], clean_text.PROCESSOR_VERSION, list(done["warnings"] or []), None
+    result = _clean_by_basis(r["source_id"], extra, basis)
+    counts["cleaned"] += 1
     body, text_pv = result["text"], clean_text.PROCESSOR_VERSION
     warnings = list(result.get("warnings") or [])
     clean_rows.append({
@@ -257,7 +243,7 @@ def _version_text(r, basis, sha, extra, inputs, counts, clean_rows):
         "sha": hashlib.sha256(body.encode()).hexdigest(),
         "kind": "json_pointer" if basis in ("registry_fields", "literature_fields") else "char_span",
         "segments": json.dumps(_anchored(result.get("segments"), basis), ensure_ascii=False),
-        "lang": result.get("language"), "warnings": json.dumps(warnings), "input": sha,
+        "lang": result.get("language"), "warnings": json.dumps(warnings),
     })
     return body, text_pv, warnings, None
 
@@ -293,9 +279,9 @@ def _write_rows(conn, clean_rows, id_rows, profile_rows, counts):
         conn.execute(text("""
             INSERT INTO derived_clean_text
               (version_id,processor_version,attempt,source_id,is_demo,source_record_id,status,parse_method,
-               parse_attempts,error,file_ext,text,chars,text_sha256,locator_kind,segments,language,warnings,input_sha256)
+               parse_attempts,error,file_ext,text,chars,text_sha256,locator_kind,segments,language,warnings)
             SELECT :v,:pv,1,:source,:demo,:native,:status,:method,'[]'::jsonb,:error,NULL,:text,:chars,:sha,:kind,
-                   CAST(:segments AS jsonb),:lang,CAST(:warnings AS jsonb),:input
+                   CAST(:segments AS jsonb),:lang,CAST(:warnings AS jsonb)
             WHERE NOT EXISTS (SELECT 1 FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv)
         """), clean_rows)
     if id_rows:

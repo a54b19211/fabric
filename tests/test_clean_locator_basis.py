@@ -33,7 +33,7 @@ def check_every_segment(result, read):
 def test_web_capture_segments_resolve_inside_the_decoded_markdown_field():
     row = {"source_id": "nmpa", "facts": {"role": "web_capture"}, "raw": RAW, "clean_text": None}
     inp, basis = clean_stage._cleaner_input(row)
-    result = clean_stage._run_cleaner("nmpa", inp, basis)
+    result = clean_stage._clean_by_basis("nmpa", inp, basis)
     result = {**result, "segments": clean_stage._anchored(result["segments"], basis)}
     assert len(result["segments"]) >= 3  # 模板行（打印本页）处断段
     first = result["segments"][0]["source"]
@@ -48,26 +48,11 @@ def test_projection_segments_resolve_inside_the_version_record():
     record = {"clean_text": projection}
     row = {"source_id": "legacy_documents", "facts": {}, "raw": None, "clean_text": projection}
     inp, basis = clean_stage._cleaner_input(row)
-    result = clean_stage._run_cleaner("legacy_documents", inp, basis)
+    result = clean_stage._clean_by_basis("legacy_documents", inp, basis)
     result = {**result, "segments": clean_stage._anchored(result["segments"], basis)}
     first = result["segments"][0]["source"]
     assert (first["json_pointer"], first["within"]) == ("/clean_text", "record")
     check_every_segment(result, lambda source: resolve(source, "{}", record))
-
-
-def test_reused_content_gets_the_basis_of_the_version_it_is_written_for():
-    """真实数据里发现：库存冻结的 FDA 文档与站点插件的同一条记录正文相同，复用了后者的清洗结果，
-    连带继承了“原件 /parsed/markdown”的定位基准。内容可以复用，定位要按当前版本重建。"""
-    site = {"source_id": "fda_api_enforcement", "facts": {"role": "site_record"},
-            "raw": json.dumps({"parsed": {"markdown": "# 召回\n\n正文一段。"}}, ensure_ascii=False), "clean_text": None}
-    stored = {"source_id": "legacy_documents", "facts": {"source_site": "fda_api_enforcement"}, "raw": None,
-              "clean_text": "# 召回\n\n正文一段。"}
-    (a, basis_a), (b, basis_b) = clean_stage._cleaner_input(site), clean_stage._cleaner_input(stored)
-    assert a == b and basis_a != basis_b  # 同样的清洗输入（会复用），不同的定位基准
-    shared = clean_stage._run_cleaner("x", a, basis_a)
-    one, two = clean_stage._anchored(shared["segments"], basis_a), clean_stage._anchored(shared["segments"], basis_b)
-    assert {s["source"]["within"] for s in one} == {"raw"} and {s["source"]["within"] for s in two} == {"record"}
-    assert all("within" not in s.get("source", {}) for s in shared["segments"])  # 共用的结果没被改
 
 
 WHO_RAW = json.dumps({"Id": "28ac1b73-33a6-45fa-8474-6690de75b2ff", "Title": "Mpox - Democratic Republic of the Congo",
@@ -83,7 +68,7 @@ def test_who_v12_segments_point_at_their_raw_field_and_block():
     row = {"source_id": "who_don", "facts": {}, "raw": WHO_RAW, "clean_text": "flattened projection"}
     inp, basis = clean_stage._cleaner_input(row)
     assert basis == "who_raw_json"
-    result = clean_stage._run_cleaner("who_don", inp, basis)
+    result = clean_stage._clean_by_basis("who_don", inp, basis)
     result = {**result, "segments": clean_stage._anchored(result["segments"], basis)}
     first = result["segments"][0]["source"]
     assert (first["json_pointer"], first["within"], first.get("start")) == ("/Title", "raw", None)

@@ -162,11 +162,11 @@ def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows
     assert rows(pg, "SELECT count(*) AS n FROM derived_profiles WHERE version_id=:v", v=ct)[0]["n"] == 2  # 旧行保留
 
 
-# ——规模化运行方式：SKIP LOCKED 领活、按输入复用、失败不挡别的版本、进度——
+# ——规模化运行方式：SKIP LOCKED 领活、洗过的不重洗、失败不挡别的版本、进度——
 
 
-def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
-    from clean import clean_stage
+def test_a_version_already_cleaned_keeps_its_text_when_only_the_profile_is_redone(pg, monkeypatch):
+    from clean import clean_stage, profile
 
     allow(monkeypatch)
     calls = []
@@ -174,22 +174,12 @@ def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
     monkeypatch.setattr(clean_text, "clean_literature", lambda raw: calls.append(raw) or real(raw))
     record = {"source": "MED", "id": "123", "title": "Same", "abstractText": "No change in the abstract."}
     _fetch_europe_pmc_raw(json.dumps(record), "reuse-1")
-    _fetch_europe_pmc_raw(json.dumps({**record, "citedByCount": 7}), "reuse-2")  # 元数据变了，摘要没变
-    counts = clean_stage.process(batch=1)
-    # 第二个版本只改了引用数：清洗器只读标题和摘要，输入相同，复用，不再清洗
-    assert counts["profiled"] == 2 and counts["cleaned"] == 1 and counts["reused"] == 1 and len(calls) == 1
-
-
-def test_identical_cleaner_input_on_another_version_is_reused(pg, monkeypatch):
-    from clean import clean_stage
-
-    allow(monkeypatch)
-    page_a = nmpa_page("# 公告\n\n同一份正文，未见异常。", "reuse-page-a")
-    page_b = nmpa_page("# 公告\n\n同一份正文，未见异常。", "reuse-page-b")  # 另一个栏目地址，正文相同
+    assert clean_stage.process()["cleaned"] == 1
+    monkeypatch.setattr(profile, "PROCESSOR_VERSION", "synthetic.profile.v99")  # only the profile is redone
     counts = clean_stage.process()
-    assert counts["cleaned"] == 1 and counts["reused"] == 1
-    a = clean_stage.for_versions("nmpa", False, [page_a, page_b], "current", NOW())["versions"]
-    assert a[page_a]["clean"]["text"] == a[page_b]["clean"]["text"]
+    assert (counts["profiled"], counts["cleaned"], counts["reused"], len(calls)) == (1, 0, 1, 1)
+    [row] = rows(pg, "SELECT text_sha256, input_sha256 FROM derived_clean_text")
+    assert len(row["text_sha256"]) == 64 and row["input_sha256"] is None  # one digest per text, no input digest
 
 
 def test_two_workers_never_process_the_same_version(pg, monkeypatch):
