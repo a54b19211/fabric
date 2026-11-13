@@ -1,460 +1,195 @@
-"""真实隔离PG：固定watch续页及源健康；不碰现役。"""
+"""定时刷新在真实 PostgreSQL 上（两个临时 schema：采集库的 publication_outbox、history 库）：一段一段读完一个周期、
+出错重读、锁住的 watch 跳过、改造前的状态行接着跑、/source-health 给雷达的键。队列换成桩，不联网。"""
 
 import json
-from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
+import os
+from uuid import uuid4
 
-import integration_publication as publication_fixtures
 import pytest
-from integration_publication import rows
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from test_source_refresh import who_value
 
-from fetch import source_refresh
-from graph.db.models import CrawlLog
+from fetch import fetch_job, source_refresh
+from graph.db.models import Base
 from graph.publish import publication
 from store import history
 from store.history_models import ArchiveRecord, HistoryError
+from store.migrations import runner
 
-databases = publication_fixtures.databases
-
-
-def allow(monkeypatch, sites):
-    monkeypatch.setenv("DATAFABRIC_PUBLICATION_SOURCES", json.dumps(sites))
-    monkeypatch.setenv(
-        "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
-        json.dumps(
-            [
-                "external_archive",
-                "legacy_documents",
-                "reviewed_graph",
-                "clinicaltrials",
-                "nmpa",
-                "cde",
-                "who_don",
-                "europe_pmc",
-            ]
-        ),
-    )
+STATE = "SELECT event_key, snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'"
 
 
-def watch_config(monkeypatch, source="who_don"):
-    monkeypatch.setenv(
-        "DATAFABRIC_HISTORY_WATCHES",
-        json.dumps(
-            [
-                {
-                    "id": "synthetic-watch",
-                    "request": {"source_id": source, "query": "*", "max_records": 1},
-                    "cadence_seconds": 3600,
-                    "lookback_days": 30,
-                }
-            ]
-        ),
-    )
+@pytest.fixture
+def dbs(monkeypatch):
+    url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL")
+    if not url:
+        pytest.skip("needs the throwaway PostgreSQL of ops/run_integration_tests.sh")
+    parsed = make_url(url)
+    assert parsed.host == "127.0.0.1" and (parsed.port, parsed.database) == (18436, "fabric_history")
+    admin = create_engine(url)
+    names = ["t_refresh_outbox_" + uuid4().hex[:12], "t_refresh_history_" + uuid4().hex[:12]]
+    with admin.begin() as conn:
+        for name in names:
+            conn.execute(text("CREATE SCHEMA " + name))
+    # the outbox schema also sees public (the vector extension of the graph tables), as in integration_publication
+    outbox, target = (create_engine(url, connect_args={"options": "-csearch_path=" + name + extra})
+                      for name, extra in zip(names, (",public", "")))
+    monkeypatch.setattr(publication, "publication_engine", lambda: outbox)
+    monkeypatch.setattr(history, "history_engine", lambda: target)
+    monkeypatch.setattr(fetch_job, "enqueue_fetch", lambda run: run)  # the worker is played by finish()
+    monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
+    Base.metadata.create_all(outbox)
+    runner.apply("publication", outbox)
+    runner.apply("history", target)
+    try:
+        yield outbox, target
+    finally:
+        outbox.dispose()
+        target.dispose()
+        with admin.begin() as conn:
+            for name in names:
+                conn.execute(text(f"DROP SCHEMA {name} CASCADE"))
+        admin.dispose()
 
 
-def finish_active(source, records, continuation=None, exhausted=False, error=None, **reported):
-    control = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    run = history.read_run(control["active_run_id"])
+def rows(engine, sql, **params):
+    with engine.begin() as conn:
+        return list(conn.execute(text(sql), params).mappings())
+
+
+def watch(monkeypatch, source="who_don", query="*"):
+    config = [{"id": "synthetic-watch", "request": {"source_id": source, "query": query, "max_records": 1},
+               "cadence_seconds": 3600, "lookback_days": 30}]
+    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(config))
+
+
+def state(outbox):
+    return rows(outbox, STATE)[0]["snapshot"]
+
+
+def payloads(target):
+    return [r["request_payload"] for r in rows(target, "SELECT request_payload FROM history_runs ORDER BY created_at")]
+
+
+def finish(outbox, records=(), continuation=None, exhausted=False, error=None, stop=None):
+    """The fetch worker's part: the watch's active run is read and stored."""
+    run = history.read_run(state(outbox)["active_run_id"])
     history.job_input(run.id, run.attempt)
-    return history.finish_fetch(
-        run.id,
-        run.attempt,
-        {
-            "records": records,
-            "complete": False,
-            "upstream_pagination_exhausted": exhausted,
-            "stop_reason": "upstream_exhausted" if exhausted else "record_budget",
-            "error": error,
-            "requests": 1,
-            "bytes": 100,
-            "source_total": None,
-            "next_continuation": continuation,
-            **reported,
-        },
-    )
+    stop = stop or ("upstream_exhausted" if exhausted else "record_budget")
+    return history.finish_fetch(run.id, run.attempt, {
+        "records": list(records), "complete": False, "upstream_pagination_exhausted": exhausted, "stop_reason": stop,
+        "error": error, "requests": 1, "bytes": 100, "source_total": None, "next_continuation": continuation})
 
 
-def test_watch_fixed_intent_recovers_unknown_create_and_resumes_next_page(
-    databases, monkeypatch
-):
-    source, target = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    watch_config(monkeypatch)
-    import fetch.fetch_job as fetch
+def make_due(outbox):  # the cadence has passed
+    with outbox.begin() as conn:
+        conn.execute(text("UPDATE publication_outbox SET snapshot = jsonb_set(snapshot, '{next_check_at}', "
+                          "to_jsonb('2000-01-01T00:00:00+00:00'::text)) WHERE event_key LIKE 'source-watch:%'"))
 
-    enqueue = Mock()
-    monkeypatch.setattr(fetch, "enqueue_fetch", enqueue)
 
-    def active(*args):
-        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
+def who_record(number):
+    value = who_value(number)
+    return ArchiveRecord(source_record_id=value["Id"], record_kind="document", raw_content=json.dumps(value))
 
-    monkeypatch.setattr(fetch, "retry_inactive", active)
-    original = history.create_fetch
-    once = True
 
-    def create_then_lose(*args):
-        nonlocal once
-        result = original(*args)
-        if once:
-            once = False
-            raise RuntimeError("SYNTHETIC unknown commit")
-        return result
-
-    monkeypatch.setattr(history, "create_fetch", create_then_lose)
-    with pytest.raises(RuntimeError):
-        source_refresh.refresh_once()
+def test_a_cycle_is_read_segment_by_segment_then_waits_for_its_cadence(dbs, monkeypatch):
+    outbox, target = dbs
+    watch(monkeypatch)
+    assert source_refresh.refresh_once() == [{"watch_id": "synthetic-watch", "state": "running"}]
+    first = state(outbox)
+    assert first["request"]["updated_until"] == first["window_ended_at"]  # WHO: the update window of this cycle
+    assert source_refresh.refresh_once() == [{"watch_id": "synthetic-watch", "state": "running"}]  # still queued
+    assert len(payloads(target)) == 1
+    cursor = {"cursor": json.dumps({"modified": "2026-10-11T12:00:01Z", "id": who_value(1)["Id"]}), "read_count": 1}
+    finish(outbox, [who_record(1)], continuation=cursor)
+    source_refresh.refresh_once()  # the segment is done
+    source_refresh.refresh_once()  # the next round starts the next one, at its cursor, in the same window
+    second = payloads(target)[1]
+    assert second["continuation"] == cursor and second["updated_until"] == payloads(target)[0]["updated_until"]
+    finish(outbox, [who_record(2)], exhausted=True)
     source_refresh.refresh_once()
-    assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 1
-    rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    continuation = {
-        "cursor": '{"modified":"2026-10-11T12:00:01Z","id":"00000000-0000-4000-8000-000000000001"}',
-        "read_count": 1,
-    }
-    value = who_value()
-    finish_active(
-        source,
-        [
-            ArchiveRecord(
-                source_record_id=value["Id"],
-                record_kind="document",
-                raw_content=json.dumps(value),
-            )
-        ],
-        continuation,
-    )
-    source_refresh.refresh_once()
-    paged = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    assert paged["request"]["continuation"] == continuation
-    assert "last_success_at" not in paged
-    original_until = paged["request"]["updated_until"]
-    source_refresh.refresh_once()
-    next_state = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    assert next_state["request"]["updated_until"] == original_until
-    assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 2
-    finish_active(source, [], exhausted=True)
-    source_refresh.refresh_once()
-    complete = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    assert (
-        complete["last_success_at"]
-        and complete["state"] == "idle"
-        and "request" not in complete
-    )
-    source_refresh.refresh_once()
-    assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 2
-
-
-def test_source_health_unknown_and_actual_failures_are_separate_from_publisher(
-    databases, monkeypatch
-):
-    source, target = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    health = source_refresh.source_health("clinicaltrials")
-    assert health["collection"]["state"] == "unknown"
-    now = datetime.now(timezone.utc)
-    with Session(source) as session, session.begin():
-        session.add(
-            CrawlLog(
-                site_key="clinicaltrials",
-                status="success",
-                started_at=now - timedelta(hours=2),
-                finished_at=now - timedelta(hours=1),
-                failed_count=0,
-                total_count=4,
-            )
-        )
-        session.add(
-            CrawlLog(
-                site_key="clinicaltrials",
-                status="failed",
-                started_at=now,
-                finished_at=now,
-                failed_count=1,
-                error_message="SYNTHETIC SECRET",
-                crawl_config_snapshot={"token": "SYNTHETIC SECRET"},
-            )
-        )
-    publication.publisher_heartbeat("idle")
-    health = source_refresh.source_health("clinicaltrials")
-    assert (
-        health["collection"]["last_recorded_success_at"]
-        and health["collection"]["last_recorded_failure_at"]
-    )
-    assert health["collection"]["state"] == "failed"
-    assert "SYNTHETIC SECRET" not in json.dumps(health)
-    with target.begin() as conn:
-        conn.execute(
-            text(
-                "UPDATE history_sources SET read_enabled=false WHERE source_id='clinicaltrials'"
-            )
-        )
-    with pytest.raises(HistoryError) as exc:
-        source_refresh.source_health("clinicaltrials")
-    assert exc.value.status == 403
-
-
-def test_watch_failure_retains_continuation_and_does_not_claim_success(
-    databases, monkeypatch
-):
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    watch_config(monkeypatch)
-    import fetch.fetch_job as fetch
-
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-
-    def active(*args):
-        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
-
-    monkeypatch.setattr(fetch, "retry_inactive", active)
-    source_refresh.refresh_once()
-    state = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    first_request = state["request"]
-    finish_active(
-        source, [], error={"code": "source_read_failed", "message": "SYNTHETIC failure"}
-    )
-    source_refresh.refresh_once()
-    failed = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    assert failed["request"] == first_request
-    assert failed["state"] == "failed" and "last_success_at" not in failed
-    assert "active_run_id" not in failed and failed["last_failure_at"]
-    assert source_refresh.refresh_once() == []
-
-
-def test_old_watch_lease_cannot_overwrite_new_owner(databases, monkeypatch):
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    watch_config(monkeypatch)
-    import fetch.fetch_job as fetch
-
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-
-    def active(*args):
-        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
-
-    monkeypatch.setattr(fetch, "retry_inactive", active)
-    source_refresh.refresh_once()
-    row = rows(
-        source,
-        "SELECT event_key,snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]
-    with source.begin() as conn:
-        conn.execute(
-            text(
-                "UPDATE publication_outbox SET snapshot=jsonb_set(snapshot,'{lease_token}','\"new-owner\"') WHERE event_key=:key"
-            ),
-            {"key": row["event_key"]},
-        )
-    with pytest.raises(HistoryError) as exc:
-        source_refresh._save(source, row["event_key"], row["snapshot"])
-    assert exc.value.code == "source_watch_lease_lost"
-    assert (
-        rows(
-            source,
-            "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-        )[0]["snapshot"]["lease_token"]
-        == "new-owner"
-    )
-
-
-def test_epmc_watch_persists_update_window_not_publication_date(databases, monkeypatch):
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    watch_config(monkeypatch, source="europe_pmc")
-    import fetch.fetch_job as fetch
-
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-
-    def active(*args):
-        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
-
-    monkeypatch.setattr(fetch, "retry_inactive", active)
-    source_refresh.refresh_once()
-    first = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    query = first["request"]["query"]
-    assert "UPDATE_DATE:[" in query and "FIRST_PDATE" not in query
-    continuation = {
-        "cursor": "next-frozen-page",
-        "read_count": 1,
-    }
-    finish_active(source, [], continuation=continuation)
-    source_refresh.refresh_once()
-    source_refresh.refresh_once()
-    later = rows(
-        source,
-        "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
-    )[0]["snapshot"]
-    assert later["request"]["query"] == query
-    assert later["request"]["continuation"] == continuation
-
-
-@pytest.mark.parametrize("query,ids", [("*", []), ("lung cancer", []),
-                                    ("*", ["NCT00000001"])])
-def test_clinical_watch_freezes_update_window_or_exact_ids(databases, monkeypatch, query, ids):
-    source, target = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps([{
-        "id": "ct-fixed-fixture", "lookback_days": 30,
-        "request": {"source_id": "clinicaltrials", "query": query, "source_record_ids": ids},
-    }]))
-    import fetch.fetch_job as fetch
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-
-    def active(*_):
-        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
-
-    monkeypatch.setattr(fetch, "retry_inactive", active)
-    source_refresh.refresh_once()
-    state = rows(source, "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'")[0]["snapshot"]
-    request = state["request"]
-    if ids:
-        assert request["query"] == query and request["source_record_ids"] == ids
-    else:
-        expected = "AREA[LastUpdatePostDate]RANGE[" + state["window_started_at"][:10] + "," + state["window_ended_at"][:10] + "]"
-        assert request["query"] == (expected if query == "*" else "(" + query + ") AND " + expected)
-    source_refresh.refresh_once()
-    saved = rows(source, "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'")[0]["snapshot"]
-    assert saved["request"] == request and saved["active_run_id"] == state["active_run_id"]
-    assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 1
-
-
-def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_the_unread_window(
-    databases, monkeypatch
-):
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(["gdelt_doc"]))
-    watch_config(monkeypatch, source="gdelt_doc")
-    import fetch.fetch_job as fetch
-
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-
-    def active(*args):
-        raise HistoryError("job_may_be_active", "SYNTHETIC active", 409)
-
-    monkeypatch.setattr(fetch, "retry_inactive", active)
-    source_refresh.refresh_once()
-    watch = "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'"
-    first = rows(source, watch)[0]["snapshot"]
-    since, until = first["request"]["updated_since"], first["request"]["updated_until"]
-    assert since.endswith(":00:00+00:00") and until == first["window_ended_at"]  # whole UTC hours
-    middle = (datetime.fromisoformat(since) + timedelta(hours=1)).isoformat()
-    cut = {"start": since, "end": middle}
-    finish_active(
-        source, [], stop_reason="deadline", truncated_intervals=[cut],
-        window_coverage=[
-            {**cut, "status": "read", "possibly_truncated": True, "reason": "finest_window_full"},
-            {"start": middle, "end": until, "status": "not_read", "reason": "deadline"},
-        ],
-    )
-    source_refresh.refresh_once()
-    state = rows(source, watch)[0]["snapshot"]
-    assert state["state"] == "idle" and state["error"] is None and "request" not in state
-    assert state["window_checkpoint"] == middle and "last_success_at" not in state
-    assert state["last_coverage"]["truncated_intervals"] == [cut]  # the gap stays readable
-    assert state["last_coverage"]["stop_reason"] == "deadline"
-    assert source_refresh.refresh_once() == []  # next cycle waits for its cadence
-
-
-def test_stored_unchanged_is_the_judgement_adopting_a_record_makes(databases, monkeypatch):
-    """The incremental read's "already stored and unchanged" (store.history.stored_unchanged) is _adopted_version, the same
-    code that decides between a new version and the same one when a read is adopted."""
-    source, _ = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    watch_config(monkeypatch)
-    import fetch.fetch_job as fetch
-
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-    monkeypatch.setattr(fetch, "retry_inactive", lambda *args: (_ for _ in ()).throw(
-        HistoryError("job_may_be_active", "SYNTHETIC active", 409)))
-    source_refresh.refresh_once()
-
-    def record(value, **dump):
-        return ArchiveRecord(source_record_id=value["Id"], record_kind="document", raw_content=json.dumps(value, **dump))
-
-    value = who_value(1)
-    assert history.stored_unchanged("who_don", record(value)) is False  # not stored yet
-    finish_active(source, [record(value)], exhausted=True)
-    assert history.stored_unchanged("who_don", record(value)) is True
-    reordered = record(value, sort_keys=True, separators=(",", ":"))  # only key order and spacing differ
-    assert history.stored_unchanged("who_don", reordered) is True
-    assert history.stored_unchanged("who_don", record({**value, "Title": "SYNTHETIC corrected title"})) is False
-    assert history.stored_unchanged("who_don", record(who_value(2))) is False  # another record, not stored
-
-
-def test_watch_of_a_newest_first_source_reads_in_full_after_a_page_that_was_not_clean(databases, monkeypatch):
-    """A source without an update window (nmpa) is read from its first page and stops at the first known records
-    (known_stop). A page that failed or left items unread makes the next try read to the end: stopping at the known
-    ones would skip what was never stored."""
-    from fetch.windows import KNOWN_STOP
-
-    source, target = databases
-    allow(monkeypatch, ["clinicaltrials"])
-    watch_config(monkeypatch, source="nmpa")
-    import fetch.fetch_job as fetch
-
-    monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
-    monkeypatch.setattr(fetch, "retry_inactive", lambda *args: (_ for _ in ()).throw(
-        HistoryError("job_may_be_active", "SYNTHETIC active", 409)))
-    watch = "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'"
-    due = ("UPDATE publication_outbox SET snapshot = jsonb_set(snapshot, '{next_check_at}', "
-           "to_jsonb('2000-01-01T00:00:00+00:00'::text)) WHERE event_key LIKE 'source-watch:%'")
-
-    def payloads():
-        return [row["request_payload"] for row in rows(target, "SELECT request_payload FROM history_runs ORDER BY created_at")]
-
-    def make_due():  # the watch's cadence has passed
-        with source.begin() as conn:
-            conn.execute(text(due))
-
-    source_refresh.refresh_once()
-    first = rows(source, watch)[0]["snapshot"]
-    assert first["request"]["known_stop"] == KNOWN_STOP and first["request"]["updated_since"] is None  # no window
-    assert payloads()[0]["known_stop"] == KNOWN_STOP
-    unread = {"code": "items_unread", "message": "有 1 条读不到，如 https://x.invalid/3：HTTP 403"}
-    finish_active(source, [], error=unread, stop_reason="items_unread")  # a page that was not clean
-    source_refresh.refresh_once()
-    failed = rows(source, watch)[0]["snapshot"]
-    assert failed["state"] == "failed" and "last_success_at" not in failed and "active_run_id" not in failed
-    assert failed["request"]["known_stop"] == 0  # the retry reads to the end
-    assert source_refresh.refresh_once() == []  # waits for its cadence
-    make_due()
-    source_refresh.refresh_once()  # the failed page is tried again, as for every source
-    assert len(payloads()) == 2 and "known_stop" not in payloads()[1]
-    finish_active(source, [], exhausted=True)  # read clean to the end
-    source_refresh.refresh_once()
-    done = rows(source, watch)[0]["snapshot"]
+    done = state(outbox)
     assert done["state"] == "idle" and done["last_success_at"] and "request" not in done
-    make_due()
-    source_refresh.refresh_once()  # the next cycle stops at known records again
-    assert rows(source, watch)[0]["snapshot"]["request"]["known_stop"] == KNOWN_STOP
-    finish_active(source, [], stop_reason="reached_known")
+    assert done["window_checkpoint"] == first["window_ended_at"]  # the next cycle reads on from here
+    assert source_refresh.refresh_once() == []  # waits for its cadence
+    assert rows(target, "SELECT count(*) AS n FROM history_versions")[0]["n"] == 2
+
+
+def test_a_failed_segment_is_read_again_without_stopping_at_stored_records(dbs, monkeypatch):
+    """nmpa has no update window: the cycle reads the list from its top and stops at known_stop stored records. A
+    segment that failed is read again in full: stopping at the records the failed try stored would skip the rest."""
+    outbox, target = dbs
+    watch(monkeypatch, source="nmpa", query="https://www.nmpa.gov.cn/xxgk/ggtg/index.html")
     source_refresh.refresh_once()
-    ended = rows(source, watch)[0]["snapshot"]
-    assert ended["state"] == "idle" and ended["last_success_at"] and "request" not in ended and ended["error"] is None
+    assert payloads(target)[0]["known_stop"] == 3 and "updated_since" not in payloads(target)[0]
+    finish(outbox, error={"code": "source_read_failed", "message": "SYNTHETIC failure"}, stop="source_failed")
+    source_refresh.refresh_once()
+    failed = state(outbox)
+    assert failed["state"] == "failed" and failed["error"]["code"] == "source_watch_failed"
+    assert "active_run_id" not in failed and "last_success_at" not in failed
+    assert source_refresh.refresh_once() == []  # waits for its cadence
+    make_due(outbox)
+    source_refresh.refresh_once()
+    assert len(payloads(target)) == 2 and payloads(target)[1]["known_stop"] == 0
+    finish(outbox, stop="reached_known")
+    source_refresh.refresh_once()
+    assert state(outbox)["state"] == "idle" and state(outbox)["error"] is None
+
+
+def test_a_watch_locked_by_another_scheduler_is_skipped(dbs, monkeypatch):
+    outbox, target = dbs
+    watch(monkeypatch)
+    key = source_refresh._key(source_refresh.watches()[0])
+    with outbox.begin() as conn:
+        conn.execute(text("INSERT INTO publication_outbox (event_key, kind, source_doc_uuid, snapshot) "
+                          "VALUES (:key, 'control', :key, '{}')"), {"key": key})
+    with outbox.begin() as other:  # another scheduler is in the middle of this watch's step
+        other.execute(text("SELECT 1 FROM publication_outbox WHERE event_key = :key FOR UPDATE"), {"key": key})
+        assert source_refresh.refresh_once() == []
+    assert payloads(target) == []
+    assert source_refresh.refresh_once()[0]["state"] == "running" and len(payloads(target)) == 1
+
+
+def test_a_state_row_written_before_the_rewrite_goes_on(dbs, monkeypatch):
+    """The old scheduler's row (lease fields, request_key, a continuation with its scope_hash, no known_stop): the
+    segment it was on is read on, from its cursor, in its window; the old fields do no harm."""
+    outbox, target = dbs
+    watch(monkeypatch)
+    key = source_refresh._key(source_refresh.watches()[0])
+    request = {"source_id": "who_don", "query": "*", "source_record_ids": [], "max_records": 1, "max_pages": 3,
+               "deadline_seconds": 60, "updated_since": "2026-10-01T00:00:00+00:00",
+               "updated_until": "2026-10-31T00:00:00+00:00",
+               "continuation": {"scope_hash": "0" * 64, "cursor": "SYNTHETIC-CURSOR", "read_count": 7}}
+    old = {"state": "paging", "request": request, "generation": 4, "request_key": key + ":4", "cycle_pages": 2,
+           "lease_until": "2999-01-01T00:00:00+00:00", "lease_token": "old-owner", "watch_id": "synthetic-watch",
+           "window_ended_at": "2026-10-31T00:00:00+00:00", "next_check_at": "2026-10-31T00:00:00+00:00"}
+    with outbox.begin() as conn:
+        conn.execute(text("INSERT INTO publication_outbox (event_key, kind, source_doc_uuid, snapshot) "
+                          "VALUES (:key, 'control', :key, CAST(:old AS jsonb))"), {"key": key, "old": json.dumps(old)})
+    assert source_refresh.refresh_once()[0]["state"] == "running"
+    [payload] = payloads(target)
+    assert payload["continuation"]["cursor"] == "SYNTHETIC-CURSOR" and payload["updated_until"].startswith("2026-10-31")
+
+
+def test_source_health_gives_the_radar_its_keys_and_refuses_a_closed_source(dbs, monkeypatch):
+    outbox, target = dbs
+    watch(monkeypatch)
+    health = source_refresh.source_health("who_don")
+    assert health["collection"]["state"] == "unknown" and health["watches"][0]["state"] is None  # not run yet
+    source_refresh.refresh_once()
+    finish(outbox, error={"code": "source_read_failed", "message": "SYNTHETIC failure"}, stop="source_failed")
+    source_refresh.refresh_once()
+    health = source_refresh.source_health("who_don")
+    assert set(health["collection"]) == {"state", "last_recorded_success_at", "last_recorded_failure_at", "scope",
+                                         "coverage"}
+    assert health["collection"]["state"] == "failed" and health["collection"]["last_recorded_failure_at"]
+    [row] = health["watches"]
+    assert row["watch_id"] == "synthetic-watch" and row["scope"] == "*" and row["state"] == "failed"
+    assert row["window_ended_at"] == state(outbox)["window_ended_at"]
+    assert source_refresh.source_health("nmpa")["watches"] == []  # a source without a watch
+    with target.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled = false WHERE source_id = 'who_don'"))
+    with pytest.raises(HistoryError) as exc:
+        source_refresh.source_health("who_don")
+    assert exc.value.status == 403

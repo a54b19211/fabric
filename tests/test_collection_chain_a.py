@@ -1,15 +1,16 @@
-"""唯一采集框架（来源目录、增量窗口检查点）和登记差分处理器；不联网、不连库。"""
+"""来源目录、定时刷新（配置、增量窗口、一个周期怎么读完）、限速和登记差分处理器；不联网、不连库。"""
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from clean import registry_diff as rd
-from fetch import catalog, rate
-from fetch.source_refresh import SourceWatch, _key, _page_finished, watches
-from fetch.windows import cycle_request
-from store.history_models import FetchRequest, HistoryError
+from fetch import catalog, rate, source_refresh
+from fetch.source_refresh import GIVE_UP_AFTER, SourceWatch, _key, _segment_done, _step, watches
+from fetch.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE, cycle_request
+from store.history_models import FetchRequest, HistoryError, canonical, sha256
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -18,6 +19,10 @@ def ct_watch(**extra):
     return SourceWatch.model_validate(
         {"id": "ct", "request": {"source_id": "clinicaltrials", "query": "*", "max_records": 100}, **extra}
     )
+
+
+def pubmed_watch():
+    return SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
 
 
 # ——来源目录——
@@ -59,71 +64,47 @@ def test_every_spec_declares_decision_and_rate_group():
         assert spec.rate_group and spec.min_interval_seconds > 0
 
 
-# ——调度：旧键不变——
+# ——定时刷新的配置：状态键不变，配置按来源目录检查——
 
 
-def test_existing_realtime_watch_keeps_its_state_key():
-    from store.history_models import canonical, sha256
+def test_a_watch_keeps_the_state_key_it_had_before_the_rewrite():
+    """The state row's key is the sha256 of the config with its defaults filled in, computed as the scheduler before
+    the rewrite did (FetchRequest's fields without known_stop): a running watch goes on with its saved state."""
+    legacy = {"id": "ct", "cadence_seconds": 3600, "lookback_days": 30,
+              "request": {"source_id": "clinicaltrials", "query": "*", "source_record_ids": [], "max_records": 100,
+                          "max_pages": 3, "deadline_seconds": 60, "updated_since": None, "updated_until": None,
+                          "continuation": None}}
+    assert _key(ct_watch()) == "source-watch:" + sha256(canonical(legacy))
 
-    watch = ct_watch()
-    legacy = watch.model_dump(mode="json")
-    legacy["request"].pop("known_stop")  # the field that came later does not move the key of a running watch
-    assert _key(watch) == "source-watch:" + sha256(canonical(legacy))
 
+def test_a_watch_config_is_checked_against_the_catalog(monkeypatch):
+    def watch(source, seconds=3600, **request):
+        return {"id": "w", "cadence_seconds": seconds, "request": {"source_id": source, "query": "*", **request}}
 
-def test_cadence_floor_is_each_sources_own_who_don_runs_every_15_minutes():
-    def watch(source, seconds):
-        return SourceWatch.model_validate(
-            {"id": "w", "cadence_seconds": seconds, "request": {"source_id": source, "query": "*"}}
-        )
-
-    assert watch("who_don", 900).cadence_seconds == 900 and watch("clinicaltrials", 3600).cadence_seconds == 3600
-    for source, seconds in (("who_don", 899), ("clinicaltrials", 900)):
+    assert SourceWatch.model_validate(watch("who_don", 900)).cadence_seconds == 900  # WHO's own floor is 15 minutes
+    for bad in (watch("who_don", 899), watch("clinicaltrials", 900),  # under the source's floor
+                watch("local_files"),  # no incremental key: not watchable
+                watch("pubmed", known_stop=3)):  # filled by each cycle, not written in the config
         with pytest.raises(ValueError):
-            watch(source, seconds)
+            SourceWatch.model_validate(bad)
+    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps([watch("who_don"), watch("pubmed")]))
+    with pytest.raises(HistoryError):  # the same id twice
+        watches()
 
 
-def test_a_source_without_an_incremental_key_cannot_be_watched(monkeypatch):
-    for source in ("local_files",):
-        monkeypatch.setenv(
-            "DATAFABRIC_HISTORY_WATCHES", json.dumps([{"id": "p", "request": {"source_id": source, "query": "records"}}])
-        )
-        with pytest.raises(HistoryError):
-            watches()
-
-
-def test_known_stop_is_filled_by_the_cycle_not_written_in_the_watch(monkeypatch):
-    from fetch.windows import KNOWN_STOP
-
-    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
+def test_known_stop_is_filled_by_the_cycle_for_newest_first_lists_only():
+    pubmed = pubmed_watch()
     request, start, end = cycle_request(pubmed, {}, NOW)
     assert request["known_stop"] == KNOWN_STOP and request["query"] == "BRCA1" and start is end is None  # no window
     again, _, _ = cycle_request(pubmed, {"window_checkpoint": NOW.isoformat()}, NOW)
     assert again["known_stop"] == KNOWN_STOP and again.get("updated_since") is None  # a checkpoint changes nothing here
-    clinical = cycle_request(ct_watch(), {}, NOW)[0]
-    assert clinical["known_stop"] == 0  # a source with an update window is read by the window, as before
+    assert cycle_request(ct_watch(), {}, NOW)[0]["known_stop"] == 0  # a source with an update window is read by it
     listed = SourceWatch.model_validate(
         {"id": "l", "request": {"source_id": "pubmed", "query": "x", "source_record_ids": ["1", "2"]}})
     assert cycle_request(listed, {}, NOW)[0]["known_stop"] == 0  # an explicit list is read to its end
     crl = SourceWatch.model_validate({"id": "c", "request": {"source_id": "fda_crl", "query": "*"}})
     request, start, end = cycle_request(crl, {}, NOW)
     assert request["known_stop"] == 0 and start is end is None  # the whole list every cycle, no window, no stop
-    written = [{"id": "p", "request": {"source_id": "pubmed", "query": "x", "known_stop": 3}}]
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(written))
-    with pytest.raises(HistoryError):
-        watches()
-
-
-def test_a_read_that_came_to_known_records_ends_the_cycle_and_a_failed_page_is_read_in_full_next_time():
-    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    state = {"request": {"known_stop": 3}}
-    _page_finished(pubmed, state, {"stop_reason": "reached_known", "upstream_pagination_exhausted": False}, NOW)
-    assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
-    from fetch.source_refresh import _read_all_next_time
-
-    state = {"request": {"known_stop": 3, "continuation": {"cursor": "c"}}}
-    _read_all_next_time(state)  # the page failed or left items unread: the retry may not stop at the first known ones
-    assert state["request"] == {"known_stop": 0, "continuation": {"cursor": "c"}}
 
 
 # ——增量窗口与持久检查点——
@@ -144,18 +125,9 @@ def test_checkpoint_resumes_after_downtime_with_overlap():
 
 
 def test_fixed_ids_have_no_window():
-    sec = SourceWatch.model_validate(
-        {
-            "id": "sec",
-            "request": {
-                "source_id": "sec_companyfacts",
-                "query": "*",
-                "source_record_ids": ["CIK0000012345:us-gaap:Revenues"],
-                "max_pages": 1,
-                "max_records": 1,
-            },
-        }
-    )
+    sec = SourceWatch.model_validate({"id": "sec", "request": {
+        "source_id": "sec_companyfacts", "query": "*", "source_record_ids": ["CIK0000012345:us-gaap:Revenues"],
+        "max_pages": 1, "max_records": 1}})
     assert cycle_request(sec, {}, NOW)[1] is None
 
 
@@ -168,10 +140,8 @@ def test_europe_pmc_and_who_windows():
     assert request["updated_since"] == start.isoformat() and request["updated_until"] == end.isoformat()
 
 
-def test_gdelt_cycle_reads_whole_utc_hours_from_the_checkpoint_without_overlap(monkeypatch):
-    values = [{"id": "g", "request": {"source_id": "gdelt_doc", "query": "outbreak"}}]
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(values))
-    [gdelt] = watches()  # GDELT is watchable now
+def test_gdelt_cycle_reads_whole_utc_hours_from_the_checkpoint_without_overlap():
+    gdelt = SourceWatch.model_validate({"id": "g", "request": {"source_id": "gdelt_doc", "query": "outbreak"}})
     now = datetime(2026, 11, 4, 12, 40, tzinfo=timezone.utc)
     request, start, end = cycle_request(gdelt, {}, now)  # no checkpoint: the lookback, from the hour mark
     assert start == datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
@@ -183,130 +153,103 @@ def test_gdelt_cycle_reads_whole_utc_hours_from_the_checkpoint_without_overlap(m
     assert (start.hour, end.hour) == (11, 12)  # no new full hour yet: never an empty window
 
 
-def test_page_finished_pages_on_ends_at_the_end_and_still_rejects_a_stop_short_without_receipts():
-    paging = {"request": {}, "window_ended_at": NOW.isoformat()}
-    _page_finished(ct_watch(), paging, {"next_continuation": {"cursor": "c"}}, NOW)
-    assert paging["state"] == "paging" and paging["request"]["continuation"] == {"cursor": "c"}
-    assert "window_checkpoint" not in paging
-    done = {"request": {}, "window_ended_at": NOW.isoformat(), "cycle_pages": 1}
-    _page_finished(ct_watch(), done, {"upstream_pagination_exhausted": True}, NOW)
-    assert done["state"] == "idle" and done["window_checkpoint"] == NOW.isoformat() and done["last_success_at"]
-    assert "request" not in done and done["cycle_pages"] == 2
-    stopped = {"request": {}, "window_ended_at": NOW.isoformat()}  # no cursor, no receipts: not a finished read
-    with pytest.raises(HistoryError) as exc:
-        _page_finished(ct_watch(), stopped, {"upstream_pagination_exhausted": False, "stop_reason": "page_budget"}, NOW)
-    assert exc.value.code == "source_watch_no_cursor"
+# ——一个周期：一段一段读完；出错换新任务重读这一段；读不到的下个周期整份读——
 
 
-def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalled_cursor_is_a_failure():
-    from fetch.windows import SEGMENTS_PER_CYCLE
-
-    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    more = {"next_continuation": {"cursor": "c", "read_count": 100}, "upstream_pagination_exhausted": False}
-    state = {"request": {}, "cycle_pages": SEGMENTS_PER_CYCLE - 2}  # one more is still read on
-    _page_finished(pubmed, state, more, NOW)
-    assert state["state"] == "paging" and state["request"]["continuation"] == more["next_continuation"]
-    state["cycle_pages"] = SEGMENTS_PER_CYCLE - 1  # the last segment of the cycle: done, the older ones are the backfill's
-    _page_finished(pubmed, state, more, NOW)
-    assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
-    # a source read by its update window is not cut off: the window has to be read to its end
-    window = {"request": {}, "window_ended_at": NOW.isoformat(), "cycle_pages": 50}
-    _page_finished(ct_watch(), window, more, NOW)
-    assert window["state"] == "paging"
-    # the cursor did not move and the segment read nothing: that is not progress
-    stalled = {"request": {"continuation": more["next_continuation"]}}
-    with pytest.raises(HistoryError) as exc:
-        _page_finished(pubmed, stalled, {**more, "adopted_count": 0}, NOW)
-    assert exc.value.code == "source_watch_no_progress"
-    moved = {"request": {"continuation": {"cursor": "c", "read_count": 0}}}
-    _page_finished(pubmed, moved, {**more, "adopted_count": 100}, NOW)
-    assert moved["state"] == "paging"
+MORE = {"next_continuation": {"cursor": "c", "read_count": 100}}
 
 
-def test_a_grouped_cycle_reads_all_its_groups_and_a_failed_segment_is_read_in_full_only_once():
-    from fetch.source_refresh import _read_all_next_time
-    from fetch.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE
+def test_a_segment_with_a_cursor_reads_on_and_the_end_of_the_list_ends_the_cycle():
+    state = {"request": {"known_stop": 0}, "window_ended_at": NOW.isoformat()}
+    _segment_done(ct_watch(), state, MORE, NOW)
+    assert state["state"] == "running" and state["request"]["continuation"] == MORE["next_continuation"]
+    assert "window_checkpoint" not in state
+    _segment_done(ct_watch(), state, {"upstream_pagination_exhausted": True}, NOW)
+    assert state["state"] == "idle" and state["window_checkpoint"] == NOW.isoformat() and state["last_success_at"]
+    assert "request" not in state and state["next_check_at"] == (NOW + timedelta(hours=1)).isoformat()
+    known = {"request": {"known_stop": KNOWN_STOP}}
+    _segment_done(pubmed_watch(), known, {"stop_reason": "reached_known"}, NOW)  # came to the stored ones
+    assert known["state"] == "idle" and known["last_success_at"] and "window_checkpoint" not in known
 
+
+def test_a_segment_that_did_not_move_or_stopped_short_without_a_cursor_is_a_failure():
+    stalled = ({"request": {"continuation": MORE["next_continuation"]}}, MORE, "source_watch_no_progress")
+    cut_short = ({"request": {}}, {"upstream_pagination_exhausted": False, "stop_reason": "page_budget"},
+                 "source_watch_no_cursor")
+    for state, coverage, code in (stalled, cut_short):
+        with pytest.raises(HistoryError) as exc:
+            _segment_done(ct_watch(), state, coverage, NOW)
+        assert exc.value.code == code
+
+
+def test_a_newest_first_cycle_reads_a_few_segments_a_grouped_one_all_its_groups_a_window_to_its_end():
+    state = {"request": {"known_stop": KNOWN_STOP}, "segments": SEGMENTS_PER_CYCLE - 2}
+    _segment_done(pubmed_watch(), state, MORE, NOW)
+    assert state["state"] == "running"
+    _segment_done(pubmed_watch(), state, {"next_continuation": {"cursor": "d", "read_count": 200}}, NOW)
+    assert state["state"] == "idle" and state["last_success_at"]  # the older ones are ops/backfill_source.py's
     hkex = SourceWatch.model_validate({"id": "h", "request": {"source_id": "hkex", "query": "records"}})
-    more = {"next_continuation": {"cursor": "c", "read_count": 3}, "upstream_pagination_exhausted": False}
-    state = {"request": {"known_stop": KNOWN_STOP}, "cycle_pages": SEGMENTS_PER_CYCLE + 20}  # 远过 5 段，照样读下去
-    _page_finished(hkex, state, more, NOW)
-    assert state["state"] == "paging" and state["request"]["continuation"] == more["next_continuation"]
-    _read_all_next_time(state)  # 一段读失败了：重读这一段不许停在已存的（前面几条可能是失败的那次存下的）
-    assert state["request"]["known_stop"] == 0
-    _page_finished(hkex, state, {**more, "next_continuation": {"cursor": "d", "read_count": 9}}, NOW)
-    assert state["request"]["known_stop"] == KNOWN_STOP  # 下一段又按公司停在已存的，不是整个周期都整读
-    done = {"request": {"known_stop": KNOWN_STOP}, "cycle_pages": 30}
-    _page_finished(hkex, done, {"upstream_pagination_exhausted": True}, NOW)
-    assert done["state"] == "idle" and done["last_success_at"]  # 读完全部公司，周期收工
-    # 上一周期有公司读不到：下个周期不整份重读（每家公司的“已存就停”互不相干，读不到的下个周期自然再读）
-    assert cycle_request(hkex, {"read_all": True}, NOW)[0]["known_stop"] == KNOWN_STOP
-    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    assert cycle_request(pubmed, {"read_all": True}, NOW)[0]["known_stop"] == 0  # 一份有顺序的列表才整份重读
+    for watch in (hkex, ct_watch()):
+        far = {"request": {"known_stop": 0}, "segments": SEGMENTS_PER_CYCLE + 20}
+        _segment_done(watch, far, MORE, NOW)
+        assert far["state"] == "running"
 
 
-def _step(monkeypatch, watch, state, *, run=None, disk_low=False):
-    """refresh_once 里的一步：_advance，出错交给 _failed。库和队列换成桩：run 是这一步读到的、已读完的那次读取
-    （没有 run 就是还没建），disk_low 为真时磁盘在低水位。"""
-    from contextlib import nullcontext
-    from types import SimpleNamespace
-
-    from fetch import source_refresh
-
-    monkeypatch.setattr(source_refresh.history, "history_engine", lambda: SimpleNamespace(begin=nullcontext))
-    monkeypatch.setattr(source_refresh.history, "_source", lambda permit, source_id: None)
-    monkeypatch.setattr(source_refresh.history, "read_run", lambda run_id: run)
-    monkeypatch.setattr(source_refresh.publication, "disk_status", lambda: {"backfill_paused": disk_low})
-    if run is not None:
-        state["active_run_id"] = "r1"  # 失败后换新 run 重试：桩每次给的是同一个读完的结果
-    try:
-        source_refresh._advance(None, "key", watch, state, NOW)
-    except HistoryError as exc:
-        source_refresh._failed(watch, state, exc, NOW)
+def test_a_cycle_with_unread_items_is_followed_by_one_full_read():
+    unread = {"unread_items": [{"url": "https://x.invalid/9", "reason": "HTTP 403"}]}
+    state = {"request": {"known_stop": KNOWN_STOP}}
+    _segment_done(pubmed_watch(), state, {**MORE, **unread}, NOW)
+    _segment_done(pubmed_watch(), state, {"stop_reason": "reached_known"}, NOW)
+    assert state["read_all"] is True  # the unread one may sit behind stored ones: the next cycle does not stop at them
+    assert cycle_request(pubmed_watch(), state, NOW)[0]["known_stop"] == 0
+    full = {"request": {"known_stop": 0}}  # that full read leaves it unread again (a dead link): no second one
+    _segment_done(pubmed_watch(), full, {"stop_reason": "items_unread", **unread}, NOW)
+    assert full["read_all"] is False and full["state"] == "idle" and full["last_success_at"]
+    hkex = SourceWatch.model_validate({"id": "h", "request": {"source_id": "hkex", "query": "records"}})
+    assert cycle_request(hkex, {"read_all": True}, NOW)[0]["known_stop"] == KNOWN_STOP  # each group stops on its own
 
 
-def _read(cursor, adopted):
-    from types import SimpleNamespace
+def stub_runs(monkeypatch, runs):
+    """store.history 和队列的桩：create_fetch 记下请求，依次给出 runs 里的任务；read_run 给出最近建的那个。"""
+    calls = {"created": [], "enqueued": [], "failed": []}
 
-    coverage = {"next_continuation": cursor, "adopted_count": adopted}
-    return SimpleNamespace(state="completed", error=None, coverage=coverage)
+    def create_fetch(request):
+        calls["created"].append(request)
+        return runs[len(calls["created"]) - 1], True
 
-
-def test_three_stalled_reads_in_a_row_give_the_cycle_up_and_a_page_read_cleanly_ends_the_streak(monkeypatch):
-    """同一个位置一直原地不动（PubMed 翻过 1 万条之后）：不能每个间隔都重试同一个位置，连续 3 次之后放弃这一周期；
-    中间读成功一页，连续次数从头数。走的是真实路径：_advance → _page_finished 抛错 → _failed。"""
-    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    stuck, moved = {"cursor": "9900", "read_count": 9900}, {"cursor": "10000", "read_count": 10000}
-    state = {"request": {"known_stop": 3, "continuation": stuck}}
-    for streak in (1, 2):
-        _step(monkeypatch, pubmed, state, run=_read(stuck, 0))
-        assert state["state"] == "failed" and state["fail_streak"] == streak and state["request"]["continuation"] == stuck
-    _step(monkeypatch, pubmed, state, run=_read(moved, 100))
-    assert state["state"] == "paging" and state["fail_streak"] == 0  # 读成功一页，连续失败数清零
-    for streak in (1, 2):
-        _step(monkeypatch, pubmed, state, run=_read(moved, 0))
-        assert state["fail_streak"] == streak and state["request"]["continuation"] == moved
-    _step(monkeypatch, pubmed, state, run=_read(moved, 0))
-    assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
+    monkeypatch.setattr(source_refresh.history, "create_fetch", create_fetch)
+    monkeypatch.setattr(source_refresh.history, "read_run", lambda run_id: runs[len(calls["created"]) - 1])
+    monkeypatch.setattr(source_refresh.history, "fail_job", lambda *args: calls["failed"].append(args))
+    monkeypatch.setattr(source_refresh.fetch_job, "enqueue_fetch", lambda run: calls["enqueued"].append(run))
+    monkeypatch.setattr(source_refresh.publication, "disk_status", lambda: {"backfill_paused": False})
+    return calls
 
 
-def test_a_read_that_ends_without_a_cursor_is_counted_and_read_again_until_the_cycle_is_given_up(monkeypatch):
-    """一次读取正常结束却没给续读位置（来源截断、没有窗口回执）：不能每个间隔都取回同一个读完的结果、永远报同一个错。
-    它按读取失败计数、换新 run 重读，连续 3 次放弃这一周期。走真实路径：_advance → _page_finished → _failed。"""
-    from types import SimpleNamespace
+def a_run(state, **coverage):
+    error = {"code": "source_read_failed", "message": "x"} if state == "failed" else None
+    return SimpleNamespace(id="r-" + state, attempt=1, state=state, created_at=NOW, error=error, coverage=coverage)
 
-    cut_short = SimpleNamespace(
-        state="completed", error=None, coverage={"upstream_pagination_exhausted": False, "stop_reason": "page_budget"}
-    )
-    state = {"request": {"known_stop": 3}, "window_ended_at": NOW.isoformat()}
-    for streak in (1, 2):
-        _step(monkeypatch, ct_watch(), state, run=cut_short)
-        assert state["state"] == "failed" and state["error"]["code"] == "source_watch_no_cursor"
-        assert state["fail_streak"] == streak and "request" in state
-        assert "active_run_id" not in state and "request_key" not in state  # 下个间隔换新 run 重读，不再取回这一个
-    _step(monkeypatch, ct_watch(), state, run=cut_short)
-    assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
-    assert state["error"]["code"] == "source_watch_no_cursor"  # 来源健康（WATCH_FIELDS 的 error）里还看得到原因
+
+def test_a_failed_segment_is_read_again_in_full_and_three_failures_give_the_cycle_up(monkeypatch):
+    calls = stub_runs(monkeypatch, [a_run("failed")] * 3)
+    state = {}
+    for _ in range(GIVE_UP_AFTER):
+        _step(pubmed_watch(), state, NOW)
+        assert state["state"] == "failed" and state["error"]["code"] == "source_watch_failed"
+    # the retries do not stop at stored records: the failed try may have stored the first ones of the segment
+    assert [request.known_stop for request in calls["created"]] == [KNOWN_STOP, 0, 0]
+    assert "request" not in state and state["read_all"] is True  # given up: the next cycle starts again, in full
+    assert state["next_check_at"] == (NOW + timedelta(hours=1)).isoformat()
+
+
+def test_a_queued_run_goes_on_the_queue_and_one_left_by_a_dead_worker_is_failed_and_replaced(monkeypatch):
+    calls = stub_runs(monkeypatch, [a_run("queued")])
+    state = {}
+    _step(ct_watch(), state, NOW)
+    assert state["state"] == "running" and state["active_run_id"] == "r-queued" and len(calls["enqueued"]) == 1
+    _step(ct_watch(), state, NOW + timedelta(hours=1))  # more than 3 x JOB_TIMEOUT later, still queued
+    assert calls["failed"] and state["state"] == "failed" and "active_run_id" not in state
+    assert state["request"] and state["window_ended_at"] == NOW.isoformat()  # the same window, by a new run
 
 
 def _gate_worker(args):
@@ -494,25 +437,3 @@ def test_change_id_is_stable_and_versioned():
     assert rd.PROCESSOR_VERSION.endswith(".v3")
     a = rd.change_id("a" * 64, "b" * 64, "status")
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")
-
-
-def _unread(*urls):
-    return [{"url": url, "reason": "HTTP 403"} for url in urls]
-
-
-def test_a_cycle_with_unread_items_is_followed_by_a_cycle_that_reads_it_all():
-    from fetch import source_refresh
-
-    pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
-    unread = {"unread_items": _unread("u9")}
-    state = {"request": {}}
-    _page_finished(pubmed, state, {"next_continuation": {"cursor": "c", "read_count": 100}, **unread}, NOW)
-    assert state["state"] == "paging" and state["unclean"]  # a middle segment: the cycle goes on, the mark is kept
-    _page_finished(pubmed, state, {"stop_reason": "reached_known"}, NOW)
-    assert state["read_all"] is True and "unclean" not in state and "request" not in state
-    source_refresh._plan_cycle(pubmed, state, NOW)
-    assert state["request"]["known_stop"] == 0 and "read_all" not in state  # that cycle reads from the start, in full
-    _page_finished(pubmed, state, {"stop_reason": "reached_known"}, NOW)
-    assert state["read_all"] is False
-    source_refresh._plan_cycle(pubmed, state, NOW)
-    assert state["request"]["known_stop"] == 3  # and the one after a clean cycle stops at the known ones again

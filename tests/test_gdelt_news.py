@@ -7,7 +7,7 @@ import pytest
 
 from fetch import gdelt_news, rate, transport
 from fetch.gdelt_news import article_id
-from fetch.source_refresh import SourceWatch, _page_finished
+from fetch.source_refresh import SourceWatch, _segment_done
 from fetch.sources import project_record, read_public
 from fetch.windows import cycle_request
 from settings import APP
@@ -257,17 +257,17 @@ def watch_cycle(checkpoint):
 
 def finish_cycle(watch, state, request):
     batch = read_public(request)
-    _page_finished(watch, state, {key: value for key, value in batch.items() if key != "records"}, CYCLE_NOW)
+    _segment_done(watch, state, {key: value for key, value in batch.items() if key != "records"}, CYCLE_NOW)
     return batch
 
 
 def test_cycle_with_windows_cut_short_ends_with_the_gaps_and_moves_the_checkpoint(monkeypatch, open_gate):
     stand_in(monkeypatch, lambda start, end: 3)  # every window stays full down to 15 minutes
     watch, state, request = watch_cycle("2026-11-04T11:00:00+00:00")
-    finish_cycle(watch, state, request)
+    batch = finish_cycle(watch, state, request)
     assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
     assert state["window_checkpoint"] == "2026-11-04T12:00:00+00:00"  # past the cut-short hour: it is not retried
-    assert len(state["last_coverage"]["truncated_intervals"]) == 4  # and the gaps stay in the receipt
+    assert len(batch["truncated_intervals"]) == 4  # and the gaps stay in the receipt
 
 
 def test_cycle_stopped_by_the_deadline_resumes_at_the_first_window_it_did_not_read(monkeypatch, open_gate):
@@ -278,7 +278,7 @@ def test_cycle_stopped_by_the_deadline_resumes_at_the_first_window_it_did_not_re
     assert batch["stop_reason"] == "deadline"
     assert state["state"] == "idle" and "last_success_at" not in state  # not a finished cycle
     assert state["window_checkpoint"] == "2026-11-04T11:00:00+00:00"
-    unread = [w for w in state["last_coverage"]["window_coverage"] if w["status"] == "not_read"]
+    unread = [w for w in batch["window_coverage"] if w["status"] == "not_read"]
     assert [(w["start"][11:16], w["reason"]) for w in unread] == [("11:00", "deadline")]
 
 

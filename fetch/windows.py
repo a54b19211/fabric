@@ -1,19 +1,12 @@
-"""增量窗口：按来源目录里声明的增量键，生成一个刷新周期的固定读取范围。
+"""一个刷新周期读什么：按来源目录（fetch.catalog）里的增量读法，定这一周期的请求。
 
-持久窗口检查点：一个实时周期读完（来源分页确认到底）后，把本周期窗口终点记为检查点；
-下一周期从“检查点 − 重叠天数”读起。停机多久就补多久，不会因为回看天数固定而漏掉停机期间的更新。
-没有检查点（首次运行或旧状态）时按 lookback_days 回看，与改造前行为一致。
-
-没有更新时间可过滤、但列表从新到旧的来源（目录里的 stop_at_known）也没有窗口：每个周期从列表第一页读起，连续读到
-KNOWN_STOP 条库里已有且没变的就停（读到旧的了）。上一周期有条目读不到（fetch.source_refresh 的 read_all）时，这一周期不许这样停，
-从头读满 SEGMENTS_PER_CYCLE 段。列表不大、旧条目会后补进来的来源（full_reread，如 fda_crl）也没有窗口，每个周期整份重读，不加 known_stop。
-分组读取的来源（stop_at_known 且 by_group：港交所一家公司一组，NCCN 一份指南一组）：“读到旧的就停”只停这一组；组读不到时下个周期
-自然再读，不需要 read_all；一个周期读完全部的组，不受 SEGMENTS_PER_CYCLE 限制，但每组最多读最新的 GROUP_LIMIT 条
-（第一次读，库里什么都没有，不会把每家公司的全部历史都读下来），更老的交给回填。
-
-GDELT 没有续页，窗口读取按整点：一个周期读 [检查点, 当前整点)，不读还没走完的这一小时，也不回看重叠。
-读取没读完时（条数或截止时间用完）从第一个没读到的窗口起点继续（first_unread）；读到了但最细窗口仍满额的区间
-重读也只会得到同样被截断的结果，不重试，留在读取回执里（window_coverage、truncated_intervals）。
+- 按更新时间窗口读的来源：WHO、GDELT 用 updated_since/updated_until，Europe PMC、ClinicalTrials 把日期条件拼进检索词。
+  窗口从"检查点（上一周期读完的终点）减重叠天数"读到现在；还没有检查点时回看 lookback_days 天。
+  GDELT 只读走完的整点；读到一半停下时，检查点是第一个没读到的窗口（first_unread）。
+- 列表从新到旧的来源（stop_at_known）：每个周期从第一页读起，连续 KNOWN_STOP 条已存且没变就停（reached_known）。
+  上一周期有条目读不到（state["read_all"]）时这一周期不这样停，整份读。分组读取的来源（港交所、NCCN）每组各自停，
+  每组最多读最新的 GROUP_LIMIT 条（fetch.site_crawler），不用 read_all。
+- 明确清单、整份重读（full_reread）的来源：不加窗口，读到底。
 """
 
 from __future__ import annotations
@@ -23,72 +16,49 @@ from datetime import datetime, timedelta, timezone
 from fetch.catalog import spec
 from store.timestamps import parse_timestamp
 
-KNOWN_STOP = 3  # 连续读到这么多条“已存且没变”的，就当读到旧的了（老 ETL 是 1 条；3 条能容忍置顶的老条目）
-SEGMENTS_PER_CYCLE = 5  # “遇到已存的就停”的来源，一个刷新周期最多读这么多段（每段最多 max_records 条）；更老的交给回填
-GROUP_LIMIT = 10  # 分组读取的来源，一个刷新周期每组最多读最新的这么多条（港交所实测 172 家公司一周最多 9 条）；更老的交给回填
-
-
-def window_start(watch, state: dict, now: datetime) -> datetime:
-    checkpoint = state.get("window_checkpoint")
-    overlap = timedelta(days=spec(watch.request.source_id).incremental.overlap_days)
-    if checkpoint:
-        return parse_timestamp(checkpoint) - overlap
-    return now - timedelta(days=watch.lookback_days)
-
-
-def _hour_mark(moment: datetime) -> datetime:
-    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-
-
-def _whole_hours(watch, state: dict, now: datetime) -> tuple[datetime, datetime]:
-    """[检查点, 当前整点)。没有检查点时从回看起点所在的整点读起。还没有新的整点时重读最近一个整点，
-    不产生空窗口或倒置的窗口。"""
-    end = _hour_mark(now)
-    start = window_start(watch, state, now)
-    if not state.get("window_checkpoint"):
-        start = _hour_mark(start)
-    return (start if start < end else end - timedelta(hours=1)), end
-
-
-def first_unread(coverage: dict) -> str | None:
-    """按窗口读的读取回执 → 最早一个没读到的窗口的起点（读取停下或失败留下的），每个窗口都读到了就返回 None。"""
-    starts = [
-        parse_timestamp(receipt["start"])
-        for receipt in coverage["window_coverage"]
-        if receipt["status"] in {"failed", "not_read"} and receipt["start"]
-    ]
-    return min(starts).isoformat() if starts else None
+KNOWN_STOP = 3  # 连续读到这么多条"已存且没变"的，就当读到旧的了（3 条能容忍置顶的老条目）
+SEGMENTS_PER_CYCLE = 5  # stop_at_known 的来源一个周期最多读这么多段：空库第一次不会一直读下去，更老的用 ops/backfill_source.py 补
+GROUP_LIMIT = 10  # 分组读取的来源，一个周期每组最多读最新的这么多条
 
 
 def cycle_request(watch, state: dict, now: datetime) -> tuple[dict, datetime | None, datetime | None]:
-    """返回 (请求体, 窗口起点, 窗口终点)。明确清单没有窗口，起止为 None。"""
+    """返回 (这一周期的请求体, 窗口起点, 窗口终点)；没有窗口的来源起止都是 None。"""
     request = watch.request.model_dump(mode="json")
-    incremental = spec(watch.request.source_id).incremental
-    kind = incremental.kind
-    # 读明确清单（source_record_ids）本来就是读完这份清单，不加；上一周期有条目读不到（read_all）：这一周期整份读，不在“遇到已存的”就停
-    if (kind == "stop_at_known" and not request.get("source_record_ids")
-            and (incremental.by_group or not state.get("read_all"))):  # 分组的来源不用 read_all：读不到的组下个周期自然再读
-        request["known_stop"] = KNOWN_STOP
-    if kind in ("fixed_ids", "stop_at_known", "full_reread") or request.get("source_record_ids"):
+    source, incremental = watch.request.source_id, spec(watch.request.source_id).incremental
+    if request["source_record_ids"] or incremental.kind in ("fixed_ids", "full_reread", "stop_at_known"):
+        if incremental.kind == "stop_at_known" and not request["source_record_ids"] and (
+                incremental.by_group or not state.get("read_all")):
+            request["known_stop"] = KNOWN_STOP
         return request, None, None
-    source = watch.request.source_id
-    if source == "gdelt_doc":
-        start, end = _whole_hours(watch, state, now)
+    checkpoint = state.get("window_checkpoint")
+    if checkpoint:
+        start = parse_timestamp(checkpoint) - timedelta(days=incremental.overlap_days)
     else:
-        start, end = window_start(watch, state, now), now
-    if kind == "modified_window" or source == "gdelt_doc":
+        start = now - timedelta(days=watch.lookback_days)
+    end = now
+    if source == "gdelt_doc":  # 只读走完的整点；还没有新的整点就重读最近一个，不出空窗口
+        end = _hour(now)
+        start = start if checkpoint else _hour(start)
+        start = start if start < end else end - timedelta(hours=1)
+    first, last = start.astimezone(timezone.utc).date(), end.astimezone(timezone.utc).date()
+    if source in ("who_don", "gdelt_doc"):
         request.update(updated_since=start.isoformat(), updated_until=end.isoformat())
     elif source == "europe_pmc":
-        first = start.astimezone(timezone.utc).date().isoformat()
-        last = end.astimezone(timezone.utc).date().isoformat()
-        request["query"] = "(" + request["query"] + ") AND UPDATE_DATE:[" + first + " TO " + last + "]"
+        request["query"] = f"({request['query']}) AND UPDATE_DATE:[{first} TO {last}]"
     elif source == "clinicaltrials":
-        date_filter = (
-            "AREA[LastUpdatePostDate]RANGE[" + start.date().isoformat() + "," + end.date().isoformat() + "]"
-        )
-        request["query"] = (
-            date_filter if request["query"] == "*" else "(" + request["query"] + ") AND " + date_filter
-        )
+        dates = f"AREA[LastUpdatePostDate]RANGE[{first},{last}]"
+        request["query"] = dates if request["query"] == "*" else f"({request['query']}) AND {dates}"
     else:
         raise ValueError("no_window_builder:" + source)
     return request, start, end
+
+
+def _hour(moment: datetime) -> datetime:
+    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def first_unread(coverage: dict) -> str | None:
+    """按窗口读的读取回执 → 最早一个没读到（失败或没轮到）的窗口的起点；每个窗口都读到了是 None。"""
+    starts = [parse_timestamp(receipt["start"]) for receipt in coverage["window_coverage"]
+              if receipt["status"] in ("failed", "not_read") and receipt["start"]]
+    return min(starts).isoformat() if starts else None
