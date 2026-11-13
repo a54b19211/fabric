@@ -62,19 +62,6 @@ class _AppSettings(BaseSettings):
     def RERANK_MODEL_NAME(self) -> str:
         return self.RERANK_LLM_MODEL_NAME or self.LLM_MODEL_NAME
 
-    # 兼容旧变量名（已有代码用 QWEN_* 的不需要改）
-    @property
-    def QWEN_API_KEY(self) -> str:
-        return self.LLM_API_KEY
-
-    @property
-    def QWEN_API_BASE(self) -> str:
-        return self.LLM_API_BASE
-
-    @property
-    def QWEN_MODEL_NAME(self) -> str:
-        return self.LLM_MODEL_NAME
-
     @property
     def EXTRACTION_API_KEY(self) -> str:
         return self.EXTRACTION_LLM_API_KEY or self.LLM_API_KEY
@@ -94,35 +81,6 @@ class _AppSettings(BaseSettings):
     def RAW_DIR(self) -> Path:
         """原始文件存放目录"""
         return self.DATA_ROOT / "raw"
-
-    @property
-    def MARKDOWN_DIR(self) -> Path:
-        """Markdown 全文存放目录"""
-        return self.DATA_ROOT / "markdown"
-
-    @property
-    def JSON_DIR(self) -> Path:
-        """JSON 元数据信封存放目录"""
-        return self.DATA_ROOT / "json_envelopes"
-
-    @property
-    def LINEAGE_DIR(self) -> Path:
-        """字段级血缘追踪记录目录"""
-        return self.DATA_ROOT / "lineage"
-
-    @property
-    def QUARANTINE_DIR(self) -> Path:
-        """隔离区——质量不达标的数据暂存"""
-        return self.DATA_ROOT / "quarantine"
-
-    @property
-    def REVIEW_DIR(self) -> Path:
-        """人工审核 CSV 导出目录"""
-        return self.DATA_ROOT / "review"
-
-    # ======================== 质量门控阈值 ========================
-    MIN_MARKDOWN_LENGTH: int = 100          # Markdown 字符数低于此值判定为解析失败
-
 
     # ======================== 并发与重试 ========================
     MAX_CONCURRENCY: int = 3                # Prefect 并发任务数，防封 IP
@@ -154,17 +112,10 @@ class _AppSettings(BaseSettings):
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
-    # ======================== 本地存储开关 ========================
-    # 开发/调试时可启用本地文件存储，生产环境建议关闭（只保留数据库）
-    ENABLE_LOCAL_STORAGE: bool = False
-
     # ======================== WeKnora 同步配置 ========================
     WEKNORA_BASE_URL: str = "http://localhost:8080"
     WEKNORA_API_KEY: str = ""
     WEKNORA_KB_ID: str = ""
-
-    # ======================== MinIO 船票预留（二期使用）========================
-    FUTURE_MINIO_BUCKET: str = "zk-data-fabric"
 
 
 # 全局单例——整个项目统一用这个

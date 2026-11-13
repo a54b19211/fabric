@@ -1,7 +1,7 @@
 """网站和站点接口的采集插件 site_crawler（唯一采集框架的一部分）。
 
 每个站点的知识只有一份：站点配置 fetch/sites/*（列表页、选择器、翻页、详情提取器、接口拉取函数）和
-fetch/extractors/*。抓取、翻页、下载用 core_engine 的 scrapling_client / pagination_driver / router。
+fetch/extractors/*。抓取、翻页、下载用 fetch/web_client.py、pagination.py、page_parser.py。
 落库只有一种：写只追加的 history 版本，不写 documents 表、不把附件文字合并进父文档。
 - 详情页 → web_capture 版本（原始 HTML + 提取结果 + 附件清单）；
 - 接口记录、表格页的一张表 → site_record 版本（提取结果 + 接口原始字段）；

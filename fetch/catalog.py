@@ -272,7 +272,7 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
         blocked_reason="2026-11-04 实测：首页 200，检索列表返回 202 脚本挑战页；普通无头浏览器同样只得到 39 字节空页。"
         "旧 ETL 没有这个站的采集代码；等官方数据渠道或授权。",
     ),
-    # ——站点插件 site_crawler（站点配置 fetch/sites/* + core_engine 抓取器）——
+    # ——站点插件 site_crawler（站点配置 fetch/sites/* + fetch/web_client.py 等抓取器）——
     # 原站列表页 11-04 对普通无头浏览器分别返回 405/412/202；插件用站点配置里的浏览器抓取器运行。后来用
     # ops/check_sources.py 对原站真抓过多轮（chictr、nmpa、cde 等都读得到），verified 要不要改 True 由主持人定，
     # 这里仍是 False。没有更新时间可过滤；列表从新到旧的站点按“遇到已存的就停”进固定刷新（_NEWEST_FIRST），
@@ -550,3 +550,27 @@ def gaps() -> list[dict]:
         for s in SPECS
         if not s.fetchable
     ]
+
+
+# 试抓一个来源（main_etl.py、ops/check_sources.py、ops/backfill_source.py）时用的读法，站点配置以外的来源各写一个：
+# (查询词, 指定的来源记录号)
+SAMPLE_QUERIES = {
+    "clinicaltrials": ("*", []),
+    "europe_pmc": ("BRCA1", []),
+    "pubmed": ("BRCA1", []),
+    "fda_crl": ("*", []),
+    "who_don": ("*", []),
+    "gdelt_doc": ("FDA approval", []),
+    "sec_companyfacts": ("*", ["CIK0000320193:us-gaap:Assets", "CIK0000078003:us-gaap:Assets",
+                               "CIK0001682852:us-gaap:Assets"]),
+}
+
+
+def sample_query(source_id):
+    """试抓一个来源用的 (查询词, 记录号)：接口站点填 records，网页站点填第一个列表页网址，其余见 SAMPLE_QUERIES。"""
+    if source_id in SAMPLE_QUERIES:
+        return SAMPLE_QUERIES[source_id]
+    from fetch.site_profiles import SITE_PROFILES  # 在这里才导入：站点配置会导入站点插件，插件又读这个目录
+
+    profile = SITE_PROFILES[source_id]
+    return ("records" if profile.get("source_type") == "api" else profile["start_urls"][0]), []

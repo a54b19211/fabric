@@ -55,7 +55,7 @@ def web_fetch(url: str) -> str:
         text = getattr(page, "cleaned_text", None) or getattr(page, "text", "") or str(page)
         return text[:3000]
     except ImportError:
-        logger.error("[AgentTool] scrapling_client 不可用")
+        logger.error("[AgentTool] fetch.web_client 不可用")
         return ""
     except Exception as e:
         logger.error(f"[AgentTool] web_fetch 失败: {e}")

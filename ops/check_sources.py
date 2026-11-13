@@ -33,31 +33,11 @@ from sqlalchemy import text  # noqa: E402
 
 from fetch import catalog  # noqa: E402
 from fetch.fetch_job import history_fetch_job  # noqa: E402
-from fetch.site_profiles import SITE_PROFILES  # noqa: E402
 from fetch.windows import KNOWN_STOP  # noqa: E402
 from store import history  # noqa: E402
 from store.history_models import FetchRequest  # noqa: E402
 
-# 不在 fetch/sites 里的来源：(查询词, 指定的来源记录号)
-OTHER_QUERIES = {
-    "clinicaltrials": ("*", []),
-    "europe_pmc": ("BRCA1", []),
-    "pubmed": ("BRCA1", []),
-    "fda_crl": ("*", []),
-    "who_don": ("*", []),
-    "gdelt_doc": ("FDA approval", []),
-    "sec_companyfacts": ("*", ["CIK0000320193:us-gaap:Assets", "CIK0000078003:us-gaap:Assets",
-                               "CIK0001682852:us-gaap:Assets"]),
-}
 COLUMNS = ("来源", "第几次", "状态", "停止原因", "版本", "新增", "没变", "秒", "请求", "空标题", "空日期", "空正文", "错误")
-
-
-def query_for(source):
-    """(查询词, 记录号)，规则和 main_etl.py fetch 一样：接口站点填 records，网页站点填第一个列表页网址。"""
-    if source in OTHER_QUERIES:
-        return OTHER_QUERIES[source]
-    profile = SITE_PROFILES[source]
-    return ("records" if profile.get("source_type") == "api" else profile["start_urls"][0]), []
 
 
 def blank_counts(version_ids):
@@ -76,7 +56,7 @@ def blank_counts(version_ids):
 
 def fetch_once(source, attempt, max_records, deadline, known_stop=0):
     """抓一次，返回表里的一行（和 COLUMNS 一一对应）。抓取抛出的异常不隐藏，写进"错误"列。"""
-    query, record_ids = query_for(source)
+    query, record_ids = catalog.sample_query(source)
     request = FetchRequest(source_id=source, query=query, source_record_ids=record_ids, max_records=max_records,
                            deadline_seconds=deadline, known_stop=known_stop)
     run, _ = history.create_fetch(request, key=f"check-{source}-{attempt}-{time.time_ns()}")

@@ -33,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fetch import catalog, rate  # noqa: E402
 from fetch.fetch_job import history_fetch_job  # noqa: E402
 from fetch.site_profiles import SITE_PROFILES  # noqa: E402
-from ops.check_sources import query_for  # noqa: E402
 from store import history  # noqa: E402
 from store.history_models import FetchRequest  # noqa: E402
 
@@ -88,7 +87,7 @@ def seconds(text):
 def main():
     parser = argparse.ArgumentParser(description="把一个来源的历史存量一次读到底（会写库，可中断后接着读）")
     parser.add_argument("source", help="来源编号，如 roche、chictr、fda_crl")
-    parser.add_argument("--query", help="读取入口：站点的列表入口网址、PubMed 检索词……；不给就用 check_sources 里的默认")
+    parser.add_argument("--query", help="读取入口：站点的列表入口网址、PubMed 检索词……；不给就用 fetch/catalog.py 的 sample_query")
     parser.add_argument("--deadline", type=seconds, default=120, metavar="5-120", help="每一段最多用几秒（5 到 120，默认 120）")
     parser.add_argument("--pages", type=int, help="列表网页站点最多读几页，盖过站点配置里的 max_pages")
     args = parser.parse_args()
@@ -98,7 +97,7 @@ def main():
     if not os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL"):
         parser.error("要先设 DATAFABRIC_HISTORY_DATABASE_URL：这个命令会写库（用法见文件开头）")
     os.environ["DATAFABRIC_HISTORY_SOURCE_ALLOWLIST"] = args.source
-    query = args.query or query_for(args.source)[0]
+    query = args.query or catalog.sample_query(args.source)[0]
     profile = SITE_PROFILES.get(args.source, {})
     list_site = "max_pages" in profile and profile.get("source_type") != "api"  # 按列表页翻页的网页站点：读到的页数受 max_pages 限制
     if args.pages:

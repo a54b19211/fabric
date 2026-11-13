@@ -1,7 +1,7 @@
 """抽取一致性核验：请 BioCheck 核对“Fabric 抽出来的东西”和“它所依据的固定原文”是否对得上。只核对对应关系，
 不核对事实本身对不对。没配置 BioCheck（DATAFABRIC_BIOCHECK_URL 和 DATAFABRIC_BIOCHECK_TOKEN）时，程序打印 disabled 就退出。
 
-从哪读起：文件末尾的 run_worker()（也是 python -m clean.extraction_checks 的入口）：每隔一段时间 backfill 补登记，其余时间
+从哪读起：文件末尾的 run_worker()（由 run/checks.py 启动）：每隔一段时间 backfill 补登记，其余时间
 反复调用 process_once。process_once 认领一个核验任务（_claim），把产物拼成请求（_build），分批发给 BioCheck（_send_batches），
 逐批记下结果（_after_batch），最后收尾（_conclude）。enqueue 是清洗段写产物时登记任务的入口，for_versions 是把一页版本的
 核验结果读给 API。
@@ -698,15 +698,3 @@ def run_worker(*, stop, idle_seconds=5.0, backfill_every=60.0, rounds=None):
         if state == "idle":
             stop.wait(idle_seconds)
 
-
-if __name__ == "__main__":
-    import signal
-    import threading
-
-    if not configured():
-        print(json.dumps({"extraction_checks": {"state": "disabled"}}))
-    else:
-        stop = threading.Event()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, lambda *_: stop.set())
-        run_worker(stop=stop)

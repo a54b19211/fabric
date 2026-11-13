@@ -2,7 +2,7 @@
 路由分发器。
 
 解析优先级：
-  1. crawler_settings.SITE_PROFILES 中配置了 detail_extractor → CSS 特解
+  1. fetch.site_profiles.SITE_PROFILES 中配置了 detail_extractor → CSS 特解
   2. 未配置 / 特解结果为空 → Trafilatura 通解兜底
 
 爬虫阶段只负责：

@@ -8,7 +8,7 @@ alone:
   or any other projected field moved with it. Nothing here says whether the change matters to a conclusion.
 - projection_only: the original is the same, the parser or the projection differs (a parser upgrade).
 - serialization_only: the original means the same (key order, spacing, a field the source rewrites on every
-  response, see history_sources.stable_raw) and the projection is identical; also the case of the same original
+  response, see fetch.sources.stable_raw) and the projection is identical; also the case of the same original
   and projection under another availability proof.
 
 Two kinds of "reprocessing" are different things, and neither is a correction by the source. A parser or
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from fetch.sources import stable_raw
 
-# The fields a source projection fills in (history_sources._assemble) next to the original. Together they are the
+# The fields a source projection fills in (fetch.sources._assemble) next to the original. Together they are the
 # projection that version identity covers.
 STRUCTURE_FIELDS = (
     "record_kind", "title", "source_url", "facts", "field_locators", "event_time", "source_published_at",
