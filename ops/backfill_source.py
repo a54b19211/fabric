@@ -13,10 +13,10 @@ history_fetch_job 抓），只是一段接一段：每段最多 100 条（一次
 已经读完的段直接取回结果、不再发请求；停在半路没读完的那一段重读（它没存完的版本本来就没存）。
 一段失败（如对方网站出错）命令停下并说原因；再跑一次，这一段换个新的任务键重读。
 下面几种情况命令也会停下并说明，不会原地打转：续读位置没前进、又一个版本都没读到（常见：接口站点重放前面的条目就用完了
---deadline，调大它再试）；碰到出站上限（限额过了再跑同一条命令，这一段会重读）。
+--deadline，调大它再试）。
 --deadline 每段的秒数，5 到 120；它和读取入口、--pages 一起进每一段的任务键（换了值就是另一次回填，不会和旧的任务键冲突）。
 要设的环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（要补哪个库就指向哪个库，这个命令会写库）；
-DATAFABRIC_HISTORY_SOURCE_ALLOWLIST 不用设，命令把它设成这个来源。限速、出站上限照常生效。
+DATAFABRIC_HISTORY_SOURCE_ALLOWLIST 不用设，命令把它设成这个来源。限速照常生效。
 限制：接口站点 Roche、FiercePharma 每一段都要把前面的重新走一遍才接得上（它们的拉取函数没有可恢复的游标），条目多时越往后越慢；
 港交所（续读位置是第几家公司、这家的第几条）、NCCN（第几份指南）从续读位置接着读，不重走前面的；列表站点只重翻列表页，不重读详情页。
 """
@@ -30,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fetch import catalog, rate  # noqa: E402
+from fetch import catalog  # noqa: E402
 from fetch.fetch_job import history_fetch_job  # noqa: E402
 from fetch.site_profiles import SITE_PROFILES  # noqa: E402
 from store import history  # noqa: E402
@@ -55,9 +55,9 @@ def read_leg(source, query, continuation, leg, deadline, tag):
                 history.fail_job(run.id, run.attempt, "interrupted", "回填被中断，这一段重读")
                 raise
             return history.read_run(run.id)
-        elif run.state in ("completed", "partial") and not run.error and (run.coverage or {}).get("stop_reason") not in rate.CEILING_STOPS:
+        elif run.state in ("completed", "partial") and not run.error:
             return run  # 上一次已经读完的段
-        # 其余（失败的段，带着错误的“部分完成”，停在出站上限的段）：换个新任务键，这一段重读
+        # 其余（失败的段，带着错误的“部分完成”）：换个新任务键，这一段重读
     raise SystemExit("这一段已失败太多次，请先看原因（history_runs 里键以 backfill:%s 开头的运行）" % source)
 
 
@@ -67,8 +67,6 @@ def why_stop(run, cover, message, before, read_nothing):
     if cover.get("upstream_pagination_exhausted") or cover.get("stop_reason") == "items_unread":
         # items_unread：读到底了，只是有几条读不到（它们的网址和原因在那一段的 unread_items 里）
         return "读到底了。", True
-    if cover.get("stop_reason") in rate.CEILING_STOPS:
-        return f"停在这里：碰到出站上限（{cover['stop_reason']}）。限额过了之后再跑同一条命令，这一段会重读。", False
     if continuation and continuation == before and read_nothing:
         return "停在这里：续读位置没有前进，这一段一个版本也没读到（接口站点要先重放前面的条目，可以把 --deadline 调大）。", False
     if run.state == "failed" or not continuation:

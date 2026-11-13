@@ -27,8 +27,7 @@ def fake_web(monkeypatch, tmp_path):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
 
     def fetch_page(url, **kwargs):
-        transport.gate(url)  # 替身也是一次真实传输：过闸、计数、计字节
-        transport.received(len(FakePage.html_content.encode()))
+        transport.wait(url)  # 和真的 fetch_page 一样，打开页面之前等限速、记一个请求
         calls["fetch"].append((url, kwargs))
         return {"page": FakePage(), "url": url, "uuid": "u-" + url[-8:], "timestamp": "t", "cookies": [{"name": "c"}]}
 
@@ -45,8 +44,8 @@ def fake_web(monkeypatch, tmp_path):
             "source_site": site_key,
         }
 
-    def download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None, store_as=""):
-        transport.gate(pdf_url)
+    def download(pdf_url, parent_uuid="", source_site="", cookies=None, store_as="", proxy=None):
+        transport.wait(pdf_url)
         calls["download"].append((pdf_url, cookies))
         calls.setdefault("store_as", []).append(store_as)
         if pdf_url == ATT2 and calls.get("fail_second"):
@@ -57,9 +56,9 @@ def fake_web(monkeypatch, tmp_path):
         return {"uuid": "f", "local_path": str(path), "source_url": pdf_url, "file_ext": "." + ext, "skipped": False,
                 "file_name": calls.get("file_name", "")}
 
-    monkeypatch.setattr(site_crawler, "_fetch_page", fetch_page)
-    monkeypatch.setattr(site_crawler, "_route_webpage", route_webpage)
-    monkeypatch.setattr(site_crawler, "_download", download)
+    monkeypatch.setattr(site_crawler, "fetch_page", fetch_page)
+    monkeypatch.setattr(site_crawler, "route_webpage", route_webpage)
+    monkeypatch.setattr(site_crawler, "download_pdf", download)
     monkeypatch.setattr(site_crawler, "_store_root", lambda: tmp_path / "store")
     return calls
 
@@ -85,14 +84,13 @@ def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
         assert site_crawler.SITE_PROFILES[source]["by_group"]  # 站点配置的拉取函数也是按组给的
 
 
-
 def test_read_public_dispatches_to_the_migrated_plugin(monkeypatch):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(site_crawler, "read_site", lambda request: {"marker": request.source_id})
     assert "site_crawler" in PLUGINS
     batch = read_public(FetchRequest(source_id="chictr", query="by_url",
                                      source_record_ids=["https://www.chictr.org.cn/showproj.html?proj=1"]))
-    assert batch["marker"] == "chictr" and batch["requests"] == 0  # 计量来自同一份预算
+    assert batch["marker"] == "chictr" and batch["requests"] == 0  # 请求数是 transport 这次读取数到的
 
 
 def test_detail_page_becomes_capture_plus_one_record_per_attachment(fake_web):
@@ -141,7 +139,7 @@ def _chictr_route(monkeypatch, tokens):
                 "parse_method": "css_extract", "attachment_links": [link], "source_url": page_data["url"],
                 "source_site": site_key}
 
-    monkeypatch.setattr(site_crawler, "_route_webpage", route_webpage)
+    monkeypatch.setattr(site_crawler, "route_webpage", route_webpage)
 
 
 def test_attachment_whose_link_changes_on_every_visit_is_named_by_its_key_and_the_link_is_not_kept(fake_web, monkeypatch):
@@ -202,7 +200,7 @@ def test_list_mode_reuses_old_pagination_and_resumes(fake_web, monkeypatch):
             yield from urls
 
     start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
-    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    monkeypatch.setattr(site_crawler, "make_driver", lambda site, profile, url: Driver())
     first = read_public(FetchRequest(source_id="nmpa", query=start, max_records=5))
     assert pages_of(first) == urls[:2] and len(first["records"]) == 5
     assert first["stop_reason"] == "record_budget" and not first["upstream_pagination_exhausted"]
@@ -229,7 +227,7 @@ def test_full_reader_stops_asking_the_driver_for_more_list_pages(fake_web, monke
                 seen["closed"] = True
 
     start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
-    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    monkeypatch.setattr(site_crawler, "make_driver", lambda site, profile, url: Driver())
     batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=3))
     assert batch["stop_reason"] == "record_budget" and len(batch["records"]) == 3
     assert seen == {"pages": 2, "closed": True}  # 第 1 页 + 它的 2 个附件，第 2 页占满名额；第 3 页没有去要
@@ -266,24 +264,15 @@ def test_every_request_is_counted_and_none_is_limited_by_the_page_budget(fake_we
     urls = [PAGE, PAGE.replace("123.html", "124.html")]
     batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_pages=1,
                                      max_records=100))
-    # 两页各 1 个页面请求 + 2 个附件 = 6；请求次数只计数，不设额度（max_pages 不再折成请求数上限）
+    # 两页各 1 个页面请求 + 2 个附件 = 6；请求次数只计数，不设额度（max_pages 不折成请求数上限）
     assert batch["requests"] == 6 and batch["upstream_pagination_exhausted"]
-
-
-def test_byte_budget_stops_and_keeps_what_was_read(fake_web, monkeypatch):
-    # 第一页放得下，第二页读到一半超出：第二页不保留（读不完整），第一页和它的附件保留，续读指向第二页
-    monkeypatch.setenv("DATAFABRIC_READ_MAX_BYTES", str(len(FakePage.html_content.encode()) * 3 // 2))
-    urls = [PAGE, PAGE.replace("123.html", "124.html")]
-    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=urls, max_records=100))
-    assert batch["stop_reason"] == "byte_budget" and pages_of(batch) == [PAGE]
-    assert batch["next_continuation"] is not None
 
 
 def test_too_large_attachment_is_a_recorded_gap(fake_web, monkeypatch):
     def too_large(*a, **k):
-        raise ValueError("attachment_too_large")
+        raise ValueError("response_too_large")
 
-    monkeypatch.setattr(site_crawler, "_download", too_large)
+    monkeypatch.setattr(site_crawler, "download_pdf", too_large)
     batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
     assert {a["status"] for a in batch["attachment_coverage"]} == {"too_large"} and len(batch["records"]) == 1
 
@@ -383,292 +372,6 @@ def test_api_site_only_answers_records_query(fake_web, monkeypatch):
     assert batch["stop_reason"] == "source_failed" and batch["error"]["code"] == "unknown_query"
 
 
-def test_every_real_http_transfer_is_gated_and_counted_before_it_is_sent(monkeypatch):
-    """Codex r69 反例：拉取函数在产出第一条记录前发 12 个请求。每个请求发出前都过共享限速并计数；
-    请求次数不设额度（对方站点的压力由限速间隔和出站上限管），12 个都发，读完记录。"""
-    import httpx
-
-    seen = []
-    client = httpx.Client(transport=httpx.MockTransport(lambda r: (seen.append("http"), httpx.Response(200, json={}))[1]))
-
-    def fetcher(config):
-        for i in range(12):
-            client.get(f"https://synthetic.invalid/record/{i}")
-        yield {"id": "one", "title": "Synthetic result"}
-
-    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label",
-                        {"source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"},
-                         "uid_field": "id"})
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: seen.append("gate"))
-    result = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
-                                                 max_records=1))
-    assert seen[:4] == ["gate", "http", "gate", "http"]  # 先过闸再发
-    assert seen.count("http") == 12 and seen.count("gate") == 12 and result["requests"] == 12
-    assert result["stop_reason"] == "upstream_exhausted" and len(result["records"]) == 1
-
-
-def test_transient_errors_are_retried_at_the_transport_and_each_retry_is_counted(monkeypatch):
-    import httpx
-
-    from settings import APP
-
-    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
-    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.0)
-    answers = iter([httpx.Response(429), httpx.Response(200, json={"ok": 1})])
-    client = httpx.Client(transport=httpx.MockTransport(lambda r: next(answers)))
-
-    def fetcher(config):
-        assert client.get("https://synthetic.invalid/x").status_code == 200
-        yield {"id": "one", "title": "ok"}
-
-    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label",
-                        {"source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"},
-                         "uid_field": "id"})
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    result = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_records=5))
-    assert result["requests"] == 2 and len(result["records"]) == 1
-
-
-def test_transfers_outside_a_read_are_not_gated(monkeypatch):
-    import httpx
-
-    calls = []
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: calls.append("gate"))
-    transport.install()
-    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    client.get("https://synthetic.invalid/")
-    assert calls == []
-
-
-def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, monkeypatch):
-    """翻页驱动在独立线程里取列表页：线程带着读取上下文，列表页同样过闸计数；驱动自己的间隔归零。"""
-    import concurrent.futures
-
-    from fetch.transport import in_context
-
-    class Driver:
-        def iter_detail_urls(self):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(in_context(lambda: transport.gate(PAGE))).result()  # 列表页的一次真实传输
-            yield PAGE
-
-    made = []
-    import fetch.pagination as pd
-
-    monkeypatch.setattr(pd, "make_driver", lambda site, profile, url: made.append(Driver()) or made[-1])
-    start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
-    batch = read_public(FetchRequest(source_id="nmpa", query=start))
-    assert batch["requests"] == 4  # 列表页 1 + 详情页 1 + 附件 2
-
-
-def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
-    import httpx
-
-    from settings import APP
-
-    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
-    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.01)
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    monkeypatch.setattr(transport.time, "sleep", lambda s: None)
-    calls = []
-
-    def flaky():
-        calls.append(1)
-        if len(calls) < 3:
-            raise httpx.ReadTimeout("t")
-        return "ok"
-
-    budget = _budget()
-    assert transport._hop(budget, "https://synthetic.invalid/", flaky, drain=lambda r: None) == "ok"
-    assert len(calls) == 3 and budget.requests == 3  # 每次重发都重新过闸
-
-    calls.clear()
-
-    def broken():
-        calls.append(1)
-        raise ValueError("parse error")
-
-    with pytest.raises(ValueError):
-        transport._hop(_budget(), "https://synthetic.invalid/", broken, drain=lambda r: None)
-    assert len(calls) == 1
-    assert transport.is_transient(httpx.ReadTimeout("t")) and not transport.is_transient(RuntimeError("HTTP 429"))
-
-
-def test_a_timeout_is_retried_after_a_short_pause_and_only_a_429_backs_off(monkeypatch):
-    """超时 = 这条连接没通（实测 Akamai 的个别节点会让一半的连接卡住）：换一条马上重试，只等 1 秒；
-    干等设置里的 10 秒（再翻倍）会让一个页面用掉半分钟。429 才按间隔退避、逐次翻倍。"""
-    import httpx
-
-    from settings import APP
-
-    monkeypatch.setattr(APP, "TASK_RETRIES", 2)
-    monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 10.0)
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    slept = []
-    monkeypatch.setattr(transport.time, "sleep", slept.append)
-
-    def failing(error):
-        calls = []
-
-        def send():
-            calls.append(1)
-            if len(calls) < 3:
-                raise error
-            return "ok"
-        return send
-
-    assert transport._hop(_budget(), "https://synthetic.invalid/", failing(httpx.ConnectTimeout("t")),
-                          drain=lambda r: None) == "ok"
-    assert slept == [1.0, 1.0]
-    slept.clear()
-    limited = httpx.HTTPStatusError("429", request=httpx.Request("GET", "https://synthetic.invalid/"),
-                                    response=httpx.Response(429))
-    assert transport._hop(_budget(), "https://synthetic.invalid/", failing(limited), drain=lambda r: None) == "ok"
-    assert slept == [10.0, 20.0]
-
-
-def _budget():
-    return transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
-
-
-def _api_site(monkeypatch, fetcher):
-    monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_drug_label",
-                        {"source_type": "api", "api_fetcher": fetcher, "api": {}, "field_map": {"title": "title"},
-                         "uid_field": "id"})
-
-
-def test_codex_401_every_redirect_hop_is_metered(monkeypatch):
-    """Codex 401 反例：httpx 自动跟随 12 跳重定向。每一跳在实际发送处过闸、计数（请求次数不设额度，12 跳都发）。"""
-    import httpx
-
-    hops, gates = [], []
-
-    def handler(request):
-        hops.append(str(request.url))
-        if len(hops) < 12:
-            return httpx.Response(302, headers={"Location": "https://synthetic.invalid/hop/" + str(len(hops))})
-        return httpx.Response(200, json={"done": True})
-
-    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
-
-    def fetcher(config):
-        client.get("https://synthetic.invalid/start")
-        yield {"id": "one", "title": "synthetic redirected record"}
-
-    _api_site(monkeypatch, fetcher)
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: gates.append(True))
-    batch = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
-                                                max_records=1))
-    assert len(hops) == 12 and len(gates) == 12 and batch["requests"] == 12
-    assert batch["stop_reason"] == "upstream_exhausted" and len(batch["records"]) == 1
-
-
-def test_codex_402_retry_response_bytes_count_towards_the_budget(monkeypatch):
-    """Codex 402 第 3 点：两次 429 各回 2000 字节，预算 1000。第一次 429 的响应体就用完预算，不再重发。"""
-    import httpx
-
-    bodies = []
-
-    def handler(request):
-        status, body = (429, b"x" * 2000) if len(bodies) < 2 else (200, b"ok")
-        bodies.append(len(body))
-        return httpx.Response(status, content=body)
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-
-    def fetcher(config):
-        client.get("https://synthetic.invalid/rate-limited")
-        yield {"id": "one", "title": "synthetic record"}
-
-    _api_site(monkeypatch, fetcher)
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    monkeypatch.setenv("DATAFABRIC_READ_MAX_BYTES", "1000")
-    monkeypatch.setattr(transport, "_retry_settings", lambda: (2, 0.0))
-    batch = site_crawler.read_site(FetchRequest(source_id="fda_api_drug_label", query="records", max_pages=1,
-                                                max_records=1))
-    assert len(bodies) == 1 and batch["stop_reason"] == "byte_budget" and batch["bytes"] == 2000
-
-
-def test_streamed_download_stops_at_the_chunk_that_exhausts_the_budget(monkeypatch):
-    import httpx
-
-    def handler(request):
-        return httpx.Response(200, content=iter([b"a" * 400] * 5))  # 流式 2000 字节
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    budget = transport.Budget(max_bytes=1000, max_records=10, deadline_seconds=60)
-    seen = []
-    with transport.metered(budget), pytest.raises(transport.Stop):
-        with client.stream("GET", "https://synthetic.invalid/file") as response:
-            for chunk in response.iter_bytes():
-                seen.append(len(chunk))
-    assert sum(seen) <= 1000 < budget.bytes <= 1200 and budget.stopped == "byte_budget"
-
-
-def test_requests_and_curl_redirects_are_gated_per_hop(monkeypatch):
-    """requests：每一跳调用一次 HTTPAdapter.send；curl_cffi：关掉库内部跳转，由闸门逐跳跟随。"""
-    import requests
-
-    gates = []
-    monkeypatch.setattr(rate, "wait", lambda group, *a, **k: gates.append(group))
-
-    class Raw:
-        def __init__(self, body):
-            self.body = body
-
-        def stream(self, *a, **k):
-            yield self.body
-
-        def read(self, *a, **k):
-            body, self.body = self.body, b""
-            return body
-
-        def release_conn(self):
-            pass
-
-        def close(self):
-            pass
-
-    sent = []
-
-    def adapter_send(self, request, *args, **kwargs):
-        sent.append(request.url)
-        response = requests.Response()
-        response.request, response.url, response.raw = request, request.url, Raw(b"x" * 10)
-        if len(sent) < 3:
-            response.status_code, response.headers["Location"] = 302, "https://b.invalid/" + str(len(sent))
-        else:
-            response.status_code = 200
-        return response
-
-    from requests.adapters import HTTPAdapter
-
-    monkeypatch.setattr(HTTPAdapter, "send", adapter_send)
-    with transport.metered(_budget()) as budget:
-        assert requests.get("https://a.invalid/start").status_code == 200
-    assert len(sent) == 3 and budget.requests == 3 and budget.bytes == 30
-    assert gates == ["a.invalid", "b.invalid", "b.invalid"]  # 按每一跳的实际主机限速
-
-    curl = pytest.importorskip("curl_cffi.requests")
-    calls = []
-
-    class Answer:
-        def __init__(self, status, location=None):
-            self.status_code, self.content = status, b"yy"
-            self.headers = {"location": location} if location else {}
-
-    def curl_request(self, method, url, *args, **kwargs):
-        calls.append((url, kwargs.get("allow_redirects")))
-        return Answer(302, "/next") if len(calls) == 1 else Answer(200)
-
-    monkeypatch.setattr(curl.Session, "request", curl_request)
-    with transport.metered(_budget()) as budget:
-        assert curl.Session().request("GET", "https://c.invalid/a").status_code == 200
-    assert calls == [("https://c.invalid/a", False), ("https://c.invalid/next", False)]
-    assert budget.requests == 2 and budget.bytes == 4
-
-
 def test_failed_site_read_keeps_the_real_reason_without_secrets(fake_web, monkeypatch):
     """The reason used to be the class name only ("站点读取失败：TimeoutError"). Now it is the first line of the
     error message; the rest of the browser's call log, URL query strings and key=value pairs stay out."""
@@ -679,7 +382,7 @@ def test_failed_site_read_keeps_the_real_reason_without_secrets(fake_web, monkey
             yield
 
     start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
-    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    monkeypatch.setattr(site_crawler, "make_driver", lambda site, profile, url: Driver())
     batch = read_public(FetchRequest(source_id="nmpa", query=start))
     assert batch["error"] == {"code": "source_read_failed",
                               "message": "站点读取失败：TimeoutError：Page.goto: Timeout 30000ms exceeded."}
@@ -693,7 +396,6 @@ def test_failed_site_read_keeps_the_real_reason_without_secrets(fake_web, monkey
 ])
 def test_failure_reason_drops_secrets_and_keeps_the_class_name(raw, shown):
     assert site_crawler._why(RuntimeError(raw)) == "RuntimeError" + ("：" + shown if shown else "")
-
 
 
 # ── 读取中出错不能被吞：HTTP 错误和网络异常是失败（写明原因），不是“读到底了” ─────────────────
@@ -717,9 +419,7 @@ OPENFDA_RATE_LIMIT = {"error": {"code": "OVER_RATE_LIMIT",
 ])
 def test_openfda_http_errors_and_timeouts_are_failed_reads_that_say_so(monkeypatch, source, answer, reason):
     """openFDA 回 429 / 503 或连接超时，以前记一行日志就当读到底（运行记为“完成、没有数据”）。"""
-    import httpx
-
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: answer())
+    monkeypatch.setattr(transport, "get", lambda *a, **k: answer())
     batch = read_public(FetchRequest(source_id=source, query="records"))
     assert batch["error"]["code"] == "source_read_failed"
     assert reason in batch["error"]["message"] and "已读 0 条" in batch["error"]["message"]
@@ -729,14 +429,12 @@ def test_openfda_http_errors_and_timeouts_are_failed_reads_that_say_so(monkeypat
 
 def test_openfda_failure_on_a_later_page_keeps_what_was_read_and_still_fails(monkeypatch):
     """第二页出错：第一页读到的原件保留，但这次读取不是“读完了”。"""
-    import httpx
-
     record = {"set_id": "S1", "effective_time": "20261101", "openfda": {},
               "spl_product_data_elements": ["Some Product SOME INGREDIENT"]}
     link = '<https://api.fda.gov/drug/label.json?search_after=1&sort=effective_time:desc>; rel="next"'
     answers = iter([_http(200, {"meta": {"results": {"total": 3}}, "results": [record]}, {"Link": link}),
                     _http(500, {"error": {"code": "SERVER_ERROR"}})])
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: next(answers))
+    monkeypatch.setattr(transport, "get", lambda *a, **k: next(answers))
     batch = read_public(FetchRequest(source_id="fda_api_drug_label", query="records", max_records=5))
     assert len(batch["records"]) == 1
     assert "HTTP 500" in batch["error"]["message"] and "已读 1 条" in batch["error"]["message"]
@@ -745,14 +443,12 @@ def test_openfda_failure_on_a_later_page_keeps_what_was_read_and_still_fails(mon
 
 def test_openfda_404_past_the_last_skip_page_is_still_the_normal_end(monkeypatch):
     """skip 翻页翻过最后一页，openFDA 回 404：这是读完了，不是失败。"""
-    import httpx
-
     # 召回站点的配置现在指定了 sort（新的在前，走 search_after）；skip 翻页是没指定 sort 时的读法，这里去掉 sort 测它
     monkeypatch.delitem(site_crawler.SITE_PROFILES["fda_api_enforcement"]["api"], "sort")
     record = {"recall_number": "D-1-2026", "product_description": "Some product", "report_date": "20261101"}
     answers = iter([_http(200, {"meta": {"results": {"total": 5}}, "results": [record]}),
                     _http(404, {"error": {"code": "NOT_FOUND", "message": "No matches found!"}})])
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: next(answers))
+    monkeypatch.setattr(transport, "get", lambda *a, **k: next(answers))
     batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=10))
     assert len(batch["records"]) == 1 and batch["error"] is None
     assert batch["upstream_pagination_exhausted"] and batch["stop_reason"] == "upstream_exhausted"
@@ -773,6 +469,7 @@ class _RochePage:
 def _roche_one_year(monkeypatch, fetch):
     from fetch.extractors.roche import roche_web_fetcher
 
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     for name in ("year_start", "year_end"):
         monkeypatch.setitem(site_crawler.SITE_PROFILES["roche"]["api"], name, 2026)  # 只读 2026 年
     monkeypatch.setattr(roche_web_fetcher.StealthyFetcher, "fetch", staticmethod(fetch))
@@ -849,14 +546,15 @@ def _fierce_read(monkeypatch, pages, max_records=5, retry_delay=0):
     from fetch.extractors.fiercepharma import fiercepharma_fetcher as fetcher
 
     monkeypatch.setattr(fetcher, "RETRY_DELAY", retry_delay)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: ([
         {"url": url, "guid": "", "title": "", "description": "RSS 摘要", "pub_date": "2026-11-01"} for url in pages], []))
 
     def fetch(url, **kwargs):
         answer = pages[url].pop(0)
-        if callable(answer):  # 要在读取中间做点什么（如让预算停下），再给答复
+        if callable(answer):  # 要在读取中间做点什么，再给答复
             answer = answer()
-        if isinstance(answer, BaseException):  # 预算的 Stop 是 BaseException
+        if isinstance(answer, BaseException):  # transport.Stop 是 BaseException
             raise answer
         return answer
 
@@ -911,32 +609,11 @@ def test_fiercepharma_unread_articles_do_not_use_up_the_record_budget(monkeypatc
 def test_fiercepharma_deadline_during_a_reread_is_a_stop_and_keeps_what_was_stored(monkeypatch):
     """截止时间到的时候单篇正在读：运行是“到期”（停在这一篇、给续读位置），不是失败；已存的保留，这一篇不算读不到。"""
     a, b, c = (f"https://www.fiercepharma.com/pharma/{x}" for x in "abc")
-    expired = lambda: transport.Stop("deadline")  # noqa: E731 -- 预算在发出请求前停下，和 transport.Budget.before_send 一样
+    expired = lambda: transport.Stop("deadline")  # noqa: E731 -- 到点了，读取停下
     batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [_FiercePage(403), expired], c: [WHOLE]})
     assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
     assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
     assert json.loads(batch["next_continuation"]["cursor"])["i"] == 1
-
-
-def test_fiercepharma_the_wait_before_a_reread_does_not_run_past_the_deadline(monkeypatch):
-    """第一次读失败后要等 RETRY_DELAY 秒再读：等不及就当场停在到期，不睡过头（以前 time.sleep 睡到过期才发现）。"""
-    a, b = (f"https://www.fiercepharma.com/pharma/{x}" for x in "ab")
-    batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [_FiercePage(403)]}, retry_delay=10_000)
-    assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
-    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
-
-
-def test_fiercepharma_failures_caused_by_the_budget_running_out_are_not_unreadable_articles(monkeypatch):
-    """预算用完时浏览器里的请求被中止，抓取报的错（这里是超时）只是预算停下的后果：停在这一篇，不记成读不到。"""
-    a, b = (f"https://www.fiercepharma.com/pharma/{x}" for x in "ab")
-
-    def budget_ran_out():
-        transport.current().stopped = "deadline"
-        return TimeoutError("Page.goto: Timeout 60000ms exceeded.")
-
-    batch = _fierce_read(monkeypatch, {a: [WHOLE], b: [budget_ran_out, TimeoutError("again")]})
-    assert batch["stop_reason"] == "deadline" and batch["error"] is None and batch["unread_items"] == []
-    assert [json.loads(r.raw_content)["url"] for r in batch["records"]] == [a]
 
 
 def test_fiercepharma_a_feed_that_cannot_be_read_is_noted_and_the_other_feed_is_still_read(monkeypatch):
@@ -956,7 +633,8 @@ def test_fiercepharma_a_feed_that_cannot_be_read_is_noted_and_the_other_feed_is_
             if self.status != 200:
                 raise RuntimeError(f"HTTP {self.status}")
 
-    monkeypatch.setattr(fetcher.httpx, "get", lambda url, **kwargs: Reply(url))
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
+    monkeypatch.setattr(transport, "get", lambda url, **kwargs: Reply(url))
     monkeypatch.setattr(fetcher.StealthyFetcher, "fetch", staticmethod(lambda url, **kwargs: WHOLE))
     monkeypatch.setitem(site_crawler.SITE_PROFILES["fiercepharma"]["api"], "rss_feeds", [good, bad])
     batch = read_public(FetchRequest(source_id="fiercepharma", query="records", max_records=5))
@@ -984,6 +662,7 @@ def test_nccn_a_detail_page_that_cannot_be_read_is_noted_and_no_list_only_versio
             return "detail page"
 
     monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", Fetcher)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(nccn_fetcher, "_parse_rendered_list", lambda page, cat_num, cat_name: items)
     pdf = {"label": "Guidelines", "url": "https://www.nccn.org/pdf/g1.pdf", "version": "2.2026"}
     monkeypatch.setattr(nccn_fetcher, "extract_nccn_detail", lambda page: {
@@ -994,7 +673,7 @@ def test_nccn_a_detail_page_that_cannot_be_read_is_noted_and_no_list_only_versio
     def no_download(*args, **kwargs):  # 附件下载不是这个测试要查的：不连外网，只当这个附件没下载成功（记缺口，不存版本）
         raise ValueError("no network in unit tests")
 
-    monkeypatch.setattr(site_crawler, "_download", no_download)
+    monkeypatch.setattr(site_crawler, "download_pdf", no_download)
     batch = read_public(FetchRequest(source_id="nccn", query="records", max_records=5))
     assert [u["url"] for u in batch["unread_items"]] == ["https://www.nccn.org/g/0"]
     assert len(batch["records"]) == 1 and batch["error"]["code"] == "items_unread"  # 只有读到了详情页的那一篇存了
@@ -1016,6 +695,7 @@ def test_nccn_a_category_list_that_cannot_be_rendered_fails_the_read(monkeypatch
             raise TimeoutError("Page.goto: Timeout 45000ms exceeded.")
 
     monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", Fetcher)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     batch = read_public(FetchRequest(source_id="nccn", query="records", max_records=5))
     assert batch["records"] == [] and batch["stop_reason"] == "source_failed"
     assert batch["error"]["code"] == "source_read_failed" and "TimeoutError" in batch["error"]["message"]
@@ -1044,6 +724,7 @@ def _roche_read(monkeypatch, details):
     for name, value in {"year_start": 2026, "year_end": 2026}.items():
         monkeypatch.setitem(api, name, value)
     monkeypatch.setattr(fetcher, "RETRY_DELAY", 0)
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     pages = iter([[{"title": "Title " + url[-1], "source_url": url, "publish_date": "2026-11-10"} for url in details], []])
     monkeypatch.setattr(fetcher, "_parse_list_page", lambda page, collected, year, number: next(pages))
 
@@ -1104,7 +785,7 @@ def _list_site(monkeypatch, urls):
         def iter_detail_urls(self):
             yield from urls
 
-    monkeypatch.setattr(site_crawler, "_make_driver", lambda site, profile, url: Driver())
+    monkeypatch.setattr(site_crawler, "make_driver", lambda site, profile, url: Driver())
     return site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
 
 
@@ -1131,14 +812,14 @@ def test_an_unread_item_resets_the_count_so_known_ones_after_it_do_not_hide_it(f
     """没存的不能被“遇到已存的就停”跳过：读不到的这一条打断连续数，后面要再连续三条已存的才停。"""
     urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
     stored.update(set(urls) - {urls[2]})  # 第 3 条读不到，别的都读过了
-    original = site_crawler._fetch_page
+    original = site_crawler.fetch_page
 
     def fetch(url, **kwargs):
         if url == urls[2]:
             raise TimeoutError("synthetic")
         return original(url, **kwargs)
 
-    monkeypatch.setattr(site_crawler, "_fetch_page", fetch)
+    monkeypatch.setattr(site_crawler, "fetch_page", fetch)
     start = _list_site(monkeypatch, urls)
     batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
     assert pages_of(batch) == [urls[0], urls[1], urls[3], urls[4], urls[5]]  # 读不到的没存；停在它后面的第三条已存的
@@ -1179,14 +860,14 @@ def test_api_site_stops_at_known_records_and_an_empty_result_is_an_alarm_too(fak
 
 def test_a_detail_page_that_cannot_be_read_does_not_stop_the_list(fake_web, monkeypatch, stored):
     urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(3)]
-    original = site_crawler._fetch_page
+    original = site_crawler.fetch_page
 
     def fetch(url, **kwargs):
         if url == urls[1]:
             raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
         return original(url, **kwargs)
 
-    monkeypatch.setattr(site_crawler, "_fetch_page", fetch)
+    monkeypatch.setattr(site_crawler, "fetch_page", fetch)
     start = _list_site(monkeypatch, urls)
     batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))
     assert pages_of(batch) == [urls[0], urls[2]]  # 第 2 页读不到，没存，第 3 页照读
@@ -1217,21 +898,21 @@ def test_a_stop_while_replaying_to_the_cursor_does_not_move_the_cursor_back(fake
 
 def test_five_detail_pages_in_a_row_that_cannot_be_read_are_a_site_fault_not_five_unread_items(fake_web, monkeypatch, stored):
     urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(9)]
-    original = site_crawler._fetch_page
+    original = site_crawler.fetch_page
 
     def fetch(url, **kwargs):
         if url in urls[1:6]:  # 第 2 到第 6 页连续读不出来
             raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
         return original(url, **kwargs)
 
-    monkeypatch.setattr(site_crawler, "_fetch_page", fetch)
+    monkeypatch.setattr(site_crawler, "fetch_page", fetch)
     start = _list_site(monkeypatch, urls)
     batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))
     assert batch["error"]["code"] == "site_down" and "站点可能出了故障" in batch["error"]["message"]
     assert batch["stop_reason"] == "source_failed" and pages_of(batch) == [urls[0]]  # 读到第 6 页就不再往下读
     assert [item["url"] for item in batch["unread_items"]] == urls[1:6]
     # 中间读到一页就从头数：四条读不到、一条读到、再四条读不到，不算站点故障
-    monkeypatch.setattr(site_crawler, "_fetch_page", lambda url, **kw: original(url, **kw) if url == urls[4] else fetch_fail(url))
+    monkeypatch.setattr(site_crawler, "fetch_page", lambda url, **kw: original(url, **kw) if url == urls[4] else fetch_fail(url))
 
     def fetch_fail(url):
         raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
@@ -1240,17 +921,18 @@ def test_five_detail_pages_in_a_row_that_cannot_be_read_are_a_site_fault_not_fiv
     assert batch["error"]["code"] == "items_unread" and len(batch["unread_items"]) == 8
 
 
-def test_budget_known_counts_consecutive_known_only():
-    budget = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60, known_stop=3)
-    budget.is_known = lambda item: item != "new"
+def test_budget_known_counts_consecutive_known_only(monkeypatch):
+    from store import history
+
+    monkeypatch.setattr(history, "stored_unchanged", lambda source, item: item != "new")
+    budget = transport.Budget(FetchRequest(source_id="nmpa", query="by_url", known_stop=3))
     assert [budget.known(item) for item in ("a", "b", "new", "c", "d")] == [True, True, False, True, True]
     assert budget.known(None) is False and budget.known_run == 0  # 没读到的：连续数清零
     with pytest.raises(transport.Stop) as stop:
         for item in ("a", "b", "c"):
             budget.known(item)
-    assert stop.value.reason == "reached_known" and budget.stopped is None  # 不是预算用完，之后的传输照常
-    off = transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
-    off.is_known = lambda item: True
+    assert stop.value.reason == "reached_known"
+    off = transport.Budget(FetchRequest(source_id="nmpa", query="by_url"))
     assert [off.known(item) for item in "abcdef"] == [False] * 6  # known_stop=0：从不停
 
 

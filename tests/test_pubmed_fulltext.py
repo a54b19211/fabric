@@ -13,7 +13,7 @@ from pdf_fixture import make_pdf
 from clean import attachment_parse as ap
 from clean import jats_text
 from fetch import pubmed_fulltext as pf
-from fetch import rate, sources
+from fetch import rate, sources, transport
 from fetch import web_client as client
 from store.history_models import FetchRequest
 
@@ -68,7 +68,7 @@ class Web:
     def __init__(self, monkeypatch, *, pmc=b"", pmc_status=200, unpaywall=None):
         self.calls, self.gates = [], []
         self.pmc, self.pmc_status, self.unpaywall = pmc, pmc_status, unpaywall or {}
-        monkeypatch.setattr(rate, "wait", lambda group, interval, deadline=None: self.gates.append(group))
+        monkeypatch.setattr(rate, "wait", lambda group, interval: self.gates.append(group))
         monkeypatch.setattr(httpx, "Client",
                             lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(self.handle), **kw))
 
@@ -216,13 +216,12 @@ def test_full_text_takes_a_version_slot_and_the_read_resumes_where_it_stopped(mo
     assert third["upstream_pagination_exhausted"] and third["next_continuation"] is None
 
 
-def test_deadline_at_the_gate_stops_before_any_request(monkeypatch):
+def test_deadline_stops_before_any_request(monkeypatch):
+    from types import SimpleNamespace
+
     web = Web(monkeypatch, pmc=jats(CC_BY))
-
-    def closed(group, interval, deadline=None):
-        raise TimeoutError(group)
-
-    monkeypatch.setattr(rate, "wait", closed)
+    clock = iter([0.0] + [10_000.0] * 100)  # 读取在 0 秒开始；等完限速再看表，已经过了截止时间
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda s: None))
     batch = web.read()
     assert batch["stop_reason"] == "deadline" and batch["records"] == [] and not web.calls
     assert json.loads(batch["next_continuation"]["cursor"]) == {"i": 0, "a": 0}

@@ -727,8 +727,8 @@ def require_public_fetch_enabled():
 
 def read_public(request: FetchRequest) -> dict:
     """唯一读取入口：按来源目录找到插件并读取。新来源在 fetch.catalog 声明，再在 PLUGINS 注册。
-    整次读取共用一个预算（fetch.transport.Budget）：插件里的每一次真实传输都在发出处过闸计量，
-    返回的请求数、字节数就是这一份计量。模拟补采（is_demo）只读隔离原件包（fetch.fetch_job），
+    读几条、几点截止、读到已存的就停由插件自己数（fetch.transport.Budget）；返回的请求数、字节数是这次读取经
+    fetch.transport 发出的（transport.SENT）。模拟补采（is_demo）只读隔离原件包（fetch.fetch_job），
     从不到这里；DATAFABRIC_HISTORY_FETCH_ENABLED 不为 true 时公开读取整体关闭。"""
     from fetch.catalog import spec
 
@@ -741,16 +741,12 @@ def read_public(request: FetchRequest) -> dict:
     plugin = PLUGINS.get(declared.plugin)
     if plugin is None:
         raise HistoryError("source_plugin_missing", "来源插件未注册", 503)
-    with transport.reading(request) as budget:
-        if request.known_stop:  # 增量读取：读到“库里已有且没变”的原件就算读到旧的了（transport.Budget.known）
-            from store import history  # 在这里才导入：store.history 自己导入了本模块
-
-            budget.is_known = lambda item: history.stored_unchanged(request.source_id, item)
-        result = plugin(request)
-    return {**result, "requests": budget.requests, "bytes": budget.bytes, "subrequests": budget.subrequests}
+    transport.SENT.update(requests=0, bytes=0)
+    result = plugin(request)
+    return {**result, "requests": transport.SENT["requests"], "bytes": transport.SENT["bytes"]}
 
 
-PAGE_BYTES = 8 * 1024 * 1024  # 单个接口响应的大小上限（防内存）；整次读取的字节预算在 transport
+PAGE_BYTES = 8 * 1024 * 1024  # 单个接口响应的大小上限（防内存）
 
 
 def _ok(status):
@@ -819,6 +815,7 @@ class _PublicApiRead:
 
     def __init__(self, request: FetchRequest):
         self.request = request
+        self.budget = transport.Budget(request)  # 截止时间；增量读取时“连续读到已存的就停”
         self.source = request.source_id
         self.records, self.seen, self.source_total = [], {}, None
         self.skipped: list[dict] = []  # 来源列了、但不是一条要存的原件（openFDA 的“待发布”信函占位行），不是读不到
@@ -838,8 +835,8 @@ class _PublicApiRead:
         if remaining <= 0:
             return True
         url, params, path = _api_page(request, self.cursor, min(remaining, 100), self.consumed)
-        status, body = transport.get(client, url, params, cap=PAGE_BYTES)
-        text = body.decode("utf-8")
+        response = transport.get(url, params, client=client, cap=PAGE_BYTES, deadline=self.budget.deadline)
+        status, text = response.status_code, response.content.decode("utf-8")
         # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
         if status == 404 and source == "fda_crl":
             failure = parse_json(text).get("error") or {}
@@ -895,7 +892,7 @@ class _PublicApiRead:
                 continue
             self.seen[native] = sha256(raw)
             self.records.append(item)
-            transport.known(item)  # 增量读取：连续读到已存没变的，抛 Stop，已读的保留
+            self.budget.known(item)  # 增量读取：连续读到已存没变的，抛 Stop，已读的保留
             if len(self.records) >= self.request.max_records:
                 break
 
@@ -1020,17 +1017,17 @@ def _pubmed_articles(raw_xml, ids):
 PUBMED = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 
 
-def _pubmed_ids(client, request, start):
+def _pubmed_ids(client, request, start, deadline):
     """这一次要取的 PMID：给定的清单，或 ESearch 的结果（不指定排序时新入库的在前）。返回 (命中总数, 本次的 PMID)。"""
     if request.source_record_ids:
         if not all(re.fullmatch(r"\d+", value) for value in request.source_record_ids):
             raise ValueError("invalid_native_id")
         return len(request.source_record_ids), request.source_record_ids[start: start + request.max_records]
-    status, body = transport.get(client, PUBMED + "esearch.fcgi", {
+    response = transport.get(PUBMED + "esearch.fcgi", {
         "db": "pubmed", "retmode": "json", "term": request.query, "retstart": start,
-        "retmax": request.max_records}, cap=1024 * 1024)
-    _ok(status)
-    found = parse_json(body.decode("utf-8")).get("esearchresult")
+        "retmax": request.max_records}, client=client, cap=1024 * 1024, deadline=deadline)
+    _ok(response.status_code)
+    found = parse_json(response.content.decode("utf-8")).get("esearchresult")
     if not isinstance(found, dict) or "count" not in found or not isinstance(found.get("idlist"), list):
         raise ValueError("invalid_search")
     return int(found["count"]), found["idlist"]
@@ -1042,32 +1039,32 @@ def _read_pubmed(request):
     cursor = {"i": 结果里第几篇, "a": 1 表示这一篇的文献版本已保存、只差全文}（与站点插件同一写法）。"""
     from fetch.pubmed_fulltext import fulltext
 
-    budget = transport.current()
+    budget = transport.Budget(request)
     start, fulltext_only = _pubmed_cursor(request)
     records, coverage, count = [], [], None
     stop, error, resume = "upstream_exhausted", None, (start, int(fulltext_only))
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
-            count, ids = _pubmed_ids(client, request, start)
+            count, ids = _pubmed_ids(client, request, start, budget.deadline)
             if not ids:
                 if start < count:
                     raise ValueError("unexpected_empty_ids")
                 stop, resume = ("upstream_no_match" if count == 0 else "upstream_exhausted"), None
             else:
-                status, body = transport.get(client, PUBMED + "efetch.fcgi", {
-                    "db": "pubmed", "retmode": "xml", "id": ",".join(ids)}, cap=7 * 1024 * 1024)
-                _ok(status)
-                for k, item in enumerate(_pubmed_articles(body.decode("utf-8"), ids)):
+                response = transport.get(PUBMED + "efetch.fcgi", {"db": "pubmed", "retmode": "xml", "id": ",".join(ids)},
+                                         client=client, cap=7 * 1024 * 1024, deadline=budget.deadline)
+                _ok(response.status_code)
+                for k, item in enumerate(_pubmed_articles(response.content.decode("utf-8"), ids)):
                     resume = (start + k, 0)
                     if not (k == 0 and fulltext_only):  # 续读时这一篇已保存，只为取全文重取
                         budget.take_record()
                         records.append(item)
-                        if transport.known(item):  # 增量读取：已存且没变，全文也是上一轮存的，不再取（连续够数就抛 Stop）
+                        if budget.known(item):  # 增量读取：已存且没变，全文也是上一轮存的，不再取（连续够数就抛 Stop）
                             continue
                     resume = (start + k, 1)
                     facts = _project_pubmed(item)["facts"]
                     found_records, found_coverage = fulltext(
-                        client, item.source_record_id, facts.get("pmcid"), facts.get("doi"))
+                        client, budget, item.source_record_id, facts.get("pmcid"), facts.get("doi"))
                     records += found_records
                     coverage += found_coverage
                 done = start + len(ids)

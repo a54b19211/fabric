@@ -5,8 +5,7 @@ A recent window is another task:           python -m ops.who_backfill --since 20
 
 It reads the notices with LastModified from 2024-01-01 (or --since) up to the frozen --until, oldest first, each in its current
 version, and stops at the first bound it reaches: 400 records or 40 MiB. There is no bound on the number of requests of
-its own (they are at most 8 for 400 records); they count against the 200 a day this instance may send to who.int
-(fetch.rate), together with the scheduled watch's, and that ceiling is what holds. The plugin takes
+its own (they are at most 8 for 400 records, 30 s apart: the who.int interval in fetch/catalog.py). The plugin takes
 50 records from a response and a history run reads at most 100, so the backfill goes in legs of one run each.
 
 The coverage of every leg carries a receipt under "backfill": the bounds, what has been spent, why the backfill
@@ -15,7 +14,7 @@ created. That receipt is what marks the read as background: those versions were 
 are neither new activity nor part of an activity baseline. A version an earlier run already adopted is not listed.
 
 The legs have fixed idempotency keys. A second call with the same --until replays the legs already made without
-sending anything and carries on after them, so the bounds hold across calls, a call after a ceiling stop continues
+sending anything and carries on after them, so the bounds hold across calls, a call after a stop continues
 where the last one stopped, and a finished backfill answers with its last receipt. A different --since is a different
 task: its legs carry the start in their keys, so the earlier task and its receipts are left as they are.
 """
@@ -28,7 +27,7 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
-from fetch import rate, transport, who_don
+from fetch import who_don
 from fetch.sources import read_public
 from store import history
 from store.history_models import FetchRequest, HistoryError
@@ -37,7 +36,7 @@ LOG = logging.getLogger(__name__)
 SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 LEG_PAGES, LEG_DEADLINE = 2, 120
 LEG_RECORDS = LEG_PAGES * who_don.PAGE_SIZE  # a history run reads at most 100 records
-# Stops that end the backfill; any other stop (a ceiling, a failure, a deadline) ends one call and a later call goes on.
+# Stops that end the backfill; any other stop (a failure, a deadline) ends one call and a later call goes on.
 FINAL = frozenset({"reached_end", "records_bound", "bytes_bound"})
 
 
@@ -90,26 +89,23 @@ def _stopped_by(batch: dict, spent: Counts, bounds: Counts) -> str | None:
         return bound
     if batch["error"]:
         return "source_failed"
-    if batch["stop_reason"] in rate.CEILING_STOPS or not batch["records"] or batch["next_continuation"] is None:
+    if not batch["records"] or batch["next_continuation"] is None:
         return batch["stop_reason"]
     return None
 
 
-def _read_leg(store, run, bounds: Counts, progress: Progress) -> dict:
-    """Read one leg inside what the bounds leave: the budget of this one read is the rest of the backfill's."""
+def _read_leg(store, run) -> dict:
+    """Read one leg (its record count is what the bounds leave, see _leg_request; the bytes are checked after it)."""
     request, _ = store.job_input(run.id, run.attempt)
-    budget = transport.Budget.for_request(request)
-    budget.max_bytes =min(budget.max_bytes, bounds.bytes - progress.spent.bytes)
     try:
-        with transport.metered(budget):
-            return read_public(request)
+        return read_public(request)
     except HistoryError as exc:
         store.fail_job(run.id, run.attempt, exc.code, exc.message)
         raise
 
 
 def _run_leg(store, run, since: datetime, until: datetime, bounds: Counts, progress: Progress):
-    batch = _read_leg(store, run, bounds, progress)
+    batch = _read_leg(store, run)
     spent = progress.spent + Counts(len(batch["records"]), batch["bytes"], batch["requests"])
     stopped_by = _stopped_by(batch, spent, bounds)
     ahead = batch["next_continuation"] or progress.continuation

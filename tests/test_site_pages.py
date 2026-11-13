@@ -145,7 +145,7 @@ HKEX_COMPANIES = [{"code": "00013", "name": "和黃醫藥", "stock_id": 10000011
 
 
 def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
-    """用替身接口顶掉 hkex 的 requests.get，返回 (站点接口配置, 发出的请求参数)。rows_of(stock_id) 给这家公司的行；
+    """用替身接口顶掉 hkex 用的 transport.get，返回 (站点接口配置, 发出的请求参数)。rows_of(stock_id) 给这家公司的行；
     默认 00013 给前两行、01177 给第三行；返回异常对象就是这家读不到。"""
     import json
 
@@ -169,7 +169,7 @@ def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
 
         return Reply()
 
-    monkeypatch.setattr(hkex_fetcher.requests, "get", get)
+    monkeypatch.setattr(hkex_fetcher.transport, "get", get)
     return {**SITE_PROFILES["hkex"]["api"], "companies": HKEX_COMPANIES, **(overrides or {})}, sent
 
 

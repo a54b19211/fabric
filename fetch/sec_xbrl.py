@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -143,15 +144,16 @@ def read_sec(request):
     user_agent = os.environ.get("DATAFABRIC_SEC_USER_AGENT", "BioRadar-DataFabric/1.0 (bounded academic research)")
     if not user_agent.strip() or any(ord(c) < 32 for c in user_agent):
         raise HistoryError("sec_user_agent", "SEC读取须有明确有效的工具User-Agent")
+    deadline = time.monotonic() + request.deadline_seconds
     with httpx.Client(timeout=20, follow_redirects=False, headers={"User-Agent": user_agent, "Accept": "application/json"}) as client:
         try:
             budget_count = min(len(selected), request.max_records, request.max_pages)
             for index, native in enumerate(selected[:budget_count]):
-                # 共享限速组 sec.gov（每秒一请求，见来源目录）与本次预算由 fetch.transport 在发出处执行
-                status, body = transport.get(client, source_url(native), cap=8 * 1024 * 1024)
-                if status != 200:
-                    raise ValueError("HTTP " + str(status))
-                raw = body.decode("utf-8")
+                # 限速组 sec.gov（每秒一请求，见来源目录）、超时和 429 的重试在 transport.get；截止时间到了不再发
+                response = transport.get(source_url(native), client=client, deadline=deadline)
+                if response.status_code != 200:
+                    raise ValueError("HTTP " + str(response.status_code))
+                raw = response.content.decode("utf-8")
                 item = ArchiveRecord(source_record_id=native, record_kind="document", raw_content=raw)
                 project_sec(item, parse_json(raw))
                 records.append(item)

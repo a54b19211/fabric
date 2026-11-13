@@ -28,9 +28,8 @@ GroupStart(第几组)，并从续读位置所在的那一组读起，不重放�
 - "records"（接口站点）：按站点的接口拉取函数逐条读，可续读；
 - "stored_attachments"，source_record_ids=已存文档 URL：按 documents 库 attachments 表记录的链接
   重新下载附件原件（只读那张表，父页面不重抓）。
-每一次真实传输（接口拉取函数里的 httpx/requests/curl 请求及其每一跳重定向、网页抓取、附件下载、浏览器里的
-document/xhr/fetch 请求）都在发出处过 fetch.transport 的闸门：共享限速、字节/期限预算、超时与 429 的
-有界重试，续读重放也计数。
+打开页面、下载附件、接口请求之前都等站点的限速（fetch.transport.wait / get；接口请求和附件下载的超时与 429 有界重试
+也在 get 里）。读几条（max_records，页面和附件都算）、截止时间、“连续读到已存的就停”在这里的循环里数（transport.Budget）。
 """
 
 from __future__ import annotations
@@ -48,6 +47,9 @@ from loguru import logger
 
 from fetch import transport
 from fetch.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
+from fetch.page_parser import route_webpage
+from fetch.pagination import make_driver
+from fetch.web_client import download_pdf, fetch_page
 from fetch.windows import GROUP_LIMIT
 from store.history_models import ArchiveRecord, GroupStart, HistoryError, ItemUnreadable, make_uuid, source_time
 
@@ -64,37 +66,11 @@ SITE_DOWN_AFTER = 5  # 连续这么多条读不出来，就当站点出了故障
 from fetch.site_profiles import SITE_PROFILES  # noqa: E402  站点配置
 
 
-# ——抓取入口（测试替换这几个名字）——
-def _fetch_page(url, **kwargs):
-    from fetch.web_client import fetch_page
-
-    return fetch_page(url, **kwargs)
-
-
-def _route_webpage(page_data, site_key=None):
-    from fetch.page_parser import route_webpage
-
-    return route_webpage(page_data, site_key=site_key)
-
-
-def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None, store_as=""):
-    from fetch.web_client import download_pdf
-
-    return download_pdf(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies,
-                        store_as=store_as, proxy=site_proxy(source_site))
-
-
 def site_proxy(site):
     """这个站点的代理：站点配置里 proxy_env 写的环境变量（nccn 是 DATAFABRIC_PROXY_NCCN，如 http://127.0.0.1:7890）。
     设了，这个站点的页面渲染和附件下载都经它；站点没有 proxy_env 或变量没设，返回 None，直连。只管这一个站点，不设全局代理。"""
     name = SITE_PROFILES.get(site, {}).get("proxy_env")
     return (os.environ.get(name) or None) if name else None
-
-
-def _make_driver(site, profile, start_url):
-    from fetch.pagination import make_driver
-
-    return make_driver(site, profile, start_url)
 
 
 def _store_root() -> Path:
@@ -174,13 +150,11 @@ def _sha256_file(path: str) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def _site_host(site) -> str:
-    """站点配置里 url_pattern 的主机部分（如 "fda.gov/news-events/..." 取 "fda.gov"）。"""
-    return (SITE_PROFILES[site].get("url_pattern") or "").split("/")[0].lower()
-
-
 def _on_site(site, url) -> bool:
-    return transport.on_host(url, _site_host(site))
+    """url 的主机是站点主机（站点配置里 url_pattern 的主机部分，如 "fda.gov/news-events/..." 取 "fda.gov"）或它的子域。"""
+    host = (SITE_PROFILES[site].get("url_pattern") or "").split("/")[0].lower()
+    name = (urlparse(url).hostname or "").lower()
+    return bool(name) and (name == host or name.endswith("." + host))
 
 
 def _record(record_id, data) -> ArchiveRecord:
@@ -191,10 +165,7 @@ def _record(record_id, data) -> ArchiveRecord:
     )
 
 
-_Stop = transport.Stop  # 预算用完（BaseException，拉取函数里的 except Exception 吞不掉）
-
-
-class _Resume(_Stop):
+class _Resume(transport.Stop):
     """预算在某一父项的附件中途用完：attachment 是下一个要读的附件序号；page_recorded 表示这一页的
     页面版本已经保存，续读时只为拿附件链接和会话重取页面，不再占版本名额（否则 max_records=1
     时每轮都被父页面占满，永远读不到附件）。"""
@@ -206,13 +177,13 @@ class _Resume(_Stop):
 
 
 class _Reader:
-    """一次读取：版本、附件覆盖和续读位置。预算与计量是本次读取共用的 transport.Budget——版本数 ≤ max_records
-    （父页面和附件都算），字节、截止时间在每次真实传输的发出处执行（请求次数不设额度）；单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES。
+    """一次读取：版本、附件覆盖和续读位置。额度是 transport.Budget——版本数 ≤ max_records（父页面和附件都算）、
+    截止时间，每存一条、每下一个附件之前查；单个附件 ≤ DATAFABRIC_ATTACHMENT_MAX_BYTES。
     任何一项用完就停：已读到的保留，stop_reason 写明是哪一项，给续读位置，不声称读到底。"""
 
-    def __init__(self, request, budget):
+    def __init__(self, request):
         self.request = request
-        self.budget = budget
+        self.budget = transport.Budget(request)
         self.site = request.source_id
         self.profile = SITE_PROFILES[self.site]
         self.spec = spec(self.site)
@@ -225,11 +196,6 @@ class _Reader:
         self.unread_in_a_row = 0  # 连续读不到的条数；读到一条就清零
         self.position = 0  # 读到第几个父项了（分组读取：这一组里第几条）；停下时的续读位置指向它
         self.group = 0  # 分组读取：读到第几组了；不分组的站点一直是 0
-        # 浏览器里只放行目标站点（及其子域）的请求，第三方的广告、统计、cookie 横幅直接中止、不占请求预算
-        budget.site_host = _site_host(self.site)
-
-    def before_record(self):
-        self.budget.need_record()
 
     def add(self, record, at=None):
         """一个版本占一个名额（at：填回先占的位置）。"""
@@ -250,20 +216,20 @@ class _Reader:
             raise HistoryError("site_down", f"连续 {SITE_DOWN_AFTER} 条读不出来，站点可能出了故障；最近一条 {unread.url}：{unread.reason}")
 
     def attachment(self, link, parent_id, cookies, discovered):
-        """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。预算用完抛 _Stop。"""
+        """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。额度用完抛 transport.Stop。"""
         url = (link or {}).get("url") or ""
         key = (link or {}).get("key") or ""
         record_id = attachment_record_id(parent_id, _name(link))
         entry = {"record_id": record_id, "url": _kept_url(link), "text": (link or {}).get("text", ""),
                  "status": "stored"}
-        self.before_record()
+        self.budget.need_record()
         try:
             # 带 key 的链接（每次都不同）：原件落盘的路径也用附件记录号，同一个文件每次落在同一处
-            info = _download(url, parent_uuid=parent_id, source_site=self.site, cookies=cookies,
-                             store_as=record_id if key else "")
+            info = download_pdf(url, parent_uuid=parent_id, source_site=self.site, cookies=cookies,
+                                store_as=record_id if key else "", proxy=site_proxy(self.site))
             sha, size = _sha256_file(info["local_path"])
         except ValueError as exc:
-            status = "too_large" if str(exc) == "attachment_too_large" else "download_failed"
+            status = "too_large" if str(exc) == "response_too_large" else "download_failed"
             entry.update(status=status, error=str(exc)[:80])
             self.coverage.append({"parent_record_id": parent_id, **entry})
             return entry
@@ -305,7 +271,7 @@ class _Reader:
                 continue
             try:
                 self.attachment(link, parent_id, cookies, discovered)
-            except _Stop as stop:
+            except transport.Stop as stop:
                 for later in links[position:]:
                     self.coverage.append({"parent_record_id": parent_id, "url": _kept_url(later),
                                           "status": "not_attempted",
@@ -319,7 +285,7 @@ class _Reader:
         if not record_id:
             raise HistoryError("native_id_missing", "站点记录缺少稳定编号")
         if record_page:
-            self.before_record()
+            self.budget.need_record()
         links = _links(parsed)
         if record_page:
             record = _record(record_id, {
@@ -346,16 +312,15 @@ class _Reader:
         预算在附件中途用完时，父页面照常保存，抛 _Resume（续读位置指向下一个附件）。"""
         cfg = self.profile
         if record_page:
-            self.before_record()
-        page_data = _fetch_page(
+            self.budget.need_record()
+        page_data = fetch_page(
             url,
-            delay=0,  # 间隔由共享限速组统一控制
             wait_selector=cfg.get("detail_wait_selector"),
             disable_resources=cfg.get("disable_resources", True),
             solve_cloudflare=cfg.get("solve_cloudflare", False),
             use_simple_fetch=cfg.get("use_simple_fetch", False),
         )
-        parsed = _route_webpage(page_data, site_key=self.site)
+        parsed = route_webpage(page_data, site_key=self.site)
         html = getattr(page_data["page"], "html_content", "") or ""
         raw = html.encode("utf-8")
         html_sha = hashlib.sha256(raw).hexdigest()
@@ -412,7 +377,7 @@ def _site_results(reader, query):
         return
     if query not in profile.get("start_urls", []):
         raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
-    with closing(_make_driver(reader.site, profile, query).iter_table_data()) as pages:  # 读满不再要，浏览器就收工
+    with closing(make_driver(reader.site, profile, query).iter_table_data()) as pages:  # 读满不再要，浏览器就收工
         for batch in pages:
             for parsed in batch:
                 yield parsed, None
@@ -427,12 +392,6 @@ def _cursor(request):
         return int(value["i"]), int(value["a"]), bool(value.get("p")), int(value.get("g", 0))
     except (ValueError, KeyError, TypeError):
         raise HistoryError("invalid_cursor", "续读位置无效") from None
-
-
-def read_site(request) -> dict:
-    """site_crawler 插件入口：这次读取的全部真实传输都过同一个闸门和预算。"""
-    with transport.reading(request) as budget:
-        return _read(request, _Reader(request, budget))
 
 
 def _read_named(request, reader, start):
@@ -454,7 +413,7 @@ def _read_named(request, reader, start):
                 continue
             try:
                 reader.attachment(link, url, None, "stored_attachments_table")
-            except _Stop as stop_here:
+            except transport.Stop as stop_here:
                 raise _Resume(stop_here.reason, k, page_recorded=False) from None
 
 
@@ -470,6 +429,7 @@ def _read_site_records(request, reader, start):
                 reader.group, position, skipping = parsed.index, -1, False
                 reader.position = start_i if parsed.index == group else 0
                 reader.budget.known_run = 0  # “连续几条已存”按组数
+                reader.budget.check()  # 到点了就停在这一组的开头，续读从这一组读起
                 continue
             yielded, position = True, position + 1
             if skipping or (reader.group == group and position < start_i):
@@ -499,7 +459,7 @@ def _read_detail_pages(request, reader, start):
     if request.query not in reader.profile.get("start_urls", []):
         raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
     seen = -1
-    with closing(_make_driver(reader.site, reader.profile, request.query).iter_detail_urls()) as urls:
+    with closing(make_driver(reader.site, reader.profile, request.query).iter_detail_urls()) as urls:
         for url in urls:  # 读满不再要，浏览器就收工，不再翻下一页
             seen += 1
             if seen < start_i:
@@ -530,11 +490,12 @@ def _stopped_at(reader, start):
     return start if (reader.group, reader.position) == (start[3], start[0]) else (reader.position, 0, False)
 
 
-def _read(request, reader) -> dict:
+def read_site(request) -> dict:
     """site_crawler 插件入口；返回值形状与 read_public 其他插件相同。
     续读位置 cursor = {"i": 第几个父项（详情页 / 已存父文档 / 列表里第几个详情页或记录；分组读取是组内第几条）, "a": 该父项下第几个附件,
     "p": 1 表示这个父项的页面版本已经保存、续读时只为拿附件链接重取页面, "g": 分组读取时第几组（0 不写）}。
     重放到续读位置途中停下，位置原样不动。"""
+    reader = _Reader(request)
     error, stop, exhausted, resume = None, "upstream_exhausted", False, None
     start = (0, 0, False, 0)
     try:
@@ -549,18 +510,15 @@ def _read(request, reader) -> dict:
         exhausted = True
     except _Resume as stopped:
         stop, resume = stopped.reason, (reader.position, stopped.attachment, stopped.page_recorded)
-    except _Stop as stopped:
+    except transport.Stop as stopped:
         # 读到旧的了（增量读取）：没有下一页要接
         stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else _stopped_at(reader, start)
     except HistoryError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
-        if reader.budget.stopped:  # 浏览器里的请求因预算被中止，驱动随后报的错不是来源失败
-            stop, resume = reader.budget.stopped, _stopped_at(reader, start)
-        else:
-            error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
-            stop = "source_failed"
-            logger.error("站点 {} 读取失败：{}", reader.site, error["message"])
+        error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
+        stop = "source_failed"
+        logger.error("站点 {} 读取失败：{}", reader.site, error["message"])
     if reader.unread and stop in ("upstream_exhausted", transport.KNOWN) and error is None:
         # 读到底（或读到旧的）了，但有几条没读到：不能说读完。有版本的是“部分完成”，一个版本也没有的是“失败”（history._close_run）
         first = reader.unread[0]
@@ -584,9 +542,6 @@ def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
         "upstream_pagination_exhausted": exhausted and error is None,
         "stop_reason": stop,
         "error": error,
-        "requests": reader.budget.requests,
-        "bytes": reader.budget.bytes,
-        "subrequests": reader.budget.subrequests,
         "source_total": None,
         "count_drift": None,
         "next_continuation": next_continuation,

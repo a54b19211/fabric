@@ -8,13 +8,11 @@ from pathlib import Path
 
 import pytest
 from test_attachment_originals import (
-    URL,
     A,
     download,
     http_source,  # noqa: F401  (fixture)
 )
 
-from fetch import site_crawler
 from fetch import web_client as client
 
 
@@ -130,6 +128,6 @@ def test_directory_sync_failure_is_not_retried_and_stores_nothing(http_source, m
     """本地 I/O 错误（目录 fsync 失败）不是瞬时读取错误：不重试 HTTP，下载失败如实抛出。"""
     events = track_fsync(monkeypatch, fail_directory=lambda _path: True)
     with pytest.raises(OSError, match="directory fsync"):
-        site_crawler._download(URL, source_site="synthetic_files")
+        download()
     assert len(http_source["requests"]) == 1
     assert any(kind == "directory" for kind, _path, _fd in events)

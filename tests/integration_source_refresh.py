@@ -578,10 +578,10 @@ def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_th
     middle = (datetime.fromisoformat(since) + timedelta(hours=1)).isoformat()
     cut = {"start": since, "end": middle}
     finish_active(
-        source, [], stop_reason="outbound_quota_hour", truncated_intervals=[cut],
+        source, [], stop_reason="deadline", truncated_intervals=[cut],
         window_coverage=[
             {**cut, "status": "read", "possibly_truncated": True, "reason": "finest_window_full"},
-            {"start": middle, "end": until, "status": "not_read", "reason": "outbound_quota_hour"},
+            {"start": middle, "end": until, "status": "not_read", "reason": "deadline"},
         ],
     )
     source_refresh.refresh_once()
@@ -589,7 +589,7 @@ def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_th
     assert state["state"] == "idle" and state["error"] is None and "request" not in state
     assert state["window_checkpoint"] == middle and "last_success_at" not in state
     assert state["last_coverage"]["truncated_intervals"] == [cut]  # the gap stays readable
-    assert state["last_coverage"]["stop_reason"] == "outbound_quota_hour"
+    assert state["last_coverage"]["stop_reason"] == "deadline"
     assert source_refresh.refresh_once() == []  # next cycle waits for its cadence
 
 

@@ -133,9 +133,9 @@ def test_failure_is_not_zero_or_a_legal_empty_disclosure(monkeypatch, kind):
             return httpx.Response(int(kind))
         return httpx.Response(200, json={**value(), "cik": 1})
     mocked_http(monkeypatch, respond)
-    from fetch import transport
+    from settings import APP
 
-    monkeypatch.setattr(transport, "_retry_settings", lambda: (1, 0.0))
+    monkeypatch.setattr(APP, "TASK_RETRIES", 1)
     batch = read_public(request())
     assert batch["error"] and not batch["upstream_pagination_exhausted"]
     assert batch["stop_reason"] == "source_failed" and batch["records"] == []

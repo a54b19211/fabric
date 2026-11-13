@@ -15,6 +15,7 @@ from typing import Iterator
 
 from loguru import logger
 
+from fetch import transport
 from fetch.extractors.nccn.nccn import extract_nccn_detail
 from store.history_models import GroupStart, ItemUnreadable, make_uuid
 
@@ -49,6 +50,7 @@ def _render(fetcher, url: str, ready_selector: str, proxy: str | None = None):
     proxy 是站点的代理（没设是 None：直连）。"""
     options = {"proxy": proxy} if proxy else {}
     for attempt in range(1, RENDER_TRIES + 1):
+        transport.wait(url)
         try:
             return fetcher.fetch(url, network_idle=False, disable_resources=True, wait_selector=ready_selector,
                                  timeout=RENDER_TIMEOUT_MS, retries=1, **options)

@@ -10,8 +10,7 @@ GDELT asks for one request every 5 seconds (the catalog spaces them 6 s apart) a
 429 to most requests whatever the spacing (measured 2026-11-13 from zktest, direct and through the proxy, gaps of 6 s to
 5 minutes, about 80% of 160 requests; see fetch/catalog.py), so a request is not asked once but up to TRIES times: after
 each 429 the read waits the interval the answer names and sends the request again. After the last 429, or when there is
-no time left for the wait, the read ends as a failure that says so. Every request counts against the catalog's own
-hourly and daily ceilings, the retries too.
+no time left for the wait, the read ends as a failure that says so.
 """
 import re
 import time
@@ -96,9 +95,8 @@ def _receipt(window, status, **fields):
 
 
 def _sent() -> int:
-    """Requests the read's budget has counted so far, retries of a 429 or a timeout included."""
-    budget = transport.current()
-    return budget.requests if budget else 0
+    """Requests sent so far in this read (fetch.transport counts them), the resends after a 429 included."""
+    return transport.SENT["requests"]
 
 
 def _params(request, window):
@@ -134,10 +132,10 @@ class _Read:
     def __init__(self, request):
         self.request = request
         self.started = time.monotonic()
+        self.deadline = self.started + request.deadline_seconds
         self.records, self.seen, self.receipts = [], {}, []
         self.queue, self.after = [], None  # the current piece's windows to read (next one last); the range after it
         self.in_flight = None  # (window, requests counted before it) while its request is out
-        self.bytes = 0
 
     def run(self, client):
         for piece, after in _pieces(self.request):
@@ -164,14 +162,14 @@ class _Read:
 
     def _fetch(self, client, window):
         """One request for the window: its articles as (parsed, original text) pairs. A 429 is answered by waiting the
-        interval GDELT names and asking again, up to TRIES times (fetch.transport does not resend a 429 for a site
-        with a cap: every resend counts against the hour's quota, so the resends are made here)."""
+        interval GDELT names and asking again, up to TRIES times (so transport.get sends each request only once)."""
         for attempt in range(1, TRIES + 1):
-            with client.stream("GET", ENDPOINT, params=_params(self.request, window)) as response:
-                if response.status_code != 429:
-                    return self._articles(response)
-                response.read()
-                asked = _interval_asked(response.text)
+            response = transport.get(ENDPOINT, _params(self.request, window), client=client, cap=MAX_RESPONSE_BYTES,
+                                     timeout=min(RESPONSE_SECONDS, self.request.deadline_seconds), tries=1,
+                                     deadline=self.deadline)
+            if response.status_code != 429:
+                return self._articles(response)
+            asked = _interval_asked(response.text)
             if attempt == TRIES:
                 raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，按它要求的间隔（{asked} 秒）等过再发，"
                                    f"共发 {TRIES} 次仍是 429；请隔一段时间再读", 503)
@@ -186,15 +184,7 @@ class _Read:
         from fetch.sources import _raw_array_items, parse_json
         request = self.request
         response.raise_for_status()
-        body = bytearray()
-        for chunk in response.iter_bytes():
-            body.extend(chunk)
-            if len(body) > MAX_RESPONSE_BYTES:
-                raise HistoryError("source_byte_budget", "新闻索引响应超过8MiB")
-            if time.monotonic() - self.started >= request.deadline_seconds:
-                raise HistoryError("source_deadline", "新闻索引读取超时")
-        self.bytes += len(body)
-        raw = body.decode("utf-8")
+        raw = response.content.decode("utf-8")
         found = parse_json(raw)
         if found == {}:  # GDELT's answer to a window without a single article: 200 with the body {} (measured 2026-11-13)
             return []
@@ -242,8 +232,7 @@ class _Read:
             "records": self.records, "complete": False,
             "upstream_pagination_exhausted": not (truncated or error or stop),
             "stop_reason": "source_failed" if error else stop or "bounded_index_response",
-            "error": error, "requests": sum(receipt.requests for receipt in self.receipts), "bytes": self.bytes,
-            "source_total": None, "next_continuation": None,
+            "error": error, "source_total": None, "next_continuation": None,
             "window_coverage": [receipt.model_dump() for receipt in self.receipts],
             "truncated_intervals": [{"start": receipt.start, "end": receipt.end} for receipt in truncated],
         }
@@ -255,7 +244,7 @@ def read_gdelt(request):
     read = _Read(request)
     error = stop = None
     try:
-        with httpx.Client(timeout=min(RESPONSE_SECONDS, request.deadline_seconds), follow_redirects=False) as client:
+        with httpx.Client(follow_redirects=False) as client:
             read.run(client)
     except transport.Stop as stopped:
         stop = stopped.reason

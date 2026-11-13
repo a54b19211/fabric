@@ -11,6 +11,7 @@ Roche Media Releases 采集器（Scrapling 版）
 """
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import Iterator, Set
 
@@ -136,14 +137,15 @@ def _parse_list_page(page, collected_urls: Set[str], year: int, page_num: int) -
 def _fetch_detail(url: str) -> str:
     """抓取详情页正文，使用 StealthyFetcher。没读到（状态码不是 2xx、抛错、正文为空）就隔 RETRY_DELAY 秒重读一次，
     还不行就抛 ItemUnreadable：这一篇不存版本，网址和原因记进这次读取的覆盖信息。以前读不到返回空正文，
-    标题照存，存成一个只有标题的版本。等待用 transport.pause：到截止时间就停，不睡过头。"""
+    标题照存，存成一个只有标题的版本。打开页面之前等一下站点的限速（transport.wait）。"""
     if _is_non_html(url):
         return ""
 
     why = ""
     for attempt in range(2):
         if attempt:
-            transport.pause(RETRY_DELAY)
+            time.sleep(RETRY_DELAY)
+        transport.wait(url)
         try:
             page = StealthyFetcher.fetch(
                 url,
@@ -227,7 +229,7 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
         for page_num in range(1, max_pages_per_year + 1):
             target_url = f"{start_url}#/year/{year}/page/{page_num}"
             logger.debug(f"[Roche] 列表页: {target_url}")
-
+            transport.wait(target_url)
             try:
                 page = StealthyFetcher.fetch(
                     target_url,

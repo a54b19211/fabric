@@ -11,7 +11,7 @@ from uuid import uuid4
 from pydantic import Field, ValidationError, model_validator
 from sqlalchemy import text
 
-from fetch import rate, transport
+from fetch import transport
 from fetch.catalog import CATALOG, WATCHABLE, spec
 from fetch.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE, cycle_request, first_unread
 from graph.publish import publication
@@ -114,17 +114,6 @@ def _save(engine, key, state):
             )
 
 
-def _hold_at_ceiling(watch, state, coverage, now):
-    """读取停在出站上限（fetch.rate）：既不是失败也不是丢数据，原因写在运行的 stop_reason、留在 last_coverage。
-    已读的页保留。这一周期不记成功、检查点不动；下一周期从续读位置接着读，一页都没读到就按同一个检查点重新定窗口。"""
-    if coverage.get("next_continuation"):
-        state["request"]["continuation"] = coverage["next_continuation"]
-    elif not state["request"].get("continuation"):
-        state.pop("request")
-    state["state"] = "idle"
-    state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
-
-
 def _stalled(state, coverage):
     """续读位置和请求里的一样，而且这一段一个版本也没读到：原地没动（比如重放就用完了截止时间）。"""
     before = state["request"].get("continuation") or {}
@@ -135,7 +124,7 @@ def _stalled(state, coverage):
 def _page_finished(watch, state, coverage, now):
     """记下一次没有出错的读取：要下一段就接着读，或者结束这一周期。
 
-    停在出站上限的读取带着原因结束这一周期（_hold_at_ceiling）。其他没有续读位置的提前停止都是错误，除了按窗口读的
+    没有续读位置的提前停止都是错误，除了按窗口读的
     （GDELT）：它的回执写明哪些区间可能被截断、哪些窗口没读到，周期带着这些缺口结束，检查点移到第一个没读到的窗口。
     “遇到已存的就停”的来源一个周期最多读 SEGMENTS_PER_CYCLE 段就收工记成功：第一次读一个很深的来源（空库）不会
     一个周期接一个周期地读下去，更老的交给回填（ops/backfill_source.py）。分组读取的来源（港交所、NCCN）不按段数收工：
@@ -145,8 +134,6 @@ def _page_finished(watch, state, coverage, now):
     state["cycle_pages"] = int(state.get("cycle_pages", 0)) + 1
     if _unread_not_stuck(watch.request.source_id, coverage):
         state["unclean"] = True  # 这一周期有条目读不到：周期收尾时记下，下一周期整份重读（read_all）
-    if coverage.get("stop_reason") in rate.CEILING_STOPS and "window_coverage" not in coverage:
-        return _hold_at_ceiling(watch, state, coverage, now)
     capped = _cycle_is_full(watch, state)
     if coverage.get("next_continuation"):
         if _stalled(state, coverage):

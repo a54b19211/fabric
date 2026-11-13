@@ -15,9 +15,10 @@ from datetime import date
 from typing import Dict, Iterator
 from urllib.parse import urljoin
 
-import requests
+import httpx
 from loguru import logger
 
+from fetch import transport
 from fetch.sites.hkex_pharma_list_auto import PHARMA_COMPANIES
 from store.history_models import GroupStart, HistoryError, ItemUnreadable
 
@@ -84,10 +85,10 @@ def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
         "lang": api_config.get("lang", "ZH"),
     }
     try:
-        # 超时（连接秒数，等响应秒数）：接口约 2-4 秒回；个别连接会卡住（实测披露易的两个 Akamai 节点里一个不通），
-        # 连接 5 秒不通就放弃，由 fetch.transport 换一条连接重试
-        response = requests.get(api_config["base_url"], params=params, timeout=(5, 20),
-                                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        # 超时：接口约 2-4 秒回；个别连接会卡住（实测披露易的两个 Akamai 节点里一个不通），
+        # 连接 5 秒不通就放弃，transport.get 换一条连接重试
+        response = transport.get(api_config["base_url"], params, timeout=httpx.Timeout(20, connect=5), cap=32 * 1024 * 1024,
+                                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
         response.raise_for_status()
         body = response.json()
         rows = json.loads(body["result"])

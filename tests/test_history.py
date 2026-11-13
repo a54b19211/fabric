@@ -415,10 +415,9 @@ def test_the_html_hash_is_left_out_when_two_versions_are_compared_by_content():
 @pytest.mark.parametrize(("stop_reason", "state"), [
     ("upstream_exhausted", "completed"),
     ("record_budget", "partial"), ("page_budget", "partial"), ("deadline", "partial"),
-    ("byte_budget", "partial"), ("reached_known", "completed"),
-    ("outbound_quota_day", "partial"), ("outbound_quota_hour", "partial"),
+    ("reached_known", "completed"),
 ])
-def test_a_fetch_that_stopped_at_a_budget_or_quota_is_partial_not_completed(stop_reason, state):
+def test_a_fetch_that_stopped_at_a_budget_is_partial_not_completed(stop_reason, state):
     from datetime import datetime, timezone
 
     from store import history

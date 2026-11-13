@@ -2,18 +2,18 @@
 Fierce Pharma RSS + 详情页混合采集器。
 
 流程：
-  1. 通过 httpx 拉取 RSS XML，解析出文章 URL 和基本元数据
+  1. 用 fetch.transport.get 拉取 RSS XML，解析出文章 URL 和基本元数据
   2. 对每篇文章用 StealthyFetcher 渲染详情页，提取标题和正文（RSS 里的标题是空的，只有详情页有）
   3. yield 标准记录 dict（与 route_webpage 输出格式一致）
 详情页没读全（403、超时、标题或正文缺失）：重读一次，还不行就记为读不到（ItemUnreadable），这一篇不存版本，接着读下一篇。
 """
 
 import re
+import time
 from datetime import datetime
 from typing import Iterator
 from xml.etree import ElementTree as ET
 
-import httpx
 from loguru import logger
 from scrapling.fetchers import StealthyFetcher
 
@@ -110,7 +110,7 @@ def _fetch_rss_items(api_cfg: dict) -> tuple[list[dict], list[ItemUnreadable]]:
 
     for feed_url in feeds:
         try:
-            resp = httpx.get(feed_url, headers=headers, timeout=30, follow_redirects=True)
+            resp = transport.get(feed_url, headers=headers, timeout=30)
             resp.raise_for_status()
             items = _parse_rss(resp.content)
             logger.info(f"[FiercePharma] RSS {feed_url} 解析到 {len(items)} 条")
@@ -132,11 +132,12 @@ def _read_article(url: str) -> dict:
     """读一篇详情页，返回提取结果（标题、日期、正文）。网站对同一篇偶尔回 403（反爬），或页面没读全；等一会儿重读
     一次，两次都不行就抛 ItemUnreadable：这一篇不存版本，网址和原因记进这次读取的覆盖信息，接着读下一篇。
     以前这里用 RSS 的摘要充数，存下标题为空、正文两百字的半页，和整篇文章一样当成一个版本。
-    等待用 transport.pause：到截止时间就停，不睡过头。"""
+    打开页面之前等一下站点的限速（transport.wait）。"""
     why = ""
     for attempt in range(2):
         if attempt:
-            transport.pause(RETRY_DELAY)
+            time.sleep(RETRY_DELAY)
+        transport.wait(url)
         try:
             page = StealthyFetcher.fetch(
                 url,

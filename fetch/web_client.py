@@ -190,30 +190,27 @@ def store_original(content: bytes, identifier: str, source_site: str, file_ext: 
 
 # 简单请求（use_simple_fetch）的超时（连接秒数，读取秒数）和次数（次数 = 最多发几次，scrapling 的 retries 就是这个意思）。
 # 正常的页面一两秒就回来；个别节点会让连接或握手卡住：实测 zktest 到 fda.gov 的 Akamai 节点（23.35.148.x 一组，
-# 解析会随时间换组）有时一半以上的新连接卡住，卡住就是一直没有回音，干等 30 秒再来两次要 90 秒。所以超时短，
-# 超时后的重试交给 fetch.transport（立刻换一条连接重试）。
+# 解析会随时间换组）有时一半以上的新连接卡住，卡住就是一直没有回音，干等 30 秒再来两次要 90 秒。所以超时短、
+# 多发几次（每次是一条新连接）。
 SIMPLE_FETCH_TIMEOUT = (3, 6)
-SIMPLE_FETCH_TRIES = 2
+SIMPLE_FETCH_TRIES = 4
 CONNECT_SECONDS = 10  # 下载附件时，建立连接（含 TLS 握手）最多等几秒，见 download_pdf
 
 
-def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None, disable_resources: bool = True, solve_cloudflare: bool = False, network_idle: bool = True, use_simple_fetch: bool = False):
+def fetch_page(url: str, wait_selector: str = None, disable_resources: bool = True, solve_cloudflare: bool = False,
+               network_idle: bool = True, use_simple_fetch: bool = False):
     """
-    抓取单个网页，返回 scrapling 页面对象。
+    抓取单个网页，返回 scrapling 页面对象。打开之前先等这个站点的限速（fetch.transport.wait）。
 
     参数:
         url:               目标网页 URL
-        headers:           已废弃，保留参数签名兼容旧调用
-        delay:             请求前等待秒数
         wait_selector:     等待该 CSS 选择器出现后再返回
         disable_resources: 是否禁止加载图片/字体/CSS（默认 True 提速）
         network_idle:      是否等待网络空闲后再返回（默认 True）
-        use_simple_fetch:  True = 用 httpx 直接请求（StaticFetcher），跳过 Playwright
+        use_simple_fetch:  True = 不开浏览器，直接发请求（scrapling Fetcher）
                            适合无反爬、无 JS 渲染需求的站点，速度快 10x
     """
-    if delay > 0:
-        transport.pause(delay)  # 在读取里（fetch.transport）不睡过截止时间
-
+    transport.wait(url)
     cookies: list[dict] = []
 
     if use_simple_fetch:
@@ -244,7 +241,7 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")
 
-    # 非 2xx 状态码视为失败，抛出异常。超时和 429 的有界重试在 fetch.transport，其他错误不重试
+    # 非 2xx 状态码视为失败，抛出异常，不重试
     if not (200 <= page.status < 300):
         raise RuntimeError(f"HTTP {page.status}，页面请求被拒绝: {url}")
 
@@ -261,7 +258,6 @@ def download_pdf(
     pdf_url: str,
     parent_uuid: str = "",
     source_site: str = "",
-    force: bool = False,
     cookies: list[dict] | None = None,
     max_bytes: int | None = None,
     timeout: float = 120,
@@ -271,10 +267,10 @@ def download_pdf(
     """
     下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx/xls/xlsx）。
 
+    每次调用都重新请求（经 fetch.transport.get：限速、超时重试），成功后按字节摘要复用或保存文件，不覆盖旧原件；
+    返回里的 skipped 只表示本地已有相同字节，不表示没检查远端。超过 max_bytes 抛 ValueError("response_too_large")。
+
     参数:
-        force:   保留参数兼容；每次调用都重新请求，True也不会覆盖旧原件。
-                 当前未保存条件请求凭据，成功GET后按字节摘要复用或保存文件。
-                 skipped仅表示本地已有相同字节，不表示未检查远端。
         cookies: 从抓取页面继承的浏览器 cookies（Playwright 格式），
                  用于需要会话的站点（如 CDE）
         store_as: 原件落盘用的身份（默认是下载网址）。下载链接每次都不同的站点（ChiCTR 的链接带一次性令牌）
@@ -297,22 +293,11 @@ def download_pdf(
     limit = max_bytes if max_bytes is not None else int(os.environ.get(
         "DATAFABRIC_ATTACHMENT_MAX_BYTES", str(100 * 1024 * 1024)))
     # 连接（含 TLS 握手）只等 CONNECT_SECONDS：nccn.org、hkexnews 的个别连接会卡 60 秒以上（实测握手超时 62-76 秒），
-    # 干等就把整段读取的时间用光；放弃它，fetch.transport 换一条连接重试（超时重试在那里）
-    with httpx.Client(headers=headers, follow_redirects=True, proxy=proxy,
-                      timeout=httpx.Timeout(timeout, connect=CONNECT_SECONDS)) as client:
-        with client.stream("GET", pdf_url) as resp:
-            resp.raise_for_status()
-            declared = resp.headers.get("content-length")
-            if declared and declared.isdigit() and int(declared) > limit:
-                raise ValueError("attachment_too_large")
-            chunks, size = [], 0
-            for chunk in resp.iter_bytes():
-                size += len(chunk)
-                if size > limit:
-                    raise ValueError("attachment_too_large")
-                chunks.append(chunk)
-
-    content = b"".join(chunks)
+    # 干等就把整段读取的时间用光；放弃它，transport.get 换一条连接重试
+    with httpx.Client(headers=headers, follow_redirects=True, proxy=proxy) as client:
+        resp = transport.get(pdf_url, client=client, cap=limit, timeout=httpx.Timeout(timeout, connect=CONNECT_SECONDS))
+    resp.raise_for_status()
+    content = resp.content
     if not content:
         raise ValueError("附件响应为空，未采用旧缓存")
     # PDF文件头比可能变化的响应头可靠；其余类型沿用已有判别规则。

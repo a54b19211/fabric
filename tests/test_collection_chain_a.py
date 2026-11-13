@@ -389,45 +389,14 @@ def test_a_read_that_ends_without_a_cursor_is_counted_and_read_again_until_the_c
     assert "active_run_id" not in backfill
 
 
-def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the_cursor():
-    who = SourceWatch.model_validate(
-        {"id": "w", "cadence_seconds": 900, "request": {"source_id": "who_don", "query": "*"}}
-    )
-    checkpoint = "2026-11-03T00:00:00+00:00"
-    state = {"request": {}, "window_ended_at": NOW.isoformat(), "window_checkpoint": checkpoint}
-    cursor = {"cursor": "c"}
-    # pages were read, then the daily ceiling refused the next request: the cursor is kept, the cycle waits
-    _page_finished(who, state, {"stop_reason": "outbound_quota_day", "next_continuation": cursor}, NOW)
-    assert state["state"] == "idle" and state["request"]["continuation"] == cursor  # not paging: no retry at once
-    assert state["window_checkpoint"] == checkpoint and "last_success_at" not in state
-    assert state["next_check_at"] == (NOW + timedelta(seconds=900)).isoformat()
-    # the next cycle asks for the same page and is refused again: still the same cursor, still no failure
-    _page_finished(who, state, {"stop_reason": "outbound_quota_day"}, NOW)
-    assert state["state"] == "idle" and state["request"]["continuation"] == cursor
-    assert state["last_coverage"]["stop_reason"] == "outbound_quota_day"
-
-
-def test_outbound_caps_are_the_declared_ones_and_count_per_site(mid_hour_clock):
-    who, gdelt = catalog.spec("who_don"), catalog.spec("gdelt_doc")
-    assert (who.min_interval_seconds, who.outbound_cap) == (30, catalog.OutboundCap(per_day=200))
-    assert gdelt.min_interval_seconds == 6
-    assert gdelt.outbound_cap == catalog.OutboundCap(per_day=900, per_hour_per_query=7)
-    url = "https://www.who.int/api/hubs/diseaseoutbreaknews"
-    assert all(rate.take_for_url(url) is None for _ in range(200))
-    assert rate.take_for_url(url) == "outbound_quota_day"
-    assert rate.take_for_url("https://clinicaltrials.gov/api/v2/studies") is None  # no cap declared: not counted
-
-
 def _gate_worker(args):
     import os
     import time as _time
 
     directory, n = args
     os.environ["DATAFABRIC_RATE_DIR"] = directory
-    os.environ.pop("DATAFABRIC_HISTORY_REDIS_URL", None)
     from fetch import rate as gate
 
-    gate._redis.cache_clear()
     stamps = []
     for _ in range(n):
         gate.wait("probe.example", 0.2)
@@ -435,43 +404,14 @@ def _gate_worker(args):
     return stamps
 
 
-def test_rate_gate_without_redis_is_shared_across_processes(tmp_path):
-    """Codex r58：Redis 不可用时 3 个进程各 2 次、间隔 0.2 秒，旧实现 0.2 秒就放行 6 次。"""
+def test_rate_gate_is_shared_across_processes(tmp_path):
+    """Codex r58：3 个进程各 2 次、间隔 0.2 秒，各算各的话 0.2 秒就放行 6 次。"""
     from concurrent.futures import ProcessPoolExecutor
 
     with ProcessPoolExecutor(3) as pool:
         stamps = sorted(t for result in pool.map(_gate_worker, [(str(tmp_path), 2)] * 3) for t in result)
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     assert len(stamps) == 6 and min(gaps) >= 0.19 and stamps[-1] - stamps[0] >= 0.95
-
-
-def test_rate_gate_redis_failure_waits_and_never_splits_into_a_second_clock(monkeypatch):
-    """Codex r61：配了 Redis 而它故障时不能切到文件闸门（会和仍连得上 Redis 的进程各算各的）。"""
-
-    class Broken:
-        def set(self, *a, **k):
-            raise ConnectionError("down")
-
-    monkeypatch.setattr(rate, "_redis", lambda: Broken())
-    monkeypatch.setattr(rate, "_wait_file", lambda *a: pytest.fail("must not use the file gate"))
-    monkeypatch.setattr(rate.time, "sleep", lambda s: None)
-    import time as _time
-
-    with pytest.raises(TimeoutError):
-        rate.wait("g", 0.5, deadline=_time.monotonic() + 0.0001)
-    with pytest.raises(TimeoutError, match="rate_gate_unavailable"):
-        rate.wait("g", 0.5)
-
-
-def test_rate_gate_respects_the_deadline(tmp_path, monkeypatch):
-    import time as _time
-
-    monkeypatch.setenv("DATAFABRIC_RATE_DIR", str(tmp_path))
-    monkeypatch.delenv("DATAFABRIC_HISTORY_REDIS_URL", raising=False)
-    rate._redis.cache_clear()
-    rate.wait("slow", 30)
-    with pytest.raises(TimeoutError):
-        rate.wait("slow", 30, deadline=_time.monotonic() + 1)
 
 
 def test_every_known_host_maps_to_its_catalog_rate_group():

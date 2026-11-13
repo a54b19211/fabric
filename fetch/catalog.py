@@ -40,22 +40,11 @@ class Incremental:
     semantics: str
     # 窗口回看重叠：来源更新日期常是“天”精度且有发布延迟，重叠读到的同一原件按版本身份去重。
     overlap_days: int = 2
-    # 固定刷新（fetch.source_refresh）的最短间隔。一轮至少一次请求，有每日上限的来源要声明一个它的上限撑得住的下限。
+    # 固定刷新（fetch.source_refresh）的最短间隔。一轮至少一次请求。
     min_cadence_seconds: int = 3600
     # stop_at_known 按组算（站点配置里也写了 "by_group": True）：每一组各自从新到旧，“连续读到已存的就停”只停这一组，
     # 一个周期读完全部的组（不受 SEGMENTS_PER_CYCLE 限制），读不到的组下个周期自然再读（不用整份重读）
     by_group: bool = False
-
-
-@dataclass(frozen=True)
-class OutboundCap:
-    """本实例自己对一个网站的请求上限，跨读取、跨进程一起数（fetch.rate）。它只限制本实例发出去的，
-    不是和其他实例或现役系统共享的上限。
-    per_day：每个 UTC 日的请求数，这个来源的所有查询加在一起。
-    per_hour_per_query：每个 UTC 小时、请求的 `query` 参数每个取值各自的请求数。"""
-
-    per_day: int
-    per_hour_per_query: int | None = None
 
 
 @dataclass(frozen=True)
@@ -72,7 +61,6 @@ class CollectionSpec:
     incremental: Incremental
     rate_group: str
     min_interval_seconds: float
-    outbound_cap: OutboundCap | None = None
     # 元数据、摘要、全文各自覆盖到哪一层，如实写；键只能用 fetch.evidence_types.COVERAGE
     coverage: dict = field(default_factory=dict)
     # 支持不带时间窗的全量回填（续页标记可靠、按页可续）
@@ -105,7 +93,7 @@ class CollectionSpec:
 
 _NO_INCREMENT = Incremental("none", None, "尚未接通，没有增量键")
 # 没有可过滤的更新时间、但列表从新到旧的来源：每轮从头读，连续读到 KNOWN_STOP（fetch.windows）条已存且没变的就停，
-# 老 ETL 的“遇到第一个重复的就停止”，一处通用实现（transport.Budget.known）。列表的顺序是站点自己的默认顺序，不是来源的承诺。
+# 老 ETL 的“遇到第一个重复的就停止”，一处通用实现（fetch.transport.Budget.known）。列表的顺序是站点自己的默认顺序，不是来源的承诺。
 _NEWEST_FIRST = Incremental(
     "stop_at_known", None, "列表从新到旧，每轮从头读，连续读到 3 条已存且没变的就停；没有更新时间可过滤，旧条目被改动读不到"
 )
@@ -183,13 +171,12 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
         plugin="who_don",
         evidence_types=("official_notice",),
         decisions=("D", "E"),
-        # 每 15 分钟一轮：每轮一次请求，一天 96 次，远在每日 200 次的上限之内。
+        # 每 15 分钟一轮：每轮一次请求，一天 96 次。
         incremental=Incremental(
             "modified_window", "LastModified", "公告最后修改时间；不是暴发开始时间", min_cadence_seconds=900
         ),
         rate_group="who.int",
         min_interval_seconds=30.0,
-        outbound_cap=OutboundCap(per_day=200),  # 回填的请求也算在这 200 次里
         coverage={"metadata": "全部", "fulltext": "公告原文"},
     ),
     CollectionSpec(
@@ -395,16 +382,14 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
         ),
         rate_group="gdeltproject.org",
         min_interval_seconds=6.0,  # GDELT 要求每 5 秒最多一个请求；多留 1 秒。实测更慢也不更安全（见 notes），不再调
-        outbound_cap=OutboundCap(per_day=900, per_hour_per_query=7),  # 5 个查询 x 24 小时 x 7 次 = 最多 840
         coverage={"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
         notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条。"
         "限流 2026-11-13 实测：是对方限速，不是网络问题。从 zktest 直连和经本机代理（mihomo）各 40 次请求（间隔 6、15、30、60 秒"
         "各 10 次）：直连 8 次、代理 6 次成功，其余都是 429；换 6 个查询词 2/6 成功，间隔 300 秒 0/6 成功。成功率约 17%，"
         "和路线、间隔、查询词都无关；连接 0.3 秒，每个响应（200 和 429 都是）约 12 秒才回；429 正文写“每 5 秒一个请求”，"
         "没有 Retry-After。官方只说限速是为了保护 ElasticSearch 集群（2022-02-28 官方博客），没给数字。所以不走代理，也没有"
-        "“更慢就安全”的速率：间隔和上限（已比对方要求的慢很多）不动；每个请求最多发 6 次，每次等对方说的间隔"
-        "（fetch.gdelt_news.TRIES）。每个查询每小时最多 7 次请求，约 17% 成功，一天平均约 28 次成功，够读 24 个整点窗口"
-        "（读不到的下个周期接着读，有延迟）",
+        "“更慢就安全”的速率：间隔（已比对方要求的慢）不动；每个请求最多发 6 次，每次等对方说的间隔"
+        "（fetch.gdelt_news.TRIES），还是 429 就记为对方限流（读不到的窗口下个周期接着读，有延迟）",
     ),
     CollectionSpec(
         source_id="drugs_fda",

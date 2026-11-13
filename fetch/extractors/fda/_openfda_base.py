@@ -14,6 +14,7 @@ from typing import Iterator
 import httpx
 from loguru import logger
 
+from fetch import transport
 from store.history_models import HistoryError
 
 OPENFDA_BASE = "https://api.fda.gov"
@@ -26,7 +27,7 @@ def _get_page(url, endpoint, fetched, *, params=None, end_on_404=False):
     """读一页。HTTP 错误和网络异常都抛 HistoryError（写明原因），运行记为失败；以前是记一行日志、当作读到底。
     end_on_404：skip 翻页时 openFDA 翻过最后一页回 404，这时返回 None 表示读完了。"""
     try:
-        resp = httpx.get(url, params=params, timeout=30)
+        resp = transport.get(url, params, timeout=30, cap=32 * 1024 * 1024)
         resp.raise_for_status()
         return resp
     except httpx.HTTPStatusError as e:

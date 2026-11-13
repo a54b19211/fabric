@@ -1,9 +1,8 @@
-"""The bounded WHO backfill (ops.who_backfill): every bound, the ceiling, the receipt. The WHO endpoint and the
+"""The bounded WHO backfill (ops.who_backfill): every bound, the receipt. The WHO endpoint and the
 history store are stand-ins; nothing goes to the network or a database."""
 
 import json
 import re
-import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -22,7 +21,7 @@ REAL_CLIENT = httpx.Client
 
 @pytest.fixture(autouse=True)
 def open_gate(monkeypatch):
-    """The 30 s spacing of the who.int gate is not under test here; the counters of the ceiling are."""
+    """The 30 s spacing of the who.int gate is not under test here."""
     monkeypatch.setattr(rate, "wait_for_url", lambda url, **kw: None)
 
 
@@ -125,13 +124,13 @@ def test_backfill_with_a_since_is_another_task_that_reads_only_its_window_and_le
         backfill_who(since, since=since, store=store)  # an end that is not after the start
 
 
-def test_backfill_stops_when_its_byte_bound_is_reached_and_does_not_keep_the_page_that_crossed_it(monkeypatch):
+def test_backfill_stops_after_the_leg_that_reaches_its_byte_bound(monkeypatch):
     who, store = WhoStandIn(monkeypatch, pad=1500), RunStore()
     page = len(json.dumps({"value": who.notices[20:71]}))  # a response of the first page, give or take the spacing
     receipt = backfill_who(UNTIL, bounds=Counts(records=400, bytes=page * 3 // 2), store=store)
-    assert receipt["stopped_by"] == "bytes_bound" and len(who.requests) == 2  # the first page fits, the second crosses
-    assert receipt["spent"]["bytes"] > page * 3 // 2 and receipt["spent"]["records"] == 50
-    assert receipt["cursor"]["id"] == adopted(store)[-1]  # the second page is the gap: it starts at the cursor
+    assert receipt["stopped_by"] == "bytes_bound" and len(who.requests) == 2  # the first leg's two pages cross it
+    assert receipt["spent"]["bytes"] > page * 3 // 2 and receipt["spent"]["records"] == 100
+    assert receipt["cursor"]["id"] == adopted(store)[-1]  # a later backfill would start after the last one kept
 
 
 def test_backfill_leg_fails_on_one_response_over_8_mib_and_adopts_nothing_from_it(monkeypatch):
@@ -141,16 +140,3 @@ def test_backfill_leg_fails_on_one_response_over_8_mib_and_adopts_nothing_from_i
     assert receipt["stopped_by"] == "source_failed" and receipt["spent"]["records"] == 0 and adopted(store) == []
     assert len(who.requests) == 1  # a failed leg is the end of this call, not a retry loop
 
-
-def test_backfill_requests_count_inside_the_daily_ceiling_and_a_later_call_carries_on(monkeypatch, mid_hour_clock):
-    who, store = WhoStandIn(monkeypatch), RunStore()
-    for _ in range(197):  # the scheduled watch has used 197 of the day's 200 requests
-        assert rate.take_for_url(who_don.ENDPOINT) is None
-    stopped = backfill_who(UNTIL, store=store)
-    assert stopped["stopped_by"] == "outbound_quota_day" and len(who.requests) == 3  # the 4th was refused, not sent
-    assert stopped["spent"]["records"] == 150 and not stopped["reached_end"]
-    tomorrow = SimpleNamespace(time=lambda: 1_800_000_000 + 86400.0, monotonic=time.monotonic, sleep=time.sleep)
-    monkeypatch.setattr(rate, "time", tomorrow)  # the ceiling counts per UTC day
-    done = backfill_who(UNTIL, store=store)
-    assert done["stopped_by"] == "records_bound" and done["spent"]["records"] == 400 and done["spent"]["requests"] == 8
-    assert len(who.requests) == 8 and len(adopted(store)) == 400  # the legs already made were replayed, not read again

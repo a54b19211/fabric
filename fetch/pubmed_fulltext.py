@@ -15,7 +15,7 @@ best_oa_location（其次 oa_locations）有 url_for_pdf 且 license 是 cc-* / 
 
 许可按篇保存：具体许可（如 "CC BY-NC 4.0"）、条款（BY / NC / ND / SA）、原文链接和依据都写进附件版本的
 access，不把所有 cc-* 当成同一种可用范围；能不能用于某个业务用途由使用方按条款判断（PMC 许可因篇而异）。
-请求、字节、截止时间和版本数都走本次读取的同一个预算（fetch.transport）：保存全文前先确认还有版本名额，
+版本数和截止时间走 PubMed 读取的同一个额度（fetch.transport.Budget，由调用方传进来）：保存全文前先确认还有版本名额，
 没有就停（PubMed 读取给出“这一篇只差全文”的续读位置）。开关 DATAFABRIC_PUBMED_FULLTEXT=0 关闭。
 正文由加工层产出：PMC JATS 由 clean.jats_text（节/段定位），PDF 由 attachment_parse（MinerU，页定位）。
 """
@@ -129,8 +129,9 @@ def _pmc(client, budget, pmid, pmcid):
     entry = {"parent_record_id": pmid, "route": "pmc", "url": url, "record_id": record_id}
     budget.need_record()
     try:
-        status, raw = transport.get(client, PMC_EFETCH, {"db": "pmc", "id": pmcid, "retmode": "xml"},
-                                    cap=min(XML_BYTES, max_file_bytes()), timeout=60.0)
+        response = transport.get(PMC_EFETCH, {"db": "pmc", "id": pmcid, "retmode": "xml"}, client=client,
+                                 cap=min(XML_BYTES, max_file_bytes()), timeout=60.0, deadline=budget.deadline)
+        status, raw = response.status_code, response.content
     except ValueError as exc:
         if str(exc) == "response_too_large":
             return {**entry, "status": "too_large"}, None
@@ -163,12 +164,6 @@ def _pmc(client, budget, pmid, pmcid):
     return entry, record
 
 
-def _download(url, *, pmid, cap, timeout):
-    from fetch.web_client import download_pdf
-
-    return download_pdf(url, parent_uuid=pmid, source_site="pubmed", max_bytes=cap, timeout=timeout)
-
-
 def _unpaywall(client, budget, pmid, doi):
     from fetch.site_crawler import attachment_record_id
 
@@ -180,7 +175,9 @@ def _unpaywall(client, budget, pmid, doi):
         return {**base, "status": "invalid_doi"}, None
     budget.need_record()
     try:
-        status, raw = transport.get(client, UNPAYWALL + quote(doi, safe="/"), {"email": email}, cap=LOOKUP_BYTES)
+        response = transport.get(UNPAYWALL + quote(doi, safe="/"), {"email": email}, client=client, cap=LOOKUP_BYTES,
+                                 deadline=budget.deadline)
+        status, raw = response.status_code, response.content
     except Exception as exc:  # noqa: BLE001 -- 预算停止是 BaseException，不在这里
         return {**base, "status": "unpaywall_failed", "error": str(exc)[:40] or type(exc).__name__}, None
     if status == 404:
@@ -205,12 +202,14 @@ def _unpaywall(client, budget, pmid, doi):
 
 def _store_oa_pdf(budget, pmid, doi, entry, location):
     """Download the open-licence PDF Unpaywall named and make it the attachment version."""
+    from fetch.web_client import download_pdf
+
     url, license_value = location["url_for_pdf"], location.get("license")
+    budget.check()
     try:
-        info = _download(url, pmid=pmid, cap=max(0, min(max_file_bytes(), budget.max_bytes - budget.bytes)),
-                         timeout=budget.timeout(60.0))
+        info = download_pdf(url, parent_uuid=pmid, source_site="pubmed", max_bytes=max_file_bytes(), timeout=60)
     except ValueError as exc:
-        status = "too_large" if str(exc) == "attachment_too_large" else "oa_pdf_failed"
+        status = "too_large" if str(exc) == "response_too_large" else "oa_pdf_failed"
         return {**entry, "status": status}, None
     except Exception as exc:  # noqa: BLE001
         return {**entry, "status": "oa_pdf_failed", "error": type(exc).__name__}, None
@@ -230,11 +229,10 @@ def _store_oa_pdf(budget, pmid, doi, entry, location):
             "size": stored["size"]}, record
 
 
-def fulltext(client, pmid, pmcid, doi):
-    """一篇文献的全文 → (附件原件列表, 覆盖记录)。预算停止（transport.Stop）向上抛，由 PubMed 读取给续读位置。"""
+def fulltext(client, budget, pmid, pmcid, doi):
+    """一篇文献的全文 → (附件原件列表, 覆盖记录)。额度用完（transport.Stop）向上抛，由 PubMed 读取给续读位置。"""
     if not enabled():
         return [], [{"parent_record_id": pmid, "status": "fulltext_disabled"}]
-    budget = transport.current()
     coverage = []
     if pmcid and re.fullmatch(r"PMC\d{1,12}", pmcid):
         entry, record = _pmc(client, budget, pmid, pmcid)

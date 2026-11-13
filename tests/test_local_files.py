@@ -203,7 +203,7 @@ def fetch(ids, **extra):
 
 def test_inbox_plugin_reads_listed_files_through_the_same_store_and_version_shape(inbox):
     batch = fetch(["batch/a.pdf", "batch/missing.pdf", "batch/link.pdf"])
-    assert batch["error"] is None and batch["requests"] == 0 and batch["bytes"] == len(PDF)
+    assert batch["error"] is None and batch["requests"] == batch["bytes"] == 0  # 本地导入不发请求
     [record] = batch["records"]
     assert record.source_record_id == "local-file:inbox/batch/a.pdf"
     projected = project_record("local_files", record)

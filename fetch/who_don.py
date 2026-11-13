@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from uuid import UUID
 
 import httpx
@@ -138,6 +139,7 @@ def read_who(request):
             filters.append("LastModified " + sign + " " + value.isoformat())
     if request.query.strip() != "*":
         filters.append("contains(Title,'" + request.query.replace("'", "''") + "')")
+    deadline = time.monotonic() + request.deadline_seconds
     with httpx.Client(timeout=20, follow_redirects=False) as client:
         try:
             for _ in range(request.max_pages):
@@ -157,11 +159,10 @@ def read_who(request):
                     )
                 if page_filters:
                     params["$filter"] = " and ".join(page_filters)
-                # 限速、请求/字节/期限预算由 fetch.transport 在发出处统一执行
-                status, body = transport.get(client, ENDPOINT, params, cap=MAX_RESPONSE_BYTES)
-                if status != 200:
-                    raise ValueError("HTTP " + str(status))
-                raw = body.decode("utf-8")
+                response = transport.get(ENDPOINT, params, client=client, cap=MAX_RESPONSE_BYTES, deadline=deadline)
+                if response.status_code != 200:
+                    raise ValueError("HTTP " + str(response.status_code))
+                raw = response.content.decode("utf-8")
                 data = parse_json(raw)
                 if not isinstance(data.get("value"), list):
                     raise HistoryError(

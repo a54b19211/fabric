@@ -42,11 +42,6 @@ def test_a_leg_that_moved_on_without_new_versions_is_still_progress(monkeypatch,
     assert code == 0 and "读到底了" in out
 
 
-def test_a_read_that_hit_an_outbound_ceiling_stops_and_says_so(monkeypatch, capsys):
-    code, out, _ = run_with(monkeypatch, capsys, ["who_don"], [leg(2, 0, "c1", stop_reason="outbound_quota_day")])
-    assert code == 1 and "出站上限" in out and "outbound_quota_day" in out
-
-
 def test_pages_overrides_the_configured_pages_of_a_list_site_and_the_end_says_how_far_it_read(monkeypatch, capsys):
     from fetch.site_profiles import SITE_PROFILES
 

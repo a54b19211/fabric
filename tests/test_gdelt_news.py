@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from fetch import gdelt_news, rate, transport, window_coverage
-from fetch.gdelt_news import ENDPOINT, article_id
+from fetch.gdelt_news import article_id
 from fetch.source_refresh import SourceWatch, _page_finished
 from fetch.sources import project_record, read_public
 from fetch.window_coverage import effective_receipts
@@ -220,18 +220,22 @@ def test_failed_window_is_not_zero_news_and_the_rest_stays_unread(monkeypatch, w
     assert len(result["records"]) == 3 and result["upstream_pagination_exhausted"] is False
 
 
+def deadline_before_request(monkeypatch, n):
+    """The deadline has passed when the n-th request has waited its turn at the rate gate."""
+    calls = []
+
+    def wait(url):
+        calls.append(url)
+        if len(calls) == n:
+            raise transport.Stop("deadline")
+
+    monkeypatch.setattr(rate, "wait_for_url", wait)
+
+
 def test_a_deadline_stop_reports_the_windows_not_reached(monkeypatch, open_gate):
     """A stop in the middle of a read (here the deadline, which falls before the 11th request) lists the windows it did
     not reach; the read has no limit on the number of requests of its own, two full hours need 14."""
-    calls = []
-
-    def take(url):  # the ceiling of 7 an hour is not under test here
-        calls.append(url)
-        if len(calls) == 11:
-            transport.current().stop("deadline")
-        return None
-
-    monkeypatch.setattr(rate, "take_for_url", take)
+    deadline_before_request(monkeypatch, 11)
     sent = stand_in(monkeypatch, lambda start, end: 3)
     result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3,
                                       updated_since="2026-10-30T00:00:00Z", updated_until="2026-10-30T02:00:00Z"))
@@ -240,29 +244,6 @@ def test_a_deadline_stop_reports_the_windows_not_reached(monkeypatch, open_gate)
     unread = [w for w in result["window_coverage"] if w["status"] == "not_read"]
     assert [(w["start"][11:16], w["end"][11:16], w["reason"]) for w in unread] == [
         ("01:15", "01:30", "deadline"), ("01:30", "02:00", "deadline")]
-
-
-def test_hourly_ceiling_counts_across_reads_per_query_and_names_the_reason(monkeypatch, open_gate, mid_hour_clock):
-    stand_in(monkeypatch, lambda start, end: 3)  # every window full: one query-hour uses all 7 requests
-    first = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **HOUR))
-    assert first["requests"] == 7 and first["stop_reason"] == "bounded_index_response"
-    later = {"updated_since": "2026-10-30T01:00:00Z", "updated_until": "2026-10-30T02:00:00Z"}
-    second = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **later))
-    assert second["requests"] == 0 and second["stop_reason"] == "outbound_quota_hour"  # a later read, the same hour
-    assert second["window_coverage"][0]["reason"] == "outbound_quota_hour"
-    other = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia", max_records=3, **later))
-    assert other["requests"] == 7  # the count is per query
-
-
-def test_daily_ceiling_stops_the_read_before_its_first_request_and_names_the_reason(
-        monkeypatch, open_gate, mid_hour_clock):
-    sent = stand_in(monkeypatch, lambda start, end: 1)
-    for n in range(900):  # 900 requests of other queries already sent today
-        assert rate.take_for_url(f"{ENDPOINT}?query=other{n}") is None
-    result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3, **HOUR))
-    assert result["stop_reason"] == "outbound_quota_day" and result["requests"] == 0 and sent == []
-    [receipt] = result["window_coverage"]
-    assert (receipt["status"], receipt["reason"]) == ("not_read", "outbound_quota_day")
 
 
 def watch_cycle(checkpoint):
@@ -290,15 +271,16 @@ def test_cycle_with_windows_cut_short_ends_with_the_gaps_and_moves_the_checkpoin
     assert len(state["last_coverage"]["truncated_intervals"]) == 4  # and the gaps stay in the receipt
 
 
-def test_cycle_stopped_by_a_ceiling_resumes_at_the_first_window_it_did_not_read(monkeypatch, open_gate, mid_hour_clock):
-    stand_in(monkeypatch, lambda start, end: 3)  # the first hour takes this query's 7 requests of the hour
+def test_cycle_stopped_by_the_deadline_resumes_at_the_first_window_it_did_not_read(monkeypatch, open_gate):
+    stand_in(monkeypatch, lambda start, end: 3)  # the first hour takes 7 requests, every window full down to 15 minutes
+    deadline_before_request(monkeypatch, 8)
     watch, state, request = watch_cycle("2026-11-04T10:00:00+00:00")
     batch = finish_cycle(watch, state, request)
-    assert batch["stop_reason"] == "outbound_quota_hour"
+    assert batch["stop_reason"] == "deadline"
     assert state["state"] == "idle" and "last_success_at" not in state  # not a finished cycle
     assert state["window_checkpoint"] == "2026-11-04T11:00:00+00:00"
     unread = [w for w in state["last_coverage"]["window_coverage"] if w["status"] == "not_read"]
-    assert [(w["start"][11:16], w["reason"]) for w in unread] == [("11:00", "outbound_quota_hour")]
+    assert [(w["start"][11:16], w["reason"]) for w in unread] == [("11:00", "deadline")]
 
 
 # ---- the lead channel: the receipts a listing of a window carries ----
@@ -332,7 +314,7 @@ def test_a_later_run_replaces_the_receipt_of_a_window_an_earlier_one_did_not_rea
         return {"start": "2026-10-30T" + start + ":00+00:00", "end": "2026-10-30T" + end + ":00+00:00",
                 "status": status, **fields}
     early = {"window_coverage": [receipt("00:00", "00:30", "read", returned=1),
-                                 receipt("00:30", "01:00", "not_read", reason="outbound_quota_hour")]}
+                                 receipt("00:30", "01:00", "not_read", reason="deadline")]}
     late = {"window_coverage": [receipt("00:30", "01:00", "read", returned=2)]}
     other_query = {"window_coverage": [receipt("00:30", "01:00", "failed", reason="source_rate_limited")]}
     receipts, _ = effective_receipts([("a", early), ("a", late), ("b", other_query)])

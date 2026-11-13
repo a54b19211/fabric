@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from fetch import site_crawler, transport
+from fetch import transport
 from fetch import web_client as client
 
 URL = "https://example.invalid/notice.pdf"
@@ -19,6 +19,7 @@ def http_source(monkeypatch, tmp_path):
 
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(client.APP, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", 0)  # transport.get 重发 429 之前不真等
     state = {"body": A, "status": 200, "error": None, "requests": []}
     real_client = httpx.Client
     state["client_class"] = real_client
@@ -36,22 +37,16 @@ def http_source(monkeypatch, tmp_path):
     return state
 
 
-def _budget():
-    return transport.Budget(max_bytes=10**9, max_records=10, deadline_seconds=60)
-
-
 def download(**kwargs):
     return client.download_pdf(URL, source_site="synthetic_files", **kwargs)
 
 
 def test_a_connection_that_does_not_come_up_is_given_up_after_ten_seconds_so_the_transport_can_try_another(
-        http_source, monkeypatch):
-    """nccn.org 的个别连接 TLS 握手卡 60 秒以上（实测 62-76 秒）：下载的连接超时只有 10 秒，不是整个读取的剩余时间。"""
-    seen = {}
-    fixture_client = client.httpx.Client
-    monkeypatch.setattr(client.httpx, "Client", lambda **kwargs: (seen.update(kwargs), fixture_client(**kwargs))[1])
+        http_source):
+    """nccn.org 的个别连接 TLS 握手卡 60 秒以上（实测 62-76 秒）：下载的连接超时只有 10 秒，超时了 transport.get 换一条重发。"""
     download()
-    assert seen["timeout"].connect == client.CONNECT_SECONDS == 10 and seen["timeout"].read == 120
+    timeout = http_source["requests"][0].extensions["timeout"]
+    assert timeout["connect"] == client.CONNECT_SECONDS == 10 and timeout["read"] == 120
 
 
 def test_same_url_new_bytes_are_used_and_old_original_is_retained(http_source):
@@ -73,13 +68,12 @@ def test_same_url_new_bytes_are_used_and_old_original_is_retained(http_source):
     assert len(http_source["requests"]) == 3
 
 
-@pytest.mark.parametrize("force", [False, True])
-def test_existing_legacy_file_and_new_original_are_never_overwritten(http_source, force):
+def test_existing_legacy_file_and_new_original_are_never_overwritten(http_source):
     legacy = client.APP.RAW_DIR / "synthetic_files" / (client.make_uuid(URL) + ".pdf")
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_bytes(A)
     http_source["body"] = B
-    result = download(force=force)
+    result = download()
     assert legacy.read_bytes() == A
     assert Path(result["local_path"]).read_bytes() == B
     assert Path(result["local_path"]) != legacy
@@ -103,10 +97,10 @@ def test_timeout_uses_the_bounded_retry_and_keeps_the_old_original(http_source, 
     monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", .01)
     delays = []
     monkeypatch.setattr(transport.time, "sleep", delays.append)
-    with transport.metered(_budget()), pytest.raises(httpx.ReadTimeout):
-        site_crawler._download(URL, source_site="synthetic_files")
+    with pytest.raises(httpx.ReadTimeout):
+        download()
     assert len(http_source["requests"]) == 4  # 初次成功＋本轮最多三次读取
-    assert delays == [.01, .01]  # 超时每次等同样的短时间（上限 1 秒），不翻倍；只有 429 才翻倍
+    assert delays == []  # 超时马上换一条连接重发，不干等；只有 429 才等
     assert Path(first["local_path"]).read_bytes() == A
 
 
@@ -128,8 +122,7 @@ def test_429_retries_once_then_reads_b(http_source, monkeypatch):
     monkeypatch.setattr(client.APP, "TASK_RETRY_DELAY", .01)
     delays = []
     monkeypatch.setattr(transport.time, "sleep", delays.append)
-    with transport.metered(_budget()):
-        result = site_crawler._download(URL, source_site="synthetic_files")
+    result = download()
     assert len(requests) == 2 and delays == [.01]
     assert Path(result["local_path"]).read_bytes() == B
     assert Path(first["local_path"]).read_bytes() == A
@@ -172,11 +165,11 @@ def test_empty_response_is_a_failure_with_old_a_intact(http_source):
     assert Path(first["local_path"]).read_bytes() == A
 
 
-def test_force_refetch_of_same_bytes_does_not_rewrite_original(http_source):
+def test_refetch_of_same_bytes_does_not_rewrite_original(http_source):
     first = download()
     path = Path(first["local_path"])
     before = path.stat()
-    repeated = download(force=True)
+    repeated = download()
     after = path.stat()
     assert repeated["local_path"] == first["local_path"]
     assert repeated["skipped"] is True

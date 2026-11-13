@@ -20,8 +20,8 @@ from urllib.parse import urljoin, urlparse
 from loguru import logger
 
 from clean.excel_parser import _rows_to_markdown
+from fetch import transport
 from fetch.site_profiles import DEFAULT_HEADERS, SITE_PROFILES
-from fetch.transport import in_context
 from fetch.web_client import fetch_page
 from store.history_models import make_uuid
 
@@ -89,12 +89,11 @@ class BasePaginationDriver(ABC):
         return urls
 
     def _fetch(self, url: str):
-        """在独立线程里调用 fetch_page，避免 asyncio 冲突。"""
+        """在独立线程里调用 fetch_page，避免 asyncio 冲突。限速在 fetch_page 里等。"""
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(
-                in_context(fetch_page),
+                fetch_page,
                 url=url,
-                delay=0,  # 两次传输之间的间隔由共享限速（fetch.rate）在发出处控制
                 wait_selector=self.wait_sel,
                 disable_resources=self.disable_resources,
                 solve_cloudflare=self.solve_cloudflare,
@@ -213,7 +212,7 @@ class JsClickDriver(BasePaginationDriver):
             except BaseException as exc:  # noqa: BLE001 -- 连预算用完的 Stop 也带回调用方线程处理
                 pages.put(("error", exc))
 
-        worker = threading.Thread(target=in_context(work), daemon=True)
+        worker = threading.Thread(target=work, daemon=True)
         worker.start()
         try:
             while True:
@@ -248,6 +247,7 @@ class JsClickDriver(BasePaginationDriver):
             try:
                 ctx = browser.new_context(user_agent=ua, locale="zh-CN")
                 pw_page = ctx.new_page()
+                transport.wait(self.start_url)  # 打开列表页、点下一页之前都等一下这个站点的限速
                 pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
                 if self.wait_sel:
                     pw_page.wait_for_selector(self.wait_sel, timeout=15000)
@@ -279,6 +279,7 @@ class JsClickDriver(BasePaginationDriver):
 
                     first_links = pw_page.query_selector_all(item_link_selector)
                     old_first = first_links[0].get_attribute("href") if first_links else ""
+                    transport.wait(self.start_url)
                     next_btn.click()
 
                     if old_first:
@@ -325,6 +326,7 @@ class JsClickDriver(BasePaginationDriver):
             try:
                 ctx = browser.new_context(user_agent=ua, locale="zh-CN")
                 pw_page = ctx.new_page()
+                transport.wait(self.start_url)  # 打开列表页、点下一页之前都等一下这个站点的限速
                 pw_page.goto(self.start_url, wait_until="networkidle", timeout=30000)
                 if self.wait_sel:
                     pw_page.wait_for_selector(self.wait_sel, timeout=30000)
@@ -353,6 +355,7 @@ class JsClickDriver(BasePaginationDriver):
                     # 翻页等待：记录第一条数据行文本，点击后等待变化
                     first_row = pw_page.query_selector("table:not(.detail_table) tbody tr:first-child")
                     old_text = first_row.inner_text() if first_row else ""
+                    transport.wait(self.start_url)
                     next_btn.click()
 
                     if old_text:
