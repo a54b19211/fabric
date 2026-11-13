@@ -13,6 +13,8 @@ CONFIG = {
     "name": "NCCN Clinical Practice Guidelines",
     "source_type": "api",
     "url_pattern": "nccn.org",
+    # 代理：这个环境变量设了（如 DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890），渲染页面和下载 PDF 都经它；没设就直连
+    "proxy_env": "DATAFABRIC_PROXY_NCCN",
     "api": {
         # 要抓取的分类
         "categories": [

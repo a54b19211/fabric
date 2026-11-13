@@ -350,6 +350,25 @@ def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_ima
     assert options["wait_selector"] == "h4" and options["timeout"] == 20000 and options["retries"] == 1
 
 
+def test_nccn_reads_through_its_own_proxy_only_when_the_variable_is_set(monkeypatch):
+    """DATAFABRIC_PROXY_NCCN 设了：nccn 的渲染经它（附件下载用同一个 site_proxy）；没设：直连，和以前一样；别的站点不受影响。"""
+    from biz_rules.extractors.nccn import nccn_fetcher
+    from collection import site_crawler
+
+    seen = []
+
+    class Fetcher:
+        def fetch(self, url, **options):
+            seen.append(options.get("proxy"))
+            return "page"
+
+    monkeypatch.delenv("DATAFABRIC_PROXY_NCCN", raising=False)
+    nccn_fetcher._render(Fetcher(), "https://www.nccn.org/x", "h4", site_crawler.site_proxy("nccn"))
+    monkeypatch.setenv("DATAFABRIC_PROXY_NCCN", "http://127.0.0.1:7890")
+    nccn_fetcher._render(Fetcher(), "https://www.nccn.org/x", "h4", site_crawler.site_proxy("nccn"))
+    assert seen == [None, "http://127.0.0.1:7890"] and site_crawler.site_proxy("nmpa") is None
+
+
 def test_nccn_a_render_that_hangs_is_tried_again_in_a_new_browser_and_the_last_failure_is_the_one_raised():
     """卡在坏地址上的那次渲染 20 秒放弃，重来；每次重来都是新的 fetch 调用（新浏览器，换一次域名解析）。"""
     from biz_rules.extractors.nccn import nccn_fetcher

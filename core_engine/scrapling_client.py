@@ -278,6 +278,7 @@ def download_pdf(
     max_bytes: int | None = None,
     timeout: float = 120,
     store_as: str = "",
+    proxy: str | None = None,
 ) -> dict:
     """
     下载远程附件文件到 /data/raw/ 目录（支持 pdf/doc/docx/xls/xlsx）。
@@ -290,6 +291,7 @@ def download_pdf(
                  用于需要会话的站点（如 CDE）
         store_as: 原件落盘用的身份（默认是下载网址）。下载链接每次都不同的站点（ChiCTR 的链接带一次性令牌）
                  传附件记录号，同一个文件每次落到同一个路径。
+        proxy:   这个站点的代理（collection.site_crawler.site_proxy，如 nccn 的 DATAFABRIC_PROXY_NCCN）；None 直连。
     返回里的 file_name 是站点在响应头 Content-Disposition 里给的文件名（没有就是空串）。
     """
     file_uuid = make_uuid(pdf_url)
@@ -308,7 +310,7 @@ def download_pdf(
         "DATAFABRIC_ATTACHMENT_MAX_BYTES", str(100 * 1024 * 1024)))
     # 连接（含 TLS 握手）只等 CONNECT_SECONDS：nccn.org、hkexnews 的个别连接会卡 60 秒以上（实测握手超时 62-76 秒），
     # 干等就把整段读取的时间用光；放弃它，collection.transport 换一条连接重试（超时重试在那里）
-    with httpx.Client(headers=headers, follow_redirects=True,
+    with httpx.Client(headers=headers, follow_redirects=True, proxy=proxy,
                       timeout=httpx.Timeout(timeout, connect=CONNECT_SECONDS)) as client:
         with client.stream("GET", pdf_url) as resp:
             resp.raise_for_status()

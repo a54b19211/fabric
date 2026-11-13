@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from contextlib import closing
 from functools import lru_cache
@@ -80,7 +81,14 @@ def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None
     from core_engine.scrapling_client import download_pdf
 
     return download_pdf.fn(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies,
-                           store_as=store_as)
+                           store_as=store_as, proxy=site_proxy(source_site))
+
+
+def site_proxy(site):
+    """这个站点的代理：站点配置里 proxy_env 写的环境变量（nccn 是 DATAFABRIC_PROXY_NCCN，如 http://127.0.0.1:7890）。
+    设了，这个站点的页面渲染和附件下载都经它；站点没有 proxy_env 或变量没设，返回 None，直连。只管这一个站点，不设全局代理。"""
+    name = SITE_PROFILES.get(site, {}).get("proxy_env")
+    return (os.environ.get(name) or None) if name else None
 
 
 def _make_driver(site, profile, start_url):
@@ -394,7 +402,8 @@ def _site_results(reader, query):
         from core_engine.api_router import to_result
 
         fetch = profile["api_fetcher"]
-        for raw in fetch(profile.get("api", {}), reader.group) if profile.get("by_group") else fetch(profile.get("api", {})):
+        api = {**profile.get("api", {}), "proxy": site_proxy(reader.site)}  # 拉取函数自己开浏览器时用它（nccn）
+        for raw in fetch(api, reader.group) if profile.get("by_group") else fetch(api):
             if isinstance(raw, ItemUnreadable | GroupStart):  # 读不到这一条、接着往下读了 / 新的一组：原样传下去
                 yield raw, None
                 continue

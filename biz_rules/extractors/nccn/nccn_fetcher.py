@@ -37,18 +37,21 @@ _NAME_TO_NUM = {v[0]: k for k, v in CATEGORIES.items()}
 # 一次正常渲染 4-16 秒。www.nccn.org 解析到两个 Cloudflare 地址，从 zktest 连其中一个 TLS 握手永远不通（实测 50%-70% 的连接
 # 卡住，卡住的最后报 net::ERR_TIMED_OUT，要 30-40 秒）：卡住的那次 20 秒就放弃，重来一次要重新启动浏览器（换一次域名解析，
 # 换到好的地址）。scrapling 自己的 retries 在同一个浏览器里重试，一再落在同一个坏地址上，所以重试放在这里，最多 RENDER_TRIES 次。
+# 设了 DATAFABRIC_PROXY_NCCN（站点配置的 proxy_env）时，渲染和 PDF 下载都经这个代理，由代理去解析和连接，不再落到那个坏地址上。
 RENDER_TRIES = 6
 RENDER_TIMEOUT_MS = 20000
 LIST_READY = 'a[href*="guidelines-detail"]'
 DETAIL_READY = "h4"
 
 
-def _render(fetcher, url: str, ready_selector: str):
-    """渲染一页：等 ready_selector 出现，不等网络空闲、不加载图片等资源。卡住就换个浏览器重来，RENDER_TRIES 次都不行才抛出。"""
+def _render(fetcher, url: str, ready_selector: str, proxy: str | None = None):
+    """渲染一页：等 ready_selector 出现，不等网络空闲、不加载图片等资源。卡住就换个浏览器重来，RENDER_TRIES 次都不行才抛出。
+    proxy 是站点的代理（没设是 None：直连）。"""
+    options = {"proxy": proxy} if proxy else {}
     for attempt in range(1, RENDER_TRIES + 1):
         try:
             return fetcher.fetch(url, network_idle=False, disable_resources=True, wait_selector=ready_selector,
-                                 timeout=RENDER_TIMEOUT_MS, retries=1)
+                                 timeout=RENDER_TIMEOUT_MS, retries=1, **options)
         except Exception:
             if attempt == RENDER_TRIES:
                 raise
@@ -142,10 +145,10 @@ def _build_markdown(title: str, version: str, category_name: str,
     return "\n".join(lines)
 
 
-def _read_item(fetcher, item: dict) -> dict:
+def _read_item(fetcher, item: dict, proxy: str | None = None) -> dict:
     """读一条指南的详情页，返回完整的记录 dict（详情页的标题和版本盖过列表页的）。读不到就抛异常。"""
     detail_url = item["detail_url"]
-    detail = extract_nccn_detail(_render(fetcher, detail_url, DETAIL_READY))
+    detail = extract_nccn_detail(_render(fetcher, detail_url, DETAIL_READY, proxy))
     title = detail["title"] or item["title"]
     version = detail["version"] or item["version"]
     # 主 PDF：Guidelines section 的第一个
@@ -192,12 +195,14 @@ def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
     api_cfg 字段：
       - categories:       要抓取的分类名列表，默认全部 4 个分类
       - max_per_category: 每个分类最多抓取条数，0 = 全量（默认 0）
+      - proxy:            站点的代理（collection.site_crawler 按站点配置的 proxy_env 填；None 直连）
     start：从哪个组号读起（分类编号 × GROUP_SPAN + 它在分类列表里的序号，从 0 起）。以前跨分类按 guideline_id 去重：续读不渲染
     前面的分类就去不了重，也没有必要：两个分类里的同一份指南详情页网址不同，各是一条记录（2026-11-13 实测前两个分类 69 份和 7 份
     指南没有一份重复）。
     """
     cat_names: list[str] = api_cfg.get("categories", [v[0] for v in CATEGORIES.values()])
     max_per_cat: int = api_cfg.get("max_per_category", 0)
+    proxy = api_cfg.get("proxy")
 
     try:
         from scrapling.fetchers import StealthyFetcher
@@ -216,7 +221,7 @@ def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
             continue  # 这个分类整个在 start 之前，上一段读过了
 
         logger.info(f"[NCCN] 渲染分类列表页: {cat_name} → {cat_url}")
-        list_page = _render(fetcher, cat_url, LIST_READY)  # 渲染失败就让异常出去：整次读取失败，不能当成“这个分类没有指南”
+        list_page = _render(fetcher, cat_url, LIST_READY, proxy)  # 渲染失败就让异常出去：整次读取失败，不能当成“这个分类没有指南”
         items = _parse_rendered_list(list_page, cat_num, cat_name)
         if not items:
             yield ItemUnreadable(cat_url, "分类列表页一条指南都没解析到，可能改版")
@@ -233,7 +238,7 @@ def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
                 continue  # 前面的指南上一段读过了
             yield GroupStart(group)
             try:
-                record = _read_item(fetcher, item)
+                record = _read_item(fetcher, item, proxy)
             except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录
                 # 读不到就是读不到：不存一个只有列表页信息的降级版本（以后读到全的，它就成了“被改过”的旧版本）；
                 # 不是抛出：抛出会结束这个生成器。读取方记下这一条，再要下一条
