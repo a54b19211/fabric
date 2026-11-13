@@ -163,7 +163,7 @@ def _page_finished(watch, state, coverage, now):
             # 截断且无可靠续页位置不能称完成，更不能跳过未知页。
             raise HistoryError(
                 "source_watch_no_cursor",
-                "来源截断但无可靠续页位置；保留本页等待处理",
+                "来源截断但无可靠续页位置；按读取失败记，下个间隔重读，连续 3 次放弃这一周期",
                 503,
             )
         unread = first_unread(coverage)
@@ -206,7 +206,7 @@ def _plan_cycle(watch, state, now):
 
 
 GIVE_UP_AFTER = 3  # 同一周期连续失败这么多次，就放弃这一周期（只有 realtime；回填保留续读位置，按间隔重试）
-READ_FAILURES = ("source_watch_failed", "source_watch_no_progress")  # 计数的只有这次读取本身失败或原地不动；磁盘低水位、许可撤回等不计
+READ_FAILURES = ("source_watch_failed", "source_watch_no_progress", "source_watch_no_cursor")  # 计数的只有这次读取本身失败、原地不动、读完了没给续读位置；磁盘低水位、许可撤回等不计
 
 
 def _read_all_next_time(state):
@@ -303,11 +303,12 @@ def _failed(watch, state, exc, now):
     state["last_failure_at"] = now.isoformat()
     state["next_check_at"] = (now + timedelta(seconds=watch.cadence_seconds)).isoformat()
     # 未知 create/入队结果保留固定 key。只有运行本身失败（failed，或带着错误的 partial）才换新 run；正常的 partial
-    # （只是预算用完）不是失败。续读位置没前进的那一段读完了也没错，同样要换新 run 重读（否则每个间隔都取回同一个结果）。
+    # （只是预算用完）不是失败。续读位置没前进、或读完了却没给续读位置的那一段，run 本身也没错，同样要换新 run 重读
+    # （否则每个间隔都取回同一个结果，永远卡在这里）。
     if state.get("active_run_id"):
         try:
             saved = history.read_run(state["active_run_id"])
-            if saved.state == "failed" or saved.error or exc.code == "source_watch_no_progress":
+            if saved.state == "failed" or saved.error or exc.code in ("source_watch_no_progress", "source_watch_no_cursor"):
                 state.pop("active_run_id", None)
                 state.pop("request_key", None)
                 _read_all_next_time(state)

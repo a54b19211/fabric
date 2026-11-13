@@ -342,6 +342,31 @@ def test_a_backfill_keeps_its_place_when_the_disk_is_low_or_the_reads_fail(monke
     assert "request" not in state and state["read_all"] is True  # 实时刷新：放弃这一周期，下个间隔重新规划
 
 
+def test_a_read_that_ends_without_a_cursor_is_counted_and_read_again_until_the_cycle_is_given_up(monkeypatch):
+    """一次读取正常结束却没给续读位置（来源截断、没有窗口回执）：不能每个间隔都取回同一个读完的结果、永远报同一个错。
+    它按读取失败计数、换新 run 重读，连续 3 次实时刷新放弃这一周期，回填保留位置。走真实路径：_advance → _page_finished → _failed。"""
+    from types import SimpleNamespace
+
+    cut_short = SimpleNamespace(
+        state="completed", error=None, coverage={"upstream_pagination_exhausted": False, "stop_reason": "page_budget"}
+    )
+    state = {"request": {"known_stop": 3}, "window_ended_at": NOW.isoformat()}
+    for streak in (1, 2):
+        _step(monkeypatch, ct_watch(), state, run=cut_short)
+        assert state["state"] == "failed" and state["error"]["code"] == "source_watch_no_cursor"
+        assert state["fail_streak"] == streak and "request" in state
+        assert "active_run_id" not in state and "request_key" not in state  # 下个间隔换新 run 重读，不再取回这一个
+    _step(monkeypatch, ct_watch(), state, run=cut_short)
+    assert "request" not in state and state["fail_streak"] == 0 and state["read_all"] is True  # 下个间隔从头
+    assert state["error"]["code"] == "source_watch_no_cursor"  # 来源健康（WATCH_FIELDS 的 error）里还看得到原因
+    cursor = {"cursor": "c", "read_count": 900}
+    backfill = {"request": {"continuation": cursor}, "window_ended_at": NOW.isoformat()}
+    for _ in range(4):
+        _step(monkeypatch, ct_watch(mode="backfill"), backfill, run=cut_short)
+    assert backfill["fail_streak"] == 4 and backfill["request"]["continuation"] == cursor  # 回填不丢位置
+    assert "active_run_id" not in backfill
+
+
 def test_page_finished_at_a_ceiling_ends_the_cycle_with_its_reason_and_keeps_the_cursor():
     who = SourceWatch.model_validate(
         {"id": "w", "cadence_seconds": 900, "request": {"source_id": "who_don", "query": "*"}}
