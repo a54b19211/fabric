@@ -5,8 +5,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from collection import site_crawler, transport
-from core_engine import scrapling_client as client
+from fetch import site_crawler, transport
+from fetch import web_client as client
 
 URL = "https://example.invalid/notice.pdf"
 A = b"%PDF-1.4\nSYNTHETIC evidence A\n%%EOF\n"
@@ -15,7 +15,7 @@ B = b"%PDF-1.4\nSYNTHETIC evidence B\n%%EOF\n"
 
 @pytest.fixture
 def http_source(monkeypatch, tmp_path):
-    from collection import rate
+    from fetch import rate
 
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(client.APP, "DATA_ROOT", tmp_path)

@@ -11,8 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from biz_rules.history_models import FetchRequest
-from collection import rate, site_crawler
+from fetch import rate, site_crawler
+from store.history_models import FetchRequest
 
 DEADLINE = 5
 SLOW = ["/trickle", "/stall", "/midstall", "/slowhead", "/chunked"]
@@ -207,7 +207,7 @@ def test_browser_requests_to_other_hosts_are_aborted_and_not_counted(monkeypatch
 
 
 def test_on_host_takes_the_host_and_its_subdomains():
-    from collection.transport import on_host
+    from fetch.transport import on_host
 
     assert on_host("https://www.fda.gov/x", "fda.gov") and on_host("https://fda.gov/x", "fda.gov")
     assert not on_host("https://notfda.gov/x", "fda.gov") and not on_host("https://fda.gov.evil.example/", "fda.gov")

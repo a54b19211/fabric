@@ -8,7 +8,7 @@ from pathlib import Path
 
 from scrapling.parser import Selector
 
-from config.crawler_settings import SITE_PROFILES
+from fetch.site_profiles import SITE_PROFILES
 
 PAGES = Path(__file__).parent / "fixtures" / "site_pages"
 
@@ -47,7 +47,7 @@ def test_cde_zdyz_detail_gives_title_date_info_table_and_the_attachment_link():
 
 def test_cde_detail_extractor_still_reads_the_older_page_layout():
     """cde / cde_xxgk 用同一个提取函数：正文区 div.new_detail_content 和 div.relatedNews 里的附件照旧。"""
-    from biz_rules.extractors.cde import extract_cde_detail
+    from fetch.extractors.cde import extract_cde_detail
 
     html = ("<html><head><meta name='ArticleTitle' content='某通告'><meta name='PubDate' content='20260403'></head><body>"
             "<div class='new_detail_content'><p>正文一段。</p></div>"
@@ -77,7 +77,7 @@ def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_ol
 def test_fda_drug_safety_list_is_one_static_table_read_with_a_plain_request_in_a_single_page():
     """整张表（日期 | 标题，共约 44 条）都在静态 HTML 里（浏览器里才被分成每页 10 行），标题是详情页链接，最新的在前：
     用简单请求读一页就够了，不开浏览器（浏览器开一个页面要 20-60 秒）。fixture 是 2026-11-12 存下来的整张表。"""
-    from core_engine.pagination_driver import make_driver
+    from fetch.pagination import make_driver
 
     profile = SITE_PROFILES["fda_drug_safety"]
     sample = page("fda_drug_safety_list.html")
@@ -97,7 +97,7 @@ def test_fda_drug_safety_list_is_one_static_table_read_with_a_plain_request_in_a
 def test_fda_drug_safety_issue_date_comes_from_the_page_text_not_from_the_content_current_as_of_footer():
     """页脚 <time datetime> 是“Content current as of”（最后一次改页面的日期），不是发布日期：以前 44 篇里一批是同一天
     2026-04-03。发布日期在正文上方的小标题（月-日-年）或标题下的副标题（Month D, YYYY）里，和列表里的日期一致。"""
-    from biz_rules.extractors.fda.drug_safety import extract_fda_drug_safety
+    from fetch.extractors.fda.drug_safety import extract_fda_drug_safety
 
     for name, issued, footer in [("subtitle_date", "2026-11-09", None), ("panels", "2026-03-31", "04/03/2026"),
                                  ("plain", "2022-06-01", "06/07/2022")]:
@@ -110,7 +110,7 @@ def test_fda_drug_safety_issue_date_comes_from_the_page_text_not_from_the_conten
 
 def test_fda_drug_safety_body_is_the_whole_article_column_also_on_pages_without_accordion_panels():
     """文章在 div[role=main] 里。老页面没有折叠面板（div.panel-group），旧选择器匹配到空元素，入库的正文是空的。"""
-    from biz_rules.extractors.fda.drug_safety import extract_fda_drug_safety
+    from fetch.extractors.fda.drug_safety import extract_fda_drug_safety
 
     plain = extract_fda_drug_safety(page("fda_drug_safety_detail_plain.html"))
     assert "Ukoniq" in plain["body_text"] and "withdrawn its approval" in plain["body_text"]
@@ -149,7 +149,7 @@ def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
     默认 00013 给前两行、01177 给第三行；返回异常对象就是这家读不到。"""
     import json
 
-    from biz_rules.extractors import hkex_fetcher
+    from fetch.extractors import hkex_fetcher
 
     sent = []
     rows_of = rows_of or {1000001102: HKEX_ROWS[:2], 6833: HKEX_ROWS[2:]}.get
@@ -175,8 +175,8 @@ def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
 
 def _hkex_read(monkeypatch, overrides=None, rows_of=None, start=0):
     """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告，不含每家公司开头的 GroupStart, 发出的请求参数)。"""
-    from biz_rules.extractors import hkex_fetcher
-    from biz_rules.history_models import GroupStart
+    from fetch.extractors import hkex_fetcher
+    from store.history_models import GroupStart
 
     api, sent = _hkex_stub(monkeypatch, overrides, rows_of)
     items = list(hkex_fetcher.fetch_hkex_announcements(api, start))
@@ -218,7 +218,7 @@ def test_hkex_title_is_the_announcement_title_and_the_file_type_column_is_kept_a
 
 def test_hkex_record_through_the_site_config_has_title_date_and_the_pdf_as_attachment(monkeypatch):
     """走站点配置的字段映射之后：标题是公告标题、日期是 ISO、公告 PDF 作为附件交给采集插件。"""
-    from core_engine.api_router import to_result
+    from fetch.api_fields import to_result
 
     first = _hkex_read(monkeypatch)[0][0]
     parsed, kept = to_result("hkex", SITE_PROFILES["hkex"], first)
@@ -230,7 +230,7 @@ def test_hkex_record_through_the_site_config_has_title_date_and_the_pdf_as_attac
 def test_hkex_company_that_cannot_be_read_is_given_as_unreadable_with_its_name_and_the_next_one_is_still_read(monkeypatch):
     """一家读不到（网络、状态码）：给一个 ItemUnreadable，写明是哪家、为什么，采集插件记下它、不存版本；
     接着读下一家，不是整个来源停在这里。"""
-    from biz_rules.history_models import ItemUnreadable
+    from store.history_models import ItemUnreadable
 
     def rows_of(stock_id):
         return TimeoutError("read timed out") if stock_id == 1000001102 else HKEX_ROWS[2:]
@@ -244,8 +244,8 @@ def test_hkex_company_that_cannot_be_read_is_given_as_unreadable_with_its_name_a
 def test_hkex_a_company_is_a_group_and_a_read_can_start_at_any_company_without_asking_for_the_ones_before(monkeypatch):
     """每家公司开头给一个 GroupStart(第几家)，先于这家公司的请求（请求时间到了，续读位置就是这一家）；
     从第 start 家读起，前面的公司不发请求。"""
-    from biz_rules.extractors import hkex_fetcher
-    from biz_rules.history_models import GroupStart
+    from fetch.extractors import hkex_fetcher
+    from store.history_models import GroupStart
 
     api, sent = _hkex_stub(monkeypatch)
     items = list(hkex_fetcher.fetch_hkex_announcements(api))
@@ -281,7 +281,7 @@ def test_nccn_detail_attaches_only_the_pdfs_that_can_be_downloaded_and_leaves_ou
     """第一个 h4 之前的 PDF（化疗模板说明、年会招商册、展位图）整站每页都有，不是这份指南的文件：每份指南都下载一遍是重复下载
     （一次读取 12MB 里大半是它们）。医生版指南 PDF（/professionals/…）要登录，下载到的是登录页，每次内容不同，读一次多一个
     “版本”：不当附件，链接仍留在 sections 里。公开的患者版 PDF 当附件。fixture 是 2026-11-12 存下来的 ALL 指南页的主要部分。"""
-    from biz_rules.extractors.nccn.nccn import extract_nccn_detail
+    from fetch.extractors.nccn.nccn import extract_nccn_detail
 
     parsed = extract_nccn_detail(page("nccn_detail.html"))
     assert parsed["title"] == "Acute Lymphoblastic Leukemia" and parsed["version"] == "3.2026"
@@ -295,8 +295,8 @@ def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_group_without_rend
     不渲染（续读每段只渲染一页列表）。"""
     import scrapling.fetchers
 
-    from biz_rules.extractors.nccn import nccn_fetcher
-    from biz_rules.history_models import GroupStart
+    from fetch.extractors.nccn import nccn_fetcher
+    from store.history_models import GroupStart
 
     by_category = {"1": ["a0", "a1", "a2"], "2": ["b0", "b1"]}
     rendered = []
@@ -335,7 +335,7 @@ def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_group_without_rend
 
 def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_images():
     """页面挂着很多第三方脚本，等“网络空闲”一页要一两分钟：列表页等指南链接、详情页等 section 小标题出现就够了。"""
-    from biz_rules.extractors.nccn import nccn_fetcher
+    from fetch.extractors.nccn import nccn_fetcher
 
     seen = []
 
@@ -352,8 +352,8 @@ def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_ima
 
 def test_nccn_reads_through_its_own_proxy_only_when_the_variable_is_set(monkeypatch):
     """DATAFABRIC_PROXY_NCCN 设了：nccn 的渲染经它（附件下载用同一个 site_proxy）；没设：直连，和以前一样；别的站点不受影响。"""
-    from biz_rules.extractors.nccn import nccn_fetcher
-    from collection import site_crawler
+    from fetch import site_crawler
+    from fetch.extractors.nccn import nccn_fetcher
 
     seen = []
 
@@ -371,7 +371,7 @@ def test_nccn_reads_through_its_own_proxy_only_when_the_variable_is_set(monkeypa
 
 def test_nccn_a_render_that_hangs_is_tried_again_in_a_new_browser_and_the_last_failure_is_the_one_raised():
     """卡在坏地址上的那次渲染 20 秒放弃，重来；每次重来都是新的 fetch 调用（新浏览器，换一次域名解析）。"""
-    from biz_rules.extractors.nccn import nccn_fetcher
+    from fetch.extractors.nccn import nccn_fetcher
 
     calls = []
 
@@ -400,7 +400,7 @@ def test_nccn_a_render_that_hangs_is_tried_again_in_a_new_browser_and_the_last_f
 def test_roche_list_titles_are_read_from_inside_the_nested_teaser_link():
     """列表里每条是 <h3><a><span class="teaser__title">标题<span class="teaser__icon">…</span></span></a></h3>。
     以前取 h3 元素自己的文字（.text），得到空串：入库的 Roche 新闻稿标题全是空的。"""
-    from biz_rules.extractors.roche.roche_web_fetcher import _parse_list_page
+    from fetch.extractors.roche.roche_web_fetcher import _parse_list_page
 
     items = _parse_list_page(page("roche_teasers.html"), set(), 2026, 1)
     assert [i["source_url"] for i in items] == [

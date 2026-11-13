@@ -2,7 +2,7 @@
 
 import json
 
-from processing import clean_text
+from clean import clean_text
 
 
 def who(**sections):

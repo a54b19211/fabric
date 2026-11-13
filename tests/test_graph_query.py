@@ -7,8 +7,8 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from biz_rules.history_models import HistoryError
-from biz_rules.reviewed_graph import GraphEdge, GraphReview, PrimeKGQuery, neighborhood
+from graph.publish.reviewed_graph import GraphEdge, GraphReview, PrimeKGQuery, neighborhood
+from store.history_models import HistoryError
 from tests.test_reviewed_graph import bundle, node, ref
 
 
@@ -39,7 +39,7 @@ def test_query_rejects_invalid_scope_before_access(extra):
 
 
 def test_capture_scope_and_timeout_are_explicit(monkeypatch):
-    import flows.graph_publish as publish
+    import graph.publish.graph_publish as publish
     @contextmanager
     def connection():
         yield object()
@@ -71,7 +71,7 @@ def test_capture_scope_and_timeout_are_explicit(monkeypatch):
 
 @pytest.mark.parametrize("bad_count", [{}, []])
 def test_malformed_capture_count_stays_a_protocol_error(monkeypatch, bad_count):
-    import flows.graph_publish as publish
+    import graph.publish.graph_publish as publish
 
     monkeypatch.setattr(
         publish, "_read_primekg",

@@ -15,13 +15,14 @@ from integration_history import archive, raw_record
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 
-from biz_rules.collected_document import collected_document
-from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError, canonical
-from core_engine.weknora_index_client import IndexServiceError, publication_id
-from db import clean_stage, history, retrieval
-from db import index_publication as index
-from migration import index_publication as index_migration
-from migration import runner
+from clean import clean_stage
+from graph.publish.collected_document import collected_document
+from run import index as index_migration
+from store import history, retrieval
+from store import index_publication as index
+from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, canonical
+from store.migrations import runner
+from store.weknora_index_client import IndexServiceError, publication_id
 
 
 @pytest.fixture(scope="module")
@@ -535,8 +536,8 @@ def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
     assert counts["index_enqueued"] == 1
     saved = job(pg, version)
     meta = saved["manifest"]["metadata"]
-    from processing import clean_text
-    from processing import profile as profile_module
+    from clean import clean_text
+    from clean import profile as profile_module
     assert saved["lane"] == "new" and saved["created_at"] is not None
     assert saved["artifact_key"].startswith(clean_text.PROCESSOR_VERSION + ":")
     assert saved["manifest"]["content_sha256"] == meta["artifact_sha256"] == saved["artifact_key"].split(":")[1]
@@ -576,7 +577,7 @@ def test_enqueue_failure_rolls_back_the_profile_and_retries_cleanly(pg):
 
 def test_clean_processor_upgrade_hands_over_only_after_the_new_entry_is_ready(pg, monkeypatch):
     """Codex 429/431：新产物能检索后才停旧条目，不撤掉最后的入口；旧记录保留。"""
-    from processing import clean_text
+    from clean import clean_text
 
     version, client = ready_job(pg)
     old = job(pg)
@@ -662,8 +663,8 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
     """v3 3.3a/3.6：附件正文在加工层；解析成功、清洗段画像后才进索引，发布的是派生正文，回指附件版本。"""
     from integration_history import _fetch_attachment
 
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     version, _ = _fetch_attachment(tmp_path, monkeypatch, "idx-att")
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
@@ -688,8 +689,8 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
 def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
     from integration_history import _fetch_attachment
 
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     _fetch_attachment(tmp_path, monkeypatch, "idx-att-fail")
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
@@ -701,7 +702,7 @@ def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
     assert rows(pg, "SELECT * FROM index_publications") == []
 
 
-# —— 检索校验（db.retrieval）——
+# —— 检索校验（store.retrieval）——
 
 class SearchClient(JournalClient):
     """桥接服务的替身：召回 = 给定的命中（只来自已发布的条目）；重排记下收到的正文。"""
@@ -830,7 +831,7 @@ def test_literal_search_over_a_huge_source_returns_query_budget(pg, monkeypatch)
 def test_search_stays_available_until_the_replacement_is_ready(pg, monkeypatch):
     """Codex 441：处理器交接期，检索选用的产物与 worker 的交接状态一致——新产物的条目 ready 之前，
     仍在服务的旧条目照样能检索到；新条目 ready 之后只认新产物。"""
-    from processing import clean_text
+    from clean import clean_text
 
     version, journal = ready_job(pg)
     old = job(pg)
@@ -887,7 +888,7 @@ def test_parallel_equal_text_versions_create_one_physical_entry(pg, monkeypatch)
 # —— 长产物分片（Codex 448/451）——
 
 def small_pieces(monkeypatch, chars=200):
-    from processing import index_pieces
+    from store import index_pieces
 
     monkeypatch.setattr(index_pieces, "MAX_CHARS", chars + index_pieces.UPLOAD_OVERHEAD)
     monkeypatch.setattr(index_pieces, "MAX_BYTES", 10 ** 9)
@@ -899,7 +900,7 @@ def long_document(native="SYNTHETIC-long"):
 
 
 def test_a_long_artifact_is_indexed_in_pieces_and_is_searchable_only_when_every_piece_is_ready(pg, monkeypatch):
-    from processing import index_pieces
+    from store import index_pieces
 
     small_pieces(monkeypatch)
     version = long_document()
@@ -930,7 +931,7 @@ def test_a_long_artifact_is_indexed_in_pieces_and_is_searchable_only_when_every_
 
 
 def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
-    from processing import clean_text
+    from clean import clean_text
 
     small_pieces(monkeypatch, chars=100000)
     long_document()
@@ -959,7 +960,7 @@ def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
 
 
 def test_over_budget_whole_entries_are_replaced_and_chunk_budget_is_blocked_not_retried_forever(pg, monkeypatch):
-    from processing import index_pieces
+    from store import index_pieces
 
     version, client = ready_job(pg)
     monkeypatch.setattr(index_pieces, "MAX_CHARS", 50)  # 分片之前冻结的整篇清单，现在超过单条上传预算
@@ -1018,7 +1019,7 @@ def test_a_whole_entry_built_before_pieces_is_replaced_by_the_current_piece_plan
 def test_a_new_piece_rule_adds_new_pieces_beside_the_old_ones_and_retires_them_after(pg, monkeypatch):
     """Codex 456：唯一键和编号带完整分片身份（规则、序号、范围、片摘要）：分片规则换了，同序号的新片不会被
     旧片挡住（ON CONFLICT 悄悄跳过）；旧片在新片全部 ready 后才停用。"""
-    from processing import index_pieces
+    from store import index_pieces
 
     small_pieces(monkeypatch)
     version = long_document()
@@ -1049,7 +1050,7 @@ def test_a_new_piece_rule_adds_new_pieces_beside_the_old_ones_and_retires_them_a
 def test_old_pieces_stay_until_every_piece_of_the_new_plan_is_ready(pg, monkeypatch):
     """Codex 460 的反例：旧计划 3 片都 ready，新计划要 5 片。新计划的每一片都要建出来（不被旧片的序号挡住），
     数据库里只有其中几片 ready 时旧片照样保留、检索照样认旧片；整套新片 ready 后旧片才停用。"""
-    from processing import index_pieces
+    from store import index_pieces
 
     small_pieces(monkeypatch)
     version = long_document()
@@ -1117,7 +1118,7 @@ def rerun_file(engine, name):
 def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, monkeypatch):
     """Codex r83：piece_key 之前的分片库（按分片序号的两个唯一键、没有 piece_key 列）跑索引迁移：从已有 piece
     回填完整身份键，去掉旧唯一键、建新唯一键；id、remote_id、清单、回执都不变；再跑一次什么也不变。"""
-    from processing import index_pieces
+    from store import index_pieces
 
     small_pieces(monkeypatch)
     long_document()
@@ -1186,7 +1187,7 @@ def test_a_job_that_overruns_its_lease_goes_behind_the_others_and_the_lease_cove
     slowest bridge call, and claiming a job moves its next check past the lease."""
     import inspect
 
-    from core_engine import weknora_index_client
+    from store import weknora_index_client
 
     assert "seconds=180" in inspect.getsource(weknora_index_client.WeKnoraIndexClient.disable)
     assert index.LEASE_SECONDS > 180 + 20
@@ -1209,7 +1210,7 @@ def test_a_job_that_overruns_its_lease_goes_behind_the_others_and_the_lease_cove
 def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
     """v3 6.2 bumped the profile version: until versions are profiled again no artifact is current, and a sent
     entry must then be kept (retiring), not disabled because "every replacement is ready" held vacuously."""
-    from processing import profile as profile_module
+    from clean import profile as profile_module
 
     version, client = ready_job(pg)
     monkeypatch.setattr(profile_module, "PROCESSOR_VERSION", "datafabric.profile.v999")
@@ -1264,7 +1265,7 @@ def test_an_index_target_naming_a_retired_source_is_a_configuration_error_found_
 def test_a_new_artifact_still_parsing_or_failed_never_replaces_the_old_entry(pg, monkeypatch):
     """T-26（Codex 708）：同一 raw version 升级清洗处理器。新产物在 WeKnora 还在解析或解析失败时，旧条目照常服务
     （handover），新条目不算可检索；新产物 ready 后旧条目才停用，旧条目的知识编号和回执保留，旧命中不再采用。"""
-    from processing import clean_text
+    from clean import clean_text
 
     version, journal = ready_job(pg)
     old = job(pg)

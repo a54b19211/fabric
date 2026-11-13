@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from biz_rules.history_models import HistoryError
-from db import index_publication as index
+from store import index_publication as index
+from store.history_models import HistoryError
 
 
 def values(demo):

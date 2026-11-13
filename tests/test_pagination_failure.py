@@ -23,7 +23,7 @@ class Quiet:
 
 
 def load_driver():
-    source = Path(__file__).parents[1] / "core_engine/pagination_driver.py"
+    source = Path(__file__).parents[1] / "fetch/pagination.py"
     tree = ast.parse(source.read_text())
     nodes = [n for n in tree.body if isinstance(n, ast.ClassDef)
              and n.name in {"BasePaginationDriver", "JsClickDriver"}]

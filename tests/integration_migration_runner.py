@@ -8,9 +8,9 @@ import pytest
 from integration_migration_baselines import pg, tables  # noqa: F401 - pg is a fixture
 from sqlalchemy import text
 
-from migration import ledger, manifests, reference_data, runner
-from migration.app_ledger import MigrationStateError
-from migration.manifests import MANIFESTS, Manifest
+from store.migrations import ledger, manifests, reference_data, runner
+from store.migrations.app_ledger import MigrationStateError
+from store.migrations.manifests import MANIFESTS, Manifest
 
 HISTORY_FILES = MANIFESTS["history"].files
 
@@ -328,8 +328,8 @@ def test_a_file_with_its_own_begin_and_commit_is_still_one_transaction_with_its_
 
 
 def test_the_four_legacy_files_run_neutralised_and_are_recorded_with_the_checksum_of_the_published_file(pg):
-    from migration.manifests import TRANSACTION_CONTROL_ALLOWED
-    from migration.runner import file_text
+    from store.migrations.manifests import TRANSACTION_CONTROL_ALLOWED
+    from store.migrations.runner import file_text
 
     _, engine = pg("legacyfiles")
     receipt = runner.apply("app", engine, actor="test")

@@ -43,10 +43,9 @@ from api.schemas.response import (
     SearchEntityItem,
     StatusCounts,
 )
-from biz_rules.history_models import HistoryError
-from db.identity import get_current_review_evidence, get_objects_evidence
-from db.models import EntityDict, EntityRelation, EntitySourceEvidence, ExtractedEntity
-from db.repository import (
+from graph.db.identity import get_current_review_evidence, get_objects_evidence
+from graph.db.models import EntityDict, EntityRelation, EntitySourceEvidence, ExtractedEntity
+from graph.db.repository import (
     approve_entity_with_alias_writeback,
     approve_relation,
     batch_approve_entities,
@@ -71,7 +70,8 @@ from db.repository import (
     rollback_merge,
     search_entity_dicts,
 )
-from db.session import get_session
+from graph.db.session import get_session
+from store.history_models import HistoryError
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -1007,7 +1007,7 @@ def patch_entity(entity_id: int, body: PatchEntityRequest):
         existing = dict(row.entity_data or {})
         existing.update(body.entity_data)
         row.entity_data = existing
-        from db.identity import clear_entity_confirmation
+        from graph.db.identity import clear_entity_confirmation
         clear_entity_confirmation(row)
 
         # 已推送的实体重置同步状态

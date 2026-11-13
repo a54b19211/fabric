@@ -5,11 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from biz_rules.history_models import FetchRequest, HistoryError
-from collection import catalog, rate
-from collection.windows import cycle_request
-from db.source_refresh import SourceWatch, _key, _page_finished, watches
-from processing import registry_diff as rd
+from clean import registry_diff as rd
+from fetch import catalog, rate
+from fetch.source_refresh import SourceWatch, _key, _page_finished, watches
+from fetch.windows import cycle_request
+from store.history_models import FetchRequest, HistoryError
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -62,15 +62,15 @@ def test_every_spec_declares_decision_rate_group_and_incremental_semantics():
 
 
 def test_read_public_refuses_unconnected_plugin(monkeypatch):
-    from biz_rules import history_sources
+    from fetch import sources
 
-    monkeypatch.setitem(history_sources.PLUGINS, "who_don", None)
+    monkeypatch.setitem(sources.PLUGINS, "who_don", None)
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     request = FetchRequest.model_validate(
         {"source_id": "who_don", "query": "*", "updated_since": "2026-11-01T00:00:00Z"}
     )
     with pytest.raises(HistoryError) as exc:
-        history_sources.read_public(request)
+        sources.read_public(request)
     assert exc.value.code == "source_plugin_missing"
 
 
@@ -78,7 +78,7 @@ def test_read_public_refuses_unconnected_plugin(monkeypatch):
 
 
 def test_existing_realtime_watch_keeps_its_state_key():
-    from biz_rules.history_models import canonical, sha256
+    from store.history_models import canonical, sha256
 
     watch = ct_watch()
     legacy = watch.model_dump(mode="json")
@@ -139,7 +139,7 @@ def test_a_source_without_an_incremental_key_cannot_be_watched(monkeypatch):
 
 
 def test_known_stop_is_filled_by_the_cycle_not_written_in_the_watch(monkeypatch):
-    from collection.windows import KNOWN_STOP
+    from fetch.windows import KNOWN_STOP
 
     pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
     request, start, end = cycle_request(pubmed, {}, NOW)
@@ -165,7 +165,7 @@ def test_a_read_that_came_to_known_records_ends_the_cycle_and_a_failed_page_is_r
     state = {"request": {"known_stop": 3}}
     _page_finished(pubmed, state, {"stop_reason": "reached_known", "upstream_pagination_exhausted": False}, NOW)
     assert state["state"] == "idle" and state["last_success_at"] and "request" not in state
-    from db.source_refresh import _read_all_next_time
+    from fetch.source_refresh import _read_all_next_time
 
     state = {"request": {"known_stop": 3, "continuation": {"cursor": "c"}}}
     _read_all_next_time(state)  # the page failed or left items unread: the retry may not stop at the first known ones
@@ -247,7 +247,7 @@ def test_page_finished_pages_on_ends_at_the_end_and_still_rejects_a_stop_short_w
 
 
 def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalled_cursor_is_a_failure():
-    from collection.windows import SEGMENTS_PER_CYCLE
+    from fetch.windows import SEGMENTS_PER_CYCLE
 
     pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
     more = {"next_continuation": {"cursor": "c", "read_count": 100}, "upstream_pagination_exhausted": False}
@@ -272,8 +272,8 @@ def test_a_newest_first_cycle_ends_after_a_fixed_number_of_segments_and_a_stalle
 
 
 def test_a_grouped_cycle_reads_all_its_groups_and_a_failed_segment_is_read_in_full_only_once():
-    from collection.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE
-    from db.source_refresh import _read_all_next_time
+    from fetch.source_refresh import _read_all_next_time
+    from fetch.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE
 
     hkex = SourceWatch.model_validate({"id": "h", "request": {"source_id": "hkex", "query": "records"}})
     more = {"next_continuation": {"cursor": "c", "read_count": 3}, "upstream_pagination_exhausted": False}
@@ -299,7 +299,7 @@ def _step(monkeypatch, watch, state, *, run=None, disk_low=False):
     from contextlib import nullcontext
     from types import SimpleNamespace
 
-    from db import source_refresh
+    from fetch import source_refresh
 
     monkeypatch.setattr(source_refresh.history, "history_engine", lambda: SimpleNamespace(begin=nullcontext))
     monkeypatch.setattr(source_refresh.history, "_source", lambda permit, source_id: None)
@@ -425,7 +425,7 @@ def _gate_worker(args):
     directory, n = args
     os.environ["DATAFABRIC_RATE_DIR"] = directory
     os.environ.pop("DATAFABRIC_HISTORY_REDIS_URL", None)
-    from collection import rate as gate
+    from fetch import rate as gate
 
     gate._redis.cache_clear()
     stamps = []
@@ -637,10 +637,10 @@ def test_change_id_is_stable_and_versioned():
 
 
 def _history_rows(monkeypatch, rows):
-    """db.history.history_engine 的替身：stuck_items 的那条查询返回这些行。"""
+    """store.history.history_engine 的替身：stuck_items 的那条查询返回这些行。"""
     from contextlib import contextmanager
 
-    from db import source_refresh
+    from fetch import source_refresh
 
     class Conn:
         def execute(self, *args, **kwargs):
@@ -662,7 +662,7 @@ def _unread(*urls):
 
 
 def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypatch):
-    from db import source_refresh
+    from fetch import source_refresh
 
     # (读取范围, 是不是一轮的第一段, 这一段读不到的条目)，新的在前
     rows = [("A", True, _unread("u1", "u2")), ("A", True, _unread("u1")), ("A", True, _unread("u1", "u3")),
@@ -674,7 +674,7 @@ def test_health_lists_the_items_unread_in_each_of_the_last_three_rounds(monkeypa
 
 
 def test_a_round_of_several_segments_counts_as_one_round_for_the_stuck_items(monkeypatch):
-    from db import source_refresh
+    from fetch import source_refresh
 
     # 每轮两段：u1 总在第二段（False = 不是第一段）。按段数连续三次是不对的：最近三段里只有一段有它
     rows = [("D", False, _unread("u1")), ("D", True, _unread("u2")), ("D", False, _unread("u1")), ("D", True, None),
@@ -684,7 +684,7 @@ def test_a_round_of_several_segments_counts_as_one_round_for_the_stuck_items(mon
 
 
 def test_a_cycle_with_unread_items_is_followed_by_a_cycle_that_reads_it_all_but_a_stuck_one_does_not_count(monkeypatch):
-    from db import source_refresh
+    from fetch import source_refresh
 
     pubmed = SourceWatch.model_validate({"id": "p", "request": {"source_id": "pubmed", "query": "BRCA1"}})
     monkeypatch.setattr(source_refresh, "stuck_items", lambda source: [])

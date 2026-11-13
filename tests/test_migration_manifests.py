@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from migration import manifests
-from migration.manifests import MANIFESTS, POSTCONDITIONS, role_of, version_files
-from migration.sqlcheck import inspect_sql
+from store.migrations import manifests
+from store.migrations.manifests import MANIFESTS, POSTCONDITIONS, role_of, version_files
+from store.migrations.sqlcheck import inspect_sql
 
 REPO = Path(__file__).resolve().parents[1]
 LAST_COMPAT_VERSION = 35
-# the migration/versions/ listing of 7337e54, written out again here on purpose: the manifest tuple is compared with
+# the store/migrations/versions/ listing of 7337e54, written out again here on purpose: the manifest tuple is compared with
 # this list, not with itself
 V001_TO_V035 = [
     "V001__init_schema.sql", "V002__add_missing_columns.sql", "V003__alter_embedding_dim.sql",
@@ -75,7 +75,7 @@ def test_history_and_publication_do_not_overlap_and_are_inside_the_app_compatibi
 
 def test_the_history_manifest_is_the_union_of_the_two_former_runners():
     first = {"V017", "V018", "V021", "V022", "V023", "V025", "V029", "V030", "V032"}  # migration/history.py
-    second = {"V020", "V024", "V027", "V028", "V031"}  # migration/index_publication.py
+    second = {"V020", "V024", "V027", "V028", "V031"}  # run/index.py
     assert {name[:4] for name in MANIFESTS["history"].files if number(name) <= LAST_COMPAT_VERSION} == first | second
     assert {name[:4] for name in MANIFESTS["publication"].files} == {"V019", "V026"}  # the publication role
 

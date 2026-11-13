@@ -6,7 +6,7 @@ import zipfile
 
 import httpx
 
-from processing import mineru_cloud
+from clean import mineru_cloud
 
 
 def zipped(md):

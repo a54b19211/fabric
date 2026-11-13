@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from api.routers import research
-from db.models import Document
+from graph.db.models import Document
 
 
 @pytest.fixture

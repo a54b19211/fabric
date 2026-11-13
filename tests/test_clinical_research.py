@@ -16,7 +16,7 @@ from sqlalchemy.orm import Query, Session
 
 from api.main import app
 from api.routers import research
-from biz_rules.clinical_research import MAX_DOCUMENT_BYTES, project_clinical_trial
+from graph.extraction.clinical_research import MAX_DOCUMENT_BYTES, project_clinical_trial
 
 DOCUMENT_ID = "00000000-0000-4000-8000-000000000001"
 

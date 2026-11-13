@@ -15,10 +15,10 @@ from integration_history import (  # noqa: F401  -- 复用隔离库夹具和发�
 )
 from sqlalchemy import text
 
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
-from contracts import data_objects as do
-from db import history as store
-from processing import clean_text
+from clean import clean_text
+from store import data_objects as do
+from store import history as store
+from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 
@@ -52,7 +52,7 @@ def nmpa_page(markdown, key):
 
 
 def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, monkeypatch, tmp_path):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     ct = _fetch_study("NCT09990011", "cs-ct").version_ids[0]
@@ -96,7 +96,7 @@ def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, monkeyp
 
 
 def test_short_and_empty_material_are_kept_and_routed_honestly(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     title_only = _fetch_europe_pmc_raw(json.dumps({"source": "MED", "id": "123", "title": "Case report"}),
@@ -112,8 +112,8 @@ def test_short_and_empty_material_are_kept_and_routed_honestly(pg, monkeypatch):
 
 
 def test_attachments_are_profiled_on_their_parsed_text_and_failed_ones_quarantined(pg, monkeypatch, tmp_path):
-    from db import clean_stage, derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import clean_stage, derived_text
 
     allow(monkeypatch)
     good, _ = _fetch_attachment(tmp_path, monkeypatch, "cs-att-ok")
@@ -138,7 +138,7 @@ def test_attachments_are_profiled_on_their_parsed_text_and_failed_ones_quarantin
 
 
 def test_stored_clean_text_fits_the_data_contract(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     ct = _fetch_study("NCT09990012", "cs-contract").version_ids[0]
@@ -152,7 +152,7 @@ def test_stored_clean_text_fits_the_data_contract(pg, monkeypatch):
 
 
 def test_derived_tables_are_append_only(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     _fetch_study("NCT09990013", "cs-append")
@@ -164,7 +164,7 @@ def test_derived_tables_are_append_only(pg, monkeypatch):
 
 
 def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     ct = _fetch_study("NCT09990014", "cs-upgrade").version_ids[0]
@@ -181,7 +181,7 @@ def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows
 
 
 def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     calls = []
@@ -196,7 +196,7 @@ def test_same_input_is_cleaned_once_and_reused(pg, monkeypatch):
 
 
 def test_identical_cleaner_input_on_another_version_is_reused(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     page_a = nmpa_page("# 公告\n\n同一份正文，未见异常。", "reuse-page-a")
@@ -210,7 +210,7 @@ def test_identical_cleaner_input_on_another_version_is_reused(pg, monkeypatch):
 def test_two_workers_never_process_the_same_chunk(pg, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     for i in range(12):
@@ -223,7 +223,7 @@ def test_two_workers_never_process_the_same_chunk(pg, monkeypatch):
 
 
 def test_an_abandoned_chunk_is_reclaimed_after_its_lease(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     _fetch_study("NCT09998881", "lease-1")
@@ -235,7 +235,7 @@ def test_an_abandoned_chunk_is_reclaimed_after_its_lease(pg, monkeypatch):
 
 
 def test_a_failing_chunk_is_dead_lettered_with_its_reason_and_retried_a_bounded_number_of_times(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     _fetch_study("NCT09998882", "fail-1")
@@ -251,7 +251,7 @@ def test_a_failing_chunk_is_dead_lettered_with_its_reason_and_retried_a_bounded_
 
 
 def test_watermark_and_lag(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     for i in range(5):
@@ -266,7 +266,7 @@ def test_watermark_and_lag(pg, monkeypatch):
 
 def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch):
     """CT 投影在没有摘要时用标题顶替；清洗只认原件 briefSummary：有摘要不报 summary_missing。"""
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     ct = _fetch_study("NCT09990014", "cs-summary", summary="A phase 3 study of drug X.").version_ids[0]
@@ -280,7 +280,7 @@ def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch)
 
 # ——Codex r66 的两个反例（原样逻辑，断言写成验收）——
 def test_last_expired_lease_becomes_a_dead_letter_and_can_be_retried(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     _fetch_study("NCT09998883", "codex-last-lease")
@@ -304,8 +304,7 @@ def test_unready_waiting_attachment_does_not_starve_a_ready_one(pg, monkeypatch,
     from collections import defaultdict
     from pathlib import Path
 
-    from db import clean_stage, derived_text
-    from processing import attachment_parse
+    from clean import attachment_parse, clean_stage, derived_text
 
     allow(monkeypatch)
     first, path1 = _fetch_attachment(tmp_path, monkeypatch, "codex-waiting-first", content=b"%PDF-1.4 synthetic blocked")
@@ -328,7 +327,7 @@ def test_unready_waiting_attachment_does_not_starve_a_ready_one(pg, monkeypatch,
 
 
 def test_profile_business_categories_are_stored_and_returned(pg, monkeypatch):
-    from db import clean_stage
+    from clean import clean_stage
 
     allow(monkeypatch)
     ct = _fetch_study("NCT09990016", "cs-categories").version_ids[0]

@@ -7,7 +7,7 @@ that documents are frozen into it. Changing the text of a source means changing 
 import json
 from pathlib import Path
 
-from biz_rules.history_sources import SOURCE_CATALOG
+from fetch.sources import SOURCE_CATALOG
 
 GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "source_catalog_golden.json").read_text(encoding="utf-8"))
 

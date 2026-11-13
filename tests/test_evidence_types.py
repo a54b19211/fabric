@@ -1,4 +1,4 @@
-"""证据类型唯一注册表（contracts.evidence_types）与三处引用（来源目录、画像、业务验收）的一致性。
+"""证据类型唯一注册表（fetch.evidence_types）与三处引用（来源目录、画像、业务验收）的一致性。
 
 审阅 396/395：v3 1.4 的十二类是业务证据大类；registry_record、filing_fact 等是细类，各自映射到大类；
 metadata/abstract/fulltext 是内容覆盖层级，不和证据类别混用；没有合适大类的细类保留并标 unmapped。
@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from collection.catalog import CATALOG, SPECS
-from contracts import evidence_types as et
-from processing import profile as pf
+from clean import profile as pf
+from fetch import evidence_types as et
+from fetch.catalog import CATALOG, SPECS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -178,14 +178,14 @@ def _width(line):
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in line)
 
 
-@pytest.mark.parametrize("path", [ROOT / "contracts" / "evidence_types.py", Path(__file__)])
+@pytest.mark.parametrize("path", [ROOT / "fetch" / "evidence_types.py", Path(__file__)])
 def test_line_width_at_most_110(path):
     for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         assert _width(line) <= 110, (path.name, no, _width(line))
 
 
 def test_orders_to_revise_labels_end_protection_or_dispose_of_failed_products_are_actions():
-    from contracts.evidence_types import document_category
+    from fetch.evidence_types import document_category
 
     for title in ("关于修订阿莫西林制剂说明书的公告", "关于提前终止某品种中药保护的公告",
                   "关于5批次不合格药品的处置情况通告"):

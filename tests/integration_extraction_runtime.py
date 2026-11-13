@@ -22,12 +22,11 @@ from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session
 
 from api.main import app
-from config.settings import APP
-from core_engine import task_queue
-from db import session as db_session
-from db.models import Document, OperationLog
-from db.repository import update_extraction_status
-from flows import extraction_flow, extraction_worker
+from graph.db import session as db_session
+from graph.db.models import Document, OperationLog
+from graph.db.repository import update_extraction_status
+from graph.extraction import extraction_flow, extraction_worker, task_queue
+from settings import APP
 
 
 def wait_for_release():
@@ -140,7 +139,7 @@ def test_restart_preserves_real_tasks_and_errors_are_visible(isolated_runtime, m
 
         # 以原有函数名、UUID 参数和超时入队，模拟升级前已保存的作业。
         queued = queue.enqueue(
-            'flows.extraction_rq_job.extraction_job', 'synthetic-queued', job_timeout=18000,
+            'graph.extraction.extraction_rq_job.extraction_job', 'synthetic-queued', job_timeout=18000,
         )
         client.set('zk:extraction:paused', '1')
         before_jobs = queue.job_ids
@@ -191,7 +190,7 @@ def test_restart_preserves_real_tasks_and_errors_are_visible(isolated_runtime, m
     extract.assert_called_once()
     print('PASS: 原有 RQ 作业函数与 UUID 参数可执行；正常暂停/继续有效')
 
-    failed = queue.enqueue('flows.extraction_rq_job.extraction_job', 'synthetic-pause-error')
+    failed = queue.enqueue('graph.extraction.extraction_rq_job.extraction_job', 'synthetic-pause-error')
     with monkeypatch.context() as changed:
         changed.setattr(task_queue, 'is_extraction_paused', Mock(side_effect=RuntimeError('合成的暂停读取故障')))
         SimpleWorker([queue], connection=client).work(burst=True)

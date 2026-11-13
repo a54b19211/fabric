@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from api.schemas.request import ReviewActionRequest
-from db.models import EntityDict, EntityRelation, ExtractedEntity
+from graph.db.models import EntityDict, EntityRelation, ExtractedEntity
 
 
 def test_plain_approval_does_not_implicitly_confirm_identity():
@@ -14,7 +14,7 @@ def test_plain_approval_does_not_implicitly_confirm_identity():
 
 
 def test_unknown_object_times_remain_unknown():
-    from db.identity import evidence_values
+    from graph.db.identity import evidence_values
     values = evidence_values({'source_text': 'A sponsors B'}, 'document-1', 'trial-registry')
     assert values['version_id'] is None
     assert values['valid_from'] is None
@@ -23,7 +23,7 @@ def test_unknown_object_times_remain_unknown():
 
 
 def test_legacy_verified_boolean_is_not_auditable_human_identity():
-    from db.identity import auditable_identity
+    from graph.db.identity import auditable_identity
     assert not auditable_identity(EntityDict(is_verified=True))
     assert auditable_identity(EntityDict(is_verified=True, verified_by='reviewer-human',
                               verified_at=datetime.now(timezone.utc), verification_basis='Registry identifier checked'))
@@ -31,13 +31,13 @@ def test_legacy_verified_boolean_is_not_auditable_human_identity():
 
 @pytest.mark.parametrize('reviewer', ['auto', 'system', 'AUTO', 'agent', '  system  '])
 def test_machine_reviewer_cannot_supply_human_confirmation(reviewer):
-    from db.identity import require_human_reviewer
+    from graph.db.identity import require_human_reviewer
     with pytest.raises(ValueError, match='human'):
         require_human_reviewer(reviewer)
 
 
 def test_same_english_name_is_batch_identity_but_known_ids_cannot_conflict():
-    from db.identity import batch_identity_keys, compatible_identity
+    from graph.db.identity import batch_identity_keys, compatible_identity
     a = {'entity_type': 'Company', 'entity_name': '甲公司', 'entity_data': {'name_en': 'Acme Ltd'}}
     b = {'entity_type': 'Company', 'entity_name': '乙公司', 'entity_data': {'name_en': 'ACME LTD'}}
     assert batch_identity_keys(a) & batch_identity_keys(b)
@@ -47,7 +47,7 @@ def test_same_english_name_is_batch_identity_but_known_ids_cannot_conflict():
 
 
 def test_quote_offsets_must_identify_exact_unicode_span():
-    from db.identity import evidence_values, usable_evidence
+    from graph.db.identity import evidence_values, usable_evidence
     evidence = evidence_values({'version_id': 'a' * 64, 'quote': '甲乙',
                                'char_start': 3, 'char_end': 5}, 'doc', 'site')
     assert usable_evidence(evidence)
@@ -77,7 +77,7 @@ def test_client_name_is_not_a_trusted_review_identity(monkeypatch):
 
 
 def test_unavailable_disambiguation_cannot_allocate_new_identity():
-    from db.identity import has_candidates
+    from graph.db.identity import has_candidates
     assert has_candidates({'_disambig': {'status': 'ambiguous', 'match_step': 'step_error', 'candidates': []}})
     assert has_candidates({'_disambig': {'status': 'auto_matched', 'auto_link': False, 'dict_id': 1}})
 
@@ -106,8 +106,8 @@ def test_sensitive_api_rejects_client_claimed_human_without_review_token(path, p
 
 
 def test_native_rule_ids_and_source_locators_are_not_lost():
-    from db.identity import evidence_values, namespaced_ids
-    from db.repository import _extract_external_ids
+    from graph.db.identity import evidence_values, namespaced_ids
+    from graph.db.repository import _extract_external_ids
     native = {'rule_version': 'fixture.native.v1', 'identity_namespace': 'fda.recall_number', 'identity_value': 'D-0001-2020'}
     data = {'recall_number': 'D-0001-2020', 'event_id': 'event-1', '_native': native}
     assert _extract_external_ids('RecallProduct', data)['fda.recall_number'] == 'D-0001-2020'
@@ -121,7 +121,7 @@ def test_native_rule_ids_and_source_locators_are_not_lost():
 def test_lookup_failure_is_not_a_valid_empty_candidate_set():
     from unittest.mock import MagicMock
 
-    from db.repository import search_similar_entities
+    from graph.db.repository import search_similar_entities
     session = MagicMock()
     session.query.side_effect = RuntimeError('fixture-private-connection-data')
     with pytest.raises(RuntimeError, match='lookup unavailable') as captured:
@@ -134,7 +134,7 @@ def test_legacy_alias_lookup_requires_unique_identity():
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    from db.repository import lookup_alias, lookup_alias_candidates
+    from graph.db.repository import lookup_alias, lookup_alias_candidates
     session = MagicMock()
     session.query.return_value.join.return_value.filter.return_value.distinct.return_value.order_by.return_value.all.return_value = [
         SimpleNamespace(id=11, canonical_data={'name': 'First'}, external_ids={}),
@@ -169,7 +169,7 @@ def test_patch_changes_invalidate_existing_confirmation_and_relation_review(monk
 
 
 def test_two_known_ids_without_a_shared_namespace_cannot_merge_by_name():
-    from db.identity import batch_identity_keys, compatible_identity
+    from graph.db.identity import batch_identity_keys, compatible_identity
     assert not compatible_identity({'external_ids': {'lei': 'AAAA'}},
                                    {'external_ids': {'stock.nyse': 'BBBB'}})
     # A recall event can contain several products; event_id is not their identity key.
@@ -181,7 +181,7 @@ def test_two_known_ids_without_a_shared_namespace_cannot_merge_by_name():
 def test_candidate_similarity_score_is_preserved_exactly(monkeypatch):
     from types import SimpleNamespace
 
-    import db.identity as identity
+    import graph.db.identity as identity
     calls = []
     monkeypatch.setattr(identity, 'add_identity_proposal', lambda *args, **kwargs: calls.append(kwargs))
     identity.persist_candidates(None, SimpleNamespace(id=7), {'entity_data': {'_disambig': {
@@ -196,10 +196,10 @@ def test_candidate_similarity_score_is_preserved_exactly(monkeypatch):
 def test_alias_writeback_can_explicitly_avoid_http_under_review_locks(monkeypatch, cached):
     from unittest.mock import MagicMock
 
-    from core_engine import cloud_api_client
-    from db.repository import _write_aliases_with_embedding
+    from graph.db.repository import _write_aliases_with_embedding
+    from graph.extraction import llm_client
     generate = MagicMock(side_effect=AssertionError('Review transaction must not call the embedding service'))
-    monkeypatch.setattr(cloud_api_client, 'generate_embedding', generate)
+    monkeypatch.setattr(llm_client, 'generate_embedding', generate)
     session = MagicMock()
     session.query.return_value.filter.return_value.first.return_value = None
     vector = [0.0] * 1024

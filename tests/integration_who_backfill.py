@@ -8,11 +8,11 @@ import pytest
 from sqlalchemy import text
 from test_who_backfill import UNTIL, WhoStandIn
 
-from biz_rules.history_models import FetchRequest
-from biz_rules.history_sources import read_public
-from collection import rate
-from db import history
-from flows.who_backfill import SINCE, Counts, backfill_who
+from fetch import rate
+from fetch.sources import read_public
+from ops.who_backfill import SINCE, Counts, backfill_who
+from store import history
+from store.history_models import FetchRequest
 
 databases = publication_fixtures.databases
 

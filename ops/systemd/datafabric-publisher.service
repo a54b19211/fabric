@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m flows.scheduler --poll-seconds 30 --batch-size 20
+ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m run.scheduler --poll-seconds 30 --batch-size 20
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

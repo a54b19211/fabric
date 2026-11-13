@@ -2,7 +2,7 @@
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["frontend"]
+extend-exclude = ["graph/frontend"]
 
 [tool.ruff.lint]
 # the shared base of every repository (devtools README, "Shared code gates"): pyflakes (F), the pycodestyle errors
@@ -17,15 +17,12 @@ select = ["E4", "E7", "E9", "F", "W", "I"]
 # what ops/code_metrics.py measures (that script is the same file in every repository)
 paths = [
     "api",
-    "biz_rules",
-    "collection",
-    "config",
-    "contracts",
-    "core_engine",
-    "db",
-    "disambiguation",
-    "flows",
-    "migration",
+    "clean",
+    "fetch",
+    "graph",
+    "main_etl.py",
     "ops",
-    "processing",
+    "run",
+    "settings.py",
+    "store",
 ]

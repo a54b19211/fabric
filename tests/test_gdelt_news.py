@@ -5,16 +5,15 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from biz_rules import gdelt_news, window_coverage
-from biz_rules.gdelt_news import ENDPOINT, article_id
-from biz_rules.history_models import ArchiveRecord, Coverage, FetchRequest, HistoryError
-from biz_rules.history_sources import project_record, read_public
-from biz_rules.window_coverage import effective_receipts
-from collection import rate, transport
-from collection.windows import cycle_request
-from config.settings import APP
-from db.history import _lead_window, _list_coverage
-from db.source_refresh import SourceWatch, _page_finished
+from fetch import gdelt_news, rate, transport, window_coverage
+from fetch.gdelt_news import ENDPOINT, article_id
+from fetch.source_refresh import SourceWatch, _page_finished
+from fetch.sources import project_record, read_public
+from fetch.window_coverage import effective_receipts
+from fetch.windows import cycle_request
+from settings import APP
+from store.history import _lead_window, _list_coverage
+from store.history_models import ArchiveRecord, Coverage, FetchRequest, HistoryError
 
 HOUR = {"updated_since": "2026-10-30T00:00:00Z", "updated_until": "2026-10-30T01:00:00Z"}
 CYCLE_NOW = datetime(2026, 11, 4, 12, 30, tzinfo=timezone.utc)  # a watch cycle reads the whole hours before 12:00

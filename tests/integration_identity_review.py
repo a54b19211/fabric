@@ -21,9 +21,9 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from api.review_auth import principal_from_token
-from db import repository as repo
-from db.identity import auditable_identity, get_object_evidence
-from db.models import (
+from graph.db import repository as repo
+from graph.db.identity import auditable_identity, get_object_evidence
+from graph.db.models import (
     EntityAlias,
     EntityDict,
     EntityIdentityMergeProposal,
@@ -49,7 +49,7 @@ def engine():
     with admin.begin() as conn:
         conn.exec_driver_sql('CREATE SCHEMA IF NOT EXISTS ' + schema)
     scoped = create_engine(url, connect_args={'options': '-csearch_path=' + schema + ',public'})
-    migration_dir = Path(__file__).resolve().parents[1] / 'migration' / 'versions'
+    migration_dir = Path(__file__).resolve().parents[1] / 'store' / 'migrations' / 'versions'
     with scoped.begin() as conn:
         for migration in sorted(migration_dir.glob('V*.sql')):
             if int(migration.name[1:4]) <= 16 or migration.name.startswith('V026__'):
@@ -80,7 +80,7 @@ def fixed_document(monkeypatch):
         if evidence.get('version_id') != 'a' * 64 or content[evidence['char_start']:evidence['char_end']] != evidence['quote']:
             raise ValueError('Fixed version quote does not match source')
         return {**evidence, 'fixture_source_validated': True}
-    monkeypatch.setitem(sys.modules, 'biz_rules.object_evidence', SimpleNamespace(validate_object_evidence=check))
+    monkeypatch.setitem(sys.modules, 'graph.db.object_evidence', SimpleNamespace(validate_object_evidence=check))
     return {'version_id': 'a' * 64, 'quote': content, 'char_start': 0, 'char_end': len(content),
             'source_doc_uuid': 'fixture-doc', 'source_site': 'fixture-site'}
 
@@ -91,7 +91,7 @@ def session(engine, monkeypatch):
     def sessions():
         with Session(engine) as active, active.begin():
             yield active
-    monkeypatch.setattr('db.session.get_session', sessions)
+    monkeypatch.setattr('graph.db.session.get_session', sessions)
     monkeypatch.setattr(repo.aliases, '_write_aliases_with_embedding', lambda *a, **k: 0)
     with Session(engine) as active, active.begin():
         yield active
@@ -264,8 +264,8 @@ def test_primekg_stays_candidate_until_trusted_identity_and_checked_evidence(ses
 
 
 def test_migration_runner_executes_v021_transactionally_and_tracks_it_once(engine, monkeypatch):
-    from migration import app_ledger, runner
-    migration = Path(__file__).resolve().parents[1] / 'migration' / 'versions' / 'V035__identity_evidence.sql'
+    from store.migrations import app_ledger, runner
+    migration = Path(__file__).resolve().parents[1] / 'store' / 'migrations' / 'versions' / 'V035__identity_evidence.sql'
     runner.apply('app', engine)
     runner.apply('app', engine)
     with engine.begin() as conn:
@@ -285,7 +285,7 @@ def real_history_engine():
     with admin.begin() as conn:
         conn.exec_driver_sql('CREATE SCHEMA IF NOT EXISTS ' + schema)
     scoped = create_engine(url, connect_args={'options': '-csearch_path=' + schema})
-    from migration import runner
+    from store.migrations import runner
     runner.apply('history', scoped)
     yield scoped
     scoped.dispose()
@@ -294,7 +294,7 @@ def real_history_engine():
 
 @pytest.fixture
 def real_history(real_history_engine, monkeypatch):
-    from db import history
+    from store import history
     monkeypatch.setattr(history, 'history_engine', lambda: real_history_engine)
     monkeypatch.setenv('DATAFABRIC_HISTORY_SOURCE_ALLOWLIST', '["legacy_documents","pubmed","clinicaltrials","primekg_graph"]')
     monkeypatch.setenv('DATAFABRIC_PUBLICATION_IS_DEMO', 'true')
@@ -303,10 +303,10 @@ def real_history(real_history_engine, monkeypatch):
 
 
 def freeze_document(doc_uuid, raw, source_site='pubmed'):
-    from biz_rules.collected_document import collected_document
-    from biz_rules.history_models import ArchiveImport, ArchiveRecord
-    from biz_rules.reviewed_graph import document_native_id
-    from db import history
+    from graph.publish.collected_document import collected_document
+    from graph.publish.reviewed_graph import document_native_id
+    from store import history
+    from store.history_models import ArchiveImport, ArchiveRecord
     document = collected_document({'uuid': doc_uuid, 'source_site': source_site, 'title': 'Explicit synthetic source',
                                    'raw_content': raw}, datetime.now(timezone.utc), 'insert')
     request = ArchiveImport(source_id='legacy_documents', is_demo=True,
@@ -321,14 +321,14 @@ def freeze_document(doc_uuid, raw, source_site='pubmed'):
 
 
 def test_real_history_validator_binds_source_sha_unicode_and_permission(real_history, monkeypatch):
-    from biz_rules.history_models import HistoryError
-    from biz_rules.object_evidence import validate_object_evidence
+    from graph.db.object_evidence import validate_object_evidence
+    from store.history_models import HistoryError
     doc_uuid = 'identity-real-' + uuid4().hex
     evidence = freeze_document(doc_uuid, '甲公司🧪 has a registered sponsor relationship.')
     checked = validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
     assert checked['raw_sha256'] and checked['quote'] == evidence['quote']
     assert checked['locator']['field'] == 'raw_content'
-    from db import history
+    from store import history
     frozen = history.read_version(checked['version_id'], checked['source_id'], checked['source_record_id'],
                                   checked['is_demo'], 'current', datetime.now(timezone.utc))
     container = json.loads(frozen.raw_content)
@@ -391,7 +391,7 @@ def test_real_history_entity_relation_and_mapping_confirmation_with_two_sources(
 
 
 def test_confirmation_rejects_identity_changes_during_real_history_read(session, principal, real_history, monkeypatch):
-    import biz_rules.object_evidence as validator
+    import graph.db.object_evidence as validator
     raw = 'Explicit synthetic source for identity race check.'
     doc_uuid = 'race-' + uuid4().hex
     evidence = freeze_document(doc_uuid, raw)
@@ -411,7 +411,7 @@ def test_confirmation_rejects_identity_changes_during_real_history_read(session,
 
 
 def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, principal, real_history, monkeypatch):
-    import biz_rules.object_evidence as validator
+    import graph.db.object_evidence as validator
     doc_uuid = 'committed-race-' + uuid4().hex
     evidence = freeze_document(doc_uuid, 'Synthetic frozen identity source before concurrent edit.')
     with Session(engine) as seed, seed.begin():
@@ -424,7 +424,7 @@ def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, pri
     def sessions():
         with Session(engine) as active, active.begin():
             yield active
-    monkeypatch.setattr('db.session.get_session', sessions)
+    monkeypatch.setattr('graph.db.session.get_session', sessions)
     monkeypatch.setattr(repo.aliases, '_write_aliases_with_embedding', lambda *a, **k: 0)
     original = validator.validate_object_evidence
     def concurrent_edit(evidence, **kwargs):
@@ -444,7 +444,7 @@ def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, pri
 
 
 def test_complete_migration_stream_preserves_postgresql_function_bodies(engine, monkeypatch):
-    from migration import runner
+    from store.migrations import runner
     schema = 'opus_identity_migrations_' + uuid4().hex[:10]
     os.environ['DATAFABRIC_IDENTITY_MIGRATION_SCHEMA_RESULT'] = schema
     with engine.begin() as conn:
@@ -467,7 +467,7 @@ def native_trial_original(nct):
 
 
 def native_trial_record(nct):
-    from biz_rules.native_extraction import extract_native_entities
+    from graph.extraction.native_extraction import extract_native_entities
     return next(item for item in extract_native_entities(native_trial_original(nct), 'clinicaltrials')['entities']
                 if item['entity_type'] == 'ClinicalTrial')
 
@@ -479,7 +479,7 @@ def test_concurrent_native_first_observation_has_one_dictionary(engine, session)
     barrier = Barrier(2)
     def write(index):
         with Session(engine) as active, active.begin():
-            from db.models import Document
+            from graph.db.models import Document
             doc_uuid = 'native-concurrent-' + uuid4().hex
             active.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=native_trial_original(nct)))
             active.flush()
@@ -505,7 +505,7 @@ def test_existing_native_duplicate_ids_are_candidates_without_rewriting_legacy_r
     session.add_all(old)
     session.flush()
     count = session.query(EntityDict).count()
-    from db.models import Document
+    from graph.db.models import Document
     doc_uuid = uuid4().hex
     session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=native_trial_original(nct)))
     session.flush()
@@ -537,7 +537,7 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
     def sessions():
         with Session(engine) as active, active.begin():
             yield active
-    monkeypatch.setattr('db.session.get_session', sessions)
+    monkeypatch.setattr('graph.db.session.get_session', sessions)
     monkeypatch.setattr(review, 'get_session', sessions)
     monkeypatch.setattr(repo.aliases, '_write_aliases_with_embedding', lambda *a, **k: 0)
     for entity_id in ids:
@@ -570,12 +570,12 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
 def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_history_refs(session, principal, real_history):
     from test_native_extraction import trial_raw
 
-    from biz_rules.native_extraction import extract_native_entities
-    from biz_rules.object_evidence import validate_object_evidence
+    from graph.db.object_evidence import validate_object_evidence
+    from graph.extraction.native_extraction import extract_native_entities
     raw = trial_raw(markdown=True)
     doc_uuid = 'native-fixed-' + uuid4().hex
     reference = freeze_document(doc_uuid, raw, source_site='clinicaltrials')
-    from db.models import Document
+    from graph.db.models import Document
     session.add(Document(uuid=doc_uuid, source_site='clinicaltrials', raw_content=raw))
     session.flush()
     result = extract_native_entities(raw, 'clinicaltrials', source_version_id=reference['version_id'])
@@ -599,8 +599,8 @@ def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_h
 def test_writer_rechecks_native_claim_against_stored_source(session, invalid):
     from test_native_extraction import trial_raw
 
-    from biz_rules.native_extraction import extract_native_entities
-    from db.models import Document
+    from graph.db.models import Document
+    from graph.extraction.native_extraction import extract_native_entities
     raw = trial_raw(markdown=True)
     record = next(item for item in extract_native_entities(raw, 'clinicaltrials')['entities']
                   if item['entity_type'] == 'ClinicalTrial')
@@ -658,7 +658,7 @@ def test_pending_proposal_rejects_concurrently_changed_target(engine, session, p
 
 
 def test_current_review_evidence_cannot_borrow_appended_unreviewed_version(session, principal, real_history):
-    from db.identity import get_current_review_evidence, record_evidence
+    from graph.db.identity import get_current_review_evidence, record_evidence
     raw = 'Synthetic human reviewed identity and relation.'
     doc_uuid = 'review-binding-' + uuid4().hex
     proof = freeze_document(doc_uuid, raw)
@@ -690,7 +690,7 @@ def test_current_review_evidence_cannot_borrow_appended_unreviewed_version(sessi
 
 def test_review_lists_include_recorded_second_source_without_copying_mentions(session, monkeypatch):
     from api.routers import review
-    from db.identity import record_evidence
+    from graph.db.identity import record_evidence
     first, second = 'first-list-' + uuid4().hex, 'second-list-' + uuid4().hex
     records = [{'entity_type': 'Company', 'entity_name': target.canonical_data['name'], 'dict_id': target.id,
                 'source_text': 'Second source corroboration'} for target in [dictionary(session), dictionary(session)]]
@@ -785,7 +785,7 @@ def test_canonical_changes_invalidate_confirmation_and_block_relation(session, p
         @contextmanager
         def sessions():
             yield session
-        monkeypatch.setattr('db.session.get_session', sessions)
+        monkeypatch.setattr('graph.db.session.get_session', sessions)
         repo.merge_canonical_data(target.id, {'country': 'NEW'}, 'fda')
     elif entrypoint == 'explicit_merge':
         extra = dictionary(session, external_ids={'registry': 'NEW'})
@@ -822,7 +822,7 @@ def test_same_canonical_value_keeps_confirmation_and_explicit_confirm_signs_fina
 
 
 def test_link_rollback_rejects_changed_original_dictionary_identity(session, principal, fixed_document):
-    from db.identity import set_dictionary_identity_data
+    from graph.db.identity import set_dictionary_identity_data
     original, target = dictionary(session), dictionary(session)
     observed = entity(session, original)
     repo.approve_entity_with_alias_writeback(observed.id, '', confirm_identity=True, basis='Original identity checked',
@@ -861,15 +861,15 @@ def test_link_rollback_refreshes_cached_entity_after_independent_writer_commit(e
 
 @pytest.mark.parametrize('change', ['approved_hit', 'pending_then_approve', 'dictionary_revoke'])
 def test_recorded_second_source_enqueues_existing_graph_publication(engine, change):
-    from db.identity import set_dictionary_identity_data
-    from db.models import Document
+    from graph.db.identity import set_dictionary_identity_data
+    from graph.db.models import Document
     schema = 'opus_identity_publication_' + uuid4().hex[:10]
     os.environ['DATAFABRIC_IDENTITY_PUBLICATION_SCHEMA_RESULT'] = schema
     with engine.begin() as conn:
         conn.exec_driver_sql('CREATE SCHEMA ' + schema)
     scoped = create_engine(engine.url, connect_args={'options': '-csearch_path=' + schema + ',public'})
     with scoped.begin() as conn:
-        for migration in sorted((Path(__file__).resolve().parents[1] / 'migration' / 'versions').glob('V*.sql')):
+        for migration in sorted((Path(__file__).resolve().parents[1] / 'store' / 'migrations' / 'versions').glob('V*.sql')):
             if int(migration.name[1:4]) <= 19 or migration.name[:5] in ('V026_', 'V033_', 'V034_', 'V035_'):
                 conn.exec_driver_sql(migration.read_text())
     first, second = 'publication-first-' + uuid4().hex, 'publication-second-' + uuid4().hex
@@ -910,8 +910,8 @@ def test_recorded_second_source_enqueues_existing_graph_publication(engine, chan
 
 @pytest.mark.parametrize('reuse_existing', [False, True])
 def test_global_merge_rollback_blocks_new_native_observation_dependencies(session, principal, reuse_existing):
-    from biz_rules.native_extraction import extract_native_entities
-    from db.models import Document
+    from graph.db.models import Document
+    from graph.extraction.native_extraction import extract_native_entities
     nct = 'NCT' + str(int(uuid4().hex[:8], 16) % 100000000).zfill(8)
     keeper = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': 'Unidentified older trial'}, external_ids={}, is_verified=False)
     absorbed = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': nct, 'trial_id': nct},
@@ -940,8 +940,8 @@ def test_global_merge_rollback_blocks_new_native_observation_dependencies(sessio
 
 
 def test_single_link_rollback_blocks_added_native_evidence_without_row_change(session, principal):
-    from biz_rules.native_extraction import extract_native_entities
-    from db.models import Document
+    from graph.db.models import Document
+    from graph.extraction.native_extraction import extract_native_entities
     nct = 'NCT' + str(int(uuid4().hex[:8], 16) % 100000000).zfill(8)
     old = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': 'Old unidentified identity'}, external_ids={}, is_verified=False)
     target = EntityDict(entity_type='ClinicalTrial', canonical_data={'name': nct, 'trial_id': nct}, external_ids={'trial_id': nct}, is_verified=False)
@@ -967,11 +967,11 @@ def test_single_link_rollback_blocks_added_native_evidence_without_row_change(se
 
 def test_pending_merges_auto_resolve_stale_rows_and_group_the_open_conflicts(engine, session, monkeypatch):
     @contextmanager
-    def committing_session():  # like db.session.get_session: the function itself commits mid-way
+    def committing_session():  # like graph.db.session.get_session: the function itself commits mid-way
         with Session(engine) as active:
             yield active
             active.commit()
-    monkeypatch.setattr('db.session.get_session', committing_session)
+    monkeypatch.setattr('graph.db.session.get_session', committing_session)
     tag = uuid4().hex[:8]
     with Session(engine) as work, work.begin():
         live = EntityDict(entity_type='Company', is_verified=False, canonical_data={

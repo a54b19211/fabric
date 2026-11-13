@@ -6,12 +6,12 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from biz_rules.collected_document import (
+from graph.publish.collected_document import (
     CollectedDocument,
     collected_document,
     project_collected,
 )
-from biz_rules.history_models import ArchiveRecord, sha256
+from store.history_models import ArchiveRecord, sha256
 
 NOW = datetime(2026, 10, 18, tzinfo=timezone.utc)
 
@@ -107,7 +107,7 @@ def test_no_protocol_is_text_and_delete_is_explicit_tombstone_not_empty_success(
 
 
 def test_collected_old_wrappers_are_not_rewritten():
-    from biz_rules.reviewed_graph import StoredDocument
+    from graph.publish.reviewed_graph import StoredDocument
 
     raw = "SYNTHETIC original"
     old = StoredDocument(
@@ -172,13 +172,13 @@ def test_real_nmpa_collector_headers_are_not_narrative_and_originals_stay_exact(
     ],
 )
 def test_unrecognized_metadata_or_body_is_not_deleted(raw):
-    from biz_rules.collected_document import _narrative_text
+    from graph.publish.collected_document import _narrative_text
 
     assert _narrative_text(raw, "nmpa") == raw
 
 
 def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles_survive():
-    from biz_rules.collected_document import _narrative_text
+    from graph.publish.collected_document import _narrative_text
 
     raw = (
         "SYNTHETIC A<B, CD4<CD8 and <anti-BCMA> stay in prose.\n"
@@ -210,8 +210,8 @@ def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles
 
 @pytest.mark.parametrize("unit", ["characters", "bytes"])
 def test_input_size_diagnostics_have_only_safe_field_limit_and_unit(unit):
-    from biz_rules.history_models import MAX_RECORD_BYTES
-    from db.publication import _validation_error
+    from graph.publish.publication import _validation_error
+    from store.history_models import MAX_RECORD_BYTES
 
     marker = "SYNTHETIC_VALUE_MUST_NOT_BE_RECORDED"
     raw = marker + (
@@ -233,7 +233,7 @@ def test_input_size_diagnostics_have_only_safe_field_limit_and_unit(unit):
 
 
 def test_other_validation_does_not_copy_input_or_exception_message():
-    from db.publication import _validation_error
+    from graph.publish.publication import _validation_error
 
     marker = "SYNTHETIC_INVALID_SOURCE_VALUE_MUST_NOT_BE_RECORDED"
     with pytest.raises(ValidationError) as failure:

@@ -13,10 +13,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from test_publication import snapshot
 
-from biz_rules.schemas import ConfidenceInfo, MetadataEnvelope, ProvenanceInfo
-from db import history, publication
-from db.models import Base, Document, EntityDict, EntityRelation, ExtractedEntity
-from migration import runner
+from graph.db.models import Base, Document, EntityDict, EntityRelation, ExtractedEntity
+from graph.db.schemas import ConfidenceInfo, MetadataEnvelope, ProvenanceInfo
+from graph.publish import publication
+from store import history
+from store.migrations import runner
 
 
 @pytest.fixture
@@ -55,14 +56,14 @@ def databases(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_NAMESPACE", "synthetic.publication")
     runner.apply("history", history.history_engine())
     assert runner.main(["--db", "publication", "--apply"]) == 0
-    import db.session
+    import graph.db.session
 
     @contextmanager
     def sessions():
         with Session(source) as session, session.begin():
             yield session
 
-    monkeypatch.setattr(db.session, "get_session", sessions)
+    monkeypatch.setattr(graph.db.session, "get_session", sessions)
     try:
         yield source, target
     finally:
@@ -140,7 +141,7 @@ def test_commit_unknown_reuses_same_frozen_input_and_key(databases, monkeypatch)
 
 
 def test_new_body_is_durable_without_overwriting_old_graph_cache(databases):
-    from db.repository import upsert_document
+    from graph.db.repository import upsert_document
 
     source, target = databases
     value = snapshot()
@@ -383,7 +384,7 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
 
 
 def test_body_a_b_a_and_withdraw_then_restore_are_real_observations(databases):
-    from db.repository import upsert_document
+    from graph.db.repository import upsert_document
 
     source, target = databases
     value = snapshot("return-to-A")
@@ -440,7 +441,7 @@ def test_body_a_b_a_and_withdraw_then_restore_are_real_observations(databases):
 def test_old_graph_reference_never_replaces_newer_cleaned_candidate(
     databases,
 ):
-    from db.repository import upsert_document
+    from graph.db.repository import upsert_document
 
     source, _target = databases
     value = snapshot("compatibility-cache")
@@ -486,7 +487,7 @@ def test_old_graph_reference_never_replaces_newer_cleaned_candidate(
 def test_extra_write_failure_rolls_back_document_and_capture_in_same_source_transaction(
     databases, monkeypatch
 ):
-    from db import repository
+    from graph.db import repository
 
     source, target = databases
     value = snapshot("extra-rollback")
@@ -512,7 +513,7 @@ def test_extra_write_failure_rolls_back_document_and_capture_in_same_source_tran
 
 def test_dictionary_qualification_withdrawal_dirties_referencing_graph_only(databases, monkeypatch):
     from api.review_auth import principal_from_token
-    from db import repository
+    from graph.db import repository
     source, _target = databases
     value = snapshot("dict-qualification")
     value["raw_content"] = "SYNTHETIC company sponsors this trial.\\n" + value["raw_content"]
@@ -616,8 +617,8 @@ def test_restart_cannot_relabel_frozen_real_and_demo_scope(databases, monkeypatc
 def test_reprojection_same_original_makes_new_version_and_keeps_old_immutable(
     databases, monkeypatch
 ):
-    from biz_rules.collected_document import collected_document
-    from biz_rules.history_models import ArchiveImport, ArchiveRecord
+    from graph.publish.collected_document import collected_document
+    from store.history_models import ArchiveImport, ArchiveRecord
 
     _source, target = databases
     value = snapshot("SYNTHETIC-reprojection")
@@ -701,7 +702,7 @@ def test_oversized_input_is_blocked_for_one_hour_without_losing_fifo_or_other_do
 ):
     from datetime import timedelta
 
-    from biz_rules.history_models import MAX_RECORD_BYTES, sha256
+    from store.history_models import MAX_RECORD_BYTES, sha256
 
     source, target = databases
     value = snapshot("SYNTHETIC-large-source")
@@ -791,11 +792,11 @@ def test_reconcile_against_a_fixed_high_watermark(databases):
 def test_secondary_source_evidence_reaches_a_real_published_graph(databases):
     from pathlib import Path
 
-    from db.identity import record_evidence
+    from graph.db.identity import record_evidence
     source, target = databases
     with source.begin() as conn:
         conn.exec_driver_sql((Path(__file__).resolve().parents[1] /
-            "migration/versions/V035__identity_evidence.sql").read_text())
+            "store/migrations/versions/V035__identity_evidence.sql").read_text())
     values = [snapshot("evidence-first"), snapshot("evidence-second")]
     for value in values:
         value["raw_content"] = "SYNTHETIC company supplies this trial.\\n" + value["raw_content"]

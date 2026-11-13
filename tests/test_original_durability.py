@@ -14,8 +14,8 @@ from test_attachment_originals import (
     http_source,  # noqa: F401  (fixture)
 )
 
-from collection import site_crawler
-from core_engine import scrapling_client as client
+from fetch import site_crawler
+from fetch import web_client as client
 
 
 def prepare_path(tmp_path, monkeypatch, scenario):

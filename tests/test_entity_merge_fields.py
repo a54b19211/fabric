@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from db.models import EntityDict, EntityMergeQueue, ExtractedEntity
-from db.repository import canonical
-from db.repository.canonical import process_entity_merge
+from graph.db.models import EntityDict, EntityMergeQueue, ExtractedEntity
+from graph.db.repository import canonical
+from graph.db.repository.canonical import process_entity_merge
 
 
 class FakeQuery:
@@ -43,7 +43,7 @@ def log(monkeypatch):
 
     def set_data(_session, entity, *, canonical_data):
         entity.canonical_data = canonical_data
-    monkeypatch.setattr("db.identity.set_dictionary_identity_data", set_data)
+    monkeypatch.setattr("graph.db.identity.set_dictionary_identity_data", set_data)
     return calls
 
 

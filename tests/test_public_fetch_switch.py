@@ -9,9 +9,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routers import history as api
-from biz_rules import history_sources as sources
-from biz_rules.history_models import FetchRequest, HistoryError, RunView
-from flows import history_fetch as worker
+from fetch import fetch_job as worker
+from fetch import sources
+from store.history_models import FetchRequest, HistoryError, RunView
 
 FLAG = "DATAFABRIC_HISTORY_FETCH_ENABLED"
 
@@ -52,7 +52,7 @@ def test_disabled_api_rejects_before_persistence_queue_or_retry(monkeypatch, cli
 @pytest.mark.parametrize("source", ["clinicaltrials", "pubmed", "fda_crl", "europe_pmc",
                                     "who_don", "sec_companyfacts", "gdelt_doc"])
 def test_disabled_public_reader_blocks_every_source_before_http_or_dispatch(monkeypatch, source):
-    from biz_rules import gdelt_news, sec_xbrl, who_don
+    from fetch import gdelt_news, sec_xbrl, who_don
 
     monkeypatch.setenv(FLAG, "false")
     http = Mock(side_effect=AssertionError("HTTP forbidden"))

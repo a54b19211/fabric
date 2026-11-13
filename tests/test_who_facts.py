@@ -9,9 +9,9 @@ import json
 import pytest
 from bs4 import BeautifulSoup
 
-from biz_rules.history_models import ArchiveRecord, HistoryRecord
-from biz_rules.who_don import WHO_PARSER, project_who
-from biz_rules.who_facts import extract_counts
+from fetch.who_don import WHO_PARSER, project_who
+from fetch.who_facts import extract_counts
+from store.history_models import ArchiveRecord, HistoryRecord
 
 
 def projection(summary="", overview="", *, title="SYNTHETIC disease - Country A and Country B", **fields):

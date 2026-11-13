@@ -5,9 +5,9 @@ import sys
 
 import pytest
 
-from biz_rules.history_models import HistoryError
-from db.source_refresh import SourceWatch, watches
-from flows import scheduler
+from fetch.source_refresh import SourceWatch, watches
+from run import scheduler
+from store.history_models import HistoryError
 
 
 def sec_watch(**overrides):
@@ -34,7 +34,7 @@ def test_sec_watch_explicit_scope_survives_config_round_trip(monkeypatch):
 
 
 def test_publish_loop_no_longer_runs_indexing():
-    # v3 3.6：索引由独立 worker 执行（migration.index_publication worker），发表循环不再碰索引
+    # v3 3.6：索引由独立 worker 执行（run.index worker），发表循环不再碰索引
     assert not hasattr(scheduler, "index_tick")
 
 
@@ -65,7 +65,7 @@ def test_reported_source_failure_exits_nonzero(monkeypatch, state):
 def test_index_worker_rotates_job_classes_and_survives_unavailable_database(monkeypatch):
     from collections import Counter
 
-    from db import index_publication
+    from store import index_publication
 
     claims, scans = [], []
 

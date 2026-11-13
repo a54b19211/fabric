@@ -4,10 +4,10 @@ import dataclasses
 
 import pytest
 
-from biz_rules.history_models import FetchRequest
-from biz_rules.history_sources import PLUGINS
-from collection import catalog
-from collection.catalog import FETCHABLE, PLUGIN_READ_MODES, READ_MODES, SOURCE_READ_MODES, SPECS, spec
+from fetch import catalog
+from fetch.catalog import FETCHABLE, PLUGIN_READ_MODES, READ_MODES, SOURCE_READ_MODES, SPECS, spec
+from fetch.sources import PLUGINS
+from store.history_models import FetchRequest
 
 
 def test_every_fetchable_source_declares_modes_from_the_vocabulary_within_its_plugin():

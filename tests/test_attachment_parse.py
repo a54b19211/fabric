@@ -1,11 +1,11 @@
-"""加工层附件解析（processing.attachment_parse）：复用旧 ETL 的 MinerU / doc 转 PDF / Excel 解析，
+"""加工层附件解析（clean.attachment_parse）：复用旧 ETL 的 MinerU / doc 转 PDF / Excel 解析，
 结果按（附件版本, 处理器版本）存；失败是带原因的状态，不抛出、不冒充“附件为空”。不联网。"""
 
 import hashlib
 
 import pytest
 
-from processing import attachment_parse as ap
+from clean import attachment_parse as ap
 
 PDF = b"%PDF-1.4\nsynthetic\n%%EOF\n"
 DOC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"synthetic doc"

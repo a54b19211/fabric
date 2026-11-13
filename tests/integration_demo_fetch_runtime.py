@@ -23,7 +23,7 @@ from redis import Redis
 from rq.job import Job
 from sqlalchemy.engine import make_url
 
-from flows.history_fetch import require_demo_fetch
+from fetch.fetch_job import require_demo_fetch
 
 
 def test_native_demo_http_rq_restart_and_frozen_recovery(tmp_path):

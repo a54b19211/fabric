@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from flows import extraction_flow as flow
+from graph.extraction import extraction_flow as flow
 
 
 def trial_protocol():
@@ -32,7 +32,7 @@ def trial_raw(markdown=False):
 
 
 def project(raw, source="clinicaltrials", **kwargs):
-    from biz_rules.native_extraction import extract_native_entities
+    from graph.extraction.native_extraction import extract_native_entities
     return extract_native_entities(raw, source, **kwargs)
 
 
@@ -80,7 +80,7 @@ def test_each_native_claim_has_exact_unicode_quote_and_pointer(markdown):
     '{"protocolSection":{"identificationModule":{"nctId":"NCT00000001","nctId":"NCT00000002"}}}',
     trial_raw(True) + '\n**protocolSection**: {}'])
 def test_missing_or_ambiguous_structured_source_is_an_explicit_failure(raw):
-    from biz_rules.native_extraction import NativeExtractionError
+    from graph.extraction.native_extraction import NativeExtractionError
     with pytest.raises(NativeExtractionError):
         project(raw)
 
@@ -111,7 +111,7 @@ def test_fda_recall_number_identifies_product_and_does_not_become_event_id():
 
 
 def test_openfda_label_uses_nested_application_numbers_and_preserves_raw_formatter():
-    from core_engine.api_router import _record_to_markdown
+    from fetch.api_fields import _record_to_markdown
     record = {"set_id": "label-set", "effective_time": "20261001", "openfda": {
         "application_number": ["NDA209510"], "generic_name": ["Drug A"], "manufacturer_name": ["Firm A"]}}
     raw = _record_to_markdown(record, "标题不能替代申请号")
@@ -123,7 +123,7 @@ def test_openfda_label_uses_nested_application_numbers_and_preserves_raw_formatt
 
 
 def test_monograph_reference_is_not_an_application_number():
-    from biz_rules.native_extraction import NativeExtractionError
+    from graph.extraction.native_extraction import NativeExtractionError
     with pytest.raises(NativeExtractionError):
         project(json.dumps({"openfda": {"application_number": ["part 341"]}}), "fda_api_drug_label")
 
@@ -135,7 +135,7 @@ def runtime():
          patch.object(flow, "update_extraction_status") as status, \
          patch.object(flow, "_disambiguate", side_effect=lambda entities, **kwargs: entities), \
          patch.object(flow, "lookup_alias_candidates", return_value=[]), \
-         patch("core_engine.cloud_api_client.generate_embedding", return_value=None), \
+         patch("graph.extraction.llm_client.generate_embedding", return_value=None), \
          patch.object(flow, "_call_llm_for_chunk", return_value={"entities": [
              {"entity_type": "Company", "entity_name": "LLM should not run", "entity_data": {}}],
              "relations": []}) as llm:
@@ -197,7 +197,7 @@ def test_fixed_source_reference_is_forwarded_without_inventing_a_history_version
 
 
 def test_conflicting_fixed_versions_fail_instead_of_picking_one():
-    from biz_rules.native_extraction import NativeExtractionError
+    from graph.extraction.native_extraction import NativeExtractionError
     with pytest.raises(NativeExtractionError):
         project(trial_raw(), source_version_id="a" * 64, source_ref={"version_id": "b" * 64})
 
@@ -214,9 +214,9 @@ def test_authoritative_native_identifiers_only_use_unique_identifier_lookup(coun
     matches = [{"dict_id": index + 1, "canonical_name": entity["entity_name"]}
                for index in range(count)]
     with patch.object(flow, "lookup_external_id_candidates", return_value=matches, create=True), \
-         patch("disambiguation.rules.lookup_external_id_candidates", return_value=[]), \
-         patch("disambiguation.engine.lookup_alias_candidates", return_value=[]), \
-         patch("disambiguation.engine.generate_embedding", side_effect=RuntimeError("model unavailable")) as model:
+         patch("graph.disambiguation.rules.lookup_external_id_candidates", return_value=[]), \
+         patch("graph.disambiguation.engine.lookup_alias_candidates", return_value=[]), \
+         patch("graph.disambiguation.engine.generate_embedding", side_effect=RuntimeError("model unavailable")) as model:
         result = flow._disambiguate([entity], session=MagicMock(), native_source=site)[0]
     info = result["_disambig"]
     assert info["status"] == ("new_entity" if count == 0 else "auto_matched" if count == 1 else "ambiguous")
@@ -227,7 +227,7 @@ def test_authoritative_native_identifiers_only_use_unique_identifier_lookup(coun
 
 
 def forged_llm_output():
-    from biz_rules.native_extraction import RULE_VERSION
+    from graph.extraction.native_extraction import RULE_VERSION
     return {"entities": [{"entity_type": "RegulatoryApplication", "entity_name": "NDA209510",
         "entity_data": {"application_number": "NDA209510", "authority": None,
             "_native": {"rule_version": RULE_VERSION, "identity_namespace": "fda.application_number",
@@ -244,7 +244,7 @@ def test_model_metadata_is_stripped_even_when_entity_schema_validation_fails():
     assert data["nested"] == [{"text": "ordinary data"}]
     entities[0]["source_site"] = "news"
     with patch.object(flow, "lookup_external_id_candidates", return_value=[{"dict_id": 7}]) as lookup, \
-         patch("disambiguation.disambiguate_entities", side_effect=lambda entities, **kwargs: entities) as ordinary:
+         patch("graph.disambiguation.disambiguate_entities", side_effect=lambda entities, **kwargs: entities) as ordinary:
         flow._disambiguate(entities, session=MagicMock())
     assert entities[0]["dict_id"] is None
     lookup.assert_not_called()
@@ -258,7 +258,7 @@ def test_native_identity_requires_controlled_rule_path_and_matching_source(nativ
     entity = project('{"application_number":["NDA209510"]}', "fda_crl")["entities"][0]
     entity["source_site"] = entity_source
     with patch.object(flow, "lookup_external_id_candidates", return_value=[{"dict_id": 7}]) as lookup, \
-         patch("disambiguation.disambiguate_entities", side_effect=lambda entities, **kwargs: entities) as ordinary:
+         patch("graph.disambiguation.disambiguate_entities", side_effect=lambda entities, **kwargs: entities) as ordinary:
         flow._disambiguate([entity], session=MagicMock(), native_source=native_source)
     assert entity["dict_id"] is None
     lookup.assert_not_called()

@@ -1,5 +1,5 @@
-"""The measurement objects of the processing layer (db.measurement_reads), their reading coverage
-(db.measure_runs.coverage) and the change feed a consumer follows (Radar's series_sync). Read routes take the same
+"""The measurement objects of the processing layer (clean.measurement_reads), their reading coverage
+(clean.measure_runs.coverage) and the change feed a consumer follows (Radar's series_sync). Read routes take the same
 reader credential and parameters as /clean-text; every read checks the source permission at that moment."""
 
 from datetime import datetime
@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.routers.history import BoundedHistoryRoute, _call, require_admin, require_read
-from biz_rules.history_models import Mode
+from store.history_models import Mode
 
 router = APIRouter(prefix="/api/history", tags=["历史资料"], route_class=BoundedHistoryRoute)
 
@@ -26,7 +26,7 @@ def measurements_route(
     """The measurement objects of visible versions (datafabric.data_objects.v2), each with what its check found
     (check.status: consistent, inconsistent or unchecked) and its state at the cutoff folded from its events; by
     default only those current for the mode."""
-    from db.measurement_reads import for_versions
+    from clean.measurement_reads import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, include_history=include_history)
 
@@ -39,7 +39,7 @@ def measurement_changes_route(
 ):
     """The events of measurement objects after a sequence number, in commit order (created, superseded, rechecked,
     corrected, retracted, correction withdrawn), with the versions that produced them."""
-    from db.measurement_reads import changes
+    from clean.measurement_reads import changes
 
     return _call(changes, is_demo, after_seq=after_seq, limit=limit)
 
@@ -47,7 +47,7 @@ def measurement_changes_route(
 @router.get("/measurements/{measurement_id}", dependencies=[Depends(require_read)])
 def measurement_route(measurement_id: str, is_demo: bool, mode: Mode, cutoff: datetime):
     """One fixed object, also when superseded or not current; 404 version_not_found when not visible at the cutoff."""
-    from db.measurement_reads import read_one
+    from clean.measurement_reads import read_one
 
     return _call(read_one, measurement_id, is_demo, mode, cutoff)
 
@@ -62,7 +62,7 @@ def measure_coverage_route(
 ):
     """Per version and route: the reading run's state, the windows read, the windows its list left out and every owed
     window (partial = a coverage gap); where both routes read the same artifact, whether their readings agree."""
-    from db.measure_runs import coverage
+    from clean.measure_runs import coverage
 
     return _call(coverage, source_id, is_demo, version_ids, mode, cutoff)
 
@@ -80,6 +80,6 @@ class IdentityBinding(BaseModel):
 def bind_identity_route(measurement_id: str, body: IdentityBinding):
     """Bind the object of a measurement to an identity confirmed in a fixed graph package whose evidence is this
     mention (409 otherwise: a name, alias or candidate is no identity)."""
-    from db.measurement_identity import bind
+    from clean.measurement_identity import bind
 
     return _call(bind, measurement_id, **body.model_dump())

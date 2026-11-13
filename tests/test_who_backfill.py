@@ -1,4 +1,4 @@
-"""The bounded WHO backfill (flows.who_backfill): every bound, the ceiling, the receipt. The WHO endpoint and the
+"""The bounded WHO backfill (ops.who_backfill): every bound, the ceiling, the receipt. The WHO endpoint and the
 history store are stand-ins; nothing goes to the network or a database."""
 
 import json
@@ -11,10 +11,9 @@ import httpx
 import pytest
 from test_source_refresh import who_value
 
-from biz_rules import who_don
-from biz_rules.history_models import HistoryError
-from collection import rate
-from flows.who_backfill import SINCE, Counts, backfill_who
+from fetch import rate, who_don
+from ops.who_backfill import SINCE, Counts, backfill_who
+from store.history_models import HistoryError
 
 UNTIL = datetime(2026, 11, 9, tzinfo=timezone.utc)
 FIRST_NEW = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -60,15 +59,15 @@ class WhoStandIn:
 
 
 class RunStore:
-    """The calls of db.history that the backfill makes, over a dict of runs; finish_fetch keeps the coverage the way
-    db.history does (the real one is checked in tests/integration_who_backfill.py)."""
+    """The calls of store.history that the backfill makes, over a dict of runs; finish_fetch keeps the coverage the way
+    store.history does (the real one is checked in tests/integration_who_backfill.py)."""
 
     def __init__(self):
         self.runs = {}
 
     def create_fetch(self, request, key):
         if key in self.runs:
-            assert self.runs[key].request == request  # db.history: the same key with another request is a conflict
+            assert self.runs[key].request == request  # store.history: the same key with another request is a conflict
             return self.runs[key], False
         self.runs[key] = SimpleNamespace(id=key, attempt=1, state="queued", coverage={}, request=request)
         return self.runs[key], True

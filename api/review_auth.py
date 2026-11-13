@@ -17,7 +17,7 @@ class ReviewPrincipal:
 
 
 def principal_from_token(token):
-    from db.identity import require_human_reviewer
+    from graph.db.identity import require_human_reviewer
     raw = os.environ.get('DATAFABRIC_REVIEW_TOKENS', '')
     if not raw:
         raise ValueError('Trusted review authentication is not configured')

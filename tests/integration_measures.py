@@ -31,13 +31,12 @@ import pytest
 from integration_history import pg, pg_engine  # noqa: F401  (fixtures)
 from sqlalchemy import text
 
-from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError, archive_manifest_hash
-from db import clean_stage, measurement_identity, measurement_reads, measurements
-from db import extraction_checks as checks
-from db import history as store
-from db import measure_runs as runs
-from processing import clean_text, registry
-from processing import measure_extract as mx
+from clean import clean_stage, clean_text, measurement_identity, measurement_reads, measurements, processors
+from clean import extraction_checks as checks
+from clean import measure_extract as mx
+from clean import measure_runs as runs
+from store import history as store
+from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, archive_manifest_hash
 
 SRC = os.environ.get("DATAFABRIC_TEST_BIOCHECK_SRC")
 PYTHON = os.environ.get("DATAFABRIC_TEST_BIOCHECK_PYTHON") or sys.executable
@@ -721,7 +720,7 @@ def test_public_history_reconstruction_is_kept_apart_from_operational_replay(db,
 
 
 def graph_package(version, node_status="confirmed", span=None, key="graph-a"):
-    from biz_rules.reviewed_graph import GraphBundle
+    from graph.publish.reviewed_graph import GraphBundle
 
     (v,) = rows(store.history_engine(), "SELECT payload->>'raw_sha256' AS raw FROM history_versions WHERE version_id=:v",
                 v=version)
@@ -802,7 +801,7 @@ def test_a_graph_package_or_undeclared_source_is_never_read_for_measurements(db,
     with store.history_engine().begin() as conn:
         assert runs.measurable(conn, "who_don") is True
         assert runs.measurable(conn, "external_archive") is False  # not declared
-    monkeypatch.setattr(registry, "MEASURE_SOURCES", ("who_don", "reviewed_graph"))
+    monkeypatch.setattr(processors, "MEASURE_SOURCES", ("who_don", "reviewed_graph"))
     with store.history_engine().begin() as conn:
         assert runs.measurable(conn, "reviewed_graph") is False  # a derived product never goes back in
     revoke(db)
@@ -1236,7 +1235,7 @@ def test_a_backfill_version_is_measured_only_when_a_list_names_it_and_the_routes
 
 
 def test_a_list_that_names_windows_leaves_the_others_out_of_scope_and_reports_what_it_could_not_plan(db, fake):
-    from flows import measure_extract as worker
+    from run import measure as worker
 
     version, ghost = who_version(), "f" * 64
     assert runs.plan_scope(runs.Scope.parse({"versions": [{"version_id": version, "windows": [999]}, ghost]}),

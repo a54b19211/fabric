@@ -14,6 +14,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from uuid import uuid4
@@ -22,7 +23,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from migration import app_ledger, manifests, runner
+from store.migrations import app_ledger, manifests, runner
 
 REPO = Path(__file__).resolve().parents[1]
 REBUILD_LINE, TEAM_LINE = "c9ed485", "d316aad"
@@ -56,14 +57,23 @@ def pg():
     admin.dispose()
 
 
+# the top-level packages before r1 moved them into fetch/ clean/ store/ graph/ run/
+OLD_PACKAGES = {"biz_rules", "collection", "config", "contracts", "core_engine", "db", "disambiguation", "flows",
+                "migration", "processing"}
+
+
 def old_module(commit, tmp_path, name, monkeypatch, attribute, engine):
-    """A module of migration/ exactly as `commit` had it (with its own versions/ directory), bound to `engine`."""
+    """A module of migration/ exactly as `commit` had it (with its own versions/ directory), bound to `engine`. It is
+    imported from that commit's whole tree, put first on sys.path: the modules it imports had other names then."""
     root = tmp_path / commit
     if not root.exists():
-        archive = subprocess.run(["git", "-C", str(REPO), "archive", "--format=tar", commit, "migration"],
+        archive = subprocess.run(["git", "-C", str(REPO), "archive", "--format=tar", commit],
                                  capture_output=True, check=True).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(root)
+    for loaded in [m for m in sys.modules if m.split(".")[0] in OLD_PACKAGES]:
+        monkeypatch.delitem(sys.modules, loaded)
+    monkeypatch.syspath_prepend(str(root))
     spec = importlib.util.spec_from_file_location(f"migration_{name}_{commit}", root / "migration" / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -232,7 +242,7 @@ def test_an_unknown_or_superseded_record_is_refused_and_nothing_is_written(pg, m
 
 
 def test_the_known_migration_table_covers_every_file_today():
-    from migration.known_migrations import KNOWN
+    from store.migrations.known_migrations import KNOWN
 
     current = {(row[0], row[1], row[2]) for row in KNOWN if row[3] == "current"}
     for path in sorted(manifests.VERSIONS_DIR.glob("V*.sql")):

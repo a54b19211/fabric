@@ -1,5 +1,5 @@
 """The top-level statement splitter on its own cases and on every migration file (golden: statement count and
-digest of the split, produced by the splitter as it was before it moved to migration.sqltext)."""
+digest of the split, produced by the splitter as it was before it moved to store.migrations.sqltext)."""
 
 import hashlib
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from migration import manifests, sqltext
+from store.migrations import manifests, sqltext
 
 VERSIONS = manifests.VERSIONS_DIR
 GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "sql_split_golden.json").read_text())

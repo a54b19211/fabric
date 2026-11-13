@@ -6,12 +6,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routers import history as history_router
-from biz_rules import who_don
-from biz_rules.gdelt_news import article_id
-from biz_rules.history_models import ArchiveRecord, sha256
-from biz_rules.history_sources import project_record
-from biz_rules.version_difference import PROJECTED_FIELDS, classify
-from db import version_difference
+from fetch import who_don
+from fetch.gdelt_news import article_id
+from fetch.sources import project_record
+from store import version_difference
+from store.history_models import ArchiveRecord, sha256
+from store.version_classify import PROJECTED_FIELDS, classify
 
 WHO_ID = "00000000-0000-4000-8000-000000000001"
 UNCHANGED = {"parser_changed": False, "body_changed": False, "last_modified_changed": False, "structure_changed": False}

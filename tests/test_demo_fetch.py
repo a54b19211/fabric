@@ -9,9 +9,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routers import history as api
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError, canonical, sha256
-from db import history as store
-from flows import history_fetch as flow
+from fetch import fetch_job as flow
+from store import history as store
+from store.history_models import ArchiveRecord, FetchRequest, HistoryError, canonical, sha256
 
 INSTANCE = "r5-isolated-demo"
 
@@ -215,7 +215,7 @@ def test_api_demo_identity_is_checked_before_any_database_write(demo_config, mon
 
 
 def test_demo_cannot_bypass_worker_by_calling_public_reader(demo_config, monkeypatch):
-    from biz_rules import history_sources as sources
+    from fetch import sources
     external = Mock(side_effect=AssertionError("HTTP must not be constructed"))
     monkeypatch.setattr(sources.httpx, "Client", external)
     with pytest.raises(HistoryError) as exc:

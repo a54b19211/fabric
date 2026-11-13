@@ -4,7 +4,7 @@ tests/ 共享 fixtures —— 所有 mock，不连接数据库。
 import sys
 from pathlib import Path
 
-# 将项目根目录加入 sys.path，确保测试能 import 项目模块（disambiguation/、db/ 等）
+# 将项目根目录加入 sys.path，确保测试能 import 项目模块（graph/disambiguation/、db/ 等）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from unittest.mock import MagicMock, patch
@@ -44,8 +44,8 @@ def mock_engine():
 
 @pytest.fixture
 def mock_get_session():
-    """Mock db.session.get_session，注入 mock_session。"""
-    with patch("db.session.get_session") as mock:
+    """Mock graph.db.session.get_session，注入 mock_session。"""
+    with patch("graph.db.session.get_session") as mock:
         yield mock
 
 
@@ -63,7 +63,7 @@ def mid_hour_clock(monkeypatch):
     import time
     from types import SimpleNamespace
 
-    from collection import rate
+    from fetch import rate
 
     moment = 1_800_000_000 - 1_800_000_000 % 3600 + 1800
     monkeypatch.setattr(

@@ -20,10 +20,10 @@
 """
 
 
-from biz_rules.schemas import EXTRA_MODEL_MAP, validate_extra
-from config.sites.fda.api_drug_label import CONFIG as LABEL_CFG
-from config.sites.fda.api_enforcement import CONFIG as ENFORCEMENT_CFG
-from core_engine.api_router import _extract_extra_value, _get_nested
+from fetch.api_fields import _extract_extra_value, _get_nested
+from fetch.sites.fda.api_drug_label import CONFIG as LABEL_CFG
+from fetch.sites.fda.api_enforcement import CONFIG as ENFORCEMENT_CFG
+from graph.db.schemas import EXTRA_MODEL_MAP, validate_extra
 
 # 真实 openFDA 召回记录（2026-09-20 采集，uuid 0fa81856）
 RECORD_WITH_OPENFDA = {

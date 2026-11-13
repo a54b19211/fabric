@@ -14,8 +14,7 @@ import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ("api", "biz_rules", "collection", "config", "contracts", "core_engine", "db", "disambiguation", "flows",
-            "migration", "processing")
+PACKAGES = ("api", "clean", "fetch", "graph", "run", "store")
 
 
 def modules():

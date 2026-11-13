@@ -1,6 +1,6 @@
 """体检各来源：对每个来源真抓一次（或两次），打印一张表。
 
-干什么：把 collection.catalog 里能抓的来源（本地导入 local_files 除外）逐个走一遍和 pipeline.py fetch 相同的路：
+干什么：把 fetch.catalog 里能抓的来源（本地导入 local_files 除外）逐个走一遍和 main_etl.py fetch 相同的路：
   create_fetch 建任务、history_fetch_job 抓、读回结果。看每个来源现在抓不抓得到、用多久、标题和正文是不是空的。
   加 --twice 每个来源抓两次，第二次应该一个都不新增（"新增"列为 0），用来查"没变的内容重复存版本"。
   加 --rounds N 每个来源抓 N 次（--twice 就是 --rounds 2）。
@@ -15,7 +15,7 @@
   python ops/check_sources.py --max 3 --deadline 120   # 每个来源最多读几条、最多用几秒（默认就是 3 和 120）
 要设的环境变量：
   DATAFABRIC_HISTORY_DATABASE_URL  必设。这个命令会写库（每次抓取留下运行记录和版本），一定要指向临时库，别连线上库；
-                                   库先建好表：python -m migration.runner --db history --apply
+                                   库先建好表：python -m store.migrations.runner --db history --apply
   DATAFABRIC_HISTORY_SOURCE_ALLOWLIST  不用设，命令把它设成这次要测的来源。
   GDELT 有每小时请求额度，被限流也如实显示。
 有来源没抓到（失败，或一个版本都没有）时，表打完以退出码 1 结束。表打在标准输出，日志在标准错误输出（只想看表加 2>/dev/null）。
@@ -31,14 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import text  # noqa: E402
 
-from biz_rules.history_models import FetchRequest  # noqa: E402
-from collection import catalog  # noqa: E402
-from collection.windows import KNOWN_STOP  # noqa: E402
-from config.crawler_settings import SITE_PROFILES  # noqa: E402
-from db import history  # noqa: E402
-from flows.history_fetch import history_fetch_job  # noqa: E402
+from fetch import catalog  # noqa: E402
+from fetch.fetch_job import history_fetch_job  # noqa: E402
+from fetch.site_profiles import SITE_PROFILES  # noqa: E402
+from fetch.windows import KNOWN_STOP  # noqa: E402
+from store import history  # noqa: E402
+from store.history_models import FetchRequest  # noqa: E402
 
-# 不在 config/sites 里的来源：(查询词, 指定的来源记录号)
+# 不在 fetch/sites 里的来源：(查询词, 指定的来源记录号)
 OTHER_QUERIES = {
     "clinicaltrials": ("*", []),
     "europe_pmc": ("BRCA1", []),
@@ -53,7 +53,7 @@ COLUMNS = ("来源", "第几次", "状态", "停止原因", "版本", "新增", 
 
 
 def query_for(source):
-    """(查询词, 记录号)，规则和 pipeline.py fetch 一样：接口站点填 records，网页站点填第一个列表页网址。"""
+    """(查询词, 记录号)，规则和 main_etl.py fetch 一样：接口站点填 records，网页站点填第一个列表页网址。"""
     if source in OTHER_QUERIES:
         return OTHER_QUERIES[source]
     profile = SITE_PROFILES[source]

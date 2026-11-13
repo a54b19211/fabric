@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from biz_rules import sec_xbrl as sec
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
-from biz_rules.history_sources import _pointer, project_record, read_public
+from fetch import sec_xbrl as sec
+from fetch.sources import _pointer, project_record, read_public
+from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
 NATIVE = "CIK0001682852:us-gaap:NetIncomeLoss"
 
@@ -133,7 +133,7 @@ def test_failure_is_not_zero_or_a_legal_empty_disclosure(monkeypatch, kind):
             return httpx.Response(int(kind))
         return httpx.Response(200, json={**value(), "cik": 1})
     mocked_http(monkeypatch, respond)
-    from collection import transport
+    from fetch import transport
 
     monkeypatch.setattr(transport, "_retry_settings", lambda: (1, 0.0))
     batch = read_public(request())
@@ -149,7 +149,7 @@ def test_page_budget_is_explicit_and_retains_success_before_later_error(monkeypa
         calls.append(req)
         return httpx.Response(200, json=value()) if len(calls) == 1 else httpx.Response(503)
     mocked_http(monkeypatch, respond)
-    from collection import transport
+    from fetch import transport
 
     monkeypatch.setattr(transport.time, "sleep", lambda _: None)
     limited = read_public(FetchRequest(source_id="sec_companyfacts", query="*", source_record_ids=ids,

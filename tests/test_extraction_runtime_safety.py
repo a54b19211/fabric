@@ -58,12 +58,12 @@ def forbid_network(monkeypatch):
 def runtime(monkeypatch):
     # 普通导入实际业务模块，避免复制函数或用替身 router 测试自己。
     app = importlib.import_module("api.main").app
-    task_queue = importlib.import_module("core_engine.task_queue")
-    worker = importlib.import_module("flows.extraction_worker")
-    job = importlib.import_module("flows.extraction_rq_job")
-    flow = importlib.import_module("flows.extraction_flow")
-    repository = importlib.import_module("db.repository")
-    session = importlib.import_module("db.session")
+    task_queue = importlib.import_module("graph.extraction.task_queue")
+    worker = importlib.import_module("graph.extraction.extraction_worker")
+    job = importlib.import_module("graph.extraction.extraction_rq_job")
+    flow = importlib.import_module("graph.extraction.extraction_flow")
+    repository = importlib.import_module("graph.db.repository")
+    session = importlib.import_module("graph.db.session")
     redis = importlib.import_module("redis")
     rq = importlib.import_module("rq")
 
@@ -113,8 +113,8 @@ def test_startup_and_first_status_query_preserve_existing_work(runtime, monkeypa
 
     from sqlalchemy import event
 
-    from db.models import ExtractedEntity
-    from db.review_listeners import _guard_direct_status_write
+    from graph.db.models import ExtractedEntity
+    from graph.db.review_listeners import _guard_direct_status_write
 
     assert event.contains(ExtractedEntity.review_status, "set", _guard_direct_status_write)
 
@@ -263,7 +263,7 @@ def test_redis_submission_keeps_the_existing_rq_function_and_uuid_contract(runti
     assert queue.name == "extraction"
     assert queue.connection is runtime.redis_io
     assert function is runtime.job.extraction_job
-    assert function.__module__ + "." + function.__name__ == "flows.extraction_rq_job.extraction_job"
+    assert function.__module__ + "." + function.__name__ == "graph.extraction.extraction_rq_job.extraction_job"
     assert list(inspect.signature(function).parameters) == ["uuid"]
     assert submitted_uuid == uuid
     assert enqueue.call_args.kwargs == {"job_timeout": 18000}

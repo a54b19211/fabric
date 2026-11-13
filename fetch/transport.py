@@ -1,0 +1,628 @@
+"""一次读取的唯一闸门和预算。
+
+学生不用读这个文件，只需知道三件事：
+1. 采集代码里发出的每一次真实请求（httpx、requests、curl、浏览器），在发出的那一刻都会经过这里：先等共享限速的间隔，
+   再查预算（读几条、多少字节、几点截止），超了就抛 Stop，已经读到的保留，插件给出续读位置；
+2. 写采集代码不要自己加 time.sleep 限速，也不要自己数请求：间隔、出站上限和计数都在这里和 fetch/rate.py；
+   在读取里要等一会儿（比如重读前）用 transport.pause，到截止时间就停，不会睡过头；
+3. 一次读取只有一份预算（Budget），所有插件共用；超时和 429 的有界重试也在这里，插件里不用再写。
+下面的大部分是“让这三件事对每一种传输层（httpx、requests、curl_cffi、浏览器）都成立”的补丁，不需要读懂，也不要改。
+
+所有读取插件（公开接口、站点插件、本地导入、PubMed 全文）共用这里的 Budget：字节数、版本数（抓几条）、截止时间，
+加上共享限速组和出站计数（fetch.rate，按每一跳的实际目标主机）。请求次数不设额度：对对方网站的压力由限速间隔和
+出站上限管，读多少由“抓几条”和截止时间管；请求数只是如实计数，写进读取结果。读取期间，这个线程（及复制了上下文的线程）里发出的
+每一次真实传输都在发出那一刻过闸：
+
+- httpx：Client._send_single_request，每一跳一次（自动跟随的重定向逐跳过闸）；
+- requests：HTTPAdapter.send，每一跳一次（requests 的重定向循环逐跳调用它）；
+- curl_cffi：Session.request，关掉库内部的自动跳转，由这里逐跳跟随、逐跳过闸；
+- 浏览器（playwright 与 patchright，scrapling 的 StealthyFetcher 用后者）：页面上的每个 document / xhr / fetch
+  请求在路由处过闸；脚本、样式等子资源计数（subrequests）和计字节，不占请求数、不单独限速。读取指定了目标站点
+  （Budget.site_host）时，不是目标站点主机（及其子域）的请求是第三方的广告、统计、cookie 横幅，直接中止，不计数。
+
+字节按实际读到的每一块计（含重定向和 429 的响应体、流式下载），用完当场停。超时和 429 在每一跳有界重试
+（有出站上限的站点不重试 429），每次重发都重新过闸、重新计数。预算停止是 BaseException（Stop），拉取函数里的 except Exception 吞不掉；
+一旦停下，同一次读取之后的任何传输都直接停。没有活动读取时（API 服务的其他调用、索引客户端等）原样放行。
+
+停在哪里（Budget.check）：每次发出前、每读到一块、每交付一个版本，以及导航返回时。
+截止时间：每次等待（连接、读块、整次传输、限速、重试间隔，以及浏览器里等加载、选择器、函数、睡眠）都不超过开始等待
+那一刻的剩余时间——读块的超时在每次阻塞读之前按当时的剩余时间重设（httpx 在 httpcore 的 SyncStream.read，requests 在 http.client 底下的
+SocketIO.readinto；响应头、chunk 内部、正文都从这两处读），读块因到期超时报 deadline。
+请求数：浏览器内部跟随的重定向（Chromium 一次导航最多跟 20 跳）发出前拦不到，照实计数，不据此停。
+
+增量读取（FetchRequest.known_stop > 0，固定刷新用）：插件每读到一条父记录就问一次 Budget.known，库里已有且没变的
+连续够 known_stop 条，就以 reached_known 停——前面都是读过的，后面更旧。这是老 ETL“遇到第一个重复的就停止”。
+"""
+
+from __future__ import annotations
+
+import contextvars
+import functools
+import os
+import socket
+import time
+from contextlib import contextmanager
+from urllib.parse import urljoin, urlparse
+
+from fetch import rate
+
+_ACTIVE: contextvars.ContextVar = contextvars.ContextVar("collection_budget", default=None)
+_MARK = "__wrapped_by_collection__"
+_REDIRECTS = {301, 302, 303, 307, 308}
+GATED_BROWSER_TYPES = {"document", "xhr", "fetch"}
+TIMEOUT_RETRY_PAUSE = 1.0  # 超时后重试前等几秒（上限；设置里的重试间隔更短就用更短的）
+
+
+def byte_budget() -> int:
+    return int(os.environ.get("DATAFABRIC_READ_MAX_BYTES", str(256 * 1024 * 1024)))
+
+
+def on_host(url, host) -> bool:
+    """url 的主机是 host 本身或它的子域。"""
+    name = (urlparse(url).hostname or "").lower()
+    return bool(name) and (name == host or name.endswith("." + host))
+
+
+def _retry_settings():
+    from settings import APP
+
+    return max(0, int(APP.TASK_RETRIES)), min(max(float(APP.TASK_RETRY_DELAY), 0.0), 60.0)
+
+
+class Stop(BaseException):
+    """预算用完：reason 即 stop_reason。已读到的材料保留，读取插件给出续读位置。"""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+KNOWN = "reached_known"  # stop_reason：增量读取读到了已存且没变的原件，不是预算用完
+
+
+class Budget:
+    """一次读取的预算与计量。版本数 ≤ max_records（父记录、附件、全文都算）；字节 ≤ DATAFABRIC_READ_MAX_BYTES；
+    截止时间 deadline_seconds。任何一项用完就停，并且停住。请求数只计数，不设额度。"""
+
+    def __init__(self, *, max_bytes, max_records, deadline_seconds, known_stop=0):
+        self.max_bytes, self.max_records = max_bytes, max_records
+        self.deadline = time.monotonic() + deadline_seconds
+        self.requests = self.bytes = self.records = self.subrequests = self.redirect_hops = 0
+        self.stopped: str | None = None
+        self.site_host: str | None = None  # 站点读取填目标站点的主机；浏览器里不属于它的请求是第三方
+        self.known_stop, self.known_run = known_stop, 0
+        self.is_known = None  # 增量读取时由 read_public 填：原件 → 库里是否已有且没变（store.history.stored_unchanged）
+
+    def third_party(self, url) -> bool:
+        return bool(self.site_host) and url.startswith(("http://", "https://")) and not on_host(url, self.site_host)
+
+    @classmethod
+    def for_request(cls, request):
+        return cls(max_bytes=byte_budget(), max_records=request.max_records,
+                   deadline_seconds=request.deadline_seconds, known_stop=request.known_stop)
+
+    def stop(self, reason):
+        self.stopped = self.stopped or reason
+        raise Stop(self.stopped)
+
+    def known(self, item) -> bool:
+        """item 是不是库里已有且没变的原件（存了也不会多出新版本）。连续 known_stop 条都是，抛 Stop(KNOWN)。
+        item=None 是这一条没读到：不算已存，连续数清零——没存的不能被“已存的就停”跳过。
+        不走 self.stop：这不是预算用完，不能让这次读取之后的传输都被拦。"""
+        known = bool(self.known_stop and self.is_known and item is not None and self.is_known(item))
+        self.known_run = self.known_run + 1 if known else 0
+        if self.known_stop and self.known_run >= self.known_stop:
+            raise Stop(KNOWN)
+        return known
+
+    def check(self):
+        if self.stopped:
+            raise Stop(self.stopped)
+        if self.bytes > self.max_bytes:
+            self.stop("byte_budget")
+        if time.monotonic() >= self.deadline:
+            self.stop("deadline")
+
+    def before_send(self, url):
+        self.check()
+        if self.bytes >= self.max_bytes:
+            self.stop("byte_budget")
+        try:
+            rate.wait_for_url(url, deadline=self.deadline)
+            quota = rate.take_for_url(url)
+        except TimeoutError:
+            self.stop("deadline")
+        if quota:
+            self.stop(quota)  # 本实例对这个网站的出站上限：这次请求不发出
+        self.requests += 1
+
+    def take_bytes(self, n):
+        self.bytes += n
+        self.check()
+
+    def need_record(self):
+        self.check()
+        if self.records >= self.max_records:
+            self.stop("record_budget")
+
+    def take_record(self):
+        self.need_record()
+        self.records += 1
+
+    def timeout(self, cap):
+        """一次等待的上限：调用方的上限与剩余时间取小。多给 50ms，让被期限截断的等待一定在到期之后才超时，
+        失败处的 check 就能认出是 deadline（定时器早到亚毫秒会被当成普通超时）。"""
+        return max(0.1, min(cap, self.deadline - time.monotonic() + 0.05))
+
+    def within(self, timeout, default=3600.0):
+        """把调用方给的超时（数字、元组或 httpx 的分项字典；None 是不限）收进剩余时间。"""
+        if isinstance(timeout, dict):
+            return {key: self.within(value) for key, value in timeout.items()}
+        if isinstance(timeout, tuple):
+            return tuple(self.within(value) for value in timeout)
+        return self.timeout(default if timeout is None else timeout)
+
+    def counted(self, chunks):
+        """逐块计字节并检查；读块出错时恰因到期（每次套接字读都收在剩余时间里）就报 deadline，否则原样抛出。"""
+        try:
+            for chunk in chunks:
+                self.take_bytes(len(chunk))
+                yield chunk
+        except Exception:
+            self.check()
+            raise
+
+    def pause(self, seconds):
+        if time.monotonic() + seconds >= self.deadline:
+            self.stop("deadline")
+        time.sleep(seconds)
+
+
+def current() -> Budget | None:
+    return _ACTIVE.get()
+
+
+def known(item) -> bool:
+    """插件每交出一条父记录（没读到的给 None）就问一句；没有活动读取时恒为 False。见 Budget.known。"""
+    budget = _ACTIVE.get()
+    return budget.known(item) if budget is not None else False
+
+
+def pause(seconds):
+    """拉取函数自己要等的一会儿（重读之前的间隔等）：在读取里不会睡过截止时间，到了就以 "deadline" 停下；
+    不在读取里就是普通的睡眠。"""
+    budget = _ACTIVE.get()
+    if budget is None:
+        time.sleep(seconds)
+    else:
+        budget.pause(seconds)
+
+
+def gate(url):
+    """一次真实传输之前（替身和自带传输的代码用）：有活动读取就过闸计数。"""
+    budget = _ACTIVE.get()
+    if budget is not None:
+        budget.before_send(url)
+
+
+def received(n):
+    """自带传输的代码报告实际读到的字节。"""
+    budget = _ACTIVE.get()
+    if budget is not None:
+        budget.take_bytes(n)
+
+
+def get(client, url, params=None, *, cap, timeout=20.0):
+    """一次有界 GET → (状态码, 字节)。闸门和预算由传输层执行；cap 只是这一个响应的大小上限（防内存），
+    超过抛 ValueError("response_too_large")。"""
+    budget = _ACTIVE.get()
+    body = bytearray()
+    with client.stream("GET", url, params=params, timeout=budget.timeout(timeout) if budget else timeout) as response:
+        for chunk in response.iter_bytes():
+            body.extend(chunk)
+            if len(body) > cap:
+                raise ValueError("response_too_large")
+        return response.status_code, bytes(body)
+
+
+def _transient_kind(error: BaseException) -> str | None:
+    """"timeout"（超时）、"rate_limit"（429）或 None（别的错误，不重试）。沿着异常链找。"""
+    seen = set()
+    while isinstance(error, BaseException) and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, TimeoutError) or any(
+            cls.__name__ in {"TimeoutException", "TimeoutError", "ReadTimeout", "ConnectTimeout",
+                             "WriteTimeout", "PoolTimeout", "Timeout"}  # Timeout：curl_cffi
+            for cls in type(error).__mro__
+        ):
+            return "timeout"
+        if getattr(getattr(error, "response", None), "status_code", None) == 429:
+            return "rate_limit"
+        error = error.__cause__ or error.__context__
+    return None
+
+
+def is_transient(error: BaseException) -> bool:
+    """只重试超时和限流（429）；解析错误和其他 HTTP 错误不重试。"""
+    return _transient_kind(error) is not None
+
+
+def _retry_on_429(url) -> bool:
+    """有出站上限的站点（GDELT、WHO）收到 429 不重试：每次重发都是一个计入上限的请求，重试会把每小时的额度用光。
+    响应原样交给读取插件，由它报"对方限流"。"""
+    declared = rate.group_for_url(url)
+    return declared is None or declared.outbound_cap is None
+
+
+def _hop(budget, url, send, *, drain, gated=True):
+    """一跳：过闸 → 发送；超时和 429 有界重试，每次重发重新过闸。drain 读完并关闭 429 的响应（字节照计）。"""
+    retries, delay = _retry_settings()
+    for attempt in range(retries + 1):
+        if gated:
+            budget.before_send(url)
+        try:
+            response = send()
+        except Exception as error:
+            budget.check()  # 等待恰因到期而失败（超时收在剩余时间里）：报 deadline，不报来源失败
+            kind = _transient_kind(error)
+            if attempt == retries or kind is None:
+                raise
+            if kind == "timeout":
+                # 超时 = 这条连接没通（实测 Akamai 的个别节点会让一半的连接卡住），换一条马上重试；干等没有用，
+                # 两次发送的间隔已由限速闸门保证。只有 429 才按间隔退避。
+                budget.pause(min(delay, TIMEOUT_RETRY_PAUSE))
+            else:
+                budget.pause(delay)
+                delay = min(delay * 2, 60.0)
+            continue
+        status = getattr(response, "status_code", None) or getattr(response, "status", None)
+        if status == 429 and attempt < retries and _retry_on_429(url):
+            drain(response)
+            budget.pause(delay)
+            delay = min(delay * 2, 60.0)
+            continue
+        return response
+    raise AssertionError("unreachable")
+
+
+# —— httpx ——
+
+def _httpx_hop(original):
+    import httpx
+
+    class Counted(httpx.SyncByteStream):
+        def __init__(self, stream, budget):
+            self.stream, self.budget = stream, budget
+
+        def __iter__(self):
+            return self.budget.counted(self.stream)
+
+        def close(self):
+            self.stream.close()
+
+    def send(self, request):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, request)
+
+        def once():
+            request.extensions["timeout"] = budget.within(request.extensions.get("timeout", {}))
+            response = original(self, request)
+            if hasattr(response, "_content"):  # 传输层已整块读入（内存响应等）：当场计
+                budget.take_bytes(len(response._content))
+            else:
+                response.stream = Counted(response.stream, budget)
+            return response
+
+        def drain(response):
+            try:
+                response.read()
+            finally:
+                response.close()
+
+        return _hop(budget, str(request.url), once, drain=drain)
+
+    return send
+
+
+# —— 套接字读：每一次阻塞读都收进当前剩余时间（读超时是发送时设的，不会随已用时间减少）——
+
+def _httpcore_read(original):
+    """httpx 经 httpcore：响应头、chunk、正文的每次 recv 都走 SyncStream.read，按传入的读超时重设套接字。"""
+
+    def read(self, max_bytes, timeout=None):
+        budget = _ACTIVE.get()
+        return original(self, max_bytes, budget.within(timeout) if budget is not None else timeout)
+
+    return read
+
+
+def _socketio_readinto(original):
+    """requests 经 urllib3 / http.client：响应头、chunk、正文的每次 recv 都走 socket.makefile 底下的 SocketIO.readinto。"""
+
+    def readinto(self, buffer):
+        budget = _ACTIVE.get()
+        if budget is not None:
+            try:
+                self._sock.settimeout(budget.within(self._sock.gettimeout()))
+            except OSError:  # 套接字已关：交给原读取报错
+                pass
+        return original(self, buffer)
+
+    return readinto
+
+
+# —— requests ——
+
+class _CountedRaw:
+    def __init__(self, raw, budget):
+        self._raw, self._budget = raw, budget
+
+    def stream(self, amt=2**16, decode_content=None):
+        if getattr(self._raw, "chunked", False) or not hasattr(self._raw, "read1"):
+            chunks = self._raw.stream(amt, decode_content=decode_content)
+        else:  # read(amt) 要攒满 amt 才返回，慢速返回时一块能拖过期限；read1 到多少返回多少
+            chunks = iter(lambda: self._raw.read1(amt, decode_content=decode_content), b"")
+        return self._budget.counted(chunks)
+
+    def read(self, *args, **kwargs):
+        try:
+            data = self._raw.read(*args, **kwargs)
+        except Exception:
+            self._budget.check()
+            raise
+        self._budget.take_bytes(len(data or b""))
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def _requests_hop(original):
+    def send(self, request, *args, **kwargs):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, request, *args, **kwargs)
+
+        def once():
+            kwargs["timeout"] = budget.within(kwargs.get("timeout"))
+            response = original(self, request, *args, **kwargs)
+            response.raw = _CountedRaw(response.raw, budget)
+            return response
+
+        def drain(response):
+            try:
+                response.content  # noqa: B018 -- 读完（计字节）再关
+            finally:
+                response.close()
+
+        return _hop(budget, request.url, once, drain=drain)
+
+    return send
+
+
+# —— curl_cffi ——
+
+def _curl_request(original):
+    def request(self, method, url, *args, **kwargs):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, method, url, *args, **kwargs)
+        follow = kwargs.pop("allow_redirects", True) is not False
+        limit = kwargs.pop("max_redirects", None)
+        limit = 10 if limit is None or limit < 0 else min(limit, 10)
+        stream = bool(kwargs.get("stream"))
+        timeout = kwargs.pop("timeout", getattr(self, "timeout", None))
+
+        def once():
+            return original(self, method, url, *args, allow_redirects=False, timeout=budget.within(timeout), **kwargs)
+
+        for _ in range(limit + 1):
+            response = _hop(budget, url, once, drain=lambda r: r.close() if stream else budget.take_bytes(len(r.content)))
+            if stream:
+                chunks = response.iter_content
+                response.iter_content = lambda *a, _chunks=chunks, **k: budget.counted(_chunks(*a, **k))
+            else:
+                budget.take_bytes(len(response.content))
+            location = response.headers.get("location")
+            if not follow or response.status_code not in _REDIRECTS or not location:
+                return response
+            url = urljoin(url, location)
+            if response.status_code == 303 or (response.status_code in (301, 302) and method.upper() == "POST"):
+                method = "GET"
+                for key in ("data", "json", "files"):
+                    kwargs.pop(key, None)
+        raise RuntimeError("too_many_redirects")
+
+    return request
+
+
+# —— 浏览器 ——
+
+def _route(page):
+    """页面上每个请求都经过这里：document / xhr / fetch 过闸，其余计数；然后交给页面原有的路由（如禁用资源）。
+    路由回调在浏览器驱动的协程里跑，拿不到读取的上下文变量，所以读取挂在页面上。"""
+    if getattr(page, "_collection_routed", False):
+        return
+
+    def handle(route, request):
+        budget = getattr(page, "_collection_budget", None)
+        if budget is not None:
+            if budget.third_party(request.url):  # 广告、统计、cookie 横幅：不放行、不计数
+                route.abort()
+                return
+            if request.resource_type in GATED_BROWSER_TYPES:
+                try:
+                    budget.before_send(request.url)
+                except Stop:
+                    route.abort()
+                    return
+            else:
+                budget.subrequests += 1
+        route.fallback()
+
+    def redirected(request):
+        # 浏览器内部跟随的重定向，下一跳不经过路由，发出前拦不住：照实计数（占请求数），不据此停
+        budget = getattr(page, "_collection_budget", None)
+        if budget is not None and request.redirected_from is not None and request.resource_type in GATED_BROWSER_TYPES:
+            budget.requests += 1
+            budget.redirect_hops += 1
+
+    def finished(request):
+        budget = getattr(page, "_collection_budget", None)
+        if budget is not None:
+            size = _browser_body_size(request)  # 先取大小再加：取大小会切到浏览器驱动，期间别的事件也在加
+            budget.bytes += size  # 事件里不抛：下次过闸、导航返回或交付版本时 check 停
+
+    page.route("**/*", handle)  # 后注册的路由先执行：先过闸，再交给 scrapling 等原有路由
+    page.on("request", redirected)
+    page.on("requestfinished", finished)
+    page._collection_routed = True
+
+
+def _browser_body_size(request) -> int:
+    """响应体字节。document / xhr / fetch 读实际响应体长度；子资源用浏览器给的 responseBodySize，
+    取不到（patchright 等返回 -1）用 content-length。"""
+    if request.resource_type in GATED_BROWSER_TYPES:
+        try:
+            response = request.response()
+            if response is not None and not (300 <= response.status < 400):
+                return len(response.body())
+        except Exception:  # noqa: BLE001 -- 取不到（页面已关闭等）退回浏览器给的大小
+            pass
+    try:
+        size = int(request.sizes().get("responseBodySize") or 0)
+    except Exception:  # noqa: BLE001
+        size = -1
+    if size >= 0:
+        return size
+    try:
+        response = request.response()
+        return max(0, int((response.headers if response else {}).get("content-length") or 0))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _within_ms(budget, wait):
+    """浏览器的超时（毫秒；None 是页面默认的 30 秒，0 是不限）收进剩余时间。"""
+    return budget.within(30.0 if wait is None else (wait / 1000 or None)) * 1000
+
+
+def _browser_goto(original):
+    def goto(self, url, *args, **kwargs):
+        budget = _ACTIVE.get()
+        self._collection_budget = budget
+        if budget is None:
+            return original(self, url, *args, **kwargs)
+        _route(self)
+        kwargs["timeout"] = _within_ms(budget, kwargs.get("timeout"))
+        try:
+            response = _hop(budget, url, lambda: original(self, url, *args, **kwargs),
+                            drain=lambda r: None, gated=False)  # 导航请求本身在路由处过闸
+        except Exception:
+            budget.check()  # 预算停止（路由已中止导航）优先于浏览器报的中止错误
+            raise
+        budget.check()
+        return response
+
+    return goto
+
+
+def _browser_wait(original):
+    """页面上的等待（等选择器、等加载状态、等函数、等 locator）：超时收进剩余时间。恰因到期而超时报 deadline。"""
+    def wait(self, *args, **kwargs):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, *args, **kwargs)
+        budget.check()
+        kwargs["timeout"] = _within_ms(budget, kwargs.get("timeout"))
+        try:
+            return original(self, *args, **kwargs)
+        except Exception:
+            budget.check()
+            raise
+
+    return wait
+
+
+def _browser_sleep(original):
+    """wait_for_timeout：睡不过剩余时间，睡醒时已到期就报 deadline。"""
+    def sleep(self, timeout):
+        budget = _ACTIVE.get()
+        if budget is None:
+            return original(self, timeout)
+        budget.check()
+        original(self, min(timeout, _within_ms(budget, timeout)))
+        budget.check()
+
+    return sleep
+
+
+def _patch(owner, name, wrap):
+    original = getattr(owner, name, None)
+    if original is None or getattr(original, _MARK, False):
+        return
+    wrapped = functools.wraps(original)(wrap(original))
+    setattr(wrapped, _MARK, True)
+    setattr(owner, name, wrapped)
+
+
+def install():
+    """把闸门装到各传输层的实际发送处。幂等（已包过的带标记）；每次按当前的类检查。没装的库跳过。"""
+    from httpcore._backends.sync import SyncStream
+    from httpx._client import Client as HttpxClient
+
+    _patch(HttpxClient, "_send_single_request", _httpx_hop)
+    _patch(SyncStream, "read", _httpcore_read)
+    _patch(socket.SocketIO, "readinto", _socketio_readinto)
+    try:
+        from requests.adapters import HTTPAdapter
+
+        _patch(HTTPAdapter, "send", _requests_hop)
+    except ImportError:
+        pass
+    try:
+        from curl_cffi.requests import Session as CurlSession
+
+        _patch(CurlSession, "request", _curl_request)
+    except ImportError:
+        pass
+    for module in ("playwright.sync_api", "patchright.sync_api"):
+        try:
+            api = __import__(module, fromlist=["Page", "Frame", "Locator"])
+        except ImportError:
+            continue
+        _patch(api.Page, "goto", _browser_goto)
+        for owner in (api.Page, api.Frame):
+            for name in ("wait_for_selector", "wait_for_load_state", "wait_for_function", "wait_for_url"):
+                _patch(owner, name, _browser_wait)
+            _patch(owner, "wait_for_timeout", _browser_sleep)
+        _patch(api.Locator, "wait_for", _browser_wait)
+
+
+@contextmanager
+def metered(budget):
+    """这段时间里（这个线程及复制了上下文的线程）的所有真实传输都过 budget。"""
+    install()
+    token = _ACTIVE.set(budget)
+    try:
+        yield budget
+    finally:
+        _ACTIVE.reset(token)
+
+
+@contextmanager
+def reading(request):
+    """这次读取的预算：已有活动读取就沿用（read_public 外层建，插件内层复用），否则按请求新建。"""
+    active = _ACTIVE.get()
+    if active is not None:
+        yield active
+        return
+    with metered(Budget.for_request(request)) as budget:
+        yield budget
+
+
+def in_context(fn):
+    """给要交给其他线程执行的函数带上当前上下文（翻页驱动在独立线程里跑浏览器）。"""
+    ctx = contextvars.copy_context()
+    return functools.partial(ctx.run, fn)

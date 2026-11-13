@@ -1,4 +1,4 @@
-"""PubMed 合法全文（collection.pubmed_fulltext）：PMC JATS / Unpaywall OA PDF 作为附件版本，或如实记缺失。
+"""PubMed 合法全文（fetch.pubmed_fulltext）：PMC JATS / Unpaywall OA PDF 作为附件版本，或如实记缺失。
 
 不联网：httpx.MockTransport 替身；每个请求都要先过共享限速（rate.wait 替身记次数）。
 """
@@ -10,13 +10,12 @@ import httpx
 import pytest
 from pdf_fixture import make_pdf
 
-from biz_rules import history_sources
-from biz_rules.history_models import FetchRequest
-from collection import pubmed_fulltext as pf
-from collection import rate
-from core_engine import scrapling_client as client
-from processing import attachment_parse as ap
-from processing import jats_text
+from clean import attachment_parse as ap
+from clean import jats_text
+from fetch import pubmed_fulltext as pf
+from fetch import rate, sources
+from fetch import web_client as client
+from store.history_models import FetchRequest
 
 EMAIL = "ops-mailbox@example.invalid"
 OA_PDF = "https://repo.example.org/b.pdf"
@@ -92,7 +91,7 @@ class Web:
         return httpx.Response(404)
 
     def read(self, **extra):
-        return history_sources.read_public(
+        return sources.read_public(
             FetchRequest(source_id="pubmed", query="x", source_record_ids=["111", "222"], **extra))
 
 
@@ -118,7 +117,7 @@ def test_pmc_cc_fulltext_becomes_an_attachment_version_and_parses_with_section_l
     [attachment] = [r for r in batch["records"] if r.raw_media_type == "application/json"]
     assert [a.source_record_id for a in articles] == ["111", "222"]
     assert attachment.source_record_id == "111#attachment=" + pf.pmc_url("PMC111")
-    projected = history_sources.project_record("pubmed", attachment)
+    projected = sources.project_record("pubmed", attachment)
     facts = projected["facts"]
     assert facts["role"] == "attachment" and facts["parent_record_id"] == "111" and facts["file_ext"] == ".xml"
     assert facts["access"]["tier"] == "pmc_fulltext_cc" and facts["access"]["license"] == "CC BY 4.0"
@@ -186,7 +185,7 @@ def test_unpaywall_cc_pdf_is_downloaded_through_the_shared_store(monkeypatch, tm
     batch = web.read()
     [attachment] = [r for r in batch["records"] if r.raw_media_type == "application/json"]
     assert attachment.source_record_id == "222#attachment=" + OA_PDF
-    facts = history_sources.project_record("pubmed", attachment)["facts"]
+    facts = sources.project_record("pubmed", attachment)["facts"]
     assert facts["access"]["tier"] == "unpaywall_oa_pdf" and facts["access"]["license"] == "cc-by"
     assert facts["file_ext"] == ".pdf" and Path(facts["store_path"]).read_bytes() == make_pdf("OA PDF")
     assert Path(facts["store_path"]).parent == tmp_path / "raw" / "pubmed"
@@ -198,19 +197,19 @@ def test_unpaywall_cc_pdf_is_downloaded_through_the_shared_store(monkeypatch, tm
 
 def test_full_text_takes_a_version_slot_and_the_read_resumes_where_it_stopped(monkeypatch):
     """Codex 400 第 4 点：max_records 按本次产出的版本计，文献和全文都算；额度不足给续读位置，不越界、不丢。"""
-    from biz_rules.history_models import FetchContinuation
+    from store.history_models import FetchContinuation
 
     web = Web(monkeypatch, pmc=jats(CC_BY))
     ids = ["111", "222"]
     first = web.read(max_records=1)
     assert [r.source_record_id for r in first["records"]] == ["111"] and first["stop_reason"] == "record_budget"
     assert json.loads(first["next_continuation"]["cursor"]) == {"i": 0, "a": 1}  # 第 0 篇已存，只差全文
-    second = history_sources.read_public(FetchRequest(
+    second = sources.read_public(FetchRequest(
         source_id="pubmed", query="x", source_record_ids=ids, max_records=1,
         continuation=FetchContinuation(**first["next_continuation"])))
     assert [r.source_record_id for r in second["records"]] == ["111#attachment=" + pf.pmc_url("PMC111")]
     assert json.loads(second["next_continuation"]["cursor"]) == {"i": 1, "a": 0}
-    third = history_sources.read_public(FetchRequest(
+    third = sources.read_public(FetchRequest(
         source_id="pubmed", query="x", source_record_ids=ids, max_records=1,
         continuation=FetchContinuation(**second["next_continuation"])))
     assert [r.source_record_id for r in third["records"]] == ["222"]

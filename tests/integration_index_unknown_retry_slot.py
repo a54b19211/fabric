@@ -5,7 +5,7 @@ from integration_index_publication import ready_job, rows
 from integration_index_scheduling import KB, SENT, UNSENT, base_job, clone, lease_all, pg, pg_engine  # noqa: F401  (fixtures)
 from sqlalchemy import text
 
-from db import index_publication as index
+from store import index_publication as index
 
 
 def test_unknown_retry_cannot_reuse_a_previous_attempt_rejection_to_release_slot(pg,monkeypatch):

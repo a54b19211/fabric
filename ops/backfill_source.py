@@ -1,7 +1,7 @@
 """把一个来源的历史存量一次读到底：不设条数上限，按页往后读，可中断后接着读。
 
 和固定刷新（DATAFABRIC_HISTORY_WATCHES）是两回事：固定刷新每轮只读最新的、遇到已存的就停；这个命令是手动补老的，
-不停在已存的上，一直读到来源读完。读的方式、存版本的规则都和 pipeline.py fetch 一样（create_fetch 建任务、
+不停在已存的上，一直读到来源读完。读的方式、存版本的规则都和 main_etl.py fetch 一样（create_fetch 建任务、
 history_fetch_job 抓），只是一段接一段：每段最多 100 条（一次读取的上限），上一段给的续读位置交给下一段。
 怎么跑（仓库根目录，用本仓的 .venv；一个接一个地读，不并发）：
   python ops/backfill_source.py roche                      # 接口站点：查询词是 records，不用给
@@ -30,12 +30,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from biz_rules.history_models import FetchRequest  # noqa: E402
-from collection import catalog, rate  # noqa: E402
-from config.crawler_settings import SITE_PROFILES  # noqa: E402
-from db import history  # noqa: E402
-from flows.history_fetch import history_fetch_job  # noqa: E402
+from fetch import catalog, rate  # noqa: E402
+from fetch.fetch_job import history_fetch_job  # noqa: E402
+from fetch.site_profiles import SITE_PROFILES  # noqa: E402
 from ops.check_sources import query_for  # noqa: E402
+from store import history  # noqa: E402
+from store.history_models import FetchRequest  # noqa: E402
 
 LEG_RECORDS = 100  # 一次读取最多 100 条（FetchRequest.max_records 的上限）
 

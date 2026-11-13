@@ -11,11 +11,11 @@ import pytest
 from integration_history import _fetch_study, pg, pg_engine  # noqa: F401  -- 隔离库夹具
 from sqlalchemy import text
 
-from biz_rules.collected_document import CollectedDocument
-from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError, sha256
-from biz_rules.reviewed_graph import document_native_id
-from collection.legacy_migration import CONVERTER, migrate, plan
-from db import history as store
+from fetch.legacy_migration import CONVERTER, migrate, plan
+from graph.publish.collected_document import CollectedDocument
+from graph.publish.reviewed_graph import document_native_id
+from store import history as store
+from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, sha256
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 SOURCES = ["legacy_documents", "clinicaltrials", "nmpa", "fda_api_drug_label", "cde_xxgk", "external_archive"]
@@ -292,7 +292,7 @@ def test_a_new_graph_package_may_not_cite_a_retired_source_and_an_old_one_still_
     old = _publish_fixture_graph(observation, "before-retirement")  # the bridge and its refusal are open (fixture)
     assert old.version_ids
     # the refusal is back in force; the writer stays open so the same documents are adopted again (idempotently)
-    from db import history
+    from store import history
 
     monkeypatch.setattr(history, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
     with pytest.raises(HistoryError) as error:

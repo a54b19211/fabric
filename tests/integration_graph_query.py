@@ -19,10 +19,10 @@ from integration_history import pg, pg_engine  # noqa: F401 -- shared PG fixture
 from sqlalchemy import text
 
 from api.routers.history import router
-from biz_rules.history_models import sha256
-from biz_rules.reviewed_graph import PrimeKGQuery
-from db import history as store
-from flows import graph_publish, graph_query
+from graph.publish import graph_publish, graph_query
+from graph.publish.reviewed_graph import PrimeKGQuery
+from store import history as store
+from store.history_models import sha256
 
 QUERY_TOKEN = "synthetic-primekg-query-only"
 READ_TOKEN = "test-reader-only"

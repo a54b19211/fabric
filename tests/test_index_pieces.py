@@ -1,7 +1,7 @@
-"""processing.index_pieces：长清洗产物的索引分片（v3 3.6，Codex 448/451）。小上限，便于覆盖各种切法。"""
+"""store.index_pieces：长清洗产物的索引分片（v3 3.6，Codex 448/451）。小上限，便于覆盖各种切法。"""
 import hashlib
 
-from processing import index_pieces as ip
+from store import index_pieces as ip
 
 LIMIT = 300 + ip.UPLOAD_OVERHEAD  # 每片最多 300 字（再加上传附加的一行）
 

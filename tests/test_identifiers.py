@@ -1,4 +1,4 @@
-"""清洗层编号规范化（processing.identifiers）：从正文里抽 NCT / CTR / ChiCTR / PMID / PMCID / DOI /
+"""清洗层编号规范化（clean.identifiers）：从正文里抽 NCT / CTR / ChiCTR / PMID / PMCID / DOI /
 批准文号 / 受理号 / 股票代码，并规范成统一写法。这些编号之后只用作同源链接和同一性候选，错连比漏连代价大，
 所以负例（长得像但不是）和正例一样多。纯函数，不联网、不连库。"""
 
@@ -6,7 +6,7 @@ import unicodedata
 
 import pytest
 
-from processing import identifiers as ids
+from clean import identifiers as ids
 
 
 def hits(text):
@@ -360,7 +360,7 @@ def test_labeled_registration_numbers_need_the_label():
 
 
 def test_site_extractor_uses_the_one_rule():
-    from biz_rules.extractors import extract_approval_number
+    from fetch.extractors import extract_approval_number
 
     assert extract_approval_number("批准文号：国药准字 T20230001") == "国药准字T20230001"  # 旧正则漏了 T 类
     assert extract_approval_number("国药准字H123456789") == ""  # 9 位不是批准文号（旧正则会截成前 8 位）

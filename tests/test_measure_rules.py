@@ -1,4 +1,4 @@
-"""processing.measure_rules against BioRadar's own rules (measure.v10 at b452279) on the same cleaned WHO DON texts
+"""clean.measure_rules against BioRadar's own rules (measure.v10 at b452279) on the same cleaned WHO DON texts
 and the same model outputs: windows, contexts, quote placement and the strict request body of every (window,
 measure) pair, field by field (tests/fixtures/measure_golden.json, made by tests/fixtures/measure_golden_make.py).
 The one deliberate difference: window 0 of a longer text ends at a boundary, where BioRadar cuts it at WINDOW."""
@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from contracts import data_objects as do
-from processing import measure_extract as mx
-from processing import measure_rules as rules
+from clean import measure_extract as mx
+from clean import measure_rules as rules
+from store import data_objects as do
 
 GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "measure_golden.json").read_text(encoding="utf-8"))
 RADAR_PRODUCER = {"name": "bioradar.triage", "version": "measure.v10"}

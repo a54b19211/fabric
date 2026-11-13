@@ -1,8 +1,8 @@
-"""Which readings may stand for each other across a re-read (db.measurements): only the same full candidate."""
+"""Which readings may stand for each other across a re-read (clean.measurements): only the same full candidate."""
 
 import copy
 
-from db import measurements as m
+from clean import measurements as m
 
 ITEM = {"kind": "measurement", "producer": {"name": "datafabric.measure_extract", "version": "v1+a"},
         "locator": {"passage": "p1", "start": 27, "end": 71}, "quote": "截至2026年10月28日，共报告确诊病例66例",

@@ -1,4 +1,4 @@
-"""The chat calls of core_engine.cloud_api_client (qwen_extract_structured without streaming, qwen_chat), pinned at
+"""The chat calls of graph.extraction.llm_client (qwen_extract_structured without streaming, qwen_chat), pinned at
 the HTTP boundary: the request each one sends (URL, key, JSON body, timeouts), how often it is sent and how long it
 waits in between, what the caller gets back and what is logged. The fake provider answers inside httpx's own
 transport, so no request leaves the process."""
@@ -11,8 +11,8 @@ import httpx
 import pytest
 from loguru import logger
 
-from config.settings import APP
-from core_engine import cloud_api_client as cac
+from graph.extraction import llm_client as cac
+from settings import APP
 
 BASE, EXTRACTION_BASE = "http://llm.test/v1", "http://extraction.test/v1"
 TIMEOUT = {"connect": 5.0, "read": 600.0, "write": 600.0, "pool": 600.0}

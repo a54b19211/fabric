@@ -5,23 +5,23 @@ from integration_history import _fetch_study
 from integration_publication import databases  # noqa: F401  -- 两 schema 隔离库夹具
 from sqlalchemy import text
 
-from db import clean_stage
-from db.models import ExtractedEntity
+from clean import clean_stage
+from graph.db.models import ExtractedEntity
 
 NCT = "NCT09997001"
 
 
 def _setup(monkeypatch):
     import api.routers.documents as documents_api
-    import core_engine.task_queue as tq
-    import db.repository as repository
-    import db.session
-    import flows.extraction_flow as flow
+    import graph.db.repository as repository
+    import graph.db.session
+    import graph.extraction.extraction_flow as flow
+    import graph.extraction.task_queue as tq
 
     # 这些模块在导入时按名字绑定了 get_session：都指到本测试的隔离库会话
     for module in (flow, repository, documents_api):
         if hasattr(module, "get_session"):
-            monkeypatch.setattr(module, "get_session", db.session.get_session)
+            monkeypatch.setattr(module, "get_session", graph.db.session.get_session)
 
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
                        '["clinicaltrials","legacy_documents","reviewed_graph","external_archive"]')
@@ -40,8 +40,8 @@ def _setup(monkeypatch):
 
 
 def test_a_history_only_version_reaches_pending_review_and_v1_stays_v1(databases, monkeypatch):
-    from db.extraction_subjects import enqueue_version, subject_uuid
-    from flows.extraction_rq_job import extraction_job
+    from graph.db.extraction_subjects import enqueue_version, subject_uuid
+    from graph.extraction.extraction_rq_job import extraction_job
 
     source, _target = databases
     seen = _setup(monkeypatch)
@@ -81,8 +81,8 @@ def test_a_history_only_version_reaches_pending_review_and_v1_stays_v1(databases
 def test_enqueue_is_idempotent_and_refuses_uncleaned_or_mismatched_versions(databases, monkeypatch):
     import pytest
 
-    from biz_rules.history_models import HistoryError
-    from db.extraction_subjects import enqueue_version
+    from graph.db.extraction_subjects import enqueue_version
+    from store.history_models import HistoryError
 
     _setup(monkeypatch)
     v1 = _fetch_study("NCT09997002", "subj-idem").version_ids[0]
@@ -102,10 +102,11 @@ def test_reviewed_results_on_a_history_subject_publish_a_graph_pointing_at_that_
 
     from sqlalchemy.orm import Session
 
-    from db import history, publication
-    from db.extraction_subjects import enqueue_version
-    from db.models import EntityDict
-    from flows.extraction_rq_job import extraction_job
+    from graph.db.extraction_subjects import enqueue_version
+    from graph.db.models import EntityDict
+    from graph.extraction.extraction_rq_job import extraction_job
+    from graph.publish import publication
+    from store import history
 
     source, _target = databases
     _setup(monkeypatch)
@@ -143,10 +144,10 @@ def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(
     from fastapi.testclient import TestClient
 
     import api.routers.documents as documents_api
-    from biz_rules.history_models import HistoryError
-    from db import history
-    from db.extraction_subjects import enqueue_version
-    from flows.extraction_rq_job import extraction_job
+    from graph.db.extraction_subjects import enqueue_version
+    from graph.extraction.extraction_rq_job import extraction_job
+    from store import history
+    from store.history_models import HistoryError
 
     source, target = databases
     seen = _setup(monkeypatch)
@@ -177,8 +178,8 @@ def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(
 
 def test_codex_402_repeated_enqueue_reports_the_artifact_pinned_to_the_job(databases, monkeypatch):
     """Codex 402 第 4 点：清洗器升级后再次登记同一版本，回执给出任务实际绑定的产物（v6），新产物另行标出。"""
-    from db.extraction_subjects import enqueue_version
-    from processing import clean_text
+    from clean import clean_text
+    from graph.db.extraction_subjects import enqueue_version
 
     source, _ = databases
     _setup(monkeypatch)

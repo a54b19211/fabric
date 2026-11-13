@@ -2,9 +2,9 @@
 
 import pytest
 
-from disambiguation import engine
-from disambiguation.llm_ranker import SCORE_MID
-from disambiguation.models import (
+from graph.disambiguation import engine
+from graph.disambiguation.llm_ranker import SCORE_MID
+from graph.disambiguation.models import (
     STATUS_AMBIGUOUS,
     STATUS_AUTO_MATCHED,
     STATUS_CANDIDATE_MATCHED,

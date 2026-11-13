@@ -6,12 +6,11 @@ import json
 
 import pytest
 
-from db import measure_runs
-from processing import clean_text, registry
-from processing import measure_agreement as agreement
-from processing import measure_counts as counts
-from processing import measure_extract as mx
-from processing import measure_rules as rules
+from clean import clean_text, measure_runs, processors
+from clean import measure_agreement as agreement
+from clean import measure_counts as counts
+from clean import measure_extract as mx
+from clean import measure_rules as rules
 
 CUMULATIVE = "As of 28 October 2026, Rwanda has reported 66 cumulative confirmed cases of Marburg virus disease."
 UNSTATED = "As of 12 October 2026, a total of 124 confirmed cases of cholera have been reported in Chad."
@@ -66,7 +65,7 @@ def test_the_route_is_in_the_producer_identity_and_the_rules_read_a_declared_sou
     assert mx.route_of(mx.rules_identity(counts.METHOD)) == mx.RULES
     assert mx.route_of(mx.producer_identity("a" * 64)) == mx.MODEL
     assert measure_runs.Route(mx.RULES, KEYS["producer"], None).config == {"route": "rules", "method": counts.METHOD}
-    assert set(counts.SOURCES) <= set(registry.MEASURE_SOURCES)
+    assert set(counts.SOURCES) <= set(processors.MEASURE_SOURCES)
 
 
 def test_the_routes_agree_only_when_all_nine_items_are_the_same_and_never_as_independent_evidence():

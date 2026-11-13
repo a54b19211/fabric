@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import false
 
 from api.schemas.response import EntityReviewStatsResponse, PipelineOverviewResponse, PipelineStage
-from core_engine.agent_runner import get_agent_runner
-from db.agent_run_repo import (
+from graph.agents.runner import get_agent_runner
+from graph.db.agent_run_repo import (
     count_pending_entities,
     get_agent_run,
     get_agent_stats,
@@ -24,8 +24,8 @@ from db.agent_run_repo import (
     mark_document_reviewing,
     unmark_document_reviewing,
 )
-from db.models import Document, EntityRelation, ExtractedEntity
-from db.session import get_session
+from graph.db.models import Document, EntityRelation, ExtractedEntity
+from graph.db.session import get_session
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -696,7 +696,7 @@ def trigger_batch_merge(body: BatchMergeRequest):
     """批量消歧——从可消歧实体中取 N 个入队，后台消费。"""
     from sqlalchemy import text
 
-    from core_engine.merge_queue import get_merge_queue
+    from graph.agents.merge_queue import get_merge_queue
 
     mq = get_merge_queue()
 
@@ -730,7 +730,7 @@ def trigger_batch_merge(body: BatchMergeRequest):
 @router.get("/merge/queue/status", response_model=MergeQueueStatusResponse)
 def get_merge_queue_status():
     """查询消歧队列状态。"""
-    from core_engine.merge_queue import get_merge_queue
+    from graph.agents.merge_queue import get_merge_queue
     mq = get_merge_queue()
     return MergeQueueStatusResponse(**mq.status())
 
@@ -882,7 +882,7 @@ def get_pipeline_overview():
             "    SELECT 'Company', external_ids->>'stock_code'"
             "      FROM entity_dict WHERE is_deleted=false AND entity_type='Company' AND external_ids ? 'stock_code'"
             # 注：Indication/icd_code 已于 2026-09-28 移出强 ID（分类码粒度不足），
-            #     此统计须与 disambiguation/rules.py:STRONG_ID_FIELDS 保持一致。
+            #     此统计须与 graph/disambiguation/rules.py:STRONG_ID_FIELDS 保持一致。
             "    UNION ALL"
             "    SELECT 'Pathway', external_ids->>'id'"
             "      FROM entity_dict WHERE is_deleted=false AND entity_type='Pathway' AND external_ids ? 'id'"
@@ -898,7 +898,7 @@ def get_pipeline_overview():
         ))
 
         # ⑥ 同步（正文索引发布 + 实体推送 + 关系推送）
-        from db import index_publication
+        from store import index_publication
         ent_rows = session.execute(text(
             "SELECT weknora_graph_status, COUNT(*) FROM extracted_entities WHERE is_deleted=false GROUP BY weknora_graph_status"
         )).fetchall()

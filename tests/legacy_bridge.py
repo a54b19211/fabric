@@ -2,7 +2,7 @@
 implementations are not deleted). The service never opens it: there is no environment switch. A test that needs the old
 writer, or a graph package that cites a legacy version as packages did before the retirement, says so here."""
 
-from db import history
+from store import history
 
 REFUSE_RETIRED_REFS = history._refuse_retired_refs  # what the service runs, taken before any test replaces it
 

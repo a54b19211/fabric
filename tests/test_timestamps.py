@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from biz_rules.timestamps import parse_timestamp
+from store.timestamps import parse_timestamp
 
 UTC = timezone.utc
 BASE = datetime(2026, 11, 6, 9, 42, 58, tzinfo=UTC)

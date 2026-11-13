@@ -1,11 +1,10 @@
-"""审核图推 WeKnora 图谱。文档正文进 WeKnora 只走 db/index_publication（经桥接服务），这里不再有第二条路。"""
+"""审核图推 WeKnora 图谱。文档正文进 WeKnora 只走 store/index_publication（经桥接服务），这里不再有第二条路。"""
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
 from api.schemas.request import FullGraphSyncRequest, GraphSyncRequest
 from api.schemas.response import GraphSyncResponse, GraphSyncStatsResponse, GraphSyncStatusCount
-from core_engine.weknora_graph_client import get_weknora_graph_client
-from db.repository import (
+from graph.db.repository import (
     batch_mark_entity_dict_failed,
     batch_mark_entity_dict_synced,
     batch_mark_entity_weknora_graph_failed,
@@ -17,6 +16,7 @@ from db.repository import (
     get_relations_for_weknora_graph,
     get_weknora_graph_stats,
 )
+from graph.publish.weknora_graph_client import get_weknora_graph_client
 
 router = APIRouter(prefix="/api/weknora", tags=["weknora"])
 

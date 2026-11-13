@@ -12,13 +12,15 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from test_source_refresh import metric, who_value
 
-from biz_rules.history_models import (
+from fetch import source_refresh
+from graph.db.models import CrawlLog
+from graph.publish import publication
+from store import history
+from store.history_models import (
     ArchiveImport,
     ArchiveRecord,
     HistoryError,
 )
-from db import history, publication, source_refresh
-from db.models import CrawlLog
 
 databases = publication_fixtures.databases
 
@@ -167,13 +169,13 @@ def test_supersedes_same_scope_allows_period_correction_not_unrelated_metric(dat
 
 
 def test_old_proof_cannot_make_later_bound_evidence_visible(databases):
-    from biz_rules.history_models import archive_manifest_hash
+    from store.history_models import archive_manifest_hash
 
     def reviewed(request, day):
         return request.model_copy(
             update={
                 "proof": __import__(
-                    "biz_rules.history_models", fromlist=["ArchiveProofRequest"]
+                    "store.history_models", fromlist=["ArchiveProofRequest"]
                 ).ArchiveProofRequest(
                     available_at={"value": day, "precision": "day"},
                     uri="fixture://SYNTHETIC-proof",
@@ -250,7 +252,7 @@ def test_watch_fixed_intent_recovers_unknown_create_and_resumes_next_page(
     source, target = databases
     allow(monkeypatch, ["clinicaltrials"])
     watch_config(monkeypatch)
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     enqueue = Mock()
     monkeypatch.setattr(fetch, "enqueue_fetch", enqueue)
@@ -280,7 +282,7 @@ def test_watch_fixed_intent_recovers_unknown_create_and_resumes_next_page(
         "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
     )[0]["snapshot"]
     request = __import__(
-        "biz_rules.history_models", fromlist=["FetchRequest"]
+        "store.history_models", fromlist=["FetchRequest"]
     ).FetchRequest.model_validate(state["request"])
     continuation = {
         "scope_hash": request.scope_hash(),
@@ -421,7 +423,7 @@ def test_watch_failure_retains_continuation_and_does_not_claim_success(
     source, _ = databases
     allow(monkeypatch, ["clinicaltrials"])
     watch_config(monkeypatch)
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
 
@@ -453,7 +455,7 @@ def test_old_watch_lease_cannot_overwrite_new_owner(databases, monkeypatch):
     source, _ = databases
     allow(monkeypatch, ["clinicaltrials"])
     watch_config(monkeypatch)
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
 
@@ -486,7 +488,7 @@ def test_old_watch_lease_cannot_overwrite_new_owner(databases, monkeypatch):
 
 
 def test_independent_keyset_index_creation_and_rollback_in_real_schema(databases):
-    from migration import runner
+    from store.migrations import runner
 
     source, _ = databases
     assert runner.main(["--db", "publication", "--online", "site-index"]) == 0
@@ -509,7 +511,7 @@ def test_epmc_watch_persists_update_window_not_publication_date(databases, monke
     source, _ = databases
     allow(monkeypatch, ["clinicaltrials"])
     watch_config(monkeypatch, source="europe_pmc")
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
 
@@ -524,7 +526,7 @@ def test_epmc_watch_persists_update_window_not_publication_date(databases, monke
     )[0]["snapshot"]
     query = first["request"]["query"]
     assert "UPDATE_DATE:[" in query and "FIRST_PDATE" not in query
-    from biz_rules.history_models import FetchRequest
+    from store.history_models import FetchRequest
 
     request = FetchRequest.model_validate(first["request"])
     continuation = {
@@ -552,7 +554,7 @@ def test_clinical_watch_freezes_update_window_or_exact_ids(databases, monkeypatc
         "id": "ct-fixed-fixture", "lookback_days": 30,
         "request": {"source_id": "clinicaltrials", "query": query, "source_record_ids": ids},
     }]))
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
 
     def active(*_):
@@ -580,7 +582,7 @@ def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_th
     allow(monkeypatch, ["clinicaltrials"])
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(["gdelt_doc"]))
     watch_config(monkeypatch, source="gdelt_doc")
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
 
@@ -612,12 +614,12 @@ def test_gdelt_watch_cycle_stopped_by_a_ceiling_keeps_its_gaps_and_resumes_at_th
 
 
 def test_stored_unchanged_is_the_judgement_adopting_a_record_makes(databases, monkeypatch):
-    """The incremental read's "already stored and unchanged" (db.history.stored_unchanged) is _adopted_version, the same
+    """The incremental read's "already stored and unchanged" (store.history.stored_unchanged) is _adopted_version, the same
     code that decides between a new version and the same one when a read is adopted."""
     source, _ = databases
     allow(monkeypatch, ["clinicaltrials"])
     watch_config(monkeypatch)
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
     monkeypatch.setattr(fetch, "retry_inactive", lambda *args: (_ for _ in ()).throw(
@@ -641,12 +643,12 @@ def test_watch_of_a_newest_first_source_reads_in_full_after_a_page_that_was_not_
     """A source without an update window (nmpa) is read from its first page and stops at the first known records
     (known_stop). A page that failed or left items unread makes the next try read to the end: stopping at the known
     ones would skip what was never stored."""
-    from collection.windows import KNOWN_STOP
+    from fetch.windows import KNOWN_STOP
 
     source, target = databases
     allow(monkeypatch, ["clinicaltrials"])
     watch_config(monkeypatch, source="nmpa")
-    import flows.history_fetch as fetch
+    import fetch.fetch_job as fetch
 
     monkeypatch.setattr(fetch, "enqueue_fetch", lambda run: run)
     monkeypatch.setattr(fetch, "retry_inactive", lambda *args: (_ for _ in ()).throw(

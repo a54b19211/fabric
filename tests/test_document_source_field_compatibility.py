@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from biz_rules.history_models import ArchiveRecord
-from biz_rules.history_sources import project_record
+from fetch.sources import project_record
+from store.history_models import ArchiveRecord
 
 
 def document(**fields):

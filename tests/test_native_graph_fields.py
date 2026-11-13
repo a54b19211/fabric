@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from biz_rules.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
-from biz_rules.native_graph import build_native_graph, validate_field_bindings
-from biz_rules.reviewed_graph import GraphBundle
+from graph.publish.native_graph import build_native_graph, validate_field_bindings
+from graph.publish.reviewed_graph import GraphBundle
+from store.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
 
 
 def record():

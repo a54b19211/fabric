@@ -11,13 +11,13 @@ from pydantic import BaseModel
 from sqlalchemy import case, func, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from biz_rules.clinical_research import (
+from graph.db.models import Document
+from graph.db.session import get_session
+from graph.extraction.clinical_research import (
     MAX_DOCUMENT_BYTES,
     ClinicalTrialProjection,
     project_clinical_trial,
 )
-from db.models import Document
-from db.session import get_session
 
 router = APIRouter(prefix="/api/research/documents", tags=["research"])
 SEARCH_LIMIT = 20

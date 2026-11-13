@@ -2,8 +2,8 @@
 
 import json
 
-from biz_rules import source_capabilities as caps
-from biz_rules.source_capabilities import SourceFacts, capabilities
+from fetch import source_capabilities as caps
+from fetch.source_capabilities import SourceFacts, capabilities
 
 
 def flags(source_id, **kw):
@@ -70,8 +70,8 @@ def test_history_modes_leave_out_reconstruction_where_there_is_no_proof_of_the_p
 
 
 def test_reconstruction_support_agrees_with_what_the_read_path_refuses():
-    from biz_rules.history_models import HistoryError
-    from db.history import _derived_mode
+    from store.history import _derived_mode
+    from store.history_models import HistoryError
 
     for source_id in ("pubmed", "reviewed_graph", "primekg_graph", "legacy_documents", "external_archive"):
         try:
@@ -95,7 +95,7 @@ def test_an_unavailable_entry_names_the_source_with_every_flag_false():
 
 
 def test_measurements_are_a_capability_of_the_declared_original_sources_only(monkeypatch):
-    from processing import registry
+    from clean import processors
 
     who = flags("who_don")["measurements"]
     assert who == {"processor": "datafabric.measure_extract.v5", "contract": "datafabric.data_objects.v2",
@@ -104,5 +104,5 @@ def test_measurements_are_a_capability_of_the_declared_original_sources_only(mon
     assert flags("who_don", readable=False)["measurements"] is None  # the permission first
     assert flags("pubmed")["measurements"] is None
     # a derived source (a graph package) never gets measurements, even if it were declared
-    monkeypatch.setattr(registry, "MEASURE_SOURCES", ("who_don", "reviewed_graph"))
+    monkeypatch.setattr(processors, "MEASURE_SOURCES", ("who_don", "reviewed_graph"))
     assert flags("reviewed_graph")["measurements"] is None

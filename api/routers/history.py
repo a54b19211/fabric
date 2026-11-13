@@ -11,8 +11,16 @@ from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from biz_rules.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
-from biz_rules.history_models import (
+from graph.publish.graph_query import (
+    PrimeKGLookupResult,
+    PrimeKGResult,
+    lookup_primekg,
+    query_primekg,
+)
+from graph.publish.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
+from graph.publish.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGLookup, PrimeKGQuery
+from store import history as store
+from store.history_models import (
     BUSINESS_TYPES,
     ArchiveImport,
     FetchRequest,
@@ -22,14 +30,6 @@ from biz_rules.history_models import (
     RecordCollection,
     RecordKind,
     RunView,
-)
-from biz_rules.reviewed_graph import GraphNeighborhood, GraphResolution, PrimeKGLookup, PrimeKGQuery
-from db import history as store
-from flows.graph_query import (
-    PrimeKGLookupResult,
-    PrimeKGResult,
-    lookup_primekg,
-    query_primekg,
 )
 
 
@@ -198,8 +198,8 @@ def local_file(
     idempotency_key: str = Header(alias="Idempotency-Key"),
 ):
     """本地文件原件导入（multipart：file、collection、is_demo）。原件按 sha256 落盘 → 一条附件版本
-    （来源 local_files）→ 加工层附件解析。类型白名单与大小上限见 collection.local_files。"""
-    from collection.local_files import import_upload, max_upload_bytes
+    （来源 local_files）→ 加工层附件解析。类型白名单与大小上限见 fetch.local_files。"""
+    from fetch.local_files import import_upload, max_upload_bytes
 
     limit = max_upload_bytes()
     content = file.file.read(limit + 1)
@@ -210,7 +210,7 @@ def local_file(
 
 @router.post("/fetch", response_model=RunView, dependencies=[Depends(require_admin)])
 def fetch(body: FetchRequest, idempotency_key: str = Header(alias="Idempotency-Key")):
-    from flows.history_fetch import enqueue_fetch, require_fetch_allowed
+    from fetch.fetch_job import enqueue_fetch, require_fetch_allowed
 
     _call(require_fetch_allowed, body)
 
@@ -231,7 +231,7 @@ def run(run_id: str):
     dependencies=[Depends(require_admin)],
 )
 def retry(run_id: str, body: RetryRequest):
-    from flows.history_fetch import require_retry_allowed, retry_inactive
+    from fetch.fetch_job import require_retry_allowed, retry_inactive
 
     _call(require_retry_allowed)
     return _call(retry_inactive, run_id, body.expected_attempt)
@@ -330,7 +330,7 @@ def registry_changes(
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
 ):
     """一页版本各自与上一版的登记字段差分（加工层派生，处理器版本固定）。"""
-    from db.registry_changes import for_versions
+    from clean.registry_changes import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
@@ -344,7 +344,7 @@ def version_differences(
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
 ):
     """一页版本各自与上一可见版本的差异事实：只差序列化、只差投影、原文变了。只陈述事实，不做判断。"""
-    from db.version_difference import for_versions
+    from store.version_difference import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
@@ -358,7 +358,7 @@ def derived_text(
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
 ):
     """一页版本的加工层派生正文（附件解析结果，含失败原因）。"""
-    from db.derived_text import for_versions
+    from clean.derived_text import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
@@ -374,7 +374,7 @@ def clean_text_route(
 ):
     """一页版本的清洗正文（带定位）、编号和画像（分类、四维质量、分流）。v3 3.3。
     processor_version：只取这个处理器版本的产物（v3 6.1 按引用回读）；不给就是当前处理器。"""
-    from db.clean_stage import for_versions
+    from clean.clean_stage import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff, processor_version)
 
@@ -389,13 +389,13 @@ def extraction_checks_route(
 ):
     """v3 6.2: the extraction-consistency checks of visible versions (BioCheck), per producer. A version without a
     completed check is "unchecked"; consumers use only completed, explicit results and never raise a state."""
-    from db.extraction_checks import for_versions
+    from clean.extraction_checks import for_versions
 
     return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
 
 
 class SearchRequest(BaseModel):
-    """检索请求（v3 3.6）。cutoff 不给就是现在；mode 决定按哪种时间判可见（见 db.retrieval）。"""
+    """检索请求（v3 3.6）。cutoff 不给就是现在；mode 决定按哪种时间判可见（见 store.retrieval）。"""
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=2000)
     mode: Mode = "current"
@@ -414,7 +414,7 @@ def search_route(body: SearchRequest):
     只有通过的片段才重排、才返回。剔除的给原因计数；不足 top_k 如实写明。"""
     from datetime import timezone
 
-    from db import retrieval
+    from store import retrieval
 
     cutoff = body.cutoff or datetime.now(timezone.utc)
     return _call(retrieval.search, body.query, body.mode, cutoff, sources=body.sources, scopes=body.scopes,
@@ -427,7 +427,7 @@ def collection_catalog():
     """来源目录：已接通、已登记未接通、被拒绝（含原因）的来源，缺口如实列出。"""
     from dataclasses import asdict
 
-    from collection.catalog import SPECS, gaps
+    from fetch.catalog import SPECS, gaps
 
     return {
         "schema_version": "datafabric.collection.catalog.v1",
@@ -525,14 +525,14 @@ def graph_resolve(
 def publication_status(
     source_id: Literal["legacy_documents", "reviewed_graph"],
 ):
-    from db.publication import publication_status as read_status
+    from graph.publish.publication import publication_status as read_status
 
     return _call(read_status, source_id)
 
 
 @router.get("/source-health", dependencies=[Depends(require_read)])
 def source_health(source_id: str = Query(min_length=1, max_length=80)):
-    from db.source_refresh import source_health as health
+    from fetch.source_refresh import source_health as health
 
     return _call(health, source_id)
 
@@ -589,7 +589,7 @@ class NativeGraphRequest(BaseModel):
              dependencies=[Depends(require_admin)])
 def native_graph(body: NativeGraphRequest,
                  idempotency_key: str = Header(alias="Idempotency-Key")):
-    from flows.graph_publish import publish_native_graph
+    from graph.publish.graph_publish import publish_native_graph
 
     records = [_call(store.read_version, item.version_id, "clinicaltrials",
                      item.source_record_id, body.is_demo, body.mode, body.cutoff)
@@ -606,7 +606,7 @@ def index_status(
     cursor: str | None = Query(default=None, max_length=128),
 ):
     """正文进 WeKnora 的唯一路径（index_publications）的作业列表；按状态/来源过滤，next_cursor 续页。"""
-    from db.index_publication import status
+    from store.index_publication import status
 
     return _call(status, limit=limit, state=state, source_id=source_id, cursor=cursor)
 
@@ -614,7 +614,7 @@ def index_status(
 @router.get("/index/counts", dependencies=[Depends(require_admin)])
 def index_counts():
     """各状态作业数，未出现的状态记0。"""
-    from db.index_publication import STATES, state_counts
+    from store.index_publication import STATES, state_counts
 
     counts = _call(state_counts)
     return {"states": {s: counts.get(s, 0) for s in STATES} | counts, "total": sum(counts.values())}
@@ -624,13 +624,13 @@ def index_counts():
 def index_scheduler():
     """T-30：按作业类别 x 来源的到期、在租、最久等待和最近领取；按知识库的在途预算、发送令牌、闸门拒绝与阻塞时长；
     最近一小时首发、ready、失败数。"""
-    from db.index_publication import scheduler_status
+    from store.index_publication import scheduler_status
 
     return _call(scheduler_status)
 
 
 @router.post("/index/{publication_id}/retry", dependencies=[Depends(require_admin)])
 def index_retry(publication_id: str):
-    from db.index_publication import retry
+    from store.index_publication import retry
 
     return _call(retry, publication_id)

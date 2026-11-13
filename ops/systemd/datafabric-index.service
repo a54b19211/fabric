@@ -4,7 +4,7 @@ After=network.target
 StartLimitIntervalSec=0
 
 # What it does: takes the due rows of index_publications and sends their clean text to WeKnora through the bridge
-# service (read migration/index_publication.py, then db/index_publication.py).
+# service (read run/index.py, then store/index_publication.py).
 # Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL (the history database), DATAFABRIC_INDEX_TARGETS (the
 # knowledge bases to index into; with no target configured the worker prints "disabled" and exits 0, so it stays
 # stopped), WEKNORA_KDD_URL and WEKNORA_KDD_TOKEN (the bridge service). Optional limits: DATAFABRIC_INDEX_*.
@@ -14,7 +14,7 @@ StartLimitIntervalSec=0
 WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m migration.index_publication worker -c 2
+ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m run.index worker -c 2
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

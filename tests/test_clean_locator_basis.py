@@ -5,9 +5,9 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from contracts import data_objects as do
-from db import clean_stage
-from processing import clean_text as ct
+from clean import clean_stage
+from clean import clean_text as ct
+from store import data_objects as do
 
 MARKDOWN = (
     '关于注销药品注册证书的公告\n\n'

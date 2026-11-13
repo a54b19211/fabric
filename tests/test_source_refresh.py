@@ -8,13 +8,13 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from biz_rules.history_models import ArchiveRecord, FetchRequest
-from biz_rules.history_sources import project_record, read_public
-from biz_rules.observations import observation
-from biz_rules.who_don import ENDPOINT, project_who
-from collection import rate
-from collection.windows import cycle_request
-from db.source_refresh import SourceWatch, _page_finished
+from fetch import rate
+from fetch.observations import observation
+from fetch.source_refresh import SourceWatch, _page_finished
+from fetch.sources import project_record, read_public
+from fetch.who_don import ENDPOINT, project_who
+from fetch.windows import cycle_request
+from store.history_models import ArchiveRecord, FetchRequest
 
 
 def metric():
@@ -179,7 +179,7 @@ def test_epmc_continuation_survives_record_budget_and_keeps_total_offset(monkeyp
 
 
 def test_bound_pointer_is_rfc6901_and_decimal_precision_is_not_float_rounding():
-    from biz_rules.observations import (
+    from fetch.observations import (
         native_json,
         native_pointer,
         validate_bound_values,
@@ -206,7 +206,7 @@ def test_bound_pointer_is_rfc6901_and_decimal_precision_is_not_float_rounding():
     # A value differing only beyond float precision must still fail source binding.
     base = observation({**metric(), "value": {"lower": "1", "upper": "1"}})
     expected = __import__(
-        "biz_rules.observations", fromlist=["binding_values"]
+        "fetch.observations", fromlist=["binding_values"]
     ).binding_values(base)
     expected.pop("subject.namespace")
     pointers = {}

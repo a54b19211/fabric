@@ -16,10 +16,10 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
-from db import history as store
-from flows import history_fetch as flow
-from migration import runner
+from fetch import fetch_job as flow
+from store import history as store
+from store.history_models import ArchiveRecord, FetchRequest, HistoryError
+from store.migrations import runner
 
 
 def original(native="SYNTHETIC-DEMO-1", summary="SYNTHETIC original report"):

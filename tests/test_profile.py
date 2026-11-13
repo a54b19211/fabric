@@ -1,6 +1,6 @@
-"""v3 3.3 分类、四维质量与分流（processing/profile.py）。确定性规则，不调模型。"""
+"""v3 3.3 分类、四维质量与分流（clean/profile.py）。确定性规则，不调模型。"""
 
-from processing import profile as pf
+from clean import profile as pf
 
 
 def run(source, *, chars=800, warnings=(), role=None, raw_types=None, parse_status=None):

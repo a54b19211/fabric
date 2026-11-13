@@ -3,7 +3,7 @@
 from integration_migration_baselines import diff, fingerprint, old_module, pg  # noqa: F401 - pg is a fixture
 from sqlalchemy import text
 
-from migration import manifests, runner
+from store.migrations import manifests, runner
 
 BEFORE = "7337e54"
 

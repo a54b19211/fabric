@@ -21,7 +21,7 @@ from integration_index_publication import (  # noqa: F401  (fixtures)
 )
 from sqlalchemy import text
 
-from db import index_publication as index
+from store import index_publication as index
 
 KB = "synthetic-isolated-kb"
 
@@ -339,7 +339,7 @@ def test_a_sending_job_after_a_restart_is_polled_not_uploaded_again(pg, monkeypa
 
 
 def test_migration_recovers_the_size_of_earlier_uploads(pg):
-    from migration import index_publication as index_migration
+    from run import index as index_migration
 
     base = base_job(pg)
     (piece,) = clone(pg, base, state="'indexing'", desired_state="'active'", **SENT,

@@ -1,8 +1,8 @@
-"""Which contract, endpoint and checker each producer's products are checked under (db.extraction_checks)."""
+"""Which contract, endpoint and checker each producer's products are checked under (clean.extraction_checks)."""
 
 import extraction_contract as ec
 
-from db import extraction_checks as checks
+from clean import extraction_checks as checks
 
 
 def test_identifiers_and_annotations_go_to_v1_and_measurements_to_v3():

@@ -21,55 +21,55 @@ api/routers/documents.py:get_document  73/24  document endpoint with many option
 api/routers/documents.py:list_documents  82/22  document endpoint with many optional filters and joins in one query builder; split filter parsing from the query
 api/routers/extraction.py:trigger_extraction  96/14  legacy extraction trigger, retires with the old extraction queue (audit 1.4)
 api/routers/review.py:get_review_stats  98/10  review graph/statistics endpoint building the whole view in one pass; split per view section
-biz_rules/cleaners/field/date_format.py:normalize_date  109/18  date normaliser with one branch per accepted format; table-driven rewrite
-biz_rules/document_evidence.py:attach_document_evidence  71/35  evidence attachment: one branch per source/material kind; split per kind
-biz_rules/extraction_prompts.py:get_pubmed_extraction_prompt  88/21  prompt text builder, long because of the embedded schema description; move the text to data
-biz_rules/extractors/chictr/chictr.py:extract_chictr_detail  79/22  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
-biz_rules/extractors/nccn/nccn.py:extract_nccn_detail  107/30  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
-biz_rules/extractors/roche/roche_web_fetcher.py:_parse_list_page  55/25  list/paging parser of one site; site markup dictates the shape
-biz_rules/graph_tools.py:paths  56/34  graph query helper with the traversal and its filters inline
-biz_rules/graph_tools.py:subgraph  25/25  graph query helper with the traversal and its filters inline
-biz_rules/history_models.py:FetchRequest.fixed_scope  32/23  request validator with one check per scope rule; keep the rules in one place
-biz_rules/history_sources.py:_project_pubmed  91/20  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
-biz_rules/native_extraction.py:_index_json  53/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
-biz_rules/native_extraction.py:_index_json.walk  46/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
-biz_rules/native_extraction.py:_project  102/39  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
-biz_rules/native_extraction.py:clinical_trial_attributes  30/23  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
-biz_rules/native_graph.py:build_native_graph  86/31  field-binding and graph-build rules, one branch per rule kind; table-driven rewrite (audit 2.1)
-biz_rules/object_evidence.py:validate_object_evidence  78/36  validator with one check per evidence rule; keep the rules in one place
-biz_rules/reviewed_graph.py:GraphBundle.consistent  39/27  reviewed-graph neighbourhood/bundle code with traversal and filters inline
-biz_rules/reviewed_graph.py:primekg_bundle  102/16  reviewed-graph neighbourhood/bundle code with traversal and filters inline
-biz_rules/sec_xbrl.py:financial_rows  50/31  XBRL fact projection with one branch per statement item
-biz_rules/who_don.py:project_who  75/27  WHO disease-outbreak page reader/projection, one branch per page section
-biz_rules/who_don.py:read_who  120/32  WHO disease-outbreak page reader/projection, one branch per page section
-core_engine/agent_runner.py:AgentRunner.run_document_review  122/31  legacy graph agent runner (AgentRunner is a god class, audit 2.1); split with the legacy graph feature
-core_engine/agent_runner.py:AgentRunner.run_entity_merge_stream  191/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
-core_engine/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merge agent graph assembly
-core_engine/api_router.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
-core_engine/cloud_api_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
-core_engine/router.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
-db/history.py:_read_filters  79/22  history store queries and validators with many optional filters inline
-db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:merge_dictionary_identities  64/40  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:resolve_link_proposal  44/28  identity merge/rollback/review SQL with one branch per case; split by operation
-db/identity.py:rollback_identity_merge  57/39  identity merge/rollback/review SQL with one branch per case; split by operation
-db/publication.py:_graph_input  86/18  graph publication worker: lease, plan, write and mark in one pass; split per step
-db/publication.py:_prepare  103/12  graph publication worker: lease, plan, write and mark in one pass; split per step
-db/publication.py:_publish_graph  84/5  graph publication worker: lease, plan, write and mark in one pass; split per step
-db/publication.py:publish_once  101/21  graph publication worker: lease, plan, write and mark in one pass; split per step
-db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
-db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
-db/repository/review_relations.py:approve_relation  64/25  multi-step write/review function of the legacy graph repository; split per step
-db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
-db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
-db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step
-db/source_refresh.py:source_health  149/34  source refresh/health worker: schedule, fetch and report in one pass; split per step
-disambiguation/llm_ranker.py:rank_with_llm  101/21  LLM/reranker call with prompt, parse and fallback inline
-disambiguation/llm_ranker.py:rank_with_reranker  69/26  LLM/reranker call with prompt, parse and fallback inline
-flows/graph_publish.py:_read_primekg  82/24  graph publication flow: capture and bundle build in long functions; split per step
-flows/graph_publish.py:capture_primekg  137/31  graph publication flow: capture and bundle build in long functions; split per step
-flows/graph_publish.py:main  94/8  graph publication flow: capture and bundle build in long functions; split per step
-flows/history_fetch.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place
-flows/history_fetch.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
-migration/sqltext.py:split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case
+fetch/extractors/dates.py:normalize_date  109/18  date normaliser with one branch per accepted format; table-driven rewrite
+fetch/document_evidence.py:attach_document_evidence  71/35  evidence attachment: one branch per source/material kind; split per kind
+graph/extraction/extraction_prompts.py:get_pubmed_extraction_prompt  88/21  prompt text builder, long because of the embedded schema description; move the text to data
+fetch/extractors/chictr/chictr.py:extract_chictr_detail  79/22  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
+fetch/extractors/nccn/nccn.py:extract_nccn_detail  107/30  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
+fetch/extractors/roche/roche_web_fetcher.py:_parse_list_page  55/25  list/paging parser of one site; site markup dictates the shape
+graph/publish/graph_tools.py:paths  56/34  graph query helper with the traversal and its filters inline
+graph/publish/graph_tools.py:subgraph  25/25  graph query helper with the traversal and its filters inline
+store/history_models.py:FetchRequest.fixed_scope  32/23  request validator with one check per scope rule; keep the rules in one place
+fetch/sources.py:_project_pubmed  91/20  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
+graph/extraction/native_extraction.py:_index_json  53/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
+graph/extraction/native_extraction.py:_index_json.walk  46/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
+graph/extraction/native_extraction.py:_project  102/39  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
+graph/extraction/native_extraction.py:clinical_trial_attributes  30/23  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
+graph/publish/native_graph.py:build_native_graph  86/31  field-binding and graph-build rules, one branch per rule kind; table-driven rewrite (audit 2.1)
+graph/db/object_evidence.py:validate_object_evidence  78/36  validator with one check per evidence rule; keep the rules in one place
+graph/publish/reviewed_graph.py:GraphBundle.consistent  39/27  reviewed-graph neighbourhood/bundle code with traversal and filters inline
+graph/publish/reviewed_graph.py:primekg_bundle  102/16  reviewed-graph neighbourhood/bundle code with traversal and filters inline
+fetch/sec_xbrl.py:financial_rows  50/31  XBRL fact projection with one branch per statement item
+fetch/who_don.py:project_who  75/27  WHO disease-outbreak page reader/projection, one branch per page section
+fetch/who_don.py:read_who  120/32  WHO disease-outbreak page reader/projection, one branch per page section
+graph/agents/runner.py:AgentRunner.run_document_review  122/31  legacy graph agent runner (AgentRunner is a god class, audit 2.1); split with the legacy graph feature
+graph/agents/runner.py:AgentRunner.run_entity_merge_stream  191/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
+graph/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merge agent graph assembly
+fetch/api_fields.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
+graph/extraction/llm_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
+fetch/page_parser.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
+store/history.py:_read_filters  79/22  history store queries and validators with many optional filters inline
+graph/db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation
+graph/db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/review SQL with one branch per case; split by operation
+graph/db/identity.py:merge_dictionary_identities  64/40  identity merge/rollback/review SQL with one branch per case; split by operation
+graph/db/identity.py:resolve_link_proposal  44/28  identity merge/rollback/review SQL with one branch per case; split by operation
+graph/db/identity.py:rollback_identity_merge  57/39  identity merge/rollback/review SQL with one branch per case; split by operation
+graph/publish/publication.py:_graph_input  86/18  graph publication worker: lease, plan, write and mark in one pass; split per step
+graph/publish/publication.py:_prepare  103/12  graph publication worker: lease, plan, write and mark in one pass; split per step
+graph/publish/publication.py:_publish_graph  84/5  graph publication worker: lease, plan, write and mark in one pass; split per step
+graph/publish/publication.py:publish_once  101/21  graph publication worker: lease, plan, write and mark in one pass; split per step
+graph/db/repository/entity_dicts.py:_rerank_candidates  77/22  multi-step write/review function of the legacy graph repository; split per step
+graph/db/repository/aliases.py:_write_aliases_with_embedding  105/24  multi-step write/review function of the legacy graph repository; split per step
+graph/db/repository/review_relations.py:approve_relation  64/25  multi-step write/review function of the legacy graph repository; split per step
+graph/db/repository/review_entities.py:batch_approve_entities  89/20  multi-step write/review function of the legacy graph repository; split per step
+graph/db/repository/merges.py:batch_resolve_merges  85/19  multi-step write/review function of the legacy graph repository; split per step
+graph/db/repository/entity_dicts.py:find_candidate_dicts_for_review  122/15  multi-step write/review function of the legacy graph repository; split per step
+fetch/source_refresh.py:source_health  149/34  source refresh/health worker: schedule, fetch and report in one pass; split per step
+graph/disambiguation/llm_ranker.py:rank_with_llm  101/21  LLM/reranker call with prompt, parse and fallback inline
+graph/disambiguation/llm_ranker.py:rank_with_reranker  69/26  LLM/reranker call with prompt, parse and fallback inline
+graph/publish/graph_publish.py:_read_primekg  82/24  graph publication flow: capture and bundle build in long functions; split per step
+graph/publish/graph_publish.py:capture_primekg  137/31  graph publication flow: capture and bundle build in long functions; split per step
+graph/publish/graph_publish.py:main  94/8  graph publication flow: capture and bundle build in long functions; split per step
+fetch/fetch_job.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place
+fetch/fetch_job.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
+store/migrations/sqltext.py:split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case

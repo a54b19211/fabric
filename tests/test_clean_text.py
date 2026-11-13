@@ -1,4 +1,4 @@
-"""加工层正文清洗（processing.clean_text）：只删模板/导航整行、只规范空白；
+"""加工层正文清洗（clean.clean_text）：只删模板/导航整行、只规范空白；
 否定、单位、限定词、更正声明一个字都不能丢；每段都能回指原件（字符偏移或 JSON pointer）；
 没有正文就如实说没有，不补写。纯函数，不联网、不碰库。"""
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from processing import clean_text as ct
+from clean import clean_text as ct
 
 KEY_TERMS_ZH = ("【更正】未见明显肝毒性（ALT 升高 ≥3×ULN 的发生率 2.1%），剂量 10 mg/kg，"
                 "约 30% 疑似无显著获益，不推荐。")

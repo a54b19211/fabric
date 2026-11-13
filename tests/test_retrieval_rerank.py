@@ -1,7 +1,7 @@
 """The characters a rerank sends are counted in its receipt, and the count holds nothing back (task book 02, 2.5)."""
-from biz_rules.history_models import HistoryError
-from db import retrieval
-from db.index_publication import IndexTarget
+from store import retrieval
+from store.history_models import HistoryError
+from store.index_publication import IndexTarget
 
 TARGET = IndexTarget(source_instance="synthetic", source_id="who_don", is_demo=False, knowledge_base_id="kb-1",
                      source_scope="public_health")

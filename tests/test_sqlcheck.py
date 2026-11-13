@@ -1,8 +1,8 @@
-"""The pre-execution checks of a migration file (migration.sqlcheck)."""
+"""The pre-execution checks of a migration file (store.migrations.sqlcheck)."""
 
 import pytest
 
-from migration.sqlcheck import inspect_sql, mask
+from store.migrations.sqlcheck import inspect_sql, mask
 
 
 def test_a_plain_file_passes_with_all_three_checks_named():
@@ -57,7 +57,7 @@ def test_mask_keeps_the_length_and_the_line_structure():
 
 
 def test_neutralising_blanks_exactly_the_begin_and_commit_lines_and_nothing_else():
-    from migration.sqlcheck import neutralise_transaction_control
+    from store.migrations.sqlcheck import neutralise_transaction_control
 
     sql = "-- x\nBEGIN;\nCREATE TABLE t(a int);\nCOMMENT ON TABLE t IS 'BEGIN;';\nCOMMIT;\n"
     out = neutralise_transaction_control(sql)
@@ -69,7 +69,7 @@ def test_neutralising_blanks_exactly_the_begin_and_commit_lines_and_nothing_else
 
 
 def test_neutralising_leaves_function_bodies_alone_and_refuses_what_it_cannot_make_safe():
-    from migration.sqlcheck import neutralise_transaction_control
+    from store.migrations.sqlcheck import neutralise_transaction_control
 
     body = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; END; $$ LANGUAGE plpgsql;"
     assert neutralise_transaction_control(body) == body
@@ -80,8 +80,8 @@ def test_neutralising_leaves_function_bodies_alone_and_refuses_what_it_cannot_ma
 
 
 def test_the_four_legacy_files_neutralise_to_text_without_control_and_otherwise_identical():
-    from migration import manifests
-    from migration.sqlcheck import neutralise_transaction_control
+    from store.migrations import manifests
+    from store.migrations.sqlcheck import neutralise_transaction_control
 
     for name in manifests.TRANSACTION_CONTROL_ALLOWED:
         original = (manifests.VERSIONS_DIR / name).read_text(encoding="utf-8")

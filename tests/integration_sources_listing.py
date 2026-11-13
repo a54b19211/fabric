@@ -9,12 +9,12 @@ from integration_migration_baselines import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
 from api.routers import history as router
-from biz_rules import source_capabilities as caps
-from biz_rules.history_sources import SOURCE_CATALOG
-from collection import catalog
-from db import history as store
-from migration import runner
-from processing import registry
+from clean import processors
+from fetch import catalog
+from fetch import source_capabilities as caps
+from fetch.sources import SOURCE_CATALOG
+from store import history as store
+from store.migrations import runner
 
 DERIVED_GRAPHS = {"reviewed_graph", "primekg_graph"}
 TARGETS = [{"source_instance": "synthetic.index.pg", "source_id": source, "is_demo": False,
@@ -74,7 +74,7 @@ def test_the_retired_bridge_is_outside_sources_and_inside_retired_sources_with_i
 
 
 def test_the_effective_time_shows_up_once_the_deployment_wrote_it(library):
-    from migration import source_lifecycle
+    from ops import source_lifecycle
 
     with library.begin() as conn:
         source_lifecycle.record(conn, "legacy_documents", "effective", actor="deploy:test")
@@ -150,7 +150,7 @@ def test_each_sources_capabilities_follow_the_declarations(library, source_id):
     assert (flags["fetch"] or {}).get("modes") == (list(spec.read_modes) if spec else None)
     if flags["fetch"]:
         assert flags["fetch"]["admin_only"] is True
-    applied = registry.applicable(source_id)
+    applied = processors.applicable(source_id)
     assert (flags["attachments"] or {}).get("text_processor") == applied.get("attachment_parse")
     assert (flags["clean_text"] or {}).get("processor") == applied.get("clean_text")
     assert (flags["registry_diff"] or {}).get("processor") == applied.get("registry_diff")

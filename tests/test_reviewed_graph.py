@@ -6,8 +6,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from biz_rules.history_models import HistoryError, sha256
-from biz_rules.reviewed_graph import (
+from graph.publish.reviewed_graph import (
     GraphBundle,
     GraphEdge,
     GraphIdentity,
@@ -20,6 +19,7 @@ from biz_rules.reviewed_graph import (
     primekg_bundle,
     resolve,
 )
+from store.history_models import HistoryError, sha256
 
 
 def node(identity, name="same name", **extra):
@@ -193,8 +193,8 @@ def test_legacy_document_preserves_raw_and_rejects_hash_mismatch():
 
 
 def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
-    from biz_rules.reviewed_graph import GraphDocumentRef
-    from flows.graph_publish import build_document_bundle
+    from graph.publish.graph_publish import build_document_bundle
+    from graph.publish.reviewed_graph import GraphDocumentRef
 
     raw = "manual and auto alias"
     document = StoredDocument(
@@ -281,8 +281,8 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
 
 
 def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract():
-    from biz_rules.history_models import ArchiveRecord
-    from biz_rules.history_sources import _pointer, parse_json, project_record
+    from fetch.sources import _pointer, parse_json, project_record
+    from store.history_models import ArchiveRecord
 
     graph = bundle()
     raw = graph.model_dump_json()
@@ -321,8 +321,8 @@ def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract
 
 
 def test_missing_optional_graph_fact_has_no_invented_null_locator():
-    from biz_rules.history_models import ArchiveRecord
-    from biz_rules.history_sources import project_record
+    from fetch.sources import project_record
+    from store.history_models import ArchiveRecord
 
     raw = bundle().model_dump_json(exclude={"selection_truncated"})
     projected = project_record(
@@ -338,8 +338,8 @@ def test_primekg_capture_is_parameterized_read_only_bounded_and_directional(
 ):
     from contextlib import contextmanager
 
-    import flows.graph_publish as publish
-    from flows.graph_publish import capture_primekg
+    import graph.publish.graph_publish as publish
+    from graph.publish.graph_publish import capture_primekg
 
     @contextmanager
     def connection():
@@ -431,8 +431,8 @@ def test_primekg_capture_is_parameterized_read_only_bounded_and_directional(
 def test_primekg_capture_separates_empty_error_and_ambiguous_identity(monkeypatch):
     from contextlib import contextmanager
 
-    import flows.graph_publish as publish
-    from flows.graph_publish import capture_primekg
+    import graph.publish.graph_publish as publish
+    from graph.publish.graph_publish import capture_primekg
 
     @contextmanager
     def connection():
@@ -515,8 +515,8 @@ def test_primekg_capture_separates_empty_error_and_ambiguous_identity(monkeypatc
     client.close()
 
 def test_two_source_documents_can_share_mentions_without_borrowing_confirmation():
-    from biz_rules.reviewed_graph import GraphDocumentRef
-    from flows.graph_publish import build_document_bundle
+    from graph.publish.graph_publish import build_document_bundle
+    from graph.publish.reviewed_graph import GraphDocumentRef
     text = "SYNTHETIC A targets SYNTHETIC B."
     documents = [StoredDocument(source_doc_uuid=uuid, source_site="external_archive",
         title="Synthetic", original_raw_content=text, original_raw_sha256=sha256(text))

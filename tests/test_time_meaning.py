@@ -3,10 +3,10 @@
 import json
 from datetime import datetime, timezone
 
-from biz_rules.gdelt_news import article_id
-from biz_rules.history_models import ArchiveRecord, AvailabilityProof, HistoryRecord, sha256
-from biz_rules.history_sources import project_record
-from db import index_publication as index
+from fetch.gdelt_news import article_id
+from fetch.sources import project_record
+from store import index_publication as index
+from store.history_models import ArchiveRecord, AvailabilityProof, HistoryRecord, sha256
 
 SEEN = datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
 ARTIFACT = {"doc_type": "notice", "doc_category": "official", "evidence_types": [],

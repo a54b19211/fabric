@@ -1,5 +1,5 @@
 """Generates tests/fixtures/measure_golden.json with BioRadar's own measure rules (measure.v10), so that
-processing.measure_rules can be compared with them field by field. Not part of the test suite: it imports BioRadar.
+clean.measure_rules can be compared with them field by field. Not part of the test suite: it imports BioRadar.
 
     # 1. the cleaned texts, from this checkout's WHO DON cleaner
     .venv/bin/python tests/fixtures/measure_golden_make.py texts > /tmp/texts.json
@@ -75,7 +75,7 @@ MEASURES = [
 
 def texts():
     sys.path.insert(0, ".")
-    from processing import clean_text
+    from clean import clean_text
 
     out = []
     for name, raw in (("who_marburg", RAW), ("who_mpox_short", SHORT)):

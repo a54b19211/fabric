@@ -14,15 +14,15 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from api.routers.history import router
-from biz_rules.history_models import (
+from store import history as store
+from store.history_models import (
     ArchiveImport,
     ArchiveRecord,
     FetchRequest,
     HistoryError,
     archive_manifest_hash,
 )
-from db import history as store
-from migration import runner
+from store.migrations import runner
 
 
 def date(value):
@@ -640,7 +640,7 @@ def _graph_archive(payload, **extra):
 
 
 def test_graph_roundtrip_unicode_quote_and_idempotency(pg, monkeypatch):
-    from biz_rules.reviewed_graph import GraphBundle
+    from graph.publish.reviewed_graph import GraphBundle
 
     observation, run, payload, now = _published_graph(pg, monkeypatch)
     graph = GraphBundle.model_validate_json(payload["raw_content"])
@@ -674,7 +674,7 @@ def test_graph_roundtrip_unicode_quote_and_idempotency(pg, monkeypatch):
 
 
 def test_graph_quote_tamper_is_rejected_and_previous_versions_remain(pg, monkeypatch):
-    from biz_rules.reviewed_graph import GraphBundle
+    from graph.publish.reviewed_graph import GraphBundle
 
     _, _, payload, now = _published_graph(pg, monkeypatch)
     graph = GraphBundle.model_validate_json(payload["raw_content"])
@@ -750,11 +750,11 @@ def test_graph_dependencies_revoke_normal_version_raw_and_neighborhood(pg, monke
 def test_current_graph_cannot_gain_old_archive_proof_or_future_merge(pg, monkeypatch):
     from datetime import timedelta
 
-    from biz_rules.reviewed_graph import GraphBundle, GraphRedirect
+    from graph.publish.reviewed_graph import GraphBundle, GraphRedirect
 
     _, _, payload, now = _published_graph(pg, monkeypatch)
     request = _graph_archive(payload)
-    from biz_rules.history_models import ArchiveProofRequest, TimeValue
+    from store.history_models import ArchiveProofRequest, TimeValue
 
     request.proof = ArchiveProofRequest(
         available_at=TimeValue(value="2016-01-01", precision="day"),
@@ -788,7 +788,7 @@ def test_graph_reads_reject_a_bound_document_not_visible_at_same_cutoff(
 ):
     from datetime import timedelta
 
-    from biz_rules.history_models import canonical, sha256
+    from store.history_models import canonical, sha256
 
     _, _, payload, now = _published_graph(pg, monkeypatch)
     old_time = now - timedelta(days=2)
@@ -825,7 +825,7 @@ def test_graph_reads_reject_a_bound_document_not_visible_at_same_cutoff(
 
 
 def test_primekg_only_replays_background_after_local_first_seen(pg, monkeypatch):
-    from flows.graph_publish import publish_primekg
+    from graph.publish.graph_publish import publish_primekg
 
     _graph_sources(monkeypatch)
     capture = {
@@ -1167,7 +1167,7 @@ def _fetch_capture(html, key, markdown="# 公告"):
     """A NMPA detail page as the site plugin stores it; the calls below change only its HTML (and the hash of it)."""
     import hashlib
 
-    from collection.site_crawler import WEB_SCHEMA
+    from fetch.site_crawler import WEB_SCHEMA
 
     url = "https://www.nmpa.gov.cn/xxgk/ggtg/3.html"
     raw = json.dumps({"schema_version": WEB_SCHEMA, "role": "web_capture", "site": "nmpa", "url": url, "fetched_at": "t",
@@ -1202,10 +1202,10 @@ def test_a_web_page_whose_html_alone_changed_is_not_a_new_version(pg, monkeypatc
 
 
 def test_a_version_stored_before_document_evidence_still_matches_its_original(pg, monkeypatch):
-    """Versions first seen before biz_rules.document_evidence existed carry no document_evidence. It is derived from
+    """Versions first seen before fetch.document_evidence existed carry no document_evidence. It is derived from
     the original and the projection, so it is not part of the version identity: observing the same original again
     reuses that version instead of adding one per record (docs/decisions/0001-merge-server-fix.md)."""
-    from biz_rules import document_evidence
+    from fetch import document_evidence
 
     raw = json.dumps({"source": "MED", "id": "123", "title": "Example", "abstractText": "A"}, sort_keys=True)
     with monkeypatch.context() as before_merge:
@@ -1285,7 +1285,7 @@ def _fetch_study(native, key, **status):
 
 
 def test_registry_diff_written_with_version_and_read_with_visibility(pg):
-    from db.registry_changes import for_versions
+    from clean.registry_changes import for_versions
 
     first = _fetch_study("NCT09990001", "rd-1")
     same = _fetch_study("NCT09990001", "rd-2")  # 同内容不产生新版本，也不产生差分
@@ -1322,7 +1322,7 @@ def test_registry_diff_written_with_version_and_read_with_visibility(pg):
 
 
 def test_registry_diff_backfill_pairs_existing_versions_once(pg):
-    from db.registry_changes import backfill, for_versions
+    from clean.registry_changes import backfill, for_versions
 
     a = _fetch_study("NCT09990002", "bf-1").version_ids[0]
     b = _fetch_study("NCT09990002", "bf-2", n=200).version_ids[0]
@@ -1345,7 +1345,7 @@ def test_registry_diff_backfill_pairs_existing_versions_once(pg):
 
 
 def test_version_differences_pair_a_version_with_its_visible_predecessor(pg):
-    from db.version_difference import for_versions
+    from store.version_difference import for_versions
 
     v1 = _fetch_study("NCT09990003", "vd-1").version_ids[0]
     v2 = _fetch_study("NCT09990003", "vd-2", n=200).version_ids[0]
@@ -1383,7 +1383,7 @@ def _fetch_attachment(tmp_path, monkeypatch, key, content=b"%PDF-1.4 synthetic n
         "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
         '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc","nmpa"]',
     )
-    from collection.site_crawler import attachment_record_id
+    from fetch.site_crawler import attachment_record_id
 
     path = tmp_path / (key + ".pdf")
     path.write_bytes(content)
@@ -1408,8 +1408,8 @@ def _fetch_attachment(tmp_path, monkeypatch, key, content=b"%PDF-1.4 synthetic n
 
 
 def test_attachment_parsed_once_with_retry_on_failure_and_read_with_visibility(pg, tmp_path, monkeypatch):
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     version, path = _fetch_attachment(tmp_path, monkeypatch, "att-1")
     answers = iter([{"success": False, "markdown": "", "error": "timeout"},
@@ -1431,8 +1431,8 @@ def test_attachment_parsed_once_with_retry_on_failure_and_read_with_visibility(p
 
 
 def test_attachment_failures_stop_after_the_attempt_limit(pg, tmp_path, monkeypatch):
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     version, path = _fetch_attachment(tmp_path, monkeypatch, "att-2")
     monkeypatch.setattr(ap, "_mineru", lambda p: {"success": False, "markdown": "", "error": "x"})
@@ -1451,8 +1451,8 @@ def test_attachment_failures_stop_after_the_attempt_limit(pg, tmp_path, monkeypa
 
 
 def test_same_file_twice_is_parsed_once(pg, tmp_path, monkeypatch):
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     calls = []
     monkeypatch.setattr(ap, "_mineru", lambda p: calls.append(p) or {"success": True, "markdown": "# 同一份", "error": ""})
@@ -1467,7 +1467,7 @@ def test_same_file_twice_is_parsed_once(pg, tmp_path, monkeypatch):
 
 def test_claims_keep_two_workers_apart_and_expired_leases_are_reclaimed(pg, tmp_path, monkeypatch):
     """Codex r59：认领前先查待办再在事务外解析，两个实例会重复解析同一版本。"""
-    from db import derived_text
+    from clean import derived_text
 
     version, _ = _fetch_attachment(tmp_path, monkeypatch, "claim-1")
     first = derived_text.claim(pg, version, lease_seconds=60)
@@ -1478,8 +1478,8 @@ def test_claims_keep_two_workers_apart_and_expired_leases_are_reclaimed(pg, tmp_
 
 
 def test_lost_lease_writes_nothing(pg, tmp_path, monkeypatch):
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     version, _ = _fetch_attachment(tmp_path, monkeypatch, "claim-2")
 
@@ -1497,8 +1497,8 @@ def test_lost_lease_writes_nothing(pg, tmp_path, monkeypatch):
 def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_path, monkeypatch):
     import hashlib
 
-    from collection.site_crawler import ATT_SCHEMA, WEB_SCHEMA, attachment_record_id
-    from db import derived_text
+    from clean import derived_text
+    from fetch.site_crawler import ATT_SCHEMA, WEB_SCHEMA, attachment_record_id
 
     monkeypatch.setenv(
         "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
@@ -1529,7 +1529,7 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
         "requests": 2, "bytes": len(content), "source_total": None, "error": None,
     })
     page_version, att_version = done.version_ids
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
 
     monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "# 正文", "error": "",
                                                   "content_list": [{"type": "text", "text": "正文", "page_idx": 2}]})
@@ -1549,14 +1549,14 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
     assert got["versions"][legacy]["attachment_of"][0]["link_basis"] == "parent_version_unknown"
 
 
-# ——测试用：把一批明确的 documents 原件和审核图写进 history（生产上由 db.publication 自动发表）——
-from biz_rules.history_models import ArchiveImport, ArchiveRecord, canonical, sha256  # noqa: E402,F811
-from biz_rules.reviewed_graph import (  # noqa: E402
+# ——测试用：把一批明确的 documents 原件和审核图写进 history（生产上由 graph.publish.publication 自动发表）——
+from graph.publish.graph_publish import bind_document_text, build_document_bundle  # noqa: E402
+from graph.publish.reviewed_graph import (  # noqa: E402
     GraphDocumentRef,
     StoredDocument,
     document_native_id,
 )
-from flows.graph_publish import bind_document_text, build_document_bundle  # noqa: E402
+from store.history_models import ArchiveImport, ArchiveRecord, canonical, sha256  # noqa: E402,F811
 
 
 def _fixture_document(value):
@@ -1655,7 +1655,7 @@ def _publish_fixture_graph(observation, key):
 
 def test_migration_leaves_a_seeded_row_alone_and_the_list_shows_the_declared_description_with_the_rows_access(
         pg, monkeypatch):
-    from biz_rules.history_sources import SOURCE_CATALOG
+    from fetch.sources import SOURCE_CATALOG
 
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["nmpa"]')
     with pg.begin() as conn:
@@ -1717,8 +1717,8 @@ def test_gdelt_leads_are_listed_by_window_with_the_receipts_of_the_windows(pg, m
     monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
     import httpx
 
-    from biz_rules.history_sources import read_public
-    from collection import rate
+    from fetch import rate
+    from fetch.sources import read_public
     monkeypatch.setattr(rate, "wait_for_url", lambda url, **kw: None)  # the 5 s spacing is not under test
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["gdelt_doc"]')
 
@@ -1783,8 +1783,8 @@ def test_gdelt_index_changes_keep_old_original_and_public_material_type(pg, monk
     monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
     import httpx
 
-    from biz_rules.gdelt_news import article_id
-    from biz_rules.history_sources import read_public
+    from fetch.gdelt_news import article_id
+    from fetch.sources import read_public
     monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["gdelt_doc"]')
     title = ["SYNTHETIC first headline"]
     def response(request):

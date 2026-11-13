@@ -1,4 +1,4 @@
-"""Generate migration/known_migrations.py from the repository history.
+"""Generate store/migrations/known_migrations.py from the repository history.
 
 Every migration file any commit reachable from HEAD ever had is listed with the checksum the runner records for it
 (md5 of the text as Path.read_text gives it) and what it is today:
@@ -9,7 +9,7 @@ Every migration file any commit reachable from HEAD ever had is listed with the 
                needs a person to decide, the runner refuses it.
 
     python ops/known_migrations.py           # print the module
-    python ops/known_migrations.py --check   # exit 1 if migration/known_migrations.py is out of date
+    python ops/known_migrations.py --check   # exit 1 if store/migrations/known_migrations.py is out of date
 """
 
 import hashlib
@@ -18,8 +18,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSIONS = ROOT / "migration" / "versions"
-TARGET = ROOT / "migration" / "known_migrations.py"
+VERSIONS = ROOT / "store" / "migrations" / "versions"
+TARGET = ROOT / "store" / "migrations" / "known_migrations.py"
+# where the files are, and where they were before r1 moved migration/ into store/: the history is read from both
+HISTORY_DIRS = ("store/migrations/versions/", "migration/versions/")
 
 
 def _git(*args):
@@ -42,14 +44,15 @@ def entries():
         current[path.name] = _checksum(path.read_text(encoding="utf-8"))
     by_checksum = {checksum: name for name, checksum in current.items()}
     seen = {}
-    for commit in _git("rev-list", "HEAD", "--", "migration/versions").decode().split():
-        for line in _git("ls-tree", commit, "migration/versions/").decode().splitlines():
-            _mode, _type, blob, path = line.split(None, 3)
-            name = path.rsplit("/", 1)[1]
-            if not (name.startswith("V") and name.endswith(".sql")):
-                continue
-            text = _git("cat-file", "-p", blob).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            seen.setdefault((name, _checksum(text)), commit[:7])
+    for commit in _git("rev-list", "HEAD", "--", *HISTORY_DIRS).decode().split():
+        for folder in HISTORY_DIRS:
+            for line in _git("ls-tree", commit, folder).decode().splitlines():
+                _mode, _type, blob, path = line.split(None, 3)
+                name = path.rsplit("/", 1)[1]
+                if not (name.startswith("V") and name.endswith(".sql")):
+                    continue
+                text = _git("cat-file", "-p", blob).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                seen.setdefault((name, _checksum(text)), commit[:7])
     for name, checksum in current.items():
         seen.setdefault((name, checksum), "HEAD")
     rows = []
@@ -89,9 +92,9 @@ if __name__ == "__main__":
     text = render()
     if "--check" in sys.argv:
         if TARGET.read_text(encoding="utf-8") != text:
-            print("migration/known_migrations.py is out of date: python ops/known_migrations.py > "
-                  "migration/known_migrations.py")
+            print("store/migrations/known_migrations.py is out of date: python ops/known_migrations.py > "
+                  "store/migrations/known_migrations.py")
             sys.exit(1)
-        print("migration/known_migrations.py is up to date")
+        print("store/migrations/known_migrations.py is up to date")
     else:
         sys.stdout.write(text)

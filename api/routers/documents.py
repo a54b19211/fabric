@@ -12,10 +12,10 @@ from api.schemas.response import (
     DocumentItem,
     DocumentListResponse,
 )
-from biz_rules.history_models import HistoryError
-from db.extraction_subjects import listed, subject_text
-from db.models import Attachment, DocExtra, Document
-from db.session import get_session
+from graph.db.extraction_subjects import listed, subject_text
+from graph.db.models import Attachment, DocExtra, Document
+from graph.db.session import get_session
+from store.history_models import HistoryError
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 

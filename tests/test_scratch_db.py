@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from migration.app_ledger import MigrationStateError
-from migration.scratch_db import LABEL, ScratchPostgres
+from store.migrations.app_ledger import MigrationStateError
+from store.migrations.scratch_db import LABEL, ScratchPostgres
 
 
 class FakeDocker:

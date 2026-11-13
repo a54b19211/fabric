@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core_engine.agent_runner import AgentRunner
+from graph.agents.runner import AgentRunner
 
 
 @pytest.mark.parametrize("kind", ["entity", "relation"])
@@ -17,10 +17,10 @@ def test_machine_review_only_saves_a_proposal(kind, decision):
                        "steps": [{"type": "mock"}]}
     with ExitStack() as stack:
         stack.enter_context(patch.object(runner, f"_load_{kind}", return_value=target))
-        stack.enter_context(patch(f"core_engine.agent_runner.run_{kind}_review_pipeline",
+        stack.enter_context(patch(f"graph.agents.runner.run_{kind}_review_pipeline",
                                   return_value=pipeline_result))
-        save = stack.enter_context(patch("core_engine.agent_runner.save_agent_run", return_value=123))
-        mutations = [stack.enter_context(patch(f"core_engine.agent_runner.{name}", create=True))
+        save = stack.enter_context(patch("graph.agents.runner.save_agent_run", return_value=123))
+        mutations = [stack.enter_context(patch(f"graph.agents.runner.{name}", create=True))
                      for name in ("approve_entity_with_alias_writeback", "_reject_entity",
                                   "_approve_relation", "_reject_relation")]
         result = getattr(runner, f"run_{kind}_review")(9)
@@ -46,7 +46,7 @@ def test_document_counts_separate_suggestions_from_applied_decisions():
          patch.object(runner, "_get_pending_relations_by_document", return_value=[{"id": 2}]), \
          patch.object(runner, "run_entity_review", return_value=entity_result), \
          patch.object(runner, "run_relation_review", return_value=relation_result), \
-         patch("core_engine.agent_runner.update_agent_run_batch"):
+         patch("graph.agents.runner.update_agent_run_batch"):
         result = runner.run_document_review("doc")
     assert result["approved"] == result["rejected"] == 0
     assert result["relation_approved"] == result["relation_rejected"] == 0
@@ -57,9 +57,9 @@ def test_document_counts_separate_suggestions_from_applied_decisions():
 def test_failed_save_is_reported_and_cannot_claim_a_saved_proposal():
     runner = AgentRunner(SimpleNamespace(model_name="mock-model"))
     with patch.object(runner, "_load_entity", return_value={"review_status": "pending"}), \
-         patch("core_engine.agent_runner.run_entity_review_pipeline", return_value={
+         patch("graph.agents.runner.run_entity_review_pipeline", return_value={
              "decision": "escalated", "reason": "review", "confidence": 0.5, "steps": []}), \
-         patch("core_engine.agent_runner.save_agent_run", return_value=0):
+         patch("graph.agents.runner.save_agent_run", return_value=0):
         result = runner.run_entity_review(1)
     assert result["decision"] == "error"
     assert result["proposal_saved"] is False
@@ -81,7 +81,7 @@ def test_api_serialization_preserves_proposal_meaning_and_counts():
 
 
 def test_document_history_counts_proposals_separately():
-    from db.agent_run_repo import list_runs_by_document
+    from graph.db.agent_run_repo import list_runs_by_document
 
     row = SimpleNamespace(document_uuid="doc", document_title="Test", entity_count=3,
                           approved_count=0, rejected_count=0, escalated_count=0,
@@ -92,7 +92,7 @@ def test_document_history_counts_proposals_separately():
     session.execute.side_effect = [SimpleNamespace(scalar=lambda: 1),
                                    SimpleNamespace(fetchall=lambda: [row]),
                                    SimpleNamespace(fetchall=lambda: [])]
-    with patch("db.agent_run_repo.get_session") as get_session:
+    with patch("graph.db.agent_run_repo.get_session") as get_session:
         get_session.return_value.__enter__.return_value = session
         documents, total = list_runs_by_document()
     assert total == 1
@@ -144,7 +144,7 @@ def conflict_input():
 def test_conflict_tool_collects_a_proposal_without_resolving_or_claiming_human_identity():
     import json
 
-    from core_engine.agent_tools import decision_tools
+    from graph.agents.tools import decision_tools
 
     with patch.object(decision_tools, "resolve_merge", create=True) as mutate:
         output = decision_tools.resolve_attribute_conflict.invoke({
@@ -163,8 +163,8 @@ def test_conflict_runner_saves_value_and_input_as_a_pending_agent_run(saved):
     runner = AgentRunner(SimpleNamespace(max_iterations=3, model_name="mock-model"))
     result = {"decision": "accept_new", "resolved_value": "PHASE3", "reason": "source field",
               "confidence": 0.8, "messages": []}
-    with patch("core_engine.agent_runner.get_conflict_resolver_graph") as graph, \
-         patch("core_engine.agent_runner.save_agent_run", return_value=saved) as save:
+    with patch("graph.agents.runner.get_conflict_resolver_graph") as graph, \
+         patch("graph.agents.runner.save_agent_run", return_value=saved) as save:
         graph.return_value.invoke.return_value = result
         response = runner.run_conflict_resolution(**conflict_input())
     assert response["decision"] == ("proposal_accept_new" if saved else "error")
@@ -184,8 +184,8 @@ def test_conflict_runner_saves_value_and_input_as_a_pending_agent_run(saved):
 def test_actual_conflict_graph_keeps_the_structured_proposed_value_without_mutation(terminal):
     from langchain_core.messages import AIMessage
 
-    from core_engine.agent_tools import decision_tools
-    from core_engine.agents import conflict_resolver
+    from graph.agents import conflict_resolver
+    from graph.agents.tools import decision_tools
 
     config = SimpleNamespace(model_name="mock", llm_api_key="fake", llm_api_base="https://example.invalid",
                              temperature=0.0, max_tokens=256)
@@ -210,7 +210,7 @@ def test_actual_conflict_graph_keeps_the_structured_proposed_value_without_mutat
 def test_conflict_graph_without_a_structured_proposal_escalates_instead_of_inventing_a_decision():
     from langchain_core.messages import AIMessage
 
-    from core_engine.agents import conflict_resolver
+    from graph.agents import conflict_resolver
 
     config = SimpleNamespace(model_name="mock", llm_api_key="fake", llm_api_base="https://example.invalid",
                              temperature=0.0, max_tokens=256)

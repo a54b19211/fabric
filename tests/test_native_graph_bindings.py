@@ -6,8 +6,8 @@ graph_field_mismatch, the others are changes it has to accept (they are not part
 import pytest
 from test_graph_tools import context, record
 
-from biz_rules.history_models import HistoryError, TimeValue, sha256
-from biz_rules.native_graph import LEGACY_METHOD, build_native_graph, validate_field_bindings
+from graph.publish.native_graph import LEGACY_METHOD, build_native_graph, validate_field_bindings
+from store.history_models import HistoryError, TimeValue, sha256
 
 
 def _graph():

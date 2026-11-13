@@ -7,10 +7,10 @@ import pytest
 from integration_history import pg, pg_engine  # noqa: F401
 from sqlalchemy import text
 
-from biz_rules.history_models import ArchiveImport, ArchiveRecord, HistoryError
-from biz_rules.reviewed_graph import GraphBundle, GraphRef
-from db import history as store
-from flows.graph_publish import publish_native_graph
+from graph.publish.graph_publish import publish_native_graph
+from graph.publish.reviewed_graph import GraphBundle, GraphRef
+from store import history as store
+from store.history_models import ArchiveImport, ArchiveRecord, HistoryError
 
 
 def source_record(condition="SYNTHETIC condition A"):
@@ -91,12 +91,12 @@ def test_invalid_native_field_or_predicate_never_changes_real_published_graph(pg
         elif change == "native_id":
             graph.nodes[0].identity_rule.basis.json_pointer = "/protocolSection/conditionsModule/conditions/0"
         elif change == "approved_edge":
-            from biz_rules.reviewed_graph import GraphEdge, GraphReview
+            from graph.publish.reviewed_graph import GraphEdge, GraphReview
             graph.edges.append(GraphEdge(id="synthetic:unsupported", source=graph.edges[0].source,
                                         target=graph.edges[0].target, relation_type="CAUSES",
                                         review=GraphReview(status="approved"), binding_status="unbound"))
         else:
-            from biz_rules.reviewed_graph import GraphNode, GraphReview
+            from graph.publish.reviewed_graph import GraphNode, GraphReview
             unsupported = GraphNode(namespace="synthetic", id="unsupported", entity_type="Drug",
                                     name="SYNTHETIC unsupported", identity_status="confirmed",
                                     identity_review_basis="unverified assertion", review=GraphReview(status="approved"))

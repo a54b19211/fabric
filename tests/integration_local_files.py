@@ -18,10 +18,10 @@ from sqlalchemy import text
 from test_pubmed_fulltext import CC_BY, Web, jats
 
 from api.routers.history import router
-from biz_rules import history_sources
-from biz_rules.history_models import FetchRequest
-from core_engine import scrapling_client as client
-from db import history as store
+from fetch import sources
+from fetch import web_client as client
+from store import history as store
+from store.history_models import FetchRequest
 
 ADMIN = "test-admin-only"
 
@@ -48,8 +48,8 @@ def upload(test_client, content, key, name="报告.pdf"):
 
 
 def test_uploaded_pdf_is_a_fixed_version_and_is_parsed_with_page_locators(chain, pg, monkeypatch):  # noqa: F811
-    from db import derived_text
-    from processing import attachment_parse as ap
+    from clean import attachment_parse as ap
+    from clean import derived_text
 
     pdf = make_pdf("Local import evidence")
     first = upload(chain, pdf, "local-1")
@@ -76,13 +76,13 @@ def test_uploaded_pdf_is_a_fixed_version_and_is_parsed_with_page_locators(chain,
 
 
 def test_pubmed_pmc_fulltext_links_to_its_same_run_article_and_parses_as_jats(chain, pg, monkeypatch):  # noqa: F811
-    from db import derived_text
+    from clean import derived_text
 
     Web(monkeypatch, pmc=jats(CC_BY))  # 替身网络
     request = FetchRequest(source_id="pubmed", query="x", source_record_ids=["111", "222"])
     run, _ = store.create_fetch(request, "pubmed-fulltext-1")
     store.job_input(run.id, run.attempt)
-    batch = history_sources.read_public(request)
+    batch = sources.read_public(request)
     done = store.finish_fetch(run.id, run.attempt, batch)
     assert done.state == "completed" and len(done.version_ids) == 3
     assert {c["status"] for c in done.coverage["attachment_coverage"]} >= {"stored", "no_pmcid"}

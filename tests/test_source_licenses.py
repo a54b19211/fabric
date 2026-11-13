@@ -4,10 +4,10 @@ import dataclasses
 
 import pytest
 
-from biz_rules import retired_sources, source_licenses
-from biz_rules.history_sources import SOURCE_CATALOG
-from biz_rules.source_licenses import COLLECTED, DERIVED, LicenseSpec, collected_licenses, validate_declarations
-from collection.catalog import FETCHABLE, SITE_SOURCES
+from fetch import retired_sources, source_licenses
+from fetch.catalog import FETCHABLE, SITE_SOURCES
+from fetch.source_licenses import COLLECTED, DERIVED, LicenseSpec, collected_licenses, validate_declarations
+from fetch.sources import SOURCE_CATALOG
 
 
 def test_every_fetchable_collection_spec_has_exactly_one_licence_and_nothing_else_does():
@@ -35,7 +35,7 @@ def test_every_declaration_is_academic_use_only_and_has_a_record_kind():
 
 
 def test_the_site_licence_is_generated_from_the_collection_spec():
-    from collection.catalog import spec
+    from fetch.catalog import spec
 
     for source_id in sorted(SITE_SOURCES):
         item = collected_licenses()[source_id]

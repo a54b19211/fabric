@@ -48,7 +48,7 @@ def test_a_read_that_hit_an_outbound_ceiling_stops_and_says_so(monkeypatch, caps
 
 
 def test_pages_overrides_the_configured_pages_of_a_list_site_and_the_end_says_how_far_it_read(monkeypatch, capsys):
-    from config.crawler_settings import SITE_PROFILES
+    from fetch.site_profiles import SITE_PROFILES
 
     monkeypatch.setitem(SITE_PROFILES["chictr"], "max_pages", 50)
     done = ("completed", {"upstream_pagination_exhausted": True})

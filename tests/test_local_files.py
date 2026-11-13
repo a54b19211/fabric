@@ -16,12 +16,12 @@ from fastapi.testclient import TestClient
 from pdf_fixture import make_pdf
 
 from api.routers import history as history_router
-from biz_rules.history_models import FetchRequest, HistoryError
-from biz_rules.history_sources import PLUGINS, SOURCE_CATALOG, project_record, read_public
-from collection import catalog, local_files
-from core_engine import scrapling_client as client
-from db import history as store
-from processing import attachment_parse as ap
+from clean import attachment_parse as ap
+from fetch import catalog, local_files
+from fetch import web_client as client
+from fetch.sources import PLUGINS, SOURCE_CATALOG, project_record, read_public
+from store import history as store
+from store.history_models import FetchRequest, HistoryError
 
 ADMIN = "test-admin-only"
 PDF = make_pdf("Local import evidence")
@@ -36,7 +36,7 @@ def api(monkeypatch, tmp_path):
     imported = []
 
     def import_archive(request, key):
-        # 与 db.history.import_archive 相同的第一步：全包先投影校验
+        # 与 store.history.import_archive 相同的第一步：全包先投影校验
         prepared = [(item, project_record(request.source_id, item)) for item in request.records]
         imported.append({"request": request, "key": key, "prepared": prepared})
         return {
@@ -72,7 +72,7 @@ def test_catalog_declares_local_files_as_an_import_source_with_license_entry():
     assert "local_files" in catalog.FETCHABLE and "local_files" not in catalog.WATCHABLE
     assert PLUGINS["local_file_import"] is not None
     assert SOURCE_CATALOG["local_files"]["acquisition_channel"] == "institutional_upload"
-    from db import derived_text
+    from clean import derived_text
 
     assert catalog.SITE_SOURCES < catalog.ATTACHMENT_SOURCES == derived_text.ATTACHMENT_SOURCES
     assert {"local_files", "pubmed"} <= derived_text.ATTACHMENT_SOURCES

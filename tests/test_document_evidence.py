@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from biz_rules.history_models import ArchiveRecord, HistoryError
-from biz_rules.history_sources import project_record
+from fetch.sources import project_record
+from store.history_models import ArchiveRecord, HistoryError
 
 
 def archive(**extra):
@@ -97,7 +97,7 @@ def test_pubmed_correction_direction_and_native_xml_locator():
                  "letter_type": "CRL", "application_number": ["NDA123456"]}),
 ])
 def test_official_identity_does_not_prove_body_is_present(source, raw):
-    from biz_rules.history_sources import crl_id
+    from fetch.sources import crl_id
     native = raw["Id"] if source == "who_don" else crl_id(raw)
     result = project_record(source, ArchiveRecord(source_record_id=native, record_kind="document",
                             raw_content=json.dumps(raw)))
@@ -130,7 +130,7 @@ def test_partial_bibliographic_ids_still_have_shared_origin_constraint():
 def test_information_event_detection_time_is_not_guessed_and_requires_timezone():
     from pydantic import ValidationError
 
-    from biz_rules.history_models import InformationEnvironmentEvent
+    from store.history_models import InformationEnvironmentEvent
     value = {"event_type": "reported_deletion", "description": "final label only",
              "basis_locator": {"json_pointer": "/censorship_type"}}
     assert InformationEnvironmentEvent.model_validate(value).detected_at is None

@@ -1,13 +1,13 @@
 """A reading is an object whatever its check says: the check is carried on the object (check.status), it does not
-decide whether there is one. No database: the pure parts of db.measurements (what is a placeholder, what an answer
+decide whether there is one. No database: the pure parts of clean.measurements (what is a placeholder, what an answer
 sets). The chain with a database is in tests/integration_measures.py."""
 
 from datetime import datetime, timezone
 
 import pytest
 
-from contracts import data_objects as do
-from db import measurements
+from clean import measurements
+from store import data_objects as do
 
 SHA, VID = "e" * 64, "a" * 64
 SEEN = datetime(2026, 11, 1, tzinfo=timezone.utc)

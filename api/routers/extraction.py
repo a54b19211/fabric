@@ -15,9 +15,9 @@ from api.schemas.response import (
     WorkerItem,
     WorkerStatsResponse,
 )
-from db.extraction_subjects import listed
-from db.models import Document
-from db.session import get_session
+from graph.db.extraction_subjects import listed
+from graph.db.models import Document
+from graph.db.session import get_session
 
 router = APIRouter(prefix="/api/extraction", tags=["extraction"])
 
@@ -108,7 +108,7 @@ def trigger_extraction(body: ExtractionTriggerRequest):
     # 异步执行抽取（worker 各自加载 raw_content，压力分散）
     if count > 0:
         try:
-            from flows.extraction_flow import run_extraction_for_uuids
+            from graph.extraction.extraction_flow import run_extraction_for_uuids
             run_extraction_for_uuids(uuids_to_run)
             logger.info(f"[Extraction] 已提交 {count} 篇到抽取队列")
         except Exception as e:
@@ -165,7 +165,7 @@ def trigger_pending_extraction(body: PendingExtractRequest):
         logger.info(f"[Extraction] {status} 批量入队: {count} 篇")
 
     if count > 0:
-        from flows.extraction_flow import run_extraction_for_uuids
+        from graph.extraction.extraction_flow import run_extraction_for_uuids
         run_extraction_for_uuids(uuids)
 
     return ExtractionTriggerResponse(
@@ -213,7 +213,7 @@ def get_extraction_stats():
 def get_worker_stats():
     """查询 WorkerManager 各 Worker 的队列状态。"""
     try:
-        from flows.extraction_worker import get_extraction_manager
+        from graph.extraction.extraction_worker import get_extraction_manager
         manager = get_extraction_manager()
 
         # 获取 Worker 状态
@@ -245,7 +245,7 @@ def get_worker_stats():
 def pause_extraction():
     """暂停抽取：Worker 完成当前任务后停止消费队列。"""
     try:
-        from flows.extraction_worker import get_extraction_manager
+        from graph.extraction.extraction_worker import get_extraction_manager
         manager = get_extraction_manager()
         manager.pause()
         logger.info("[API] 抽取已暂停")
@@ -259,7 +259,7 @@ def pause_extraction():
 def resume_extraction():
     """继续抽取：恢复 Worker 消费队列。"""
     try:
-        from flows.extraction_worker import get_extraction_manager
+        from graph.extraction.extraction_worker import get_extraction_manager
         manager = get_extraction_manager()
         manager.resume()
         logger.info("[API] 抽取已继续")
@@ -289,7 +289,7 @@ def get_db_pool_status():
     """
     import psycopg2
 
-    from config.settings import APP
+    from settings import APP
 
     try:
         conn = psycopg2.connect(APP.DB_URL, connect_timeout=5)
@@ -372,7 +372,7 @@ def re_extract_document(uuid: str):
 
     # 提交到 WorkerManager
     try:
-        from flows.extraction_flow import run_extraction_for_uuids
+        from graph.extraction.extraction_flow import run_extraction_for_uuids
         result = run_extraction_for_uuids([uuid])
         if result.get("failed", 0) > 0:
             raise HTTPException(status_code=500, detail=result.get("error", "提交失败"))
@@ -442,8 +442,8 @@ class HistoryVersionSubject(BaseModel):
 @router.post("/history-version", dependencies=[Depends(require_admin)])
 def trigger_history_version(body: HistoryVersionSubject):
     """把 history 的一个固定版本交给抽取（只在 history 里、没有 documents 行的新材料也走这里）。"""
-    from biz_rules.history_models import HistoryError
-    from db.extraction_subjects import enqueue_version
+    from graph.db.extraction_subjects import enqueue_version
+    from store.history_models import HistoryError
 
     try:
         return enqueue_version(body.source_id, body.record_id, body.version_id, is_demo=body.is_demo)

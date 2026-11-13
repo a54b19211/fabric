@@ -1,4 +1,4 @@
-"""db.lease on real PostgreSQL: FOR UPDATE SKIP LOCKED, lease expiry and token ownership are database semantics,
+"""store.lease on real PostgreSQL: FOR UPDATE SKIP LOCKED, lease expiry and token ownership are database semantics,
 so they are checked against the database, in a throwaway schema of the isolated test instance."""
 
 import os
@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from db.lease import LeaseQueue, backoff, vacant
+from store.lease import LeaseQueue, backoff, vacant
 
 JOBS = LeaseQueue("lease_jobs", ("id",))
 CLAIMS = LeaseQueue("lease_claims", ("version_id", "processor_version"))

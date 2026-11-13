@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-from biz_rules.history_models import canonical, sha256
-from core_engine import weknora_index_client as module
+from store import weknora_index_client as module
+from store.history_models import canonical, sha256
 
 PID = "a" * 64
 TOKEN = "synthetic-private-token"

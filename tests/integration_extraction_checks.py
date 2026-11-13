@@ -10,8 +10,8 @@ import pytest
 from integration_index_publication import add_document, pg, pg_engine, profile, rows  # noqa: F401  (fixtures)
 from sqlalchemy import text
 
-from biz_rules.history_models import HistoryError
-from db import extraction_checks as checks
+from clean import extraction_checks as checks
+from store.history_models import HistoryError
 
 # What BioCheck v3 answers per kind (biocheck app/extraction.py check_item), written out here, not imported.
 V3_FIELDS = {"identifier": ("locator", "identifier"), "annotation": ("locator", "label")}

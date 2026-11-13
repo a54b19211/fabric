@@ -1,4 +1,4 @@
-"""v3 第二部分数据契约（contracts/data_objects.py）。
+"""v3 第二部分数据契约（store/data_objects.py）。
 
 样例按 Codex 要求跨类型：登记结构化（真实 CT 状态变化）、附件派生正文（真实 NMPA 附件）、论文叙述（合成）、
 财务表格测量（合成）、弱信号与同源更正（合成）。合成样例只验证契约和流程，不代表真实覆盖。
@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from contracts import data_objects as do
+from store import data_objects as do
 
 UTC = timezone.utc
 A, B, C, D = ("a" * 64, "b" * 64, "c" * 64, "d" * 64)

@@ -4,8 +4,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from api.exception_logger import ExceptionLogger
 from api.routers import agent, documents, extraction, history, measurements, research, review, weknora
-from core_engine.exception_logger import ExceptionLogger
 
 app = FastAPI(
     title="ZK Data Fabric 审核后台 API",
@@ -17,13 +17,13 @@ app = FastAPI(
 @app.on_event("startup")
 def _register_review_listeners():
     """API 重启时 Worker 可能仍在执行，不能清理队列或重置任务。"""
-    import db.review_listeners  # noqa: F401
+    import graph.db.review_listeners  # noqa: F401
 
 @app.on_event("startup")
 def _validate_source_configuration():
     """A configuration the service cannot honour stops it at start, not at the first request: the index targets must not
     name a retired source (the declarations themselves were validated when they were imported)."""
-    from db import index_publication
+    from store import index_publication
 
     index_publication.targets()
 

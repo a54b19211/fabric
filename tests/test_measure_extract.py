@@ -1,9 +1,9 @@
-"""processing.measure_extract: the output it accepts, the producer identity, the reading identity, one window."""
+"""clean.measure_extract: the output it accepts, the producer identity, the reading identity, one window."""
 
 import json
 
-from processing import measure_extract as mx
-from processing import measure_rules as rules
+from clean import measure_extract as mx
+from clean import measure_rules as rules
 
 TEXT = ("# Marburg virus disease - Rwanda\n\nAs of 28 October 2026, a total of 66 confirmed cases of Marburg virus "
         "disease have been reported in Rwanda.\n")

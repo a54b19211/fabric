@@ -4,9 +4,9 @@ import pytest
 from integration_migration_baselines import old_module, pg, tables  # noqa: F401 - pg is a fixture
 from sqlalchemy import text
 
-from migration import baseline, compat_mappings, fingerprint, ledger, manifests, reference_data, runner
-from migration.compat_mappings import CompatMapping
-from migration.manifests import MANIFESTS, Manifest
+from store.migrations import baseline, compat_mappings, fingerprint, ledger, manifests, reference_data, runner
+from store.migrations.compat_mappings import CompatMapping
+from store.migrations.manifests import MANIFESTS, Manifest
 
 BEFORE = "7337e54"
 HISTORY_FILES = MANIFESTS["history"].files

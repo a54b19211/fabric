@@ -1,4 +1,4 @@
-"""站点插件 collection.site_crawler（NMPA / CDE / ChiCTR 页面、接口站点、表格页）。
+"""站点插件 fetch.site_crawler（NMPA / CDE / ChiCTR 页面、接口站点、表格页）。
 
 不联网：页面抓取、解析和附件下载都换成替身；旧代码的站点配置和调用顺序原样复用。
 """
@@ -7,9 +7,9 @@ import json
 
 import pytest
 
-from biz_rules.history_models import ArchiveRecord, FetchRequest, HistoryError
-from biz_rules.history_sources import PLUGINS, project_record, read_public
-from collection import catalog, rate, site_crawler, transport
+from fetch import catalog, rate, site_crawler, transport
+from fetch.sources import PLUGINS, project_record, read_public
+from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
 PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/20261101120000123.html"
 ATT1 = "https://www.nmpa.gov.cn/directory/web/nmpa/images/a1.doc"
@@ -365,7 +365,7 @@ def test_api_site_records_become_site_record_versions_with_their_attachments(fak
     [record] = batch["records"]
     data = json.loads(record.raw_content)
     assert data["role"] == "site_record" and data["raw"]["id"] == "R1" and data["parsed"]["title"] == "召回一"
-    from biz_rules.history_models import make_uuid as _make_uuid
+    from store.history_models import make_uuid as _make_uuid
     assert record.source_record_id == _make_uuid("fda_api_enforcement:R1")
     assert batch["stop_reason"] == "record_budget" and batch["next_continuation"]
     projected = site_crawler.project_capture("fda_api_enforcement", record)
@@ -410,7 +410,7 @@ def test_every_real_http_transfer_is_gated_and_counted_before_it_is_sent(monkeyp
 def test_transient_errors_are_retried_at_the_transport_and_each_retry_is_counted(monkeypatch):
     import httpx
 
-    from config.settings import APP
+    from settings import APP
 
     monkeypatch.setattr(APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.0)
@@ -444,7 +444,7 @@ def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, m
     """翻页驱动在独立线程里取列表页：线程带着读取上下文，列表页同样过闸计数；驱动自己的间隔归零。"""
     import concurrent.futures
 
-    from collection.transport import in_context
+    from fetch.transport import in_context
 
     class Driver:
         def iter_detail_urls(self):
@@ -453,7 +453,7 @@ def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, m
             yield PAGE
 
     made = []
-    import core_engine.pagination_driver as pd
+    import fetch.pagination as pd
 
     monkeypatch.setattr(pd, "make_driver", lambda site, profile, url: made.append(Driver()) or made[-1])
     start = site_crawler.SITE_PROFILES["nmpa"]["start_urls"][0]
@@ -464,7 +464,7 @@ def test_list_pages_fetched_in_the_driver_thread_go_through_the_gate(fake_web, m
 def test_transient_errors_are_retried_and_others_are_not(monkeypatch):
     import httpx
 
-    from config.settings import APP
+    from settings import APP
 
     monkeypatch.setattr(APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 0.01)
@@ -499,7 +499,7 @@ def test_a_timeout_is_retried_after_a_short_pause_and_only_a_429_backs_off(monke
     干等设置里的 10 秒（再翻倍）会让一个页面用掉半分钟。429 才按间隔退避、逐次翻倍。"""
     import httpx
 
-    from config.settings import APP
+    from settings import APP
 
     monkeypatch.setattr(APP, "TASK_RETRIES", 2)
     monkeypatch.setattr(APP, "TASK_RETRY_DELAY", 10.0)
@@ -771,7 +771,7 @@ class _RochePage:
 
 
 def _roche_one_year(monkeypatch, fetch):
-    from biz_rules.extractors.roche import roche_web_fetcher
+    from fetch.extractors.roche import roche_web_fetcher
 
     for name in ("year_start", "year_end"):
         monkeypatch.setitem(site_crawler.SITE_PROFILES["roche"]["api"], name, 2026)  # 只读 2026 年
@@ -783,7 +783,7 @@ def test_roche_starts_at_this_year_when_the_start_year_is_zero_or_not_given(monk
     """起始年份以前写死 2026：到了 2027 年，新年的新闻稿读不到。0 或不写 = 今年。"""
     from datetime import datetime, timezone
 
-    from biz_rules.extractors.roche import roche_web_fetcher as fetcher
+    from fetch.extractors.roche import roche_web_fetcher as fetcher
 
     seen = []
 
@@ -846,7 +846,7 @@ WHOLE = _FiercePage(200, "Merck KGaA lands FDA nod", "正文。" * 400)
 
 def _fierce_read(monkeypatch, pages, max_records=5, retry_delay=0):
     """pages：文章网址 → 依次给出的答复（页面替身，或要抛出的异常）。RSS 里的标题是空的，和真实情况一致。"""
-    from biz_rules.extractors.fiercepharma import fiercepharma_fetcher as fetcher
+    from fetch.extractors.fiercepharma import fiercepharma_fetcher as fetcher
 
     monkeypatch.setattr(fetcher, "RETRY_DELAY", retry_delay)
     monkeypatch.setattr(fetcher, "_fetch_rss_items", lambda cfg: ([
@@ -941,7 +941,7 @@ def test_fiercepharma_failures_caused_by_the_budget_running_out_are_not_unreadab
 
 def test_fiercepharma_a_feed_that_cannot_be_read_is_noted_and_the_other_feed_is_still_read(monkeypatch):
     """一个 RSS 读不到（以前只记日志，当成“这个 feed 没有文章”）：记成读不到的条目，别的 feed 照读，运行是“有 1 条读不到”。"""
-    from biz_rules.extractors.fiercepharma import fiercepharma_fetcher as fetcher
+    from fetch.extractors.fiercepharma import fiercepharma_fetcher as fetcher
 
     good, bad = "https://www.fiercepharma.com/rss/Pharma/xml", "https://www.fiercepharma.com/rss/manufacturing/xml"
     rss = (b"<rss><channel><item><link>https://www.fiercepharma.com/pharma/a</link>"
@@ -969,7 +969,7 @@ def test_nccn_a_detail_page_that_cannot_be_read_is_noted_and_no_list_only_versio
     """以前存一个只有列表页信息的降级版本（没有 PDF 链接）；之后读到全的，它就成了“被改过”的旧版本。"""
     import scrapling.fetchers
 
-    from biz_rules.extractors.nccn import nccn_fetcher
+    from fetch.extractors.nccn import nccn_fetcher
 
     items = [{"title": f"Guideline {i}", "version": "1.2026", "detail_url": f"https://www.nccn.org/g/{i}",
               "guideline_id": str(i), "category_name": "Supportive Care"} for i in range(2)]
@@ -1038,7 +1038,7 @@ ROCHE_WHOLE = _RocheDetail(200, "Roche today announced new data. " * 20)
 
 def _roche_read(monkeypatch, details):
     """details：文章网址 → 依次给出的答复（详情页替身，或要抛出的异常）。列表页：一页，列出这些文章，下一页是空的。"""
-    from biz_rules.extractors.roche import roche_web_fetcher as fetcher
+    from fetch.extractors.roche import roche_web_fetcher as fetcher
 
     api = site_crawler.SITE_PROFILES["roche"]["api"]
     for name, value in {"year_start": 2026, "year_end": 2026}.items():
@@ -1089,9 +1089,9 @@ def test_roche_detail_page_that_stays_unread_is_not_stored_with_an_empty_body(mo
 
 @pytest.fixture
 def stored(monkeypatch):
-    """库里已有且没变的原件（记录身份的集合）。真正的判断是 db.history.stored_unchanged，和存版本共用 _adopted_version，
+    """库里已有且没变的原件（记录身份的集合）。真正的判断是 store.history.stored_unchanged，和存版本共用 _adopted_version，
     要真库，见 tests/integration_history.py；这里换成查集合。"""
-    from db import history
+    from store import history
 
     known = set()
     monkeypatch.setattr(history, "stored_unchanged", lambda source, item: item.source_record_id in known)
@@ -1144,7 +1144,7 @@ def test_an_unread_item_resets_the_count_so_known_ones_after_it_do_not_hide_it(f
     assert pages_of(batch) == [urls[0], urls[1], urls[3], urls[4], urls[5]]  # 读不到的没存；停在它后面的第三条已存的
     assert [item["url"] for item in batch["unread_items"]] == [urls[2]]
     assert batch["error"]["code"] == "items_unread" and batch["stop_reason"] == "items_unread"
-    assert batch["next_continuation"] is None  # 读到旧的了：没有下一页；运行标“部分完成”，下一次整份读到底（db.source_refresh）
+    assert batch["next_continuation"] is None  # 读到旧的了：没有下一页；运行标“部分完成”，下一次整份读到底（fetch.source_refresh）
 
 
 def test_a_read_that_stored_nothing_new_is_not_a_failure_but_an_empty_list_is(fake_web, monkeypatch, stored):
@@ -1161,7 +1161,7 @@ def test_a_read_that_stored_nothing_new_is_not_a_failure_but_an_empty_list_is(fa
 
 
 def test_api_site_stops_at_known_records_and_an_empty_result_is_an_alarm_too(fake_web, monkeypatch, stored):
-    from biz_rules.history_models import make_uuid as _make_uuid
+    from store.history_models import make_uuid as _make_uuid
 
     items = [{"id": f"R{i}", "t": f"召回{i}", "d": "2026-01-0" + str(i + 1), "u": f"https://x.invalid/{i}"} for i in range(6)]
     profile = {"source_type": "api", "api": {}, "uid_field": "id",
@@ -1260,7 +1260,7 @@ def test_budget_known_counts_consecutive_known_only():
 def _grouped(monkeypatch, groups, fetched=None):
     """一个接口站点，条目分成几组（groups[g] 是这一组的条目数）。拉取函数和真的一样：从第 start 组读起，每组开头给 GroupStart。
     fetched 记下每次从第几组读起。"""
-    from biz_rules.history_models import GroupStart
+    from store.history_models import GroupStart
 
     def fetcher(cfg, start):
         if fetched is not None:
@@ -1294,7 +1294,7 @@ def test_a_grouped_site_goes_on_from_its_group_and_item_without_the_groups_befor
 
 
 def test_a_grouped_site_stops_at_known_records_in_each_group_and_goes_on_with_the_next_group(fake_web, monkeypatch, stored):
-    from biz_rules.history_models import make_uuid as _make_uuid
+    from store.history_models import make_uuid as _make_uuid
 
     _grouped(monkeypatch, [6, 6, 6])
     for g in (0, 1):  # 第 0、1 组：前两条是新的，其余已存；第 2 组全是新的
@@ -1316,7 +1316,7 @@ def test_a_grouped_incremental_read_takes_at_most_group_limit_items_per_group(fa
 
 def test_a_group_that_cannot_be_read_does_not_stop_the_next_group_and_a_stop_while_asking_for_a_group_keeps_that_group(
         fake_web, monkeypatch):
-    from biz_rules.history_models import GroupStart, ItemUnreadable
+    from store.history_models import GroupStart, ItemUnreadable
 
     def fetcher(cfg, start):
         yield GroupStart(0)

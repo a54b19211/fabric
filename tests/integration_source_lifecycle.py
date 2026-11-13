@@ -8,9 +8,10 @@ from integration_migration_adoption import old_history  # noqa: F401 - builds a 
 from integration_migration_baselines import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
-from biz_rules.history_models import HistoryError
-from biz_rules.retired_sources import RETIRED
-from migration import baseline, runner, source_lifecycle
+from fetch.retired_sources import RETIRED
+from ops import source_lifecycle
+from store.history_models import HistoryError
+from store.migrations import baseline, runner
 
 
 def events(engine):
@@ -37,7 +38,7 @@ def test_the_migration_records_the_decision_as_a_day_not_as_an_effective_time(li
 
 
 def test_running_the_file_again_does_not_record_the_decision_twice(library):
-    from migration.manifests import VERSIONS_DIR
+    from store.migrations.manifests import VERSIONS_DIR
 
     with library.begin() as conn:
         conn.exec_driver_sql((VERSIONS_DIR / "V036__history_source_lifecycle.sql").read_text(encoding="utf-8"))

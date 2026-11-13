@@ -8,8 +8,8 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from biz_rules import history_sources as sources
-from biz_rules.history_models import (
+from fetch import sources
+from store.history_models import (
     ArchiveImport,
     ArchiveRecord,
     FetchRequest,
@@ -216,8 +216,8 @@ def test_public_page_budget_is_partial_and_raw_original(monkeypatch):
 
 
 def test_unknown_enrollment_not_zero():
-    from biz_rules.schemas import ClinicalTrialsExtra
-    from core_engine.api_router import _extract_extra_value
+    from fetch.api_fields import _extract_extra_value
+    from graph.db.schemas import ClinicalTrialsExtra
 
     assert _extract_extra_value({}, {"path": "n", "type": "int"}) is None
     assert _extract_extra_value({"n": 0}, {"path": "n", "type": "int"}) == 0
@@ -226,21 +226,21 @@ def test_unknown_enrollment_not_zero():
 
 
 def test_legacy_no_database_is_not_saved(monkeypatch):
-    import db.session
-    from db import repository
+    import graph.db.session
+    from graph.db import repository
 
     @contextmanager
     def absent():
         yield None
 
-    monkeypatch.setattr(db.session, "get_session", absent)
+    monkeypatch.setattr(graph.db.session, "get_session", absent)
     with pytest.raises(RuntimeError, match="未保存"):
         repository.upsert_document(SimpleNamespace())
 
 
 def test_legacy_changed_text_rejected_before_old_result_write(monkeypatch):
-    import db.session
-    from db import repository
+    import graph.db.session
+    from graph.db import repository
 
     document = SimpleNamespace(raw_content="old raw", extraction_status="completed")
     session = Mock()
@@ -250,7 +250,7 @@ def test_legacy_changed_text_rejected_before_old_result_write(monkeypatch):
     def existing():
         yield session
 
-    monkeypatch.setattr(db.session, "get_session", existing)
+    monkeypatch.setattr(graph.db.session, "get_session", existing)
     with pytest.raises(RuntimeError, match="旧结果已保留"):
         repository.upsert_document(
             SimpleNamespace(uuid="old", raw_content="changed raw")
@@ -400,7 +400,7 @@ def test_the_html_of_a_web_capture_is_not_what_makes_a_version():
 
 
 def test_the_html_hash_is_left_out_when_two_versions_are_compared_by_content():
-    from db import history
+    from store import history
 
     def identity(html_sha256, record_ids=("r1",)):
         return {"raw_sha256": "raw-" + html_sha256, "title": "T", "availability_proof": {"kind": "k"}, "mapping_review": None,
@@ -421,7 +421,7 @@ def test_the_html_hash_is_left_out_when_two_versions_are_compared_by_content():
 def test_a_fetch_that_stopped_at_a_budget_or_quota_is_partial_not_completed(stop_reason, state):
     from datetime import datetime, timezone
 
-    from db import history
+    from store import history
 
     written = []
     conn = SimpleNamespace(execute=lambda statement, params: written.append(params))

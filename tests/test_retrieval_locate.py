@@ -1,5 +1,5 @@
-"""db.retrieval.locate：命中块定位回固定正文（v3 3.6 小批实测）。"""
-from db.retrieval import locate
+"""store.retrieval.locate：命中块定位回固定正文（v3 3.6 小批实测）。"""
+from store.retrieval import locate
 
 FIXED = "intro\n| a | b |\n| --- | --- |\n| 1 | x |\n| 2 | y |\n| 3 | z |\nend"
 

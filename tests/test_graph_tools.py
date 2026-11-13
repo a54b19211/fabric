@@ -5,10 +5,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from biz_rules.graph_tools import graph_identity, paths, subgraph
-from biz_rules.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
-from biz_rules.native_graph import build_native_graph, validate_field_bindings
-from biz_rules.reviewed_graph import GraphIdentity, GraphRef, resolve
+from graph.publish.graph_tools import graph_identity, paths, subgraph
+from graph.publish.native_graph import build_native_graph, validate_field_bindings
+from graph.publish.reviewed_graph import GraphIdentity, GraphRef, resolve
+from store.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
 
 
 def record(nct="NCT00000001", *, condition="Condition A"):
@@ -71,7 +71,7 @@ def test_source_binding_rejects_forged_fields_meaning_and_identity(change):
     elif change == "alias":
         trial.aliases.append("Unproven synonym")
     else:
-        from biz_rules.history_models import TimeValue
+        from store.history_models import TimeValue
         edge.valid_from = TimeValue(value="2016", precision="year", meaning="guessed_from_document")
     with pytest.raises(HistoryError) as error:
         validate_field_bindings(graph, context(rec))
@@ -142,7 +142,7 @@ def test_identity_is_never_guessed_from_malformed_input(value):
 
 @pytest.mark.parametrize("injection", ["empty_projection", "approved_node", "approved_edge", "redirect"])
 def test_native_origin_cannot_smuggle_approved_objects_or_edges_without_native_rules(injection):
-    from biz_rules.reviewed_graph import GraphBundle, GraphEdge, GraphNode, GraphRedirect, GraphReview
+    from graph.publish.reviewed_graph import GraphBundle, GraphEdge, GraphNode, GraphRedirect, GraphReview
 
     rec = record()
     graph = build_native_graph([rec])
