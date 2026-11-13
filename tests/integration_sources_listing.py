@@ -7,6 +7,7 @@ from integration_migration_runner import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
 from api.routers import history as router
+from fetch.catalog import RETIRED
 from fetch.sources import SOURCE_CATALOG
 from store import history as store
 from store.migrations import runner
@@ -17,7 +18,7 @@ def library(pg, monkeypatch):
     _, engine = pg("listing")
     monkeypatch.setattr(store, "history_engine", lambda: engine)
     runner.apply("history", store.history_engine())
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted([*SOURCE_CATALOG, "legacy_documents"])))
+    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted(SOURCE_CATALOG)))
     with engine.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=true"))
     return engine
@@ -37,7 +38,7 @@ def test_readable_sources_are_listed_by_id_and_the_retired_bridge_apart(library)
     assert set(body) == {"capabilities_version", "sources", "retired_sources"}
     assert body["capabilities_version"] == "datafabric.source_capabilities.v1"
     ids = [item["source_id"] for item in body["sources"]]
-    assert ids == sorted(ids) and set(ids) == set(SOURCE_CATALOG) - {"legacy_documents"}
+    assert ids == sorted(ids) and set(ids) == set(SOURCE_CATALOG) - set(RETIRED)
     assert by_id(body["sources"])["nmpa"]["name"] == SOURCE_CATALOG["nmpa"]["name"]
     (retired,) = body["retired_sources"]
     assert retired["source_id"] == "legacy_documents" and retired["capabilities"]["readable"] is True

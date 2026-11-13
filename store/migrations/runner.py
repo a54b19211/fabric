@@ -142,15 +142,13 @@ def apply(role: str, engine) -> list[str]:
 
 
 def seed_history_sources(engine) -> None:
-    """A history_sources row for each catalog (and retired) source that has none; an existing row is the
-    administrator's decision (read_enabled, access) and stays as it is."""
-    from fetch.retired_sources import RETIRED
+    """A history_sources row for each catalog source (fetch.catalog.source_catalog) that has none; an existing row is
+    the administrator's decision (read_enabled) and stays as it is."""
     from fetch.sources import SOURCE_CATALOG
     from store.history_models import canonical
 
-    rows = [*SOURCE_CATALOG.items(), *((source_id, item.catalog_entry()) for source_id, item in RETIRED.items())]
     with engine.begin() as conn:
-        for source_id, catalog in rows:
+        for source_id, catalog in SOURCE_CATALOG.items():
             conn.execute(text("INSERT INTO history_sources (source_id, catalog) VALUES (:id, CAST(:catalog AS jsonb)) "
                               "ON CONFLICT (source_id) DO NOTHING"), {"id": source_id, "catalog": canonical(catalog)})
 

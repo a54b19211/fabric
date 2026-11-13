@@ -67,7 +67,6 @@ def test_who_keeps_notice_mode_without_invented_population_rate_or_cases():
     data["Summary"] = "<p>SYNTHETIC narrative mentions 100 cases; denominator absent.</p>"
     projected = sources.project_record("who_don", ArchiveRecord(
         source_record_id=data["Id"], record_kind="document", raw_content=json.dumps(data)))
-    assert sources.SOURCE_CATALOG["who_don"]["native_analysis_mode"] == "notice_event_only"
     assert not {"cases", "population", "denominator", "incidence", "rate"} & projected["facts"].keys()
     assert projected["event_time"]["meaning"] == "who_notice_publication"
 

@@ -1,7 +1,7 @@
-"""证据类型唯一注册表（fetch.evidence_types）与三处引用（来源目录、画像、业务验收）的一致性。
+"""证据类型唯一注册表（fetch.evidence_types）：细类到大类的映射，来源目录和画像怎么用它。
 
 审阅 396/395：v3 1.4 的十二类是业务证据大类；registry_record、filing_fact 等是细类，各自映射到大类；
-metadata/abstract/fulltext 是内容覆盖层级，不和证据类别混用；没有合适大类的细类保留并标 unmapped。
+没有合适大类的细类保留并标 unmapped。
 纯本地测试，不联网、不连库。
 """
 
@@ -41,35 +41,17 @@ def test_every_fine_type_maps_to_a_category_or_says_unmapped():
 
 
 def test_unmapped_fine_types_are_kept_not_forced_into_primary_research():
-    assert set(et.unmapped_fine_types()) == {
+    unmapped = {k for k, t in et.FINE_TYPES.items() if t.category == et.UNMAPPED}
+    assert unmapped == {
         "review", "literature_other", "guideline", "drug_database", "measurement", "internal_ledger",
         "funding",
     }
-    for slug in et.unmapped_fine_types():
+    for slug in unmapped:
         assert et.category_of(slug) == "unmapped" != "primary_research"
     assert et.category_of("not_a_type") == "unknown"
     # 一组细类覆盖的大类：去重保序，unmapped 照样列出
     assert et.categories_of(["primary_research", "review", "preprint", "guideline"]) == [
         "primary_research", "unmapped", "preprint"]
-
-
-def test_coverage_levels_are_separate_from_evidence():
-    assert {"metadata", "abstract", "fulltext"} <= set(et.COVERAGE)
-    assert not set(et.COVERAGE) & (set(et.FINE_TYPES) | set(et.CATEGORIES) | set(et.DOC_ROLES))
-    assert not set(et.DOC_ROLES) & set(et.FINE_TYPES)
-
-
-def test_registry_self_check_rejects_mixing(monkeypatch):
-    monkeypatch.setitem(et.FINE_TYPES, "abstract", et.FineType("摘要", "primary_research", None))
-    with pytest.raises(ValueError, match="覆盖层级"):
-        et.check_registry()
-    monkeypatch.delitem(et.FINE_TYPES, "abstract")
-    monkeypatch.setitem(et.FINE_TYPES, "media", et.FineType("媒体", "social", None))
-    with pytest.raises(ValueError, match="同名"):
-        et.check_registry()
-    monkeypatch.setitem(et.FINE_TYPES, "media", et.FineType("媒体", "media", None, on_action="decision"))
-    with pytest.raises(ValueError, match="按内容改判"):
-        et.check_registry()
 
 
 @pytest.mark.parametrize("lead,category", [
@@ -107,12 +89,11 @@ def test_content_rule_only_applies_to_content_classified_types():
     assert et.categories_of(["regulatory_notice"]) == ["official_notice", "regulatory_decision"]
 
 
-def test_catalog_uses_only_registered_fine_types_and_coverage_levels():
+def test_catalog_uses_only_registered_fine_types():
     for s in SPECS:
         assert s.evidence_types, s.source_id
         for t in s.evidence_types:
             assert t in et.FINE_TYPES, (s.source_id, t)
-        assert set(s.coverage) <= set(et.COVERAGE), s.source_id
     # 覆盖层级不再写成证据类型
     levels = {"abstract", "literature_metadata", "metadata", "fulltext"}
     for s in SPECS:
@@ -132,7 +113,7 @@ def run(source, **kw):
 def test_profile_credibility_and_doc_types_come_from_the_registry():
     assert pf.PROCESSOR_VERSION == "datafabric.profile.v5"
     assert pf.CREDIBILITY == {k: t.credibility for k, t in et.FINE_TYPES.items() if t.credibility}
-    allowed = set(et.FINE_TYPES) | set(et.DOC_ROLES) | {et.UNKNOWN}
+    allowed = set(et.FINE_TYPES) | {"attachment", "stored_document", et.UNKNOWN}
     raw_types = (None, ["review"], ["research-article"], ["preprint"], ["editorial"])
     for sid in CATALOG:
         for role in (None, "attachment"):

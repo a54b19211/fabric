@@ -22,7 +22,7 @@ def _register_review_listeners():
 @app.on_event("startup")
 def _validate_source_configuration():
     """A configuration the service cannot honour stops it at start, not at the first request: the index targets must not
-    name a retired source (the declarations themselves were validated when they were imported)."""
+    name a retired source."""
     from store import index_publication
 
     index_publication.targets()

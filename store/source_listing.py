@@ -8,12 +8,9 @@ source that is not readable is left out (the radar treats a source it does not s
 from __future__ import annotations
 
 from clean import processors
-from fetch.catalog import CATALOG
-from fetch.retired_sources import RETIRED
+from fetch.catalog import CATALOG, GRAPH_SOURCES, RETIRED
 
 CAPABILITIES_VERSION = "datafabric.source_capabilities.v1"
-# graph packages are read through the graph interface, never chosen as a source of an analysis
-GRAPH_SOURCES = ("reviewed_graph", "primekg_graph")
 
 
 def capabilities(source_id: str, readable: bool, fetch_enabled: bool) -> dict:

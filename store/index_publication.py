@@ -63,7 +63,7 @@ def targets():
             raise ValueError()
     except (ValueError, TypeError):
         raise HistoryError("index_target_configuration", "来源到知识库的索引配置无效", 503) from None
-    from fetch.retired_sources import RETIRED
+    from fetch.catalog import RETIRED
 
     retired = sorted({item.source_id for item in result if item.source_id in RETIRED})
     if retired:

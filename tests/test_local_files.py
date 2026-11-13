@@ -66,12 +66,12 @@ def stored_files(root):
     return sorted(folder.iterdir()) if folder.exists() else []
 
 
-def test_catalog_declares_local_files_as_an_import_source_with_license_entry():
+def test_catalog_declares_local_files_as_an_import_source_with_a_library_row():
     spec = catalog.spec("local_files")
     assert spec.status == "active" and spec.plugin == "local_file_import" and not spec.verified
     assert "local_files" in catalog.FETCHABLE and "local_files" not in catalog.WATCHABLE
     assert PLUGINS["local_file_import"] is not None
-    assert SOURCE_CATALOG["local_files"]["acquisition_channel"] == "institutional_upload"
+    assert SOURCE_CATALOG["local_files"] == {"name": spec.name}
     from clean import derived_text
 
     assert catalog.SITE_SOURCES < catalog.ATTACHMENT_SOURCES == derived_text.ATTACHMENT_SOURCES

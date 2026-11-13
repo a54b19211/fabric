@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import text
 
-from fetch.retired_sources import RETIRED
+from fetch.catalog import RETIRED
 from store import history, index_pieces
 from store import index_publication as index
 from store.history_models import HistoryError

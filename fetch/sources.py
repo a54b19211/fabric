@@ -15,7 +15,7 @@ import httpx
 
 from clean.identifiers import NCT_ID
 from fetch import transport
-from fetch.source_licenses import source_catalog
+from fetch.catalog import source_catalog
 from store.history_models import (
     ArchiveRecord,
     FetchRequest,
@@ -26,7 +26,7 @@ from store.history_models import (
     source_time,
 )
 
-# generated from the declarations in fetch.source_licenses, cross-validated against fetch.catalog on import
+# every source with a history_sources row and its name (fetch.catalog)
 SOURCE_CATALOG = source_catalog()
 
 

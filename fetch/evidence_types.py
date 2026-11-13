@@ -1,7 +1,7 @@
-"""证据类型的唯一注册表：来源目录（fetch.catalog）和加工画像（clean.profile）都只引用这里，
+"""证据类型的唯一注册表：来源目录（fetch.catalog 的 evidence_types）和加工画像（clean.profile）都只引用这里，
 不各自另写一套词表。
 
-三层东西分开列，不混用：
+两层分开列，不混用：
 - 大类（CATEGORIES）：v3 1.4 的十二类业务证据。
 - 细类（FINE_TYPES）：来源目录和画像实际使用的类型，每个细类写明映射到哪个大类。
   一个来源可以覆盖多个细类，也就可以覆盖多个大类。
@@ -12,11 +12,10 @@
   个别细类按内容分大类（FineType.on_action）：监管机构的公告/通知只有原文写明监管动作（批准、
   拒绝、召回、撤市/暂停、警告信/执法、CRL 等）的才算监管决定，其余按它的默认大类（官方通报），
   不因出自监管机构网站就整体算“决定”。规则只在 document_category 一处。
-- 内容覆盖层级（COVERAGE）：元数据、摘要、全文（以及登记结果表、附件）。这是“读到了多少”，
-  不是“这是什么证据”，只能写在来源目录的 coverage 里，不能当细类或大类。
 
-另有两种文档角色（DOC_ROLES）：附件、documents 库存冻结件。它们是画像里的 doc_type，
-但不是证据类型：附件的大类随所属来源，库存冻结件的大类未判定。
+元数据、摘要、全文是“读到了多少”，写在来源目录的 coverage 里，不是证据类型。
+画像的 doc_type 另有两种文档角色：attachment（附件，大类随所属来源）、
+stored_document（documents 库存冻结件，大类未判定），也不是证据类型。
 
 纯数据与纯函数，不导入采集、加工或验收模块，避免循环依赖。
 """
@@ -103,21 +102,6 @@ FINE_TYPES: dict[str, FineType] = {
                                   "上传者提供，类别和许可都要按原件另判，不推断"),
 }
 
-# 内容覆盖层级：metadata → abstract → fulltext；results、attachments 是附属部分
-COVERAGE: dict[str, str] = {
-    "metadata": "元数据",
-    "abstract": "摘要",
-    "fulltext": "全文",
-    "results": "登记结果表",
-    "attachments": "附件",
-}
-
-# 画像 doc_type 里的文档角色，不是证据类型
-DOC_ROLES: dict[str, str] = {
-    "attachment": "附件：大类随所属来源，来源只映射到一个大类时取它，否则 unknown",
-    "stored_document": "documents 库存冻结件：大类未判定（unknown）",
-}
-
 # 监管动作词（小写比对）：标题、摘要或来源给的类别字段里有这些词，按内容分的细类才改判为 on_action。
 REGULATORY_ACTIONS: tuple[str, ...] = (
     # 批准 / 拒绝（含 FDA CRL）
@@ -169,33 +153,3 @@ def categories_of(fine_types) -> list[str]:
                 out.append(c)
     return out
 
-
-def unmapped_fine_types() -> list[str]:
-    return [k for k, t in FINE_TYPES.items() if t.category == UNMAPPED]
-
-
-def check_registry() -> None:
-    """注册表自身的一致性。导入时就跑，不合格直接失败，不等到下游才发现。"""
-    errors: list[str] = []
-    allowed = set(CATEGORIES) | {UNMAPPED, UNKNOWN}
-    for slug, t in FINE_TYPES.items():
-        if t.category not in allowed:
-            errors.append(f"细类 {slug} 映射到未知大类 {t.category}")
-        if t.on_action is not None and t.on_action not in CATEGORIES:
-            errors.append(f"细类 {slug} 按内容改判到未知大类 {t.on_action}")
-        if slug in CATEGORIES and t.category != slug:
-            errors.append(f"细类 {slug} 与大类同名，必须映射到同名大类")
-        if slug in COVERAGE:
-            errors.append(f"{slug} 是内容覆盖层级，不能当细类")
-    for name, table in (("大类", CATEGORIES), ("文档角色", DOC_ROLES)):
-        clash = sorted(set(table) & set(COVERAGE))
-        if clash:
-            errors.append(f"{name}与覆盖层级重名：{clash}")
-    clash = sorted(set(DOC_ROLES) & (set(FINE_TYPES) | set(CATEGORIES)))
-    if clash:
-        errors.append(f"文档角色与证据类型重名：{clash}")
-    if errors:
-        raise ValueError("；".join(errors))
-
-
-check_registry()

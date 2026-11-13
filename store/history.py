@@ -160,7 +160,7 @@ def _ref_key(ref):
 def _refuse_retired_refs(refs):
     """A package published now cites the real source version a legacy one became (legacy_aliases.real_version_id),
     never the retired bridge. Packages published before keep validating on read: this is the publish path only."""
-    from fetch.retired_sources import RETIRED
+    from fetch.catalog import RETIRED
 
     retired = sorted({ref.source_id for ref in refs if ref.source_id in RETIRED})
     if retired:
