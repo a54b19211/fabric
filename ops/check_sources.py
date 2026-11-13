@@ -17,7 +17,7 @@
   DATAFABRIC_HISTORY_DATABASE_URL  必设。这个命令会写库（每次抓取留下运行记录和版本），一定要指向临时库，别连线上库；
                                    库先建好表：python -m store.migrations.runner --db history --apply
   DATAFABRIC_HISTORY_SOURCE_ALLOWLIST  不用设，命令把它设成这次要测的来源。
-  GDELT 有每小时请求额度，被限流也如实显示。
+  GDELT 常回 429（对方限流），读不到也如实显示。
 有来源没抓到（失败，或一个版本都没有）时，表打完以退出码 1 结束。表打在标准输出，日志在标准错误输出（只想看表加 2>/dev/null）。
 """
 

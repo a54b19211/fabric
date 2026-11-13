@@ -62,3 +62,4 @@ def test_get_refuses_a_response_over_its_cap_and_sends_nothing_after_the_deadlin
 def test_a_browser_resolves_only_the_site_it_opens():
     assert transport.site_only("https://www.nccn.org/guidelines/x") == [
         "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE nccn.org, EXCLUDE *.nccn.org"]
+    assert transport.site_only("https://www.nccn.org/guidelines/x", proxy="http://127.0.0.1:7890") == []

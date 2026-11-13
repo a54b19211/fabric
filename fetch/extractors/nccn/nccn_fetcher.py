@@ -53,7 +53,8 @@ def _render(fetcher, url: str, ready_selector: str, proxy: str | None = None):
         transport.wait(url)
         try:
             return fetcher.fetch(url, network_idle=False, disable_resources=True, wait_selector=ready_selector,
-                                 timeout=RENDER_TIMEOUT_MS, retries=1, extra_flags=transport.site_only(url), **options)
+                                 timeout=RENDER_TIMEOUT_MS, retries=1, extra_flags=transport.site_only(url, proxy),
+                                 **options)
         except Exception:
             if attempt == RENDER_TRIES:
                 raise
