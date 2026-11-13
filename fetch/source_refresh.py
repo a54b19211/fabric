@@ -107,8 +107,8 @@ def _step(watch, state, now):
     try:
         if "request" not in state:  # 新的一个周期
             request, start, end = cycle_request(watch, state, now)
-            state.update(request=request, segments=0, read_all=False, cycle_started_at=now.isoformat(),
-                         window_started_at=start.isoformat() if start else None,
+            state.update(watch_id=watch.id, request=request, segments=0, read_all=False,
+                         cycle_started_at=now.isoformat(), window_started_at=start.isoformat() if start else None,
                          window_ended_at=end.isoformat() if end else None)
         if state.get("active_run_id"):
             run = history.read_run(state["active_run_id"])
@@ -148,7 +148,8 @@ def _segment_done(watch, state, coverage, now):
     state.update(segments=state.get("segments", 0) + 1, fail_streak=0, retry=False, error=None,
                  unclean=state.get("unclean", False) or bool(coverage.get("unread_items")))
     incremental = spec(watch.request.source_id).incremental
-    enough = incremental.kind == "stop_at_known" and not incremental.by_group and state["segments"] >= SEGMENTS_PER_CYCLE
+    newest_first = incremental.kind == "stop_at_known" and not incremental.by_group
+    enough = newest_first and state["segments"] >= SEGMENTS_PER_CYCLE
     if after and not enough:
         request["continuation"] = after
         state["state"] = "running"
@@ -168,9 +169,10 @@ def _failed(watch, state, exc, now):
     """出错：cadence_seconds 秒后换一个新任务重读这一段。重读时不在已存的上停（retry）：前面几条可能是失败的这次存下的，
     停在它们上面就跳过了后面没存的。连续 GIVE_UP_AFTER 次放弃这一周期：下一周期从检查点重新规划，"遇到已存的就停"的整份读。"""
     state.pop("active_run_id", None)
+    later = now + timedelta(seconds=watch.cadence_seconds)
     state.update(state="blocked" if exc.status == 403 else "failed", error={"code": exc.code, "message": exc.message},
-                 last_failure_at=now.isoformat(), next_check_at=(now + timedelta(seconds=watch.cadence_seconds)).isoformat(),
-                 retry=True, fail_streak=state.get("fail_streak", 0) + 1)
+                 last_failure_at=now.isoformat(), next_check_at=later.isoformat(), retry=True,
+                 fail_streak=state.get("fail_streak", 0) + 1)
     if state["fail_streak"] >= GIVE_UP_AFTER:
         for name in ("request", "segments", "unclean", "retry", "fail_streak"):
             state.pop(name, None)
@@ -188,11 +190,13 @@ def source_health(source_id, engine=None):
         history._source(conn, source_id)  # 不可读的来源：403
     configured = {_key(watch): watch for watch in watches() if watch.request.source_id == source_id}
     with (engine or publication.publication_engine()).begin() as conn:
-        saved = dict(conn.execute(text("SELECT event_key, snapshot FROM publication_outbox WHERE event_key = ANY(:keys)"),
-                                  {"keys": list(configured)}).all())
-    rows = [{"watch_id": watch.id, "scope": watch.request.query, **{name: saved.get(key, {}).get(name)
-                                                                    for name in WATCH_FIELDS}}
-            for key, watch in configured.items()]
+        found = conn.execute(text("SELECT event_key, snapshot FROM publication_outbox WHERE event_key = ANY(:keys)"),
+                             {"keys": list(configured)})
+        saved = dict(found.all())
+    rows = []
+    for key, watch in configured.items():
+        values = {name: saved.get(key, {}).get(name) for name in WATCH_FIELDS}
+        rows.append({"watch_id": watch.id, "scope": watch.request.query, **values})
 
     def latest(name):
         return max((row[name] for row in rows if row[name]), key=parse_timestamp, default=None)
