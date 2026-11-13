@@ -14,7 +14,6 @@ import httpx
 import llm_transport as lt
 from loguru import logger
 from openai import OpenAI
-from prefect import task
 
 from settings import APP
 
@@ -180,11 +179,6 @@ def _chat_completion(stage: str, api_key: str, base_url: str, body: dict) -> str
     return answer.content
 
 
-@task(
-    name="qwen_extract_structured",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
 def qwen_extract_structured(
     prompt: str,
     system_prompt: str = "",

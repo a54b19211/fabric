@@ -85,7 +85,7 @@ def _call_llm_for_chunk(chunk, source_site: str) -> dict:
     """调用 LLM 处理单块，返回原始 dict，失败返回 {}。"""
     prompt = _build_chunk_prompt(chunk, source_site)
     try:
-        result = qwen_extract_structured.fn(
+        result = qwen_extract_structured(
             prompt=prompt,
             system_prompt=ENTITY_EXTRACTION_SYSTEM_PROMPT,
             use_extraction_model=True,

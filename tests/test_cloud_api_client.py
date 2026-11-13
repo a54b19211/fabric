@@ -103,7 +103,7 @@ def extraction_request(base, key, model, system):
 def test_extraction_sends_one_json_request_and_returns_the_object(monkeypatch, endpoints, logs, use_extraction_model,
                                                                   base, key, model):
     provider = Provider(monkeypatch, (200, completion('{"drug": "X", "n": 1}')))
-    result = cac.qwen_extract_structured.fn("the prompt", system_prompt="the system",
+    result = cac.qwen_extract_structured("the prompt", system_prompt="the system",
                                             use_extraction_model=use_extraction_model)
     assert result == {"drug": "X", "n": 1}
     assert provider.requests == [extraction_request(base, key, model, "the system")]
@@ -113,14 +113,14 @@ def test_extraction_sends_one_json_request_and_returns_the_object(monkeypatch, e
 
 def test_extraction_default_system_prompt_and_fenced_answer(monkeypatch, endpoints):
     provider = Provider(monkeypatch, (200, completion('```json\n{"a": [1, 2]}\n```')))
-    assert cac.qwen_extract_structured.fn("the prompt") == {"a": [1, 2]}
+    assert cac.qwen_extract_structured("the prompt") == {"a": [1, 2]}
     system = provider.requests[0]["body"]["messages"][0]
     assert system["role"] == "system" and system["content"].startswith(DEFAULT_SYSTEM)
 
 
 def test_extraction_answer_that_is_not_json_is_saved_and_gives_nothing(monkeypatch, endpoints, logs, saved):
     Provider(monkeypatch, (200, completion('{"a": 1,,}')))
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert saved == ['{"a": 1,,}']
     assert any(line.startswith("ERROR LLM 返回内容非合法 JSON\nJSON 解析失败:") and line.endswith("/scratch/answer.json")
                for line in logs)
@@ -128,20 +128,20 @@ def test_extraction_answer_that_is_not_json_is_saved_and_gives_nothing(monkeypat
 
 def test_extraction_answer_without_content_gives_nothing(monkeypatch, endpoints, logs):
     Provider(monkeypatch, (200, completion(None)))
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert "ERROR LLM API 调用异常: 'NoneType' object has no attribute 'strip'" in logs
 
 
 def test_extraction_is_resent_after_server_errors_and_rate_limits(monkeypatch, endpoints):
     provider = Provider(monkeypatch, (500, BUSY), (429, BUSY), (200, completion('{"a": 1}')))
-    assert cac.qwen_extract_structured.fn("the prompt", system_prompt="the system") == {"a": 1}
+    assert cac.qwen_extract_structured("the prompt", system_prompt="the system") == {"a": 1}
     assert provider.requests == [extraction_request(BASE, "key-main", "chat-model", "the system")] * 3
     assert_waits(provider.waits, 2)
 
 
 def test_extraction_gives_up_after_two_resends(monkeypatch, endpoints, logs):
     provider = Provider(monkeypatch, (503, BUSY), (503, BUSY), (503, BUSY))
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert len(provider.requests) == 3
     assert_waits(provider.waits, 2)
     assert "ERROR LLM API 调用异常: Error code: 503 - {'error': {'message': 'busy', 'type': 'server_error'}}" in logs
@@ -153,7 +153,7 @@ def test_extraction_gives_up_after_two_resends(monkeypatch, endpoints, logs):
                           (401, "", "Error code: 401")])
 def test_extraction_is_not_resent_after_a_client_error(monkeypatch, endpoints, logs, status, value, logged):
     provider = Provider(monkeypatch, (status, value))
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert len(provider.requests) == 1 and provider.waits == []
     assert f"ERROR LLM API 调用异常: {logged}" in logs
 
@@ -162,7 +162,7 @@ def test_extraction_is_not_resent_after_a_client_error(monkeypatch, endpoints, l
                                              (httpx.ReadTimeout, "Request timed out.")])
 def test_extraction_is_resent_after_transport_failures(monkeypatch, endpoints, logs, failure, logged):
     provider = Provider(monkeypatch, failure, failure, failure)
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert len(provider.requests) == 3
     assert_waits(provider.waits, 2)
     assert f"ERROR LLM API 调用异常: {logged}" in logs
@@ -171,7 +171,7 @@ def test_extraction_is_resent_after_transport_failures(monkeypatch, endpoints, l
 def test_extraction_without_a_key_sends_nothing(monkeypatch, endpoints, logs):
     monkeypatch.setattr(APP, "LLM_API_KEY", "")
     provider = Provider(monkeypatch)
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert provider.requests == []
     assert "ERROR LLM API Key 未配置（LLM_API_KEY），跳过结构化提取" in logs
 
@@ -226,7 +226,7 @@ def test_chat_without_a_key_sends_nothing(monkeypatch, endpoints, logs):
 @pytest.mark.parametrize("answer", [{"choices": []}, "<html>ok</html>"])
 def test_an_answer_that_is_no_chat_completion_gives_nothing(monkeypatch, endpoints, answer):
     Provider(monkeypatch, (200, answer), (200, answer))
-    assert cac.qwen_extract_structured.fn("the prompt") == {}
+    assert cac.qwen_extract_structured("the prompt") == {}
     assert cac.qwen_chat(user_message="candidates") == ""
 
 
@@ -234,6 +234,6 @@ def test_chat_calls_build_no_sdk_client(monkeypatch, endpoints):
     # their HTTP side is llm_transport; only streaming and embeddings still build an OpenAI client (ADR 0007)
     monkeypatch.setattr(cac, "OpenAI", None)
     provider = Provider(monkeypatch, (200, completion('{"a": 1}')), (200, completion("ok")))
-    assert cac.qwen_extract_structured.fn("the prompt") == {"a": 1}
+    assert cac.qwen_extract_structured("the prompt") == {"a": 1}
     assert cac.qwen_chat(user_message="candidates") == "ok"
     assert len(provider.requests) == 2
