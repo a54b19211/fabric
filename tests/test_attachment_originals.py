@@ -44,6 +44,16 @@ def download(**kwargs):
     return client.download_pdf.fn(URL, source_site="synthetic_files", **kwargs)
 
 
+def test_a_connection_that_does_not_come_up_is_given_up_after_ten_seconds_so_the_transport_can_try_another(
+        http_source, monkeypatch):
+    """nccn.org 的个别连接 TLS 握手卡 60 秒以上（实测 62-76 秒）：下载的连接超时只有 10 秒，不是整个读取的剩余时间。"""
+    seen = {}
+    fixture_client = client.httpx.Client
+    monkeypatch.setattr(client.httpx, "Client", lambda **kwargs: (seen.update(kwargs), fixture_client(**kwargs))[1])
+    download()
+    assert seen["timeout"].connect == client.CONNECT_SECONDS == 10 and seen["timeout"].read == 120
+
+
 def test_same_url_new_bytes_are_used_and_old_original_is_retained(http_source):
     first = download()
     assert Path(first["local_path"]).read_bytes() == A

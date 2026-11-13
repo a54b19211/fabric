@@ -195,6 +195,7 @@ def store_original(content: bytes, identifier: str, source_site: str, file_ext: 
 # 超时后的重试交给 collection.transport（立刻换一条连接重试）。
 SIMPLE_FETCH_TIMEOUT = (3, 6)
 SIMPLE_FETCH_TRIES = 2
+CONNECT_SECONDS = 10  # 下载附件时，建立连接（含 TLS 握手）最多等几秒，见 download_pdf
 
 
 @task(
@@ -305,7 +306,10 @@ def download_pdf(
     # 流式读取并设上限（加工层预算）：超过 max_bytes 立即停止，不把超大文件读进内存
     limit = max_bytes if max_bytes is not None else int(os.environ.get(
         "DATAFABRIC_ATTACHMENT_MAX_BYTES", str(100 * 1024 * 1024)))
-    with httpx.Client(headers=headers, follow_redirects=True, timeout=timeout) as client:
+    # 连接（含 TLS 握手）只等 CONNECT_SECONDS：nccn.org、hkexnews 的个别连接会卡 60 秒以上（实测握手超时 62-76 秒），
+    # 干等就把整段读取的时间用光；放弃它，collection.transport 换一条连接重试（超时重试在那里）
+    with httpx.Client(headers=headers, follow_redirects=True,
+                      timeout=httpx.Timeout(timeout, connect=CONNECT_SECONDS)) as client:
         with client.stream("GET", pdf_url) as resp:
             resp.raise_for_status()
             declared = resp.headers.get("content-length")
