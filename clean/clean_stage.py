@@ -1,7 +1,7 @@
 """清洗段：每个版本只处理一次，写出干净正文、编号和画像。结果只追加、可重跑，同样的输入得到同样的结果。
 领活用 SELECT ... FOR NO KEY UPDATE SKIP LOCKED，可多进程并行：别的进程正在处理的版本直接跳过。
 
-从哪读起：process()。它按来源一批一批地领还没画像的版本（_process_batch），一批的活在 _process_rows 里：_prepare_rows
+从哪读起：process()。它一批一批地领还没画像的版本（_process_batch），一批的活在 _process_rows 里：_prepare_rows
 选出清洗的输入，_version_text 清洗（这个版本已经洗过就用那份正文），_write_rows 批量写入。process_versions() 只处理指定的几个版本，
 给 main_etl.py 单次调试用；stage_status() 给出各来源的进度；for_versions() 把一页版本的产物读给 API。命令行入口是
 run/clean.py。
@@ -11,7 +11,8 @@ run/clean.py。
 （建索引待办）排活。
 
 运行方式（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）：
-- 领活：一批 = 一个来源里还没有当前画像、也不在等附件正文的版本，按 published_seq 先后；领到的版本行锁到这批写完。
+- 领活：一批 = 还没有当前画像、也不在等附件正文的版本，按（来源, published_seq）先后；领到的版本行锁到这批写完。
+  没活时这条查询是一次全表的反连接（隔离库实测 70 万个已画像版本约 0.8 秒），每轮只查一次，不分来源。
   整批写不成时逐个重做，做不成的版本记在返回的 failed_versions 里，本轮跳过，下一轮再试。
 - 已经洗过的不重洗：这个版本在当前清洗器版本下已有正文（derived_clean_text 有 (version_id, processor_version)
   这一行），就用那份正文重算编号和画像（例如只有画像处理器升级时）。每份正文只留一个摘要 text_sha256。
@@ -159,12 +160,12 @@ _FIELDS = """
 """
 _PROFILED = """EXISTS (SELECT 1 FROM derived_profiles p WHERE p.version_id=v.version_id
                        AND p.processor_version=:prof AND p.text_processor_version=ANY(:texts))"""
-# 领一批：这个来源里还没有当前画像、也不在等附件正文的版本，按发布先后；别的进程锁着的跳过
+# 领一批：还没有当前画像、也不在等附件正文的版本，每个来源按发布先后；别的进程锁着的跳过
 _TODO_SQL = _FIELDS + """
-    WHERE v.source_id=:source AND v.record_kind<>'graph' AND NOT (v.version_id = ANY(:skip))
+    WHERE NOT (v.source_id = ANY(:skip_sources)) AND v.record_kind<>'graph' AND NOT (v.version_id = ANY(:skip))
       AND NOT """ + _PROFILED + """
       AND NOT EXISTS (SELECT 1 FROM derived_stage_waiting w WHERE w.stage_key=:k AND w.version_id=v.version_id)
-    ORDER BY v.published_seq LIMIT :n
+    ORDER BY v.source_id, v.published_seq LIMIT :n
     FOR NO KEY UPDATE OF v SKIP LOCKED
 """
 # 同一组字段，按版本号取（等待表补做、main_etl.py 单次调试都用它）
@@ -347,7 +348,7 @@ def process_versions(version_ids):
 
 
 def process(*, batch=BATCH, time_budget_seconds=600):
-    """按来源一批一批地领还没画像的版本处理，直到没有活或到时间；返回计数。"""
+    """一批一批地领还没画像的版本处理，直到没有活或到时间；返回计数。"""
     from store.history import history_engine
 
     engine = history_engine()
@@ -357,20 +358,16 @@ def process(*, batch=BATCH, time_budget_seconds=600):
               "quarantine": 0, "weak_signal": 0, "normal": 0, "failed_versions": []}
     while _process_waiting(engine, key, counts) and time.monotonic() - began < time_budget_seconds:
         pass
-    with engine.begin() as conn:
-        sources = conn.execute(text(
-            "SELECT source_id FROM history_sources WHERE published_seq > 0 AND NOT (source_id = ANY(:skip)) "
-            "ORDER BY source_id"), {"skip": list(SKIP_SOURCES)}).scalars().all()
-    for source in sources:
-        while time.monotonic() - began < time_budget_seconds and _process_batch(engine, key, source, batch, counts):
-            pass
+    while time.monotonic() - began < time_budget_seconds and _process_batch(engine, key, batch, counts):
+        pass
     return counts
 
 
-def _process_batch(engine, key, source, batch, counts):
-    """领这个来源的一批版本处理掉，返回领到几个（0：这个来源没活了）。整批做不成时在同一事务里逐个重做，
+def _process_batch(engine, key, batch, counts):
+    """领一批版本处理掉，返回领到几个（0：没活了）。整批做不成时在同一事务里逐个重做，
     做不成的版本记进 counts["failed_versions"]，本轮不再领它。"""
-    params = {"source": source, "n": batch, "k": key, "skip": [f["version_id"] for f in counts["failed_versions"]],
+    params = {"skip_sources": list(SKIP_SOURCES), "n": batch, "k": key,
+              "skip": [f["version_id"] for f in counts["failed_versions"]],
               "prof": profile.PROCESSOR_VERSION, "texts": [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION]}
     with engine.begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout='120000ms'"))
