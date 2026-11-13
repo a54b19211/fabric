@@ -124,7 +124,7 @@ def prepare(content: bytes, collection: str, name: str, *, discovered_from: str)
     )
 
 
-def import_upload(content: bytes, filename: str, collection: str, is_demo: bool, key: str):
+def import_upload(content: bytes, filename: str, collection: str, is_demo: bool, key: str | None):
     """上传入口：一个文件 → 一条附件版本，经 import_archive 发布（幂等键同 /archives）。"""
     from store import history as store
 
@@ -132,8 +132,6 @@ def import_upload(content: bytes, filename: str, collection: str, is_demo: bool,
         raise HistoryError("file_too_large", "文件超过上传上限", 413)
     collection, name = clean_collection(collection), clean_name(filename)
     file_type(name, content)  # 先拒类型，不为被拒的文件落盘
-    if SOURCE_ID not in store.allowed_sources():
-        raise HistoryError("source_not_allowed", "当前许可不允许该来源", 403)
     record = prepare(content, collection, name, discovered_from="upload")
     request = ArchiveImport(
         source_id=SOURCE_ID,

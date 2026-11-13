@@ -1,15 +1,14 @@
-"""固定公开来源读取与确定性投影；只读小批，不推断项目身份或临床成败。"""
+"""公开来源的读取（read_public）和原件投影（project_record）。接口类来源（ClinicalTrials、Europe PMC、
+FDA CRL、PubMed）的读法在这里，网站在 fetch/site_crawler.py，其余来源各有自己的模块。"""
 
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from decimal import Decimal
-from typing import Any, NamedTuple
+from typing import Any
 
 import httpx
 
@@ -20,7 +19,6 @@ from store.history_models import (
     ArchiveRecord,
     FetchRequest,
     HistoryError,
-    TimeValue,
     canonical,
     sha256,
     source_time,
@@ -171,80 +169,18 @@ def crl_id(data: dict) -> str:
     return name + "#" + sha256(canonical(components))[:24]
 
 
-# Fields a source rewrites in every response although the record did not change: ClinicalTrials stamps
-# each study with the date of its data snapshot. Version identity ignores them; the raw is kept as seen.
-VOLATILE_RAW = {"clinicaltrials": (("derivedSection", "miscInfoModule", "versionHolder"),)}
-
-# A web capture keeps the page's HTML as it was seen, but the HTML does not identify a version: pages carry
-# generated ids (NMPA's accessibility widget) and a new download path on every request (ChiCTR). Two captures
-# are the same version when the parse result and the attachment list are the same.
-# The trade-off: a change in the HTML that the parser does not read (markup, scripts, widgets) makes no new
-# version, and the HTML kept is the first one seen. A changed parse result or attachment list still does.
-CAPTURE_HTML = ("html", "html_sha256", "html_store_path")
-
-
-class _Ambiguous(ValueError):
-    """A JSON text another parser may read differently: compared by its raw hash, not as content."""
-
-
-def _object(pairs):
-    if len({key for key, _ in pairs}) != len(pairs):
-        raise _Ambiguous("duplicate key")  # RFC 8259: parsers differ on which value wins
-    return dict(pairs)
-
-
-def _constant(name):
-    raise _Ambiguous(name)  # NaN / Infinity are not JSON
-
-
-def _number(text):
-    value = float(text)
-    if not math.isfinite(value) or Decimal(text) != Decimal(repr(value)):
-        raise _Ambiguous("precision")  # two different numbers could parse to one float
-    return value
-
-
-def stable_raw(source_id, raw):
-    """The raw as canonical JSON without the source's volatile fields (and a web capture's HTML), for comparing
-    two observations:
-    key order and spacing are serialization, not content (live 2026-11-03: Europe PMC returned the same
-    record with its keys in another order on most refreshes, 23927 versions for 8444 records; 66 sampled
-    neighbouring versions parsed equal). Array order is kept. None (compare the raw hash) if the raw is not
-    JSON, is ambiguous JSON (a duplicate key, NaN/Infinity, a number a float cannot hold exactly), or a
-    volatile field has an unexpected shape."""
-    try:
-        data = json.loads(raw, object_pairs_hook=_object, parse_constant=_constant, parse_float=_number)
-    except (TypeError, ValueError):  # _Ambiguous included
-        return None
-    if isinstance(data, dict) and data.get("role") == "web_capture":
-        for key in CAPTURE_HTML:
-            data.pop(key, None)
-    for path in VOLATILE_RAW.get(source_id, ()):
-        node = data
-        for key in path[:-1]:
-            node = node.get(key) if isinstance(node, dict) else None
-        if isinstance(node, dict) and path[-1] in node:
-            # only the known shape, a plain date; anything else is compared as it is
-            if not (isinstance(node[path[-1]], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", node[path[-1]])):
-                return None
-            node.pop(path[-1])
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-
 def project_record(source_id: str, item: ArchiveRecord) -> dict:
-    """原件 → 投影。v3 6.3 的迁入封装（{"legacy_migration": {...}, 解析器可读的正文}）：只把正文交给该来源原有的
-    解析器，同一处把迁入块写进 facts、publication_role 记为 migrated_record，解析器版本带上转换器版本；原件本身
-    （封装）原样保存。没有可用证明，这里也不造证明。来源已给出的材料性质、全文和文档关联
-    （fetch.document_evidence）附在解析器的投影上，按拆掉迁入封装后的原件计算。"""
+    """原件 → 投影：标题、正文、facts（带原件里的位置）、几个时间，外加材料性质（fetch/document_evidence.py）。
+    投影只是给人和下游读的；一个原件是不是新版本，看的是它的内容指纹（store.history.fingerprint）。
+    legacy 迁入的原件（{"legacy_migration": {...}, 正文}）只把正文交给来源自己的投影，迁入块记进 facts。"""
     from fetch.document_evidence import attach_document_evidence
 
     migration, item = _migration_envelope(source_id, item)
-    projected = _project_record(source_id, item)
+    projected = _project(source_id, item)
     try:
         projected = attach_document_evidence(source_id, item, projected)
     except (ValueError, TypeError, AttributeError):
-        raise HistoryError("invalid_document_evidence", "材料类型、全文或文档关联依据不符合契约") from None
+        raise HistoryError("invalid_document_evidence", "材料类型、全文或文档关联不符合格式") from None
     if migration is None:
         return projected
     return dict(projected, facts={**projected["facts"], "legacy_migration": migration,
@@ -263,123 +199,74 @@ def _migration_envelope(source_id, item):
     block = data.pop("legacy_migration")
     if (not isinstance(block, dict) or block.get("converter") != CONVERTER or source_id == "legacy_documents"
             or not re.fullmatch(r"[0-9a-f]{64}", str(block.get("legacy_version_id") or ""))):
-        raise HistoryError("invalid_migration_envelope", "迁入封装不符合固定契约", 422)
+        raise HistoryError("invalid_migration_envelope", "迁入封装不符合固定格式", 422)
     return block, item.model_copy(update={"raw_content": json.dumps(data, ensure_ascii=False, sort_keys=True)})
 
 
-def _project_record(source_id: str, item: ArchiveRecord) -> dict:
-    """Dispatch to the source's projector: sources with a module of their own, then the field projections."""
+def _project(source_id: str, item: ArchiveRecord) -> dict:
+    """按来源找它的投影函数。"""
+    from fetch.catalog import ATTACHMENT_SOURCES, SITE_SOURCES
+
     if source_id == "pubmed" and item.raw_media_type == "application/xml":
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
-        raise HistoryError("unsupported_media", "该来源只支持保留的JSON原件")
-    from fetch.catalog import ATTACHMENT_SOURCES, SITE_SOURCES
-
+        raise HistoryError("unsupported_media", "该来源只支持 JSON 原件")
     if source_id in SITE_SOURCES:
         from fetch.site_crawler import project_capture
 
         return project_capture(source_id, item)
-    if source_id in ATTACHMENT_SOURCES:
-        # 站点以外有附件版本的来源（PubMed 全文、本地导入）：与站点附件同一契约
+    if source_id in ATTACHMENT_SOURCES:  # 站点以外有附件的来源（PubMed 全文、本地文件）
         from fetch.attachments import project_attachment
 
         return project_attachment(source_id, item)
     data = parse_json(item.raw_content)
-    own = _OWN_PROJECTORS.get(source_id)
-    if own is not None:
-        return own(item, data)
-    if source_id == "external_archive" and data.get("schema_version") == "datafabric.observation.v1":
-        return _project_observation(item, data)
+    if source_id == "gdelt_doc":
+        from fetch.gdelt_news import project_gdelt
+
+        return project_gdelt(item, data)
+    if source_id == "sec_companyfacts":
+        from fetch.sec_xbrl import project_sec
+
+        return project_sec(item, data)
+    if source_id == "who_don":
+        from fetch.who_don import project_who
+
+        return project_who(item, data)
     if source_id in {"legacy_documents", "reviewed_graph", "primekg_graph"}:
-        return _project_graph(source_id, item, data)
-    fields = _FIELD_PROJECTORS.get(source_id)
-    if fields is None:
-        raise HistoryError("unsupported_source", "该来源没有可执行的固定投影")
-    return _assemble(source_id, item, fields(item, data))
+        from graph.publish.reviewed_graph import project_graph_record
 
-
-def _project_gdelt(item, data):
-    from fetch.gdelt_news import project_gdelt
-
-    return project_gdelt(item, data)
-
-
-def _project_sec(item, data):
-    from fetch.sec_xbrl import project_sec
-
-    return project_sec(item, data)
-
-
-def _project_who(item, data):
-    from fetch.who_don import project_who
-
-    return project_who(item, data)
-
-
-# Sources whose projection lives in a module of its own (imported on use)
-_OWN_PROJECTORS = {"gdelt_doc": _project_gdelt, "sec_companyfacts": _project_sec, "who_don": _project_who}
-
-
-def _project_observation(item, data):
-    from fetch.observations import project_observation
-
-    try:
-        return project_observation(item, data)
-    except ValueError:
-        raise HistoryError("invalid_observation", "观测值、期间或口径不符合固定契约") from None
-
-
-def _project_graph(source_id, item, data):
-    from graph.publish.reviewed_graph import project_graph_record
-
-    try:
-        return project_graph_record(source_id, item, data)
-    except ValueError:
-        raise HistoryError("invalid_graph_fields", "图包或旧文档桥字段不符合固定契约") from None
-
-
-class _Projection(NamedTuple):
-    """What a field projection reads from one original; _assemble checks it and builds the projected record."""
-
-    kind: str | None
-    title: object
-    clean_text: str
-    facts: dict
-    locators: dict
-    source_url: str | None = None
-    published: TimeValue | None = None
-    updated: TimeValue | None = None
-    event_time: TimeValue | None = None
-
-
-_PARSER_VERSIONS = {
-    "clinicaltrials": "datafabric.clinicaltrials.native.v0.2",
-    "europe_pmc": "datafabric.europepmc.core.v0.2",
-}
-
-
-def _assemble(source_id, item, p: _Projection) -> dict:
-    if item.record_kind != p.kind:
+        try:
+            return project_graph_record(source_id, item, data)
+        except ValueError:
+            raise HistoryError("invalid_graph_fields", "图包或旧文档桥字段不符合固定格式") from None
+    projector = {"clinicaltrials": _project_clinicaltrials, "fda_crl": _project_fda_crl,
+                 "europe_pmc": _project_europe_pmc, "external_archive": _project_external_archive}.get(source_id)
+    if projector is None:
+        raise HistoryError("unsupported_source", "该来源没有投影函数")
+    projected = projector(item, data)
+    if projected["record_kind"] != item.record_kind:
         raise HistoryError("record_kind_mismatch", "原件类型与导入声明不一致")
-    if not isinstance(p.title, str) or len(p.title) > 10000:
-        raise HistoryError("invalid_source_fields", "来源标题格式错误")
-    projected = {
-        "record_kind": p.kind,
-        "title": p.title,
-        "source_url": p.source_url,
-        "clean_text": p.clean_text,
-        "facts": p.facts,
-        "field_locators": p.locators,
-        "event_time": p.event_time.model_dump(mode="json") if p.event_time else None,
-        "source_published_at": p.published.model_dump(mode="json") if p.published else None,
-        "source_updated_at": p.updated.model_dump(mode="json") if p.updated else None,
-    }
-    if source_id in _PARSER_VERSIONS:
-        projected["parser_version"] = _PARSER_VERSIONS[source_id]
     return projected
 
 
-def _clinicaltrials_fields(item, data) -> _Projection:
+def _record(kind, title, clean_text, facts, locators, *, url=None, published=None, updated=None, event_time=None,
+            parser_version=None) -> dict:
+    """一个投影（几个 JSON 来源共用的写法）。"""
+    if not isinstance(title, str) or len(title) > 10000:
+        raise HistoryError("invalid_source_fields", "来源标题格式错误")
+    projected = {
+        "record_kind": kind, "title": title, "source_url": url, "clean_text": clean_text, "facts": facts,
+        "field_locators": locators,
+        "event_time": event_time.model_dump(mode="json") if event_time else None,
+        "source_published_at": published.model_dump(mode="json") if published else None,
+        "source_updated_at": updated.model_dump(mode="json") if updated else None,
+    }
+    if parser_version:
+        projected["parser_version"] = parser_version
+    return projected
+
+
+def _project_clinicaltrials(item, data) -> dict:
     facts, locators = _facts(data, TRIAL_PATHS)
     for key in ("phase", "conditions"):
         if facts.get(key) is not None and (
@@ -396,13 +283,14 @@ def _clinicaltrials_fields(item, data) -> _Projection:
         raise HistoryError("native_id_mismatch", "临床登记ID与原件不一致")
     title = _pointer(data, "/protocolSection/identificationModule/briefTitle") or native
     status = "/protocolSection/statusModule/"
-    published = source_time(_pointer(data, status + "studyFirstPostDateStruct/date"), "registry_first_posted")
-    updated = source_time(_pointer(data, status + "lastUpdatePostDateStruct/date"), "registry_update_posted")
-    event_time = source_time(facts.get("start_date"), "registry_start_" + str(facts.get("start_date_type", "unknown")))
-    return _Projection(kind="trial", title=title, facts=facts, locators=locators,
-                       clean_text=_pointer(data, "/protocolSection/descriptionModule/briefSummary") or str(title),
-                       source_url="https://clinicaltrials.gov/study/" + native,
-                       published=published, updated=updated, event_time=event_time)
+    return _record(
+        "trial", title, _pointer(data, "/protocolSection/descriptionModule/briefSummary") or str(title), facts, locators,
+        url="https://clinicaltrials.gov/study/" + native,
+        published=source_time(_pointer(data, status + "studyFirstPostDateStruct/date"), "registry_first_posted"),
+        updated=source_time(_pointer(data, status + "lastUpdatePostDateStruct/date"), "registry_update_posted"),
+        event_time=source_time(facts.get("start_date"), "registry_start_" + str(facts.get("start_date_type", "unknown"))),
+        parser_version="datafabric.clinicaltrials.native.v0.2",
+    )
 
 
 FDA_CRL_FIELDS = {
@@ -418,11 +306,11 @@ FDA_CRL_FIELDS = {
 }
 
 
-def _fda_crl_fields(item, data) -> _Projection:
+def _project_fda_crl(item, data) -> dict:
     if item.source_record_id != crl_id(data):
         raise HistoryError("native_id_mismatch", "FDA复合来源ID与原件不一致")
     facts, locators = _facts(data, FDA_CRL_FIELDS)
-    # 标题：谁收到的、什么信、哪个申请、信上的日期（以前是 PDF 文件名 / 类型 / 日期，文件名不是标题）；没有公司名才退到文件名
+    # 标题：谁收到的、什么信、哪个申请、信上的日期；没有公司名才退到文件名
     applications = data.get("application_number")
     applications = ", ".join(map(str, applications)) if isinstance(applications, list) else str(applications or "")
     title = (f"{data.get('company_name') or data.get('file_name')} - {data.get('letter_type')} "
@@ -435,9 +323,8 @@ def _fda_crl_fields(item, data) -> _Projection:
         event_time = source_time(datetime.strptime(date, "%m/%d/%Y").date().isoformat(), "letter_signed")
     except (TypeError, ValueError):
         event_time = source_time(date, "letter_signed")
-    # 信函签字日期不是网页公开日期，不能自动填source_published_at。
-    return _Projection(kind="document", title=title, clean_text=clean_text, facts=facts, locators=locators,
-                       event_time=event_time)
+    # 信函签字日期不是网页公开日期，不填 source_published_at
+    return _record("document", title, clean_text, facts, locators, event_time=event_time)
 
 
 EUROPE_PMC_FIELDS = {
@@ -474,25 +361,26 @@ EUROPE_PMC_FIELDS = {
 }
 
 
-def _europe_pmc_fields(item, data) -> _Projection:
+def _project_europe_pmc(item, data) -> dict:
     native = str(data.get("source", "")) + ":" + str(data.get("id", ""))
     if not data.get("source") or not data.get("id") or native != item.source_record_id:
         raise HistoryError("native_id_mismatch", "Europe PMC source:id与原件不一致")
     facts, locators = _facts(data, EUROPE_PMC_FIELDS)
     title = data.get("title") or native
-    return _Projection(
-        kind="document", title=title, facts=facts, locators=locators,
-        clean_text=str(title) + "\n\n" + str(data.get("abstractText") or ""),
+    return _record(
+        "document", title, str(title) + "\n\n" + str(data.get("abstractText") or ""), facts, locators,
+        url="https://europepmc.org/article/" + str(data["source"]) + "/" + str(data["id"]),
         published=source_time(data.get("firstPublicationDate"), "europepmc_first_publication_may_be_imputed"),
         updated=source_time(data.get("dateOfRevision"), "europepmc_revision"),
-        source_url="https://europepmc.org/article/" + str(data["source"]) + "/" + str(data["id"]),
+        parser_version="datafabric.europepmc.core.v0.2",
     )
 
 
 _ARCHIVE_TIMES = ("mapping_available_at", "public_available_at", "observation_start", "observation_end", "event_at")
 
 
-def _external_archive_fields(item, data) -> _Projection:
+def _project_external_archive(item, data) -> dict:
+    """导入的历史原件（场景回放）：记录类型、标题、摘要和 EXTERNAL_FIELDS 里列的字段，照原件写的取。"""
     kind = data.get("record_kind")
     if kind not in ("trial", "program", "outcome", "document"):
         raise HistoryError("unsupported_record_kind", "历史原件须明确trial/program/outcome/document")
@@ -500,64 +388,19 @@ def _external_archive_fields(item, data) -> _Projection:
     title = data.get("title")
     if not isinstance(title, str) or not title.strip():
         raise HistoryError("invalid_source_fields", "历史原件须有明确标题")
-    if kind == "trial" and not isinstance(facts.get("trial_id"), str):
-        raise HistoryError("invalid_source_fields", "trial原件缺登记ID")
-    if kind == "program" and not isinstance(facts.get("program_id"), str):
-        raise HistoryError("invalid_source_fields", "program原件缺有出处项目ID")
-    if kind == "outcome":
-        _validate_outcome(facts)
     for key in _ARCHIVE_TIMES:
         if facts.get(key) is not None and source_time(facts[key]) is None:
             raise HistoryError("invalid_source_time", "历史原件时间格式/时区不合法")
-    published = source_time(data.get("source_published_at"), "archive_source_published")
-    updated = source_time(data.get("source_updated_at"), "archive_source_updated")
-    event_time = (source_time(facts.get("event_at"), "outcome_event") if kind == "outcome"
-                  else source_time(data.get("event_time"), "archive_source_event"))
     source_url = data.get("source_reference")
     if source_url is not None and (not isinstance(source_url, str) or len(source_url) > 2000):
         raise HistoryError("invalid_source_fields", "来源引用格式错误")
-    return _Projection(kind=kind, title=title, facts=facts, locators=locators, source_url=source_url,
-                       clean_text=str(title) + "\n\n" + str(facts.get("summary") or ""),
-                       published=published, updated=updated, event_time=event_time)
-
-
-# Sources projected field by field from their JSON original
-_FIELD_PROJECTORS = {
-    "clinicaltrials": _clinicaltrials_fields,
-    "fda_crl": _fda_crl_fields,
-    "europe_pmc": _europe_pmc_fields,
-    "external_archive": _external_archive_fields,
-}
-
-
-def _validate_outcome(facts):
-    if facts.get("event_type") not in (
-        "trial_stoppage",
-        "regulatory_approval",
-        "next_phase_disclosure",
-    ):
-        raise HistoryError("unsupported_outcome", "结局类型尚不支持")
-    if facts.get("unit_kind") not in ("trial", "program") or not isinstance(
-        facts.get("unit_id"), str
-    ):
-        raise HistoryError("invalid_outcome", "结局须明确观察单位")
-    observed = facts.get("event_observed")
-    if observed is not None and not isinstance(observed, bool):
-        raise HistoryError("invalid_outcome", "event_observed须为true/false/null")
-    if observed is True and not facts.get("event_at"):
-        raise HistoryError("invalid_outcome", "发生事件必须有事件时间")
-    if observed is False and facts.get("event_at"):
-        raise HistoryError("invalid_outcome", "阴性观察不能同时声称发生时间")
-    if observed is False and (
-        not facts.get("observation_start") or not facts.get("observation_end")
-    ):
-        raise HistoryError("invalid_outcome", "阴性结局必须有明确观察窗口")
-    start, end = (
-        source_time(facts.get("observation_start")),
-        source_time(facts.get("observation_end")),
+    return _record(
+        kind, title, str(title) + "\n\n" + str(facts.get("summary") or ""), facts, locators, url=source_url,
+        published=source_time(data.get("source_published_at"), "archive_source_published"),
+        updated=source_time(data.get("source_updated_at"), "archive_source_updated"),
+        event_time=(source_time(facts.get("event_at"), "outcome_event") if kind == "outcome"
+                    else source_time(data.get("event_time"), "archive_source_event")),
     )
-    if start and end and start.upper_bound() > end.upper_bound():
-        raise HistoryError("invalid_outcome", "观察窗口起止颠倒")
 
 
 def _project_pubmed(item):
@@ -697,24 +540,6 @@ def _raw_array_items(text: str, path: list[str]):
         pos = end
 
 
-def _read_who(request):
-    from fetch.who_don import read_who
-
-    return read_who(request)
-
-
-def _read_sec(request):
-    from fetch.sec_xbrl import read_sec
-
-    return read_sec(request)
-
-
-def _read_gdelt(request):
-    from fetch.gdelt_news import read_gdelt
-
-    return read_gdelt(request)
-
-
 def public_fetch_enabled() -> bool:
     """Keep the legacy default; every configured value must explicitly mean true."""
     return os.environ.get("DATAFABRIC_HISTORY_FETCH_ENABLED", "true").strip().lower() == "true"
@@ -726,23 +551,37 @@ def require_public_fetch_enabled():
 
 
 def read_public(request: FetchRequest) -> dict:
-    """唯一读取入口：按来源目录找到插件并读取。新来源在 fetch.catalog 声明，再在 PLUGINS 注册。
-    读几条、几点截止、读到已存的就停由插件自己数（fetch.transport.Budget）；返回的请求数、字节数是这次读取经
-    fetch.transport 发出的（transport.SENT）。模拟补采（is_demo）只读隔离原件包（fetch.fetch_job），
-    从不到这里；DATAFABRIC_HISTORY_FETCH_ENABLED 不为 true 时公开读取整体关闭。"""
+    """读一个来源：按来源目录（fetch/catalog.py）里写的读法调对应的读取函数。返回读到的原件、为什么停、续读位置，
+    以及这次经 fetch.transport 发出的请求数和字节数。DATAFABRIC_HISTORY_FETCH_ENABLED=false 时不出网。"""
     from fetch.catalog import spec
 
-    if request.is_demo:
-        raise HistoryError("demo_public_fetch_forbidden", "模拟补采不得调用外部公开来源", 403)
     require_public_fetch_enabled()
-    declared = spec(request.source_id)
-    if not declared.fetchable:
-        raise HistoryError("source_not_connected", "该来源在目录中尚未接通", 503)
-    plugin = PLUGINS.get(declared.plugin)
-    if plugin is None:
-        raise HistoryError("source_plugin_missing", "来源插件未注册", 503)
+    plugin = spec(request.source_id).plugin
     transport.SENT.update(requests=0, bytes=0)
-    result = plugin(request)
+    if plugin == "public_api_reader":
+        result = _read_public_api(request)
+    elif plugin == "site_crawler":  # 浏览器等较重的库，用到时才加载
+        from fetch.site_crawler import read_site
+
+        result = read_site(request)
+    elif plugin == "who_don":
+        from fetch.who_don import read_who
+
+        result = read_who(request)
+    elif plugin == "sec_xbrl":
+        from fetch.sec_xbrl import read_sec
+
+        result = read_sec(request)
+    elif plugin == "gdelt_doc":
+        from fetch.gdelt_news import read_gdelt
+
+        result = read_gdelt(request)
+    elif plugin == "local_file_import":
+        from fetch.local_files import read_local
+
+        result = read_local(request)
+    else:
+        raise HistoryError("source_not_connected", "该来源在目录中尚未接通", 503)
     return {**result, "requests": transport.SENT["requests"], "bytes": transport.SENT["bytes"]}
 
 
@@ -853,7 +692,7 @@ class _PublicApiRead:
             raise HistoryError("unexpected_empty_page", "来源仍有后续标记但返回空页")
         if source in {"clinicaltrials", "europe_pmc", "fda_crl"}:
             self.next_continuation = None if self.exhausted else {
-                "scope_hash": request.scope_hash(), "cursor": next_cursor, "read_count": self.consumed}
+                "cursor": next_cursor, "read_count": self.consumed}
         if self.exhausted:
             self.stop = "upstream_exhausted"
             return True
@@ -1085,32 +924,7 @@ def _read_pubmed(request):
         "source_total": count,
         "attachment_coverage": coverage,
         "next_continuation": None if error or resume is None else {
-            "scope_hash": request.scope_hash(),
             "cursor": json.dumps({"i": resume[0], "a": resume[1]}),
             "read_count": resume[0],
         },
     }
-
-
-def _read_site(request):
-    # 旧 ETL 站点插件依赖浏览器抓取器等较重的库，用到时才加载
-    from fetch import site_crawler
-
-    return site_crawler.read_site(request)
-
-
-def _read_local(request):
-    from fetch.local_files import read_local
-
-    return read_local(request)
-
-
-# 来源插件注册表：插件名 → 读取函数。来源目录（fetch.catalog）只引用插件名。
-PLUGINS = {
-    "site_crawler": _read_site,
-    "local_file_import": _read_local,
-    "public_api_reader": _read_public_api,
-    "who_don": _read_who,
-    "sec_xbrl": _read_sec,
-    "gdelt_doc": _read_gdelt,
-}

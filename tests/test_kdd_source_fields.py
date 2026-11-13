@@ -100,7 +100,7 @@ def test_ct_repeated_page_token_is_error_even_at_one_record_budget(monkeypatch):
     ), **kwargs))
     request = FetchRequest(source_id="clinicaltrials", query="SYNTHETIC", max_records=1)
     request = FetchRequest(**{**request.model_dump(), "continuation": {
-        "scope_hash": request.scope_hash(), "cursor": "same-token", "read_count": 1,
+        "cursor": "same-token", "read_count": 1,
     }})
     batch = sources.read_public(request)
     assert batch["error"] and batch["stop_reason"] == "source_failed"
@@ -121,7 +121,7 @@ def ct_batch(monkeypatch, payload, *, consumed=0, max_records=10):
     request = FetchRequest(source_id="clinicaltrials", query="SYNTHETIC", max_records=max_records)
     if consumed:
         request = FetchRequest(**{**request.model_dump(), "continuation": {
-            "scope_hash": request.scope_hash(), "cursor": "prior-token", "read_count": consumed,
+            "cursor": "prior-token", "read_count": consumed,
         }})
     return sources.read_public(request), calls
 

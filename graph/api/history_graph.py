@@ -7,14 +7,14 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.routers.history import BoundedHistoryRoute, _call, require_admin, require_read
+from api.routers.history import _call, require_admin, require_read
 from graph.publish import history_graph
 from graph.publish.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
 from graph.publish.reviewed_graph import GraphNeighborhood, GraphResolution
 from store import history as store
 from store.history_models import Mode, RunView
 
-router = APIRouter(prefix="/api/history", tags=["图谱"], route_class=BoundedHistoryRoute)
+router = APIRouter(prefix="/api/history", tags=["图谱"])
 
 
 @router.get(

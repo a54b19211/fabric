@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from graph.publish import history_graph
 from graph.publish.reviewed_graph import (
     GraphBundle,
     GraphEdge,
@@ -599,7 +600,7 @@ def publish_native_graph(records, key, *, max_nodes=100, max_edges=200):
         "namespace": bundle.namespace, "scope": sorted(bundle.scope_record_ids),
         "max_nodes": max_nodes, "max_edges": max_edges,
     }))
-    return store.import_archive(ArchiveImport(
+    return history_graph.import_graph(ArchiveImport(
         source_id="reviewed_graph", is_demo=bundle.is_demo,
         scope_description=bundle.scope_description, declared_count=1, declared_complete=False,
         records=[ArchiveRecord(source_record_id=native, record_kind="graph", raw_content=bundle.model_dump_json())],
@@ -612,7 +613,7 @@ def publish_primekg(observation, key):
     if observation.get("query_parameters") is not None:
         identity["query"] = observation["query_parameters"]
     native = "primekg-capture:" + sha256(canonical(identity))
-    return store.import_archive(
+    return history_graph.import_graph(
         ArchiveImport(
             source_id="primekg_graph",
             is_demo=False,

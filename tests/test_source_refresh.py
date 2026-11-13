@@ -4,65 +4,11 @@ import json
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from fetch import rate
-from fetch.observations import observation
-from fetch.sources import project_record, read_public
+from fetch.sources import read_public
 from fetch.who_don import project_who
 from store.history_models import ArchiveRecord, FetchRequest
-
-
-def metric():
-    return {
-        "schema_version": "datafabric.observation.v1",
-        "title": "SYNTHETIC revenue",
-        "kind": "metric",
-        "subject": {"namespace": "external_archive", "id": "COMPANY1"},
-        "metric_id": "revenue",
-        "metric_version": "quarterly-v1",
-        "value": {"lower": "100", "upper": "100"},
-        "unit": "USD",
-        "population": "consolidated",
-        "region": "Global",
-        "period_start": "2020-01-01",
-        "period_end": "2020-04-01",
-        "measurement_basis": "reported",
-        "status": "active",
-        "basis": {"kind": "declared", "note": "SYNTHETIC teaching declaration"},
-    }
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"value": {"lower": True, "upper": "1"}},
-        {"value": {"lower": "NaN", "upper": "100"}},
-        {"value": {"lower": "invalid", "upper": "100"}},
-        {"value": {"lower": "101", "upper": "100"}},
-        {"period_end": "2019-12-31"},
-        {"denominator": {"lower": "1", "upper": "2"}},
-        {"kind": "invented"},
-    ],
-)
-def test_observation_rejects_invalid_decimal_period_or_unknown_kind(change):
-    with pytest.raises(ValidationError):
-        observation({**metric(), **change})
-
-
-def test_observation_projection_uses_existing_raw_keys_and_distinct_parser():
-    data = metric()
-    item = ArchiveRecord(
-        source_record_id="M1", record_kind="document", raw_content=json.dumps(data)
-    )
-    result = project_record("external_archive", item)
-    assert result["parser_version"] == "datafabric.observation.projection.v0.1"
-    assert (
-        result["facts"]["kind"] == "metric"
-        and "observation_schema" not in result["facts"]
-    )
-    for key, locator in result["field_locators"].items():
-        assert data[locator["json_pointer"][1:]] == result["facts"][key]
 
 
 def who_value(number=1):
@@ -129,10 +75,6 @@ def test_who_resumes_fixed_scope_and_http_failure_never_zero_success(monkeypatch
     assert not {v.source_record_id for v in first["records"]} & {
         v.source_record_id for v in second["records"]
     }
-    with pytest.raises(ValidationError):
-        FetchRequest.model_validate(
-            {**second_request.model_dump(mode="json"), "query": "different scope"}
-        )
     # HTTP 403 is not an exhausted empty query.
     mocked_client(monkeypatch, lambda request: httpx.Response(403))
     failure = read_public(request)
@@ -174,49 +116,6 @@ def test_epmc_continuation_survives_record_budget_and_keeps_total_offset(monkeyp
     assert second["records"][0].source_record_id == "MED:2"
 
 
-def test_bound_pointer_is_rfc6901_and_decimal_precision_is_not_float_rounding():
-    from fetch.observations import (
-        native_json,
-        native_pointer,
-        validate_bound_values,
-    )
-
-    data = {**metric(), "value": {"lower": "1", "upper": "1"}}
-    data["basis"] = {
-        "kind": "source_bound",
-        "ref": {
-            "source_id": "external_archive",
-            "source_record_id": "N",
-            "version_id": "a" * 64,
-            "raw_sha256": "b" * 64,
-        },
-        "field_pointers": {},
-    }
-    native = native_json('{"amount":1.0000000000000000001,"values":[1,2]}')
-    assert str(native["amount"]) == "1.0000000000000000001"
-    with pytest.raises(ValueError):
-        native_pointer(native, "/amount/")
-    with pytest.raises(ValueError):
-        native_pointer(native, "/values/-1")
-    assert native_pointer({"a/b": {"": 1}}, "/a~1b/") == 1
-    # A value differing only beyond float precision must still fail source binding.
-    base = observation({**metric(), "value": {"lower": "1", "upper": "1"}})
-    expected = __import__(
-        "fetch.observations", fromlist=["binding_values"]
-    ).binding_values(base)
-    expected.pop("subject.namespace")
-    pointers = {}
-    actual = {}
-    for index, (key, value) in enumerate(expected.items()):
-        pointers[key] = "/" + str(index)
-        actual[str(index)] = value
-    actual[str(list(expected).index("value.lower"))] = native["amount"]
-    data["basis"]["field_pointers"] = pointers
-    bound = observation(data)
-    with pytest.raises(ValueError, match="不一致"):
-        validate_bound_values(bound, actual)
-
-
 def test_who_keyset_does_not_skip_when_previous_notice_moves_out_of_fixed_window(
     monkeypatch,
 ):
@@ -255,4 +154,3 @@ def test_who_keyset_does_not_skip_when_previous_notice_moves_out_of_fixed_window
         who_value(3)["Id"],
         who_value(4)["Id"],
     ]
-

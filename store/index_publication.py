@@ -22,12 +22,12 @@ from datetime import datetime
 from pydantic import Field
 from sqlalchemy import text
 
-from fetch.observations import OBSERVATION_PARSER
 from store import history, index_pieces
 from store.history_models import HistoryError, HistoryRecord, Model, canonical, sha256
 from store.timestamps import parse_timestamp
 from store.weknora_index_client import WeKnoraIndexClient, publication_id
 
+OBSERVATION_PARSER = "datafabric.observation.projection.v0.1"  # 旧的观测记录（已不再产生）不进知识库
 FRESH_DAYS = 3  # first_seen 在这几天内的版本算新增（lane=new），比回填先上传
 MAX_IDENTIFIERS = 50
 TOMBSTONES = ("withdrawn", "deleted", "retracted")

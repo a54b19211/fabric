@@ -25,13 +25,12 @@
     python main_etl.py --source nmpa --max 5                 # 抓 nmpa 5 条，后面各步都跑一遍
     python main_etl.py --source clinicaltrials               # 来源目录里能抓的来源都行（本地导入 local_files 除外）
     python main_etl.py --only clean --run <运行号>            # 只清洗之前某次抓取留下的版本
-  环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（历史库）；DATAFABRIC_HISTORY_SOURCE_ALLOWLIST 不设时只放行这次的来源；
+  环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（历史库）；
   index 要 DATAFABRIC_INDEX_TARGETS、WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN；measure 的模型路线要 DATAFABRIC_MEASURE_LLM_*。
   附件随抓取一起下载（预算用完的记成 not_attempted）；附件的正文由常驻的 run/attachments.py 解析，这里不跑。
 """
 
 import argparse
-import os
 import time
 from collections import Counter
 
@@ -125,16 +124,13 @@ def main(source, max_records, deadline, only=None, run_id=None):
     def on(step):
         return only is None or only == step
 
-    if source:
-        os.environ.setdefault("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", source)
     try:
         if on("fetch"):
             run_id = fetch(source, max_records, deadline)
         if on("clean"):
             print("clean  ", clean(run_id))
     except HistoryError as exc:
-        allow = "；请检查 DATAFABRIC_HISTORY_SOURCE_ALLOWLIST 有没有列出这个来源" if exc.code == "source_not_allowed" else ""
-        raise SystemExit(f"失败：{exc.message}（{exc.code}）{allow}") from None
+        raise SystemExit(f"失败：{exc.message}（{exc.code}）") from None
     if on("measure"):
         print("measure", measure())
     if on("index"):

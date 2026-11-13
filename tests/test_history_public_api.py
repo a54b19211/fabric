@@ -147,9 +147,8 @@ def test_public_api_paging_outcomes(name, monkeypatch):
 
 def test_continuation_cursor_and_read_count_resume_the_next_page(monkeypatch):
     seen = serve(monkeypatch, [(200, {"studies": [study("NCT00000003")], "totalCount": 3})])
-    scope = FetchRequest(**CT).scope_hash()
     result = sources._read_public_api(FetchRequest(
-        **CT, continuation={"cursor": "p3", "read_count": 2, "scope_hash": scope}))
+        **CT, continuation={"cursor": "p3", "read_count": 2}))
     assert seen[0]["pageToken"] == "p3"
     assert summary(result)["exhausted"] is True and summary(result)["ids"] == ["NCT00000003"]
 

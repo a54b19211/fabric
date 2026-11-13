@@ -277,15 +277,11 @@ def test_watch_fixed_intent_recovers_unknown_create_and_resumes_next_page(
         source_refresh.refresh_once()
     source_refresh.refresh_once()
     assert rows(target, "SELECT count(*) n FROM history_runs")[0]["n"] == 1
-    state = rows(
+    rows(
         source,
         "SELECT snapshot FROM publication_outbox WHERE event_key LIKE 'source-watch:%'",
     )[0]["snapshot"]
-    request = __import__(
-        "store.history_models", fromlist=["FetchRequest"]
-    ).FetchRequest.model_validate(state["request"])
     continuation = {
-        "scope_hash": request.scope_hash(),
         "cursor": '{"modified":"2026-10-11T12:00:01Z","id":"00000000-0000-4000-8000-000000000001"}',
         "read_count": 1,
     }
@@ -506,11 +502,7 @@ def test_epmc_watch_persists_update_window_not_publication_date(databases, monke
     )[0]["snapshot"]
     query = first["request"]["query"]
     assert "UPDATE_DATE:[" in query and "FIRST_PDATE" not in query
-    from store.history_models import FetchRequest
-
-    request = FetchRequest.model_validate(first["request"])
     continuation = {
-        "scope_hash": request.scope_hash(),
         "cursor": "next-frozen-page",
         "read_count": 1,
     }

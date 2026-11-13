@@ -10,7 +10,6 @@ import pytest
 
 from fetch import sources
 from store.history_models import (
-    ArchiveImport,
     ArchiveRecord,
     FetchRequest,
     TimeValue,
@@ -121,53 +120,9 @@ def test_epmc_preserves_cross_source_ids_corrections_and_license_without_fulltex
     }
 
 
-def test_outcomes_require_explicit_negative_coverage():
-    data = {
-        "record_kind": "outcome",
-        "title": "negative",
-        "event_type": "trial_stoppage",
-        "unit_kind": "trial",
-        "unit_id": "T1",
-        "event_observed": False,
-    }
-    with pytest.raises(Exception, match="观察窗口"):
-        sources.project_record(
-            "external_archive",
-            ArchiveRecord(
-                source_record_id="O1",
-                record_kind="outcome",
-                raw_content=json.dumps(data),
-            ),
-        )
-    data.update(
-        observation_start="2020-01-01",
-        observation_end="2020-12-31",
-        public_available_at="2021-01-01",
-    )
-    result = sources.project_record(
-        "external_archive",
-        ArchiveRecord(
-            source_record_id="O1", record_kind="outcome", raw_content=json.dumps(data)
-        ),
-    )
-    assert result["facts"]["event_observed"] is False
-    assert result["field_locators"]["event_observed"] == {
-        "json_pointer": "/event_observed"
-    }
-
-
-def test_naive_instants_and_client_receipt_forbidden():
+def test_naive_instants_are_not_a_time():
     with pytest.raises(ValueError):
         TimeValue(value="2020-01-01T00:00:00", precision="instant")
-    with pytest.raises(ValueError):
-        ArchiveImport(
-            source_id="external_archive",
-            is_demo=True,
-            scope_description="demo",
-            declared_count=0,
-            records=[],
-            first_seen_at="2016-01-01T00:00:00Z",
-        )
 
 
 def test_page_raw_slice_preserves_unicode_and_whitespace():
@@ -299,11 +254,10 @@ def test_epmc_end_after_window_shrinks_is_eof_with_drift(monkeypatch):
         "Client",
         lambda transport=transport, **kwargs: factory(transport=transport, **kwargs),
     )
-    scope = FetchRequest(source_id="europe_pmc", query="alpha").scope_hash()
     request = FetchRequest(
         source_id="europe_pmc",
         query="alpha",
-        continuation={"cursor": "AoIo", "read_count": 716, "scope_hash": scope},
+        continuation={"cursor": "AoIo", "read_count": 716},
     )
     result = sources.read_public(request)
     assert result["error"] is None and result["upstream_pagination_exhausted"] is True
@@ -327,91 +281,6 @@ def test_epmc_empty_first_page_with_hits_is_not_eof(monkeypatch):
     assert not result["upstream_pagination_exhausted"]
 
 
-def test_clinicaltrials_daily_data_date_is_not_a_record_change():
-    """Live 2026-11-03: every refresh made a new version of all 516 trials; only versionHolder differed."""
-    import json
-
-    def raw(holder, status="RECRUITING"):
-        return json.dumps({"protocolSection": {"identificationModule": {"nctId": "NCT01234567"},
-                                               "statusModule": {"overallStatus": status}},
-                           "derivedSection": {"miscInfoModule": {"versionHolder": holder}}})
-
-    assert sources.stable_raw("clinicaltrials", raw("2026-11-02")) == sources.stable_raw("clinicaltrials", raw("2026-11-03"))
-    assert sources.stable_raw("clinicaltrials", raw("2026-11-02")) != sources.stable_raw(
-        "clinicaltrials", raw("2026-11-03", status="COMPLETED"))
-    assert sources.stable_raw("europe_pmc", raw("2026-11-02")) != sources.stable_raw("europe_pmc", raw("2026-11-03"))
-    assert sources.stable_raw("clinicaltrials", "not json") is None
-    odd = json.dumps({"derivedSection": {"miscInfoModule": {"versionHolder": {"date": "2026-11-03"}}}})
-    assert sources.stable_raw("clinicaltrials", odd) is None  # an unknown shape is not dropped
-
-
-def test_the_same_json_in_another_key_order_is_not_a_record_change():
-    """Live 2026-11-03: Europe PMC 23927 versions for 8444 records; neighbouring versions parsed equal,
-    only the serialization differed. Values and array order still count."""
-    import json
-
-    record = {"id": "123", "title": "Alpha", "authorList": {"author": [{"fullName": "A"}, {"fullName": "B"}]}}
-    reordered = json.dumps(dict(reversed(list(record.items()))), indent=2)
-    assert sources.stable_raw("europe_pmc", json.dumps(record)) == sources.stable_raw("europe_pmc", reordered)
-    changed = dict(record, title="Alpha (corrected)")
-    assert sources.stable_raw("europe_pmc", json.dumps(record)) != sources.stable_raw("europe_pmc", json.dumps(changed))
-    swapped = dict(record, authorList={"author": [{"fullName": "B"}, {"fullName": "A"}]})
-    assert sources.stable_raw("europe_pmc", json.dumps(record)) != sources.stable_raw("europe_pmc", json.dumps(swapped))
-    assert sources.stable_raw("pubmed", "<PubmedArticle/>") is None  # not JSON: compared by its raw hash
-
-
-def test_json_another_parser_may_read_differently_is_compared_by_its_raw():
-    """Codex r46: duplicate keys, NaN/Infinity and numbers a float cannot hold fall back to the raw hash."""
-    assert sources.stable_raw("europe_pmc", '{"a": 1, "a": 2}') is None
-    assert sources.stable_raw("europe_pmc", '{"a": NaN}') is None
-    assert sources.stable_raw("europe_pmc", '{"a": -Infinity}') is None
-    assert sources.stable_raw("europe_pmc", '{"a": 0.10000000000000000001}') is None
-    assert sources.stable_raw("europe_pmc", '{"a": 1e400}') is None
-    # equal numbers written differently are one value; large integers stay exact
-    assert sources.stable_raw("europe_pmc", '{"a": 1.0}') == sources.stable_raw("europe_pmc", '{"a": 1.00}')
-    assert sources.stable_raw("europe_pmc", '{"a": 12345678901234567890}') != sources.stable_raw(
-        "europe_pmc", '{"a": 12345678901234567891}')
-
-
-def capture(html, markdown="# T\n\nbody", attachments=(), **extra):
-    """A web capture original as site_crawler stores it."""
-    data = {"schema_version": "datafabric.web_capture.v1", "role": "web_capture", "site": "nmpa", "url": "https://x/a.html",
-            "html_sha256": "h" + html, "html": html,
-            "parsed": {"title": "T", "publish_date": "2026-11-02", "markdown": markdown, "parse_method": "css_extract", "extra": {}},
-            "attachments": [{"record_id": "r" + url, "url": url, "text": ""} for url in attachments], **extra}
-    return json.dumps(data, ensure_ascii=False, sort_keys=True)
-
-
-def test_the_html_of_a_web_capture_is_not_what_makes_a_version():
-    """NMPA's accessibility widget writes new ids and ChiCTR new download paths into every response: the parse
-    result and the attachment list tell versions apart, the HTML does not."""
-    same = sources.stable_raw
-    assert same("nmpa", capture("<a id=aria1>")) == same("nmpa", capture("<a id=aria2>"))
-    assert same("nmpa", capture("<a>")) == same("nmpa", capture("<b>", html_store_path="/d/h.html"))
-    assert same("nmpa", capture("<a>")) != same("nmpa", capture("<a>", markdown="# T\n\nbody 2"))
-    assert same("nmpa", capture("<a>")) != same("nmpa", capture("<a>", attachments=("u1",)))
-    assert same("nmpa", capture("<a>", attachments=("u1",))) != same("nmpa", capture("<a>", attachments=("u2",)))
-    # only a web capture loses its html: another role keeps the key
-    assert same("europe_pmc", json.dumps({"role": "site_record", "html": "a"})) != same(
-        "europe_pmc", json.dumps({"role": "site_record", "html": "b"}))
-    assert same("nmpa", "<html>") is None  # not JSON: compared by its raw hash
-    holder = json.dumps({"derivedSection": {"miscInfoModule": {"versionHolder": "2026-11-02"}}})
-    assert same("clinicaltrials", holder) == same("clinicaltrials", holder.replace("11-02", "11-03"))
-
-
-def test_the_html_hash_is_left_out_when_two_versions_are_compared_by_content():
-    from store import history
-
-    def identity(html_sha256, record_ids=("r1",)):
-        return {"raw_sha256": "raw-" + html_sha256, "title": "T", "availability_proof": {"kind": "k"}, "mapping_review": None,
-                "facts": {"role": "web_capture", "html_sha256": html_sha256, "attachment_record_ids": list(record_ids)}}
-
-    stored = dict(identity("aaa"), availability_proof={"kind": "k", "verified_at": "2026-11-02T00:00:00Z"})
-    assert history._same_identity(stored, identity("bbb"), ignore_raw=True)
-    assert not history._same_identity(stored, identity("bbb"))  # compared by the raw hash: another original
-    assert not history._same_identity(stored, identity("aaa", ("r2",)), ignore_raw=True)  # the attachment list counts
-
-
 @pytest.mark.parametrize(("stop_reason", "state"), [
     ("upstream_exhausted", "completed"),
     ("record_budget", "partial"), ("page_budget", "partial"), ("deadline", "partial"),
@@ -425,6 +294,5 @@ def test_a_fetch_that_stopped_at_a_budget_is_partial_not_completed(stop_reason, 
     written = []
     conn = SimpleNamespace(execute=lambda statement, params: written.append(params))
     run = {"id": "r", "attempt": 1, "kind": "fetch", "attempts": []}
-    history._close_run(conn, run, [], [], [], {"stop_reason": stop_reason}, None, datetime.now(timezone.utc))
+    history._close_run(conn, run, [], [], {"stop_reason": stop_reason}, None, datetime.now(timezone.utc))
     assert written[0]["state"] == state
-

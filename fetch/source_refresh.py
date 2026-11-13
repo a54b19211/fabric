@@ -271,7 +271,7 @@ def _advance(engine, key, watch, state, now):
         history._source(permit, watch.request.source_id)
     if publication.disk_status()["backfill_paused"]:
         raise HistoryError("source_watch_disk_low", "磁盘低水位暂停新增来源读取；续页意图保留", 503)
-    from fetch.fetch_job import enqueue_fetch, retry_inactive
+    from fetch.fetch_job import JOB_TIMEOUT, enqueue_fetch
 
     if state.get("active_run_id"):
         run = history.read_run(state["active_run_id"])
@@ -280,13 +280,12 @@ def _advance(engine, key, watch, state, now):
         state["active_run_id"] = run.id
         _save(engine, key, state)
     if run.state in {"queued", "enqueue_failed", "running"}:
+        if (now - run.created_at).total_seconds() > 3 * JOB_TIMEOUT:
+            # 采集工人中途死了，任务停在 queued/running：记失败，下次换一个新任务重读这一段
+            history.fail_job(run.id, run.attempt, "run_stalled", "采集任务长时间没有结束")
+            raise HistoryError("source_watch_failed", "采集任务长时间没有结束；本页保留，下周期重试", 503)
         if run.state == "queued":
-            enqueue_fetch(run)  # 固定job_id核对后入队；崩溃遗留的死job随后显式恢复。
-        try:
-            retry_inactive(run.id, run.attempt)
-        except HistoryError as exc:
-            if exc.code != "job_may_be_active":
-                raise
+            enqueue_fetch(run)  # 已经在队列里的不会再放一次
         state["state"] = "running"
     elif run.state in {"completed", "partial"} and (not run.error or run.coverage.get("stop_reason") == "items_unread"):
         _page_finished(watch, state, run.coverage, now)  # items_unread：读到底了，只是有几条读不到，不是失败

@@ -5,8 +5,33 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from fetch.sources import parse_json
 from store import history as store
 from store.history_models import HistoryError
+
+
+def import_graph(request, key=None):
+    """发布一个图包：先核对图包引用的原件版本和证据引文都在库里、与原文一致，再像别的导入一样存成版本。"""
+    from graph.publish.reviewed_graph import GraphBundle
+
+    if request.proof is not None:
+        raise HistoryError("graph_history_unsupported", "图包没有公开历史可见时间，不能带可见证明导入")
+    with store.history_engine().begin() as conn:
+        now = store._now(conn)
+        run = {"source_id": request.source_id, "is_demo": request.is_demo}
+        for item in request.records:
+            _validate_graph_bundle(conn, run, GraphBundle.model_validate(parse_json(item.raw_content)), now)
+    return store.import_archive(request, key)
+
+
+def _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff):
+    """读一个固定图版本，并核对它引用的原件在同一模式和截止时间下也看得到、引文一致。"""
+    record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
+    if record.record_kind != "graph":
+        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    with store.history_engine().begin() as conn:
+        _check_graph_document_visibility(conn, record, mode, store._cutoff(cutoff))
+    return record
 
 
 def _evidence_text(conn, row, locator):
@@ -175,11 +200,7 @@ def read_graph_neighborhood(
 
     if source_id not in GRAPH_SOURCES:
         raise HistoryError("unsupported_graph_source", "请选择固定图来源")
-    record = store.read_version(
-        version_id, source_id, source_record_id, is_demo, mode, cutoff
-    )
-    if record.record_kind != "graph":
-        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    record = _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     seeds = []
     for value in seed_ids:
         if value.count("|") != 1:
@@ -295,11 +316,7 @@ def read_graph_resolution(
 
     if source_id not in GRAPH_SOURCES:
         raise HistoryError("unsupported_graph_source", "请选择固定图来源")
-    record = store.read_version(
-        version_id, source_id, source_record_id, is_demo, mode, cutoff
-    )
-    if record.record_kind != "graph":
-        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    record = _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     return resolve(
         GraphBundle.model_validate(parse_json(record.raw_content)),
         GraphRef(
@@ -323,9 +340,7 @@ def _fixed_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
 
     if source_id not in GRAPH_SOURCES:
         raise HistoryError("unsupported_graph_source", "请选择固定图来源")
-    record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
-    if record.record_kind != "graph":
-        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    record = _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     return GraphBundle.model_validate_json(record.raw_content), GraphRef(
         source_id=record.source_id, source_record_id=record.source_record_id,
         version_id=record.version_id, raw_sha256=record.raw_sha256,

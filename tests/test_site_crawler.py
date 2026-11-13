@@ -8,7 +8,7 @@ import json
 import pytest
 
 from fetch import catalog, rate, site_crawler, transport
-from fetch.sources import PLUGINS, project_record, read_public
+from fetch.sources import project_record, read_public
 from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
 PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/20261101120000123.html"
@@ -87,7 +87,6 @@ def test_sites_are_connected_through_the_one_framework_but_marked_unverified():
 def test_read_public_dispatches_to_the_migrated_plugin(monkeypatch):
     monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
     monkeypatch.setattr(site_crawler, "read_site", lambda request: {"marker": request.source_id})
-    assert "site_crawler" in PLUGINS
     batch = read_public(FetchRequest(source_id="chictr", query="by_url",
                                      source_record_ids=["https://www.chictr.org.cn/showproj.html?proj=1"]))
     assert batch["marker"] == "chictr" and batch["requests"] == 0  # 请求数是 transport 这次读取数到的
@@ -889,9 +888,8 @@ def test_a_stop_while_replaying_to_the_cursor_does_not_move_the_cursor_back(fake
     profile = {"source_type": "api", "api": {}, "uid_field": "id",
                "field_map": {"title": "t", "publish_date": "d", "source_url": "u"}, "api_fetcher": fetcher}
     monkeypatch.setitem(site_crawler.SITE_PROFILES, "fda_api_enforcement", profile)
-    first = FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100)
     cursor = {"i": 4, "a": 1, "p": 1}
-    cont = {"scope_hash": first.scope_hash(), "cursor": json.dumps(cursor), "read_count": 4}
+    cont = {"cursor": json.dumps(cursor), "read_count": 4}
     batch = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", max_records=100, continuation=cont))
     assert batch["records"] == [] and batch["stop_reason"] == "deadline" and batch["error"] is None
     assert json.loads(batch["next_continuation"]["cursor"]) == cursor  # 同一个位置，连附件序号也不丢
@@ -1022,6 +1020,6 @@ def test_a_grouped_site_that_gives_no_item_at_all_is_the_empty_list_alarm_but_an
     _grouped(monkeypatch, [0, 0, 0])
     first = FetchRequest(source_id="fda_api_enforcement", query="records")
     assert read_public(first)["error"]["code"] == "list_empty"
-    cont = {"scope_hash": first.scope_hash(), "cursor": json.dumps({"i": 0, "a": 0, "p": 0, "g": 1}), "read_count": 1}
+    cont = {"cursor": json.dumps({"i": 0, "a": 0, "p": 0, "g": 1}), "read_count": 1}
     tail = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", continuation=cont))
     assert tail["error"] is None and tail["upstream_pagination_exhausted"]

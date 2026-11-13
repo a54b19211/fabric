@@ -4,7 +4,7 @@ import json
 import pytest
 
 from fetch.sources import project_record
-from store.history_models import ArchiveRecord, HistoryError
+from store.history_models import ArchiveRecord
 
 
 def archive(**extra):
@@ -36,20 +36,6 @@ def test_legacy_summary_is_not_claimed_as_full_text_or_primary_research():
     assert result["document_evidence"]["material_kind"] is None
     assert result["document_evidence"]["text_level"] == "abstract"
     assert result["document_evidence"]["source_independence"]["status"] == "unknown"
-
-
-@pytest.mark.parametrize("extra", [
-    {"full_text": 5},
-    {"text_level": "full_text"},
-    {"material_kind": "primary"},
-    {"source_independence": {"status": "independent_confirmed"}},
-    {"material_kind": "social_media", "statement_status": "source_reported"},
-    {"document_relations": [{"relation_type": "corrects", "target_source_id": "external_archive",
-                             "target_source_record_id": "old", "basis_locator": {"json_pointer": "/absent"}}]},
-])
-def test_invalid_or_unproven_metadata_is_not_silently_accepted(extra):
-    with pytest.raises((HistoryError, ValueError)):
-        project_record("external_archive", archive(**extra))
 
 
 def test_social_report_remains_unverified_even_with_a_publication_date():
@@ -104,15 +90,6 @@ def test_official_identity_does_not_prove_body_is_present(source, raw):
     assert result["document_evidence"]["text_level"] in {"title", "metadata"}
 
 
-@pytest.mark.parametrize("pointer", ["//title", "/document_relations/00", "/bad~2key"])
-def test_json_pointer_does_not_rewrite_nonexistent_locations(pointer):
-    with pytest.raises(HistoryError, match="契约"):
-        project_record("external_archive", archive(document_relations=[{
-            "relation_type": "corrects", "target_source_id": "external_archive",
-            "target_source_record_id": "old", "basis_locator": {"json_pointer": pointer},
-        }]))
-
-
 def test_partial_bibliographic_ids_still_have_shared_origin_constraint():
     common = {"source": "MED", "id": "123", "pmid": "123", "title": "Title"}
     evidence = []
@@ -126,13 +103,3 @@ def test_partial_bibliographic_ids_still_have_shared_origin_constraint():
     result = project_record("europe_pmc", ArchiveRecord(
         source_record_id="PMC:PMC123", record_kind="document", raw_content=json.dumps(only_doi)))
     assert "doi:10.1234/example" in result["document_evidence"]["source_independence"]["shared_identifiers"]
-
-def test_information_event_detection_time_is_not_guessed_and_requires_timezone():
-    from pydantic import ValidationError
-
-    from store.history_models import InformationEnvironmentEvent
-    value = {"event_type": "reported_deletion", "description": "final label only",
-             "basis_locator": {"json_pointer": "/censorship_type"}}
-    assert InformationEnvironmentEvent.model_validate(value).detected_at is None
-    with pytest.raises(ValidationError):
-        InformationEnvironmentEvent.model_validate({**value, "detected_at": "2026-10-01T01:00:00"})

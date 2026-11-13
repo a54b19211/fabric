@@ -1,4 +1,5 @@
-"""历史资料的固定输入/输出契约；不把来源声明当成审核或过去可见证明。"""
+"""History 库的数据形状：存进去的原件（ArchiveRecord）、一次采集的请求（FetchRequest）、一次导入（ArchiveImport），
+读出来的版本（HistoryRecord）、版本列表（RecordCollection）和运行（RunView）。只写形状，不写规则。"""
 
 from __future__ import annotations
 
@@ -12,22 +13,9 @@ from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-CONTRACT_VERSION = "datafabric.history.v1"
 PARSER_VERSION = "datafabric.history.projection.v1"
 Mode = Literal["current", "operational_replay", "public_history_reconstruction"]
 RecordKind = Literal["trial", "program", "outcome", "document", "graph"]
-BUSINESS_TYPES = (
-    "mechanisms",
-    "literature",
-    "trials_pipeline",
-    "regulatory",
-    "intellectual_property",
-    "corporate_finance",
-    "market_payment",
-    "population_need",
-    "manufacturing_supply",
-    "research_capacity",
-)
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_IMPORT_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -40,9 +28,8 @@ class HistoryError(Exception):
 
 
 class ItemUnreadable(HistoryError):
-    """One item of a read (an article's detail page, read twice) could not be read. A fetcher that goes through
-    items one by one yields this error instead of raising it, so its generator goes on with the next item;
-    fetch.site_crawler notes the item (url and reason) in the read's coverage and stores no version for it."""
+    """一次读取里有一条（例如一篇详情页）读不到。逐条读的抓取函数 yield 它而不是 raise，读取接着下一条；
+    fetch/site_crawler.py 把网址和原因记进这次读取的 coverage，不为它存版本。"""
 
     def __init__(self, url: str, reason: str):
         super().__init__("item_unreadable", f"{reason} | {url}")
@@ -50,15 +37,14 @@ class ItemUnreadable(HistoryError):
 
 
 class GroupStart(NamedTuple):
-    """A fetcher that reads group by group (HKEX: one company is a group; NCCN: one guideline) yields this before the
-    items of group number `index`, counted from 0. fetch.site_crawler keeps it in the continuation (group, and
-    which item of the group), so a read goes on from that group without going through the earlier ones again."""
+    """按组读的抓取函数（港交所一家公司一组，NCCN 一份指南一组）在第 index 组（从 0 数）之前 yield 它；
+    fetch/site_crawler.py 把它记进续读位置，下次从这一组接着读。"""
 
     index: int
 
 
 def make_uuid(identifier: str) -> str:
-    """URL、文件路径或“来源:记录键”的确定性 UUID5：同一个标识永远得到同一个 UUID（站点记录的身份，保证幂等）。"""
+    """URL、文件路径或"来源:记录键"的确定性 UUID5：同一个标识永远得到同一个 UUID。"""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, identifier))
 
 
@@ -73,13 +59,7 @@ def utc(value: datetime) -> datetime:
 
 
 def canonical(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def sha256(value: str) -> str:
@@ -87,6 +67,8 @@ def sha256(value: str) -> str:
 
 
 class TimeValue(Model):
+    """来源给的时间：值、精度（年/月/日/时刻）和它是什么时间（meaning）。"""
+
     value: str = Field(min_length=4, max_length=40)
     precision: Literal["year", "month", "day", "instant"]
     meaning: str = Field(default="source_reported", max_length=80)
@@ -97,163 +79,51 @@ class TimeValue(Model):
         return self
 
     def lower_bound(self) -> datetime:
-        if self.precision == "year":
-            return datetime(int(self.value), 1, 1, tzinfo=timezone.utc)
-        if self.precision == "month":
-            return datetime.fromisoformat(self.value + "-01").replace(
-                tzinfo=timezone.utc
-            )
-        if self.precision == "day":
-            return datetime.fromisoformat(self.value).replace(tzinfo=timezone.utc)
-        return utc(datetime.fromisoformat(self.value.replace("Z", "+00:00")))
+        if self.precision == "instant":
+            return utc(datetime.fromisoformat(self.value.replace("Z", "+00:00")))
+        padded = {"year": "-01-01", "month": "-01", "day": ""}[self.precision]
+        return datetime.fromisoformat(self.value + padded).replace(tzinfo=timezone.utc)
 
     def upper_bound(self) -> datetime:
-        if self.precision == "year":
-            if not re.fullmatch(r"\d{4}", self.value):
-                raise ValueError("年精度格式必须为 YYYY")
-            return datetime(int(self.value), 12, 31, 23, 59, 59, 999999, timezone.utc)
-        if self.precision == "month":
-            if not re.fullmatch(r"\d{4}-\d{2}", self.value):
-                raise ValueError("月精度格式必须为 YYYY-MM")
-            year, month = map(int, self.value.split("-"))
-            return datetime(
-                year,
-                month,
-                calendar.monthrange(year, month)[1],
-                23,
-                59,
-                59,
-                999999,
-                timezone.utc,
-            )
-        if self.precision == "day":
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", self.value):
-                raise ValueError("日精度格式必须为 YYYY-MM-DD")
-            return datetime.fromisoformat(self.value).replace(
-                hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
-            )
-        return utc(datetime.fromisoformat(self.value.replace("Z", "+00:00")))
+        """这个时间最晚可能是哪一刻（一天的最后一微秒、一个月的最后一天……）；格式不对抛 ValueError。"""
+        patterns = {"year": r"\d{4}", "month": r"\d{4}-\d{2}", "day": r"\d{4}-\d{2}-\d{2}"}
+        if self.precision == "instant":
+            return utc(datetime.fromisoformat(self.value.replace("Z", "+00:00")))
+        if not re.fullmatch(patterns[self.precision], self.value):
+            raise ValueError("时间格式与精度不符")
+        parts = [int(p) for p in self.value.split("-")]
+        year, month = parts[0], parts[1] if len(parts) > 1 else 12
+        day = parts[2] if len(parts) > 2 else calendar.monthrange(year, month)[1]
+        return datetime(year, month, day, 23, 59, 59, 999999, timezone.utc)
 
 
 def source_time(value: Any, meaning: str = "source_reported") -> TimeValue | None:
-    if value in (None, ""):
-        return None
-    if not isinstance(value, str):
+    """来源给的时间字符串 → TimeValue（按写法判断精度）；空的、不是字符串的、格式不对的 → None。"""
+    if not isinstance(value, str) or not value.strip():
         return None
     value = value.strip()
-    precision = (
-        "year"
-        if re.fullmatch(r"\d{4}", value)
-        else "month"
-        if re.fullmatch(r"\d{4}-\d{2}", value)
-        else "day"
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
-        else "instant"
-    )
+    precision = next((name for name, pattern in (("year", r"\d{4}"), ("month", r"\d{4}-\d{2}"),
+                                                 ("day", r"\d{4}-\d{2}-\d{2}")) if re.fullmatch(pattern, value)),
+                     "instant")
     try:
         return TimeValue(value=value, precision=precision, meaning=meaning)
     except ValueError:
         return None
 
 
-class AvailabilityProof(Model):
-    kind: Literal["unverified", "reviewed_archive"]
+class AvailabilityProof(BaseModel):
+    """这个版本在公开历史回放（public_history_reconstruction）里从什么时候起可见：抓到的是 unverified（只按首次看到的
+    时间），档案导入时声明了可见时间的是 declared_archive。旧版本可能带着当年的出处、审核字段，原样读出。"""
+
+    model_config = ConfigDict(extra="allow")
+    kind: str = "unverified"
     available_at: TimeValue | None = None
-    uri: str | None = None
-    sha256: str | None = None
-    verified_by: str | None = None
-    verified_at: datetime | None = None
-    review_note: str | None = None
-
-
-class MappingReview(Model):
-    reviewed_by: str
-    reviewed_at: datetime
-    basis: str
-    available_at: TimeValue
-
-
-class SourceRecordReference(Model):
-    source_id: str = Field(min_length=1, max_length=80)
-    source_record_id: str = Field(min_length=1, max_length=400)
-    version_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-
-class DocumentBasisLocator(Model):
-    """位置只证明原件这样写过，不证明被转述的说法属实。"""
-    json_pointer: str | None = Field(default=None, pattern=r"^/")
-    xpath: str | None = Field(default=None, min_length=1, max_length=2000)
-    start: int | None = Field(default=None, ge=0)
-    end: int | None = Field(default=None, ge=0)
-    quote: str | None = Field(default=None, min_length=1, max_length=10000)
-
-    @model_validator(mode="after")
-    def complete_locator(self):
-        has_text = any(value is not None for value in (self.start, self.end, self.quote))
-        if has_text and (self.start is None or self.end is None or self.quote is None
-                         or self.end <= self.start or self.end - self.start != len(self.quote)):
-            raise ValueError("正文位置必须同时提供精确quote和Unicode起止下标")
-        if not self.json_pointer and not self.xpath and not has_text:
-            raise ValueError("依据必须提供原件JSON路径或正文位置")
-        return self
-
-
-class DocumentRelation(Model):
-    relation_type: Literal["corrects", "retracts", "supplements", "reposts"]
-    target_source_id: str = Field(min_length=1, max_length=80)
-    target_source_record_id: str = Field(min_length=1, max_length=400)
-    target_version_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    basis_locator: DocumentBasisLocator | None = None
-
-
-class SourceIndependence(Model):
-    shared_identifiers: list[str] = Field(default_factory=list, max_length=20)
-    # 同名来源或不同网站均不证明研究相互独立。
-    status: Literal["unknown", "same_origin"] = "unknown"
-    origin_group_id: str | None = Field(default=None, min_length=1, max_length=500)
-    original_source: SourceRecordReference | None = None
-    basis: str | None = Field(default=None, min_length=1, max_length=2000)
-
-
-class InformationEnvironmentEvent(Model):
-    event_type: Literal["reported_deletion", "official_denial", "moderation", "access_failure"]
-    description: str = Field(min_length=1, max_length=2000)
-    reported_at: TimeValue | None = None
-    detected_at: datetime | None = None
-    target: SourceRecordReference | None = None
-    basis_locator: DocumentBasisLocator
-    # 删除、辟谣和访问失败不是疾病真伪或传播风险的判定。
-
-    @field_validator("detected_at")
-    @classmethod
-    def detected_time_has_timezone(cls, value):
-        return utc(value) if value is not None else None
-
-
-class DocumentEvidence(Model):
-    schema_version: Literal["datafabric.document.evidence.v1"] = "datafabric.document.evidence.v1"
-    material_kind: Literal[
-        "primary_research", "review", "trial_registry", "press_release",
-        "corporate_disclosure", "official_notice", "news_report", "social_media",
-        "repost", "conference_abstract", "graph",
-    ] | None = None
-    text_level: Literal["full_text", "abstract", "title", "excerpt", "metadata"] | None = None
-    document_relations: list[DocumentRelation] = Field(default_factory=list, max_length=100)
-    source_independence: SourceIndependence = Field(default_factory=SourceIndependence)
-    statement_status: Literal["source_reported", "unverified_report"] = "source_reported"
-    information_events: list[InformationEnvironmentEvent] = Field(default_factory=list, max_length=50)
-
-    @model_validator(mode="after")
-    def social_is_unverified(self):
-        if self.material_kind in {"social_media", "repost"} and self.statement_status != "unverified_report":
-            raise ValueError("社媒及转载说法必须保留未证实标记")
-        return self
 
 
 class HistoryRecord(Model):
-    schema_version: Literal["datafabric.history.record.v1"] = (
-        "datafabric.history.record.v1"
-    )
+    """读出来的一个版本（雷达读的就是它）。"""
+
+    schema_version: Literal["datafabric.history.record.v1"] = "datafabric.history.record.v1"
     source_id: str
     source_record_id: str
     version_id: str
@@ -274,14 +144,15 @@ class HistoryRecord(Model):
     first_seen_at: datetime
     received_at: datetime
     availability_proof: AvailabilityProof
-    mapping_review: MappingReview | None = None
+    mapping_review: dict[str, Any] | None = None  # 旧版本才有
     published_seq: int
-    # v3 6.3：按旧编号读 legacy 版本时附上它迁成了什么（store.history._with_legacy_alias），不存进版本
-    migration: dict[str, Any] | None = None
-    document_evidence: DocumentEvidence | None = None
+    migration: dict[str, Any] | None = None  # 按旧编号读 legacy 版本时附上它迁成了什么（不存进版本）
+    document_evidence: dict[str, Any] | None = None  # fetch/document_evidence.py：材料性质、全文、文档关联
 
 
 class ArchiveRecord(Model):
+    """一条原件：来源记录号、记录类型、原文（JSON 或 XML 文本）。"""
+
     source_record_id: str = Field(min_length=1, max_length=400)
     record_kind: RecordKind
     raw_content: str = Field(min_length=2, max_length=MAX_RECORD_BYTES)
@@ -302,73 +173,48 @@ class ArchiveRecord(Model):
         return value
 
 
-class ArchiveProofRequest(Model):
+class ArchiveProof(BaseModel):
+    """导入时声明的公开可见时间；其余字段（出处、哈希、审核说明）可以带，不再核对。"""
+
+    model_config = ConfigDict(extra="ignore")
     available_at: TimeValue
-    uri: str = Field(min_length=1, max_length=2000)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    reviewed: bool = False
-    review_note: str = Field(default="", max_length=2000)
 
 
-class ArchiveImport(Model):
+class ArchiveImport(BaseModel):
+    """POST /api/history/archives：一包原件（场景回放、图谱发布、本地文件）。"""
+
+    model_config = ConfigDict(extra="ignore")
     source_id: str = Field(min_length=1, max_length=80)
     is_demo: bool
     scope_description: str = Field(min_length=1, max_length=2000)
     declared_count: int = Field(ge=0, le=5000)
     declared_complete: bool = False
     records: list[ArchiveRecord] = Field(max_length=5000)
-    scope_record_ids: list[str] = Field(default_factory=list, max_length=20000)
-    proof: ArchiveProofRequest | None = None
-    verified_mapping_ids: list[str] = Field(default_factory=list, max_length=5000)
-    mapping_review_basis: str = Field(default="", max_length=2000)
+    proof: ArchiveProof | None = None
 
     @model_validator(mode="after")
     def consistent(self):
         ids = [r.source_record_id for r in self.records]
         if len(set(ids)) != len(ids):
-            raise ValueError("同一归档包来源ID重复，须分别导入明确版本")
-        if self.scope_record_ids and (
-            len(set(self.scope_record_ids)) != len(self.scope_record_ids)
-            or not set(ids) <= set(self.scope_record_ids)
-        ):
-            raise ValueError("本包原件必须属于无重复的声明清单")
+            raise ValueError("同一包里来源ID重复")
         if len(self.records) != self.declared_count:
-            raise ValueError("声明条数须与本归档包记录条数一致")
-        if len(canonical(self.model_dump(mode="json")).encode()) > MAX_IMPORT_BYTES:
-            raise ValueError("归档包超过16MiB预算")
-        if not set(self.verified_mapping_ids) <= set(ids):
-            raise ValueError("审核映射必须来自同一包")
-        if self.verified_mapping_ids and (
-            not self.proof
-            or not self.proof.reviewed
-            or not self.mapping_review_basis.strip()
-        ):
-            raise ValueError("映射审核需要已审核归档及明确依据")
+            raise ValueError("声明条数须与记录条数一致")
         return self
 
 
-def archive_manifest_hash(records: list[ArchiveRecord]) -> str:
-    return sha256(
-        canonical(
-            [
-                {"source_record_id": r.source_record_id, "raw_content": r.raw_content}
-                for r in sorted(records, key=lambda r: r.source_record_id)
-            ]
-        )
-    )
+class FetchContinuation(BaseModel):
+    """从哪接着读：来源自己的翻页位置和已读条数（旧任务里存的多余字段忽略）。"""
 
-
-class FetchContinuation(Model):
-    scope_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_config = ConfigDict(extra="ignore")
     cursor: str = Field(min_length=1, max_length=4000)
     read_count: int = Field(ge=0, le=100000000)
 
 
-class FetchRequest(Model):
-    # 只接受来源目录中已接通的来源（fetch.catalog.FETCHABLE）；external_archive 只用于隔离模拟补采
+class FetchRequest(BaseModel):
+    """一次采集：读哪个来源、什么检索词、最多几条、多少秒内读完。"""
+
+    model_config = ConfigDict(extra="ignore")  # 旧任务里存的 is_demo、demo_instance_id 等忽略
     source_id: str = Field(min_length=1, max_length=60)
-    is_demo: bool = False
-    demo_instance_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
     query: str = Field(min_length=1, max_length=500)
     source_record_ids: list[str] = Field(default_factory=list, max_length=100)
     max_records: int = Field(default=10, ge=1, le=100)
@@ -377,133 +223,47 @@ class FetchRequest(Model):
     updated_since: datetime | None = None
     updated_until: datetime | None = None
     continuation: FetchContinuation | None = None
-    # 增量读取（固定刷新给没有更新时间可过滤的来源用）：连续读到这么多条“库里已有且没变”的就停，0 = 不停。
-    # 手动抓取、回填都是 0。不进 scope_hash：它只决定读多远，不改读哪个范围。
+    # 增量读取（定时刷新用）：连续读到这么多条"库里已有且没变"的就停（stop_reason=reached_known），0 = 不停
     known_stop: int = Field(default=0, ge=0, le=100)
-
-    def scope_hash(self):
-        return sha256(
-            canonical(
-                {
-                    "source_id": self.source_id,
-                    "query": self.query,
-                    "source_record_ids": self.source_record_ids,
-                    "updated_since": self.updated_since.isoformat()
-                    if self.updated_since
-                    else None,
-                    "updated_until": self.updated_until.isoformat()
-                    if self.updated_until
-                    else None,
-                }
-            )
-        )
 
     @model_validator(mode="after")
     def fixed_scope(self):
         from fetch.catalog import FETCHABLE
 
-        if self.is_demo != (self.demo_instance_id is not None):
-            raise ValueError("模拟补采须绑定隔离实例；真实补采不得带模拟实例")
-        if self.source_id == "external_archive" and not self.is_demo:
-            raise ValueError("归档来源仅允许隔离模拟补采")
-        if self.source_id not in FETCHABLE and self.source_id != "external_archive":
+        if self.source_id not in FETCHABLE:
             raise ValueError("来源未在目录中接通")
-        if self.is_demo and not self.query.strip():
-            raise ValueError("模拟补采查询不能为空白")
-        if self.is_demo and (self.updated_since or self.updated_until or self.continuation):
-            raise ValueError("私有模拟包不支持公开源时间窗或续页")
         for value in (self.updated_since, self.updated_until):
             if value is not None:
                 utc(value)
-        if (
-            self.updated_since
-            and self.updated_until
-            and self.updated_since > self.updated_until
-        ):
+        if self.updated_since and self.updated_until and self.updated_since > self.updated_until:
             raise ValueError("来源更新窗口顺序错误")
         if self.source_id not in {"who_don", "gdelt_doc"} and (self.updated_since or self.updated_until):
             raise ValueError("此来源尚不支持更新窗口参数")
-        if self.continuation is not None:
-            from fetch.catalog import SITE_SOURCES
-
-            if self.source_id not in {"europe_pmc", "who_don", "clinicaltrials", "pubmed", "fda_crl"} | SITE_SOURCES:
-                raise ValueError("此来源尚不支持连续分页")
-            if self.continuation.scope_hash != self.scope_hash():
-                raise ValueError("续页必须绑定原查询范围及固定时间窗")
         return self
 
 
-class WindowReceipt(Model):
-    """One window of one windowed read: what came back, or why nothing did. fetch.gdelt_news writes them into the
-    run's coverage; store.history lists them with the records of a window.
-
-    status: read (a response below the cap, or a full one that cannot be cut), split (a full response, its halves
-    follow), failed (the request failed: no count, not zero), not_read (the read stopped before this window).
-    full: the response reached max_records. possibly_truncated: a full response that cannot be cut any further."""
-
-    start: str | None
-    end: str | None
-    status: Literal["read", "split", "failed", "not_read"]
-    returned: int | None = None
-    distinct_urls: int | None = None
-    full: bool = False
-    possibly_truncated: bool = False
-    requests: int = 0
-    reason: str | None = None
-
-
-class Interval(Model):
-    start: str | None
-    end: str | None
-
-
-class Coverage(Model):
-    mode: Literal["declared_manifest", "bounded_public_query", "bounded_demo_query", "adopted_records"]
-    scope_description: str
-    complete: bool
-    upstream_pagination_exhausted: bool | None = None
-    as_of: datetime
-    run_id: str | None = None
-    max_seq: int
-    declared_count: int | None = None
-    declared_scope_count: int | None = None
-    time_eligible_count: int = 0
-    not_visible_in_scope: int = 0
-    adopted_count: int
-    stop_reason: str
-    limitations: list[str] = Field(default_factory=list)
-    # Windowed reads (GDELT): the receipts of the windows the listing speaks about, and those of them that may be cut short
-    window_coverage: list[WindowReceipt] = Field(default_factory=list)
-    truncated_intervals: list[Interval] = Field(default_factory=list)
-
-
 class RecordCollection(Model):
-    schema_version: Literal["datafabric.history.collection.v1"] = (
-        "datafabric.history.collection.v1"
-    )
+    """GET /api/history/records 的一页。coverage：max_seq（这次读到的发布序号上界）、has_more，GDELT 线索窗口另有
+    window_coverage（每个窗口这次读回了什么）和 truncated_intervals（可能没读全的区间）。"""
+
+    schema_version: Literal["datafabric.history.collection.v1"] = "datafabric.history.collection.v1"
     items: list[HistoryRecord]
     next_cursor: str | None = None
-    excluded_counts: dict[str, int]
-    coverage: Coverage
+    coverage: dict[str, Any]
 
 
-class RunView(Model):
-    fetch_mode: Literal["public", "simulated"] | None = None
-    demo_instance_id: str | None = None
-    input_sha256: str | None = None
+class RunView(BaseModel):
+    """一次运行（采集或导入）：状态、存了哪些版本、读取情况（coverage）、出错原因。"""
+
     id: str
     source_id: str
     is_demo: bool
     kind: Literal["archive", "fetch"]
-    state: Literal[
-        "queued", "running", "completed", "partial", "failed", "enqueue_failed"
-    ]
+    state: Literal["queued", "running", "completed", "partial", "failed", "enqueue_failed"]
     attempt: int
     created_at: datetime
     completed_at: datetime | None = None
     scope_description: str
     version_ids: list[str]
-    manifest_sha256: str | None = None
     coverage: dict[str, Any]
-    error: dict[str, str] | None = None
-    attempts: list[dict[str, Any]]
+    error: dict[str, Any] | None = None

@@ -22,7 +22,7 @@ def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, fact
     version = registry_diff.PROCESSOR_VERSION
     changes = []
     if previous is not None:
-        from fetch.sources import stable_raw
+        from store.history import normalized_raw
 
         prior = previous["payload"] or {}
         changes = registry_diff.diff(
@@ -31,8 +31,8 @@ def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, fact
             locators or {},
             old_summary=prior.get("clean_text"),
             new_summary=summary,
-            old_raw_stable=stable_raw(source_id, prior.get("raw_content")) if prior.get("raw_content") else None,
-            new_raw_stable=stable_raw(source_id, raw) if raw else None,
+            old_raw_stable=normalized_raw(source_id, prior.get("raw_content")) if prior.get("raw_content") else None,
+            new_raw_stable=normalized_raw(source_id, raw) if raw else None,
         )
     inserted = conn.execute(
         text("""

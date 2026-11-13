@@ -16,7 +16,7 @@ history_fetch_job 抓），只是一段接一段：每段最多 100 条（一次
 --deadline，调大它再试）。
 --deadline 每段的秒数，5 到 120；它和读取入口、--pages 一起进每一段的任务键（换了值就是另一次回填，不会和旧的任务键冲突）。
 要设的环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（要补哪个库就指向哪个库，这个命令会写库）；
-DATAFABRIC_HISTORY_SOURCE_ALLOWLIST 不用设，命令把它设成这个来源。限速照常生效。
+限速照常生效。
 限制：接口站点 Roche、FiercePharma 每一段都要把前面的重新走一遍才接得上（它们的拉取函数没有可恢复的游标），条目多时越往后越慢；
 港交所（续读位置是第几家公司、这家的第几条）、NCCN（第几份指南）从续读位置接着读，不重走前面的；列表站点只重翻列表页，不重读详情页。
 """
@@ -94,7 +94,6 @@ def main():
         parser.error("不认识的来源：%s；能读的有：%s" % (args.source, ", ".join(known)))
     if not os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL"):
         parser.error("要先设 DATAFABRIC_HISTORY_DATABASE_URL：这个命令会写库（用法见文件开头）")
-    os.environ["DATAFABRIC_HISTORY_SOURCE_ALLOWLIST"] = args.source
     query = args.query or catalog.sample_query(args.source)[0]
     profile = SITE_PROFILES.get(args.source, {})
     list_site = "max_pages" in profile and profile.get("source_type") != "api"  # 按列表页翻页的网页站点：读到的页数受 max_pages 限制

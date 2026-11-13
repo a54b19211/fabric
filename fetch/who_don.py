@@ -200,7 +200,6 @@ def read_who(request):
                     None
                     if exhausted
                     else {
-                        "scope_hash": request.scope_hash(),
                         "cursor": canonical(position),
                         "read_count": consumed,
                     }

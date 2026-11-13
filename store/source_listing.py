@@ -1,7 +1,6 @@
 """GET /api/history/sources: every history_sources row with its name, and the few capabilities the radar reads.
 
-Readable = named by DATAFABRIC_HISTORY_SOURCE_ALLOWLIST, read_enabled in the library, and every source it depends on
-readable too. Readable sources go to `sources`; retired sources (readable or not) go to `retired_sources`; any other
+Readable = read_enabled in history_sources. Readable sources go to `sources`; retired sources (readable or not) go to `retired_sources`; any other
 source that is not readable is left out (the radar treats a source it does not see as not readable).
 """
 
@@ -30,22 +29,14 @@ def capabilities(source_id: str, readable: bool, fetch_enabled: bool) -> dict:
     }
 
 
-def listing(rows, allowed, dependencies_of) -> dict:
-    """The /sources body from the library rows. `dependencies_of(row)` is store.history._catalog_dependencies."""
+def listing(rows) -> dict:
+    """The /sources body from the history_sources rows."""
     from fetch.sources import SOURCE_CATALOG, public_fetch_enabled
-
-    by_id = {row["source_id"]: row for row in rows}
-
-    def readable(source_id, seen=()):
-        row = by_id.get(source_id)
-        if row is None or source_id in seen or source_id not in allowed or row["read_enabled"] is not True:
-            return False
-        return all(readable(value, (*seen, source_id)) for value in dependencies_of(row))
 
     fetch_enabled = public_fetch_enabled()
     sources, retired = [], []
     for row in rows:
-        source_id, ok = row["source_id"], readable(row["source_id"])
+        source_id, ok = row["source_id"], row["read_enabled"] is True
         name = (SOURCE_CATALOG.get(source_id) or row["catalog"]).get("name")
         entry = {"source_id": source_id, "name": name, "capabilities": capabilities(source_id, ok, fetch_enabled)}
         if source_id in RETIRED:

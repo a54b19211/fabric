@@ -19,7 +19,7 @@ from api.routers import history as history_router
 from clean import attachment_parse as ap
 from fetch import catalog, local_files
 from fetch import web_client as client
-from fetch.sources import PLUGINS, SOURCE_CATALOG, project_record, read_public
+from fetch.sources import SOURCE_CATALOG, project_record, read_public
 from store import history as store
 from store.history_models import FetchRequest, HistoryError
 
@@ -70,7 +70,6 @@ def test_catalog_declares_local_files_as_an_import_source_with_a_library_row():
     spec = catalog.spec("local_files")
     assert spec.status == "active" and spec.plugin == "local_file_import" and not spec.verified
     assert "local_files" in catalog.FETCHABLE and "local_files" not in catalog.WATCHABLE
-    assert PLUGINS["local_file_import"] is not None
     assert SOURCE_CATALOG["local_files"] == {"name": spec.name}
     from clean import derived_text
 
@@ -159,7 +158,7 @@ def test_docx_with_word_part_is_accepted(api):
     assert imported[0]["prepared"][0][1]["facts"]["file_ext"] == ".docx"
 
 
-def test_size_limit_credentials_collection_and_source_permission(api, monkeypatch):
+def test_size_limit_credentials_and_collection(api, monkeypatch):
     test_client, imported, root = api
     monkeypatch.setenv("DATAFABRIC_LOCAL_FILE_MAX_BYTES", "100")
     assert upload(test_client, PDF).status_code == 413
@@ -169,8 +168,6 @@ def test_size_limit_credentials_collection_and_source_permission(api, monkeypatc
     assert upload(test_client, PDF, token="wrong").status_code == 403
     response = upload(test_client, PDF, collection="../x")
     assert response.status_code == 422 and response.json()["detail"]["code"] == "invalid_collection"
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["pubmed"]')
-    assert upload(test_client, PDF).status_code == 403
     assert not imported and not stored_files(root)
 
 

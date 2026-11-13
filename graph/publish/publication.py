@@ -12,6 +12,7 @@ from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from graph.publish import history_graph
 from graph.publish.collected_document import CollectedDocument, collected_document
 from graph.publish.reviewed_graph import (
     GraphBundle,
@@ -272,8 +273,7 @@ def _graph_input(conn, uuid, fallback=None):
 def _legacy_write():
     """Every path that would write a new legacy_documents version passes here (v3 6.3): retired, the event stays
     blocked with its reason (410), kept, not retried; nothing is deleted."""
-    if history.legacy_retired():
-        raise HistoryError(*history.LEGACY_RETIRED, 410)
+    raise HistoryError(*history.LEGACY_RETIRED, 410)
 
 
 def _prepare(engine, row):
@@ -385,7 +385,7 @@ def _publish_graph(engine, row, prepared, document_run):
     from graph.publish.graph_publish import bind_document_text, build_document_bundle
 
     if prepared.get("graph_request") is not None:
-        return history.import_archive(
+        return history_graph.import_graph(
             ArchiveImport.model_validate(prepared["graph_request"]),
             prepared["idempotency_prefix"] + ":graph",
         )
@@ -462,7 +462,7 @@ def _publish_graph(engine, row, prepared, document_run):
     )
     prepared = {**prepared, "graph_request": graph_request.model_dump(mode="json")}
     _save_prepared(engine, row, prepared)
-    return history.import_archive(
+    return history_graph.import_graph(
         graph_request, prepared["idempotency_prefix"] + ":graph"
     )
 
@@ -764,7 +764,7 @@ def _publish_subject_graph(engine, row, prepared):
     )
     prepared = {**prepared, "graph_request": graph_request.model_dump(mode="json")}
     _save_prepared(engine, row, prepared)
-    return history.import_archive(graph_request, prepared["idempotency_prefix"] + ":graph")
+    return history_graph.import_graph(graph_request, prepared["idempotency_prefix"] + ":graph")
 
 
 def reconcile(high_watermark: int, *, batch: int = 5000, engine=None) -> dict:

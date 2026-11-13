@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from fetch import transport
-from store.history_models import ArchiveRecord, HistoryError, WindowReceipt, sha256, source_time
+from store.history_models import ArchiveRecord, HistoryError, sha256, source_time
 
 ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
 FINEST_WINDOW = timedelta(minutes=15)
@@ -91,7 +91,11 @@ def _iso(value):
 
 
 def _receipt(window, status, **fields):
-    return WindowReceipt(start=_iso(window.start), end=_iso(window.end), status=status, **fields)
+    """一个窗口这次读回了什么：status 是 read（读到了）、split（满了，拆成两半再读）、failed（请求失败，没有条数）、
+    not_read（读取在它之前停了）；possibly_truncated：满了又不能再拆，可能漏了线索。"""
+    return {"start": _iso(window.start), "end": _iso(window.end), "status": status, "returned": None,
+            "distinct_urls": None, "full": False, "possibly_truncated": False, "requests": 0, "reason": None,
+            **fields}
 
 
 def _sent() -> int:
@@ -227,14 +231,14 @@ class _Read:
             self.receipts.append(_receipt(self.after, "not_read", reason=skipped))
 
     def batch(self, error, stop):
-        truncated = [receipt for receipt in self.receipts if receipt.possibly_truncated]
+        truncated = [receipt for receipt in self.receipts if receipt["possibly_truncated"]]
         return {
             "records": self.records, "complete": False,
             "upstream_pagination_exhausted": not (truncated or error or stop),
             "stop_reason": "source_failed" if error else stop or "bounded_index_response",
             "error": error, "source_total": None, "next_continuation": None,
-            "window_coverage": [receipt.model_dump() for receipt in self.receipts],
-            "truncated_intervals": [{"start": receipt.start, "end": receipt.end} for receipt in truncated],
+            "window_coverage": self.receipts,
+            "truncated_intervals": [{"start": receipt["start"], "end": receipt["end"]} for receipt in truncated],
         }
 
 

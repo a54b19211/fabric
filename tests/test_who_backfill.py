@@ -73,7 +73,7 @@ class RunStore:
 
     def job_input(self, run_id, attempt):
         self.runs[run_id].state = "running"
-        return self.runs[run_id].request, None
+        return self.runs[run_id].request
 
     def finish_fetch(self, run_id, attempt, batch):
         run = self.runs[run_id]

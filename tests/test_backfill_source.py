@@ -26,7 +26,7 @@ def run_with(monkeypatch, capsys, args, legs):
 
 
 def leg(new=0, same=0, cursor=None, **more):
-    cont = {"scope_hash": "0" * 64, "cursor": cursor, "read_count": 0} if cursor else None
+    cont = {"cursor": cursor, "read_count": 0} if cursor else None
     return "partial", {"new_version_count": new, "same_version_count": same, "next_continuation": cont, **more}
 
 

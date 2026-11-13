@@ -1,13 +1,14 @@
-"""有独立许可的历史资料接口；旧documents/research接口行为不变。"""
+"""雷达读的 History 接口（/api/history/*）：来源、版本、变更、清洗正文、附件正文、登记差分、上一版、检索、
+采集任务。读接口要读凭据（DATAFABRIC_HISTORY_READ_TOKEN 或管理员凭据），写接口要管理员凭据。
+图谱的 /api/history/graph/* 在 graph/api/history_graph.py，测量在 api/routers/measurements.py。"""
 
 import hmac
 import os
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,34 +24,7 @@ from store.history_models import (
     RunView,
 )
 
-
-class BoundedHistoryRoute(APIRoute):
-    def get_route_handler(self):
-        original = super().get_route_handler()
-
-        async def bounded(request: Request):
-            if request.method == "POST":
-                size, chunks = 0, []
-                async for chunk in request.stream():
-                    size += len(chunk)
-                    if size > 16 * 1024 * 1024:
-                        raise HTTPException(
-                            status_code=413,
-                            detail={
-                                "code": "request_budget",
-                                "message": "请求超过16MiB预算",
-                            },
-                        )
-                    chunks.append(chunk)
-                request._body = b"".join(chunks)
-            return await original(request)
-
-        return bounded
-
-
-router = APIRouter(
-    prefix="/api/history", tags=["历史资料"], route_class=BoundedHistoryRoute
-)
+router = APIRouter(prefix="/api/history", tags=["历史资料"])
 bearer = HTTPBearer(auto_error=False, scheme_name="HistoryBearer")
 
 
@@ -124,20 +98,13 @@ class SourceList(BaseModel):
     retired_sources: list[dict]
 
 
-class RetryRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    expected_attempt: int = Field(ge=1)
-
-
 @router.get("/sources", response_model=SourceList, dependencies=[Depends(require_read)])
 def sources():
     return _call(store.sources_receipt)
 
 
 @router.post("/archives", response_model=RunView, dependencies=[Depends(require_admin)])
-def archive(
-    body: ArchiveImport, idempotency_key: str = Header(alias="Idempotency-Key")
-):
+def archive(body: ArchiveImport, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
     return _call(store.import_archive, body, idempotency_key)
 
 
@@ -146,7 +113,7 @@ def local_file(
     file: UploadFile = File(...),
     collection: str = Form(min_length=1, max_length=120),
     is_demo: bool = Form(False),
-    idempotency_key: str = Header(alias="Idempotency-Key"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """本地文件原件导入（multipart：file、collection、is_demo）。原件按 sha256 落盘 → 一条附件版本
     （来源 local_files）→ 加工层附件解析。类型白名单与大小上限见 fetch.local_files。"""
@@ -160,11 +127,12 @@ def local_file(
 
 
 @router.post("/fetch", response_model=RunView, dependencies=[Depends(require_admin)])
-def fetch(body: FetchRequest, idempotency_key: str = Header(alias="Idempotency-Key")):
-    from fetch.fetch_job import enqueue_fetch, require_fetch_allowed
+def fetch(body: FetchRequest, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+    """建一条采集任务并放进队列（幂等键可选：同一个键再提交，返回原来那条任务）。"""
+    from fetch.fetch_job import enqueue_fetch
+    from fetch.sources import require_public_fetch_enabled
 
-    _call(require_fetch_allowed, body)
-
+    _call(require_public_fetch_enabled)
     run, fresh = _call(store.create_fetch, body, idempotency_key)
     return _call(enqueue_fetch, run) if fresh else run
 
@@ -174,18 +142,6 @@ def fetch(body: FetchRequest, idempotency_key: str = Header(alias="Idempotency-K
 )
 def run(run_id: str):
     return _call(store.read_run, run_id)
-
-
-@router.post(
-    "/runs/{run_id}/retry",
-    response_model=RunView,
-    dependencies=[Depends(require_admin)],
-)
-def retry(run_id: str, body: RetryRequest):
-    from fetch.fetch_job import require_retry_allowed, retry_inactive
-
-    _call(require_retry_allowed)
-    return _call(retry_inactive, run_id, body.expected_attempt)
 
 
 @router.get(
@@ -294,10 +250,8 @@ def version_differences(
     cutoff: datetime,
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
 ):
-    """一页版本各自与上一可见版本的差异事实：只差序列化、只差投影、原文变了。只陈述事实，不做判断。"""
-    from store.version_difference import for_versions
-
-    return _call(for_versions, source_id, is_demo, version_ids, mode, cutoff)
+    """一页版本各自的上一版（store.history.version_differences）。"""
+    return _call(store.version_differences, source_id, is_demo, version_ids, mode, cutoff)
 
 
 @router.get("/derived-text", dependencies=[Depends(require_read)])
@@ -378,11 +332,8 @@ def changes(
     is_demo: bool,
     after: int = Query(default=0, ge=0),
     limit: int = Query(default=25, ge=1, le=100),
-    cursor: str | None = None,
 ):
-    return _call(
-        store.list_changes, source_id, is_demo, after=after, limit=limit, cursor=cursor
-    )
+    return _call(store.list_changes, source_id, is_demo, after=after, limit=limit)
 
 
 @router.get("/source-health", dependencies=[Depends(require_read)])

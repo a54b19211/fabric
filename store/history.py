@@ -1,1086 +1,357 @@
-"""历史资料的三张表读写；短事务发布，原件和版本只追加。"""
+"""History 库：存版本、记采集任务、按模式和截止时间读版本。
+
+存（finish_fetch 抓取 / import_archive 导入 → _publish，一个事务）：
+  每条原件算一个内容指纹 fingerprint(source_id, raw)，和这条记录当前版本（replaced_by 为空的那个）的指纹比：
+  相同 → 不存，记"没变"；不同 → 插一个新版本（来源的 published_seq + 1），旧版本的 replaced_by 指向新版本。
+  原件只追加：已存的版本只会被补上 fingerprint、replaced_by 两列，别的不改不删。A→B→A 是第三个版本。
+读（list_records、read_version、list_changes、visible_versions）：
+  current / operational_replay 模式看 first_seen_at <= cutoff；public_history_reconstruction 看 proof_available_at
+  （档案导入时声明的公开可见时间）。一条记录在截止时间下可见的版本按 _LATEST 排第一的那个。
+
+表：history_sources（来源，read_enabled 关掉就不可读）、history_runs（采集/导入任务）、history_versions（版本）、
+history_version_rank（排序用的派生键）、history_attachment_links（附件属于哪个父页面版本）。
+"""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
 import os
 import re
 import uuid
 from functools import lru_cache
-from urllib.parse import urlsplit
 
 from sqlalchemy import create_engine, text
 
 from clean import registry_changes
-from fetch.sources import project_record, stable_raw
-from fetch.window_coverage import MAX_RUNS, effective_receipts
+from fetch.sources import project_record
 from store.history_models import (
     MAX_RESPONSE_BYTES,
-    PARSER_VERSION,
     ArchiveImport,
     AvailabilityProof,
     FetchRequest,
     HistoryError,
     HistoryRecord,
-    MappingReview,
     RecordCollection,
     RunView,
-    TimeValue,
-    archive_manifest_hash,
     canonical,
     sha256,
-    source_time,
     utc,
 )
+from store.timestamps import parse_timestamp
 
 
 @lru_cache(maxsize=2)
 def _engine(url):
-    return create_engine(
-        url,
-        pool_size=3,
-        max_overflow=2,
-        pool_pre_ping=True,
-        connect_args={"connect_timeout": 5},
-    )
+    return create_engine(url, pool_size=3, max_overflow=2, pool_pre_ping=True, connect_args={"connect_timeout": 5})
 
 
 def history_engine():
-    # 绝不回退到旧APP.DB_URL，防止独立工作树误连现役库。
+    # 不回退到别的数据库地址：没配就报错，免得工作树误连现役库
     url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL", "")
     if not url:
         raise HistoryError("history_not_configured", "历史资料数据库尚未配置", 503)
     return _engine(url)
 
 
-def allowed_sources():
-    value = os.environ.get("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", "")
-    try:
-        values = json.loads(value) if value.startswith("[") else value.split(",")
-    except ValueError:
-        raise HistoryError("history_not_configured", "来源许可配置无效", 503) from None
-    return {str(item).strip() for item in values if str(item).strip()}
+def _now(conn):
+    return conn.execute(text("SELECT clock_timestamp()")).scalar_one()
 
 
-def _catalog_dependencies(row):
-    values = row["catalog"].get("dependency_source_ids", [])
-    if not isinstance(values, list) or any(
-        not isinstance(value, str) for value in values
-    ):
-        raise HistoryError("invalid_source_dependencies", "派生来源许可配置无效", 503)
-    return set(values)
-
-
-def _source(conn, source_id, *, lock=False, _seen=None):
-    seen = set() if _seen is None else set(_seen)
-    if source_id in seen:
-        raise HistoryError("cyclic_source_dependencies", "来源许可依赖存在循环", 503)
-    seen.add(source_id)
-    if source_id not in allowed_sources():
-        raise HistoryError("source_not_allowed", "当前许可不允许该来源", 403)
-    row = (
-        conn.execute(
-            text(
-                "SELECT * FROM history_sources WHERE source_id=:id"
-                # a publisher excludes other publishers of the source only: it changes published_seq and catalog,
-                # never the key, so it must not wait on (or upgrade past) the FOR KEY SHARE locks that inserting a
-                # run or a version of the source takes through the foreign key - FOR UPDATE would, and two imports
-                # that both inserted their run before publishing deadlock
-                + (" FOR NO KEY UPDATE" if lock else "")
-            ),
-            {"id": source_id},
-        )
-        .mappings()
-        .first()
-    )
+def _source(conn, source_id, *, lock=False):
+    """来源那一行；不存在或 read_enabled 关了就不可读（403）。lock：存版本时锁住来源行，同来源的存版本排队
+    （FOR NO KEY UPDATE：只改 published_seq，不挡插版本时外键要的锁）。"""
+    row = conn.execute(
+        text("SELECT * FROM history_sources WHERE source_id=:id" + (" FOR NO KEY UPDATE" if lock else "")),
+        {"id": source_id},
+    ).mappings().first()
     if row is None or row["read_enabled"] is not True:
         raise HistoryError("source_not_available", "该来源当前不可读取", 403)
-    for dependency in _catalog_dependencies(row):
-        _source(conn, dependency, _seen=seen)
     return row
 
 
 def sources_receipt():
-    """GET /api/history/sources (store.source_listing): the readable sources and the retired ones, each with its
-    name and the capabilities the radar reads."""
+    """GET /api/history/sources：可读的来源和已退役的来源，各带名称和雷达读的几项能力（store/source_listing.py）。"""
     from store import source_listing
 
     with history_engine().begin() as conn:
         rows = list(conn.execute(text(
             "SELECT source_id, read_enabled, catalog FROM history_sources ORDER BY source_id")).mappings())
-    return source_listing.listing(rows, allowed_sources(), _catalog_dependencies)
+    return source_listing.listing(rows)
 
 
 def list_sources():
-    """The readable sources that may be offered (retired ones are in sources_receipt()['retired_sources'])."""
     return sources_receipt()["sources"]
 
 
-def _derived_mode(source_id, mode):
-    if source_id == "primekg_graph" and mode == "public_history_reconstruction":
-        raise HistoryError(
-            "graph_history_unsupported",
-            "PrimeKG捕获没有外部历史可得证明；本地回放只从first_seen开始",
-        )
-    if (
-        source_id in {"reviewed_graph", "legacy_documents"}
-        and mode == "public_history_reconstruction"
-    ):
-        raise HistoryError(
-            "graph_history_unsupported", "当前图/旧文档导出没有外部历史可得证明"
-        )
+# ---- 内容指纹 -------------------------------------------------------------------------------------------
+
+# 来源每次响应都会改写、但不说明记录变了的字段：ClinicalTrials 给每条登记盖上数据快照日期
+VOLATILE_FIELDS = {"clinicaltrials": [("derivedSection", "miscInfoModule", "versionHolder")]}
+# 网页抓取（role=web_capture）保存了当时的 HTML，但 HTML 每次都不一样（随机 id、每次新的下载路径）：
+# 比较的是解析出的标题、正文和附件清单，HTML 里解析没读到的变动不算新版本
+WEB_CAPTURE_HTML = ("html", "html_sha256", "html_store_path")
 
 
-def _validate_derived(conn, run, item, now, proof):
-    from fetch.sources import parse_json
-    from graph.publish.reviewed_graph import DERIVED_SOURCES, GraphBundle, StoredDocument
-
-    if run["source_id"] == "external_archive":
-        data = parse_json(item.raw_content)
-        if data.get("schema_version") == "datafabric.observation.v1":
-            return _validate_observation(conn, run, data, now)
-    if run["source_id"] not in DERIVED_SOURCES:
-        return set()
-    if proof.kind != "unverified" or proof.available_at is not None:
-        raise HistoryError(
-            "graph_history_unsupported", "当前图和旧文档桥不能借导入证明回填过去"
-        )
-    data = parse_json(item.raw_content)
-    if run["source_id"] == "legacy_documents":
-        if data.get("schema_version") == "datafabric.collected.document.v1":
-            from graph.publish.collected_document import CollectedDocument
-
-            original = CollectedDocument.model_validate(data)
-        else:
-            original = StoredDocument.model_validate(data)
-        _source(conn, original.source_site)
-        return {original.source_site}
-
-    from graph.publish.history_graph import _validate_graph_bundle
-
-    return _validate_graph_bundle(conn, run, GraphBundle.model_validate(data), now)
+def normalized_raw(source_id: str, raw: str) -> str:
+    """比较两份原件用的文本：JSON 原件去掉上面两类字段后按键排序重新写出（Europe PMC 同一条记录每次返回的键顺序
+    不同，曾让 8444 条记录出了 23927 个版本）；不是 JSON 的原件（PubMed XML）就是原文。"""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+    if isinstance(data, dict):
+        if data.get("role") == "web_capture":
+            for key in WEB_CAPTURE_HTML:
+                data.pop(key, None)
+        for *path, last in VOLATILE_FIELDS.get(source_id, ()):
+            node = data
+            for key in path:
+                node = node.get(key) if isinstance(node, dict) else None
+            if isinstance(node, dict):
+                node.pop(last, None)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _validate_observation(conn, run, data, now):
-    from fetch.observations import (
-        native_json,
-        observation,
-        same_series,
-        validate_bound_values,
-    )
-
-    value = observation(data)
-    dependencies = set()
-    for purpose, ref in (("basis", value.basis.ref), ("supersedes", value.supersedes)):
-        if ref is None:
-            continue
-        _source(conn, ref.source_id)
-        row = conn.execute(
-            text("""
-            SELECT payload FROM history_versions WHERE source_id=:source
-              AND source_record_id=:native AND version_id=:version AND is_demo=:demo
-              AND first_seen_at<=:now
-        """),
-            {
-                "source": ref.source_id,
-                "native": ref.source_record_id,
-                "version": ref.version_id,
-                "demo": run["is_demo"],
-                "now": now,
-            },
-        ).scalar_one_or_none()
-        if row is None or row["raw_sha256"] != ref.raw_sha256:
-            raise HistoryError(
-                "observation_ref_mismatch", "观测引用与同空间冻结版本不一致"
-            )
-        try:
-            original = native_json(row["raw_content"])
-            if purpose == "basis":
-                validate_bound_values(value, original)
-            elif not same_series(value, observation(original)):
-                raise ValueError("修订不能替换不同对象或口径")
-        except ValueError:
-            raise HistoryError(
-                "observation_binding_mismatch", "观测值、口径或修订引用与原件不一致"
-            ) from None
-        if ref.source_id != run["source_id"]:
-            dependencies.add(ref.source_id)
-    return dependencies
+def fingerprint(source_id: str, raw: str) -> str:
+    """原件的内容指纹：同一条记录两次读到的原件指纹相同，就是没变。"""
+    return sha256(normalized_raw(source_id, raw))
 
 
-def _persist_dependencies(conn, source, dependencies):
-    combined = _catalog_dependencies(source) | dependencies
-    if source["source_id"] in combined:
-        raise HistoryError("cyclic_source_dependencies", "派生来源不能依赖自身")
-    if combined != _catalog_dependencies(source):
-        conn.execute(
-            text(
-                "UPDATE history_sources SET catalog=jsonb_set(catalog,'{dependency_source_ids}',CAST(:deps AS jsonb),true) WHERE source_id=:id"
-            ),
-            {"deps": canonical(sorted(combined)), "id": source["source_id"]},
-        )
+# ---- 存版本 ---------------------------------------------------------------------------------------------
 
 
-def _view(row):
-    values = {key: row[key] for key in RunView.model_fields if key in row}
-    if row["kind"] == "fetch":
-        request = row["request_payload"]
-        values["fetch_mode"] = "simulated" if row["is_demo"] else "public"
-        values["demo_instance_id"] = request.get("demo_instance_id")
-        values["input_sha256"] = (request.get("_demo_fetch") or {}).get("input_sha256")
-    values["id"] = str(values["id"])
-    return RunView(**values)
+def _role(projected) -> str:
+    """版本的身份：来源自己的记录（source_record），或 legacy 迁入的（migrated_record）。两类各比各的当前版本，
+    迁入的旧内容不会顶掉来源自己的现版。"""
+    return (projected.get("facts") or {}).get("publication_role") or "source_record"
 
 
-def read_run(run_id):
-    with history_engine().begin() as conn:
-        row = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id"), {"id": run_id}
-            )
-            .mappings()
-            .first()
-        )
-        if row is None:
-            raise HistoryError("run_not_found", "采用任务不存在", 404)
-        _source(conn, row["source_id"])
-        return _view(row)
-
-
-def _now(conn):
-    return conn.execute(text("SELECT clock_timestamp()")).scalar_one()
-
-
-def _new_run(conn, source_id, is_demo, kind, body, key, scope, stored_body=None):
-    if (
-        not key
-        or len(key) > 160
-        or any(ord(char) < 33 or ord(char) > 126 for char in key)
-    ):
-        raise HistoryError(
-            "idempotency_key_required", "请提供1至160字符的Idempotency-Key", 400
-        )
-    _source(conn, source_id)
-    request_hash = sha256(canonical(body))
-    run_id = str(uuid.uuid4())
-    row = (
-        conn.execute(
-            text("""
-        INSERT INTO history_runs
-          (id,source_id,is_demo,kind,state,request_hash,idempotency_key,request_payload,
-           scope_description,job_id)
-        VALUES (:id,:source,:demo,:kind,'queued',:hash,:key,CAST(:body AS jsonb),:scope,:job)
-        ON CONFLICT (idempotency_key) DO NOTHING RETURNING *
-    """),
-            {
-                "id": run_id,
-                "source": source_id,
-                "demo": is_demo,
-                "kind": kind,
-                "hash": request_hash,
-                "key": key,
-                "body": canonical(stored_body if stored_body is not None else body),
-                "scope": scope,
-                "job": "history-" + run_id + "-1" if kind == "fetch" else None,
-            },
-        )
-        .mappings()
-        .first()
-    )
-    if row is not None:
-        return row, True
-    row = (
-        conn.execute(
-            text("SELECT * FROM history_runs WHERE idempotency_key=:key"), {"key": key}
-        )
-        .mappings()
-        .one()
-    )
-    if row["request_hash"] != request_hash or row["kind"] != kind:
-        raise HistoryError("idempotency_conflict", "同一幂等键已用于不同采用请求", 409)
-    _source(conn, row["source_id"])
-    return row, False
-
-
-def _proof(request: ArchiveImport, now):
-    proof = request.proof
-    if proof is None:
-        return AvailabilityProof(kind="unverified")
-    if proof.sha256 != archive_manifest_hash(request.records):
-        raise HistoryError("archive_hash_mismatch", "归档证明未绑定本包全部原件")
-    if proof.available_at.upper_bound() > now:
-        raise HistoryError("future_archive_proof", "归档可见证明不能晚于当前服务器时间")
-    parsed = urlsplit(proof.uri)
-    if parsed.scheme not in (
-        ("https", "http", "fixture") if request.is_demo else ("https",)
-    ):
-        raise HistoryError(
-            "invalid_archive_proof",
-            "真实历史证明须提供可核对HTTPS出处；fixture仅限demo",
-        )
-    if parsed.username or parsed.password or not parsed.netloc:
-        raise HistoryError("invalid_archive_proof", "归档证明地址不可含凭据")
-    if proof.reviewed and not proof.review_note.strip():
-        raise HistoryError(
-            "missing_review_basis", "审核历史归档须说明原件、许可和可得日期依据"
-        )
-    return AvailabilityProof(
-        kind="reviewed_archive" if proof.reviewed else "unverified",
-        available_at=proof.available_at,
-        uri=proof.uri,
-        sha256=proof.sha256,
-        verified_by="history-admin" if proof.reviewed else None,
-        verified_at=now if proof.reviewed else None,
-        review_note=proof.review_note if proof.reviewed else None,
-    )
-
-
-def _current_version(conn, run, item):
-    """The record's current version by Fabric's own rule (context references excluded; latest proof or
-    first sight, then the source's own update time)."""
-    return conn.execute(
-        text(
-            "SELECT version_id,payload FROM " + _VERSIONS + " "
-            "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native "
-            "AND " + _ROLE + "!='context_reference' "
-            "ORDER BY " + _LATEST + " LIMIT 1"
-        ),
-        {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
+def _current(conn, source_id, is_demo, record_id, role="source_record"):
+    """这条记录现在的版本（没有被 replaced_by 指走的最新一个）：version_id、fingerprint、原件和载荷。"""
+    return conn.execute(text(
+        "SELECT version_id, fingerprint, payload FROM history_versions "
+        "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:record AND replaced_by IS NULL "
+        "AND COALESCE(payload->'facts'->>'publication_role','source_record')=:role "
+        "ORDER BY published_seq DESC LIMIT 1"),
+        {"source": source_id, "demo": is_demo, "record": record_id, "role": role},
     ).mappings().first()
 
 
-# Stored with each new version but not part of its identity: they are computed from the original and the projection,
-# so they cannot tell two versions apart, and versions stored before they existed keep matching their originals.
-DERIVED_PAYLOAD_FIELDS = frozenset({"document_evidence"})
-
-
-def _same_identity(payload, identity, *, ignore_raw=False):
-    """Whether a stored version has this identity (review clocks never count; the raw hash only when
-    asked: parser version, media type, projection, proof and mapping always do)."""
-    prior = {key: payload.get(key) for key in identity}
-    prior["availability_proof"] = {
-        key: value for key, value in (prior["availability_proof"] or {}).items() if key != "verified_at"
-    }
-    if prior["mapping_review"]:
-        prior["mapping_review"] = {
-            key: value for key, value in prior["mapping_review"].items() if key != "reviewed_at"
-        }
-    mine = dict(identity)
-    if ignore_raw:
-        prior.pop("raw_sha256")
-        mine.pop("raw_sha256")
-        for side in (prior, mine):  # the hash of a web capture's HTML is a fact about the raw (stable_raw)
-            side["facts"] = {k: v for k, v in (side["facts"] or {}).items() if k != "html_sha256"}
-    return canonical(prior) == canonical(mine)
-
-def import_archive(request: ArchiveImport, key: str):
-    # 全包先验证再发布；任何一条非法均不部分提交或改变已有成果。
-    if request.source_id == "legacy_documents" and legacy_retired():
-        raise HistoryError(*LEGACY_RETIRED, 410)  # v3 6.3：旧桥不再新写，没有开关
-    prepared = [
-        (item, project_record(request.source_id, item)) for item in request.records
-    ]
-    with history_engine().begin() as conn:
-        now = _now(conn)
-        proof = _proof(request, now)
-        body = request.model_dump(mode="json")
-        stored = {
-            **body,
-            "records": [
-                {
-                    "source_record_id": item.source_record_id,
-                    "record_kind": item.record_kind,
-                    "raw_sha256": sha256(item.raw_content),
-                }
-                for item in request.records
-            ],
-        }
-        row, fresh = _new_run(
-            conn,
-            request.source_id,
-            request.is_demo,
-            "archive",
-            body,
-            key,
-            request.scope_description,
-            stored_body=stored,
-        )
-        if not fresh:
-            return _view(row)
-        coverage = {
-            "mode": "declared_manifest",
-            "complete": request.declared_complete,
-            "upstream_pagination_exhausted": None,
-            "declared_count": request.declared_count,
-            "adopted_count": len(prepared),
-            "declared_scope_count": len(request.scope_record_ids or request.records),
-            "stop_reason": "end_of_declared_manifest",
-            "limitations": ["完整仅指所声明归档包，不证明原站/领域全覆盖"],
-        }
-        _publish(
-            conn,
-            row,
-            prepared,
-            proof,
-            now,
-            coverage,
-            verified_mapping_ids=set(request.verified_mapping_ids),
-            mapping_basis=request.mapping_review_basis,
-        )
-        final = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id"), {"id": row["id"]}
-            )
-            .mappings()
-            .one()
-        )
-        return _view(final)
-
-
-def _publish(
-    conn,
-    run,
-    prepared,
-    proof,
-    now,
-    coverage,
-    *,
-    error=None,
-    verified_mapping_ids=frozenset(),
-    mapping_basis="",
-):
-    """Adopt the prepared originals as versions of the run's source (one transaction) and close the run."""
-    source = _source(conn, run["source_id"], lock=True)
-    seq = source["published_seq"]
-    version_ids, new_ids = [], []
-    dependencies = set()
-    for item, projected in prepared:
-        dependencies.update(_validate_derived(conn, run, item, now, proof))
-        mapping_review, mapping_time = None, None
-        if item.source_record_id in verified_mapping_ids:
-            mapping_review, mapping_time = _mapping_review(projected, proof, now, mapping_basis)
-        if proof.kind == "reviewed_archive":
-            _check_archive_bounds(projected, proof, mapping_time if mapping_review else None)
-            _check_archive_order(conn, run, item, projected, proof)
-        identity = _version_identity(run, item, projected, proof, mapping_review)
-        version_id, existing, current = _adopted_version(conn, run, item, identity)
-        if existing is None:
-            seq += 1
-            _insert_version(conn, run, item, projected, proof, mapping_review, version_id, seq, now, current)
-            new_ids.append(version_id)
-        version_ids.append(version_id)
-    _persist_dependencies(conn, source, dependencies)
-    _link_attachments(conn, run, prepared, version_ids)
-    conn.execute(
-        text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
-        {"seq": seq, "id": run["source_id"]},
-    )
-    _close_run(conn, run, prepared, version_ids, new_ids, coverage, error, now)
-
-
-_MAPPING_FIELDS = ("program_id", "lineage_id", "indication", "jurisdiction", "mapping_available_at")
-
-
-def _mapping_review(projected, proof, now, basis):
-    """A reviewed program mapping needs its five sourced fields and a public time no later than this adoption."""
-    facts = projected["facts"]
-    if not all(isinstance(facts.get(key), str) and facts[key].strip() for key in _MAPPING_FIELDS):
-        raise HistoryError("mapping_incomplete", "审核项目映射缺少五项有出处字段")
-    mapping_time = source_time(facts["mapping_available_at"])
-    if mapping_time is None or mapping_time.upper_bound() > now:
-        raise HistoryError("invalid_mapping_time", "映射公开时间格式错误或晚于本次采用")
-    review = MappingReview(reviewed_by="history-admin", reviewed_at=now, basis=basis, available_at=proof.available_at)
-    return review, mapping_time
-
-
-def _check_archive_bounds(projected, proof, mapping_time):
-    """后续结局/新映射不能借旧原件证明倒灌到历史特征。"""
-    bounds = [projected.get("source_published_at"), projected.get("source_updated_at")]
-    if projected["record_kind"] == "outcome":
-        facts = projected["facts"]
-        bounds += [source_time(facts.get(key)) for key in ("event_at", "public_available_at", "observation_end")]
-    if mapping_time is not None:
-        bounds.append(mapping_time)
-    for bound in bounds:
-        value = TimeValue.model_validate(bound) if isinstance(bound, dict) else bound
-        if value and value.upper_bound() > proof.available_at.upper_bound():
-            raise HistoryError("archive_time_conflict", "原件新增事实、结局窗口或映射晚于归档可见证明")
-
-
-def _check_archive_order(conn, run, item, projected, proof):
-    """Another archived original of the same record whose proof window overlaps this one must be ordered by an
-    exact proof time and distinguishable source update times; otherwise the revision order is unknown."""
-    prior_versions = conn.execute(
-        text("""
-          SELECT payload FROM history_versions
-          WHERE source_id=:source AND is_demo=:demo AND source_record_id=:native
-            AND proof_available_at IS NOT NULL
-        """),
-        {"source": run["source_id"], "demo": run["is_demo"], "native": item.source_record_id},
-    ).scalars()
-    updated = TimeValue.model_validate(projected["source_updated_at"]) if projected["source_updated_at"] else None
-    for previous in prior_versions:
-        if previous["raw_sha256"] == sha256(item.raw_content):
-            continue
-        old_proof = TimeValue.model_validate(previous["availability_proof"]["available_at"])
-        current_proof = proof.available_at
-        overlap = (
-            current_proof.lower_bound() <= old_proof.upper_bound()
-            and old_proof.lower_bound() <= current_proof.upper_bound()
-        )
-        if not overlap:
-            continue
-        if current_proof.upper_bound() != old_proof.upper_bound():
-            raise HistoryError(
-                "ambiguous_history_version",
-                "历史可见证明的时间精度重叠，不能确定修订先后；请补精确档案证明，旧版已保留",
-            )
-        old_updated = (
-            TimeValue.model_validate(previous["source_updated_at"]) if previous.get("source_updated_at") else None
-        )
-        ordered = (
-            updated is not None
-            and old_updated is not None
-            and (
-                updated.upper_bound() < old_updated.lower_bound()
-                or old_updated.upper_bound() < updated.lower_bound()
-            )
-        )
-        if not ordered:
-            raise HistoryError(
-                "ambiguous_history_version",
-                "同一历史时点的原件无法确定修订先后；请补可区分的来源修订时间或档案证明，旧版已保留",
-            )
-
-
-def _version_identity(run, item, projected, proof, mapping_review):
-    # 本次审核/采用时钟不参与版本身份；重复提交同原件/同审核依据复用原版本。
-    identity_proof = {k: v for k, v in proof.model_dump(mode="json").items() if k != "verified_at"}
-    identity_mapping = mapping_review.model_dump(mode="json") if mapping_review else None
-    if identity_mapping:
-        identity_mapping.pop("reviewed_at")
-    return {
-        "source_id": run["source_id"],
-        "source_record_id": item.source_record_id,
-        "is_demo": run["is_demo"],
-        "raw_sha256": sha256(item.raw_content),
-        "raw_media_type": item.raw_media_type,
-        "parser_version": PARSER_VERSION,
-        **{key: value for key, value in projected.items() if key not in DERIVED_PAYLOAD_FIELDS},
-        "availability_proof": identity_proof,
-        "mapping_review": identity_mapping,
-    }
-
-
-def _adopted_version(conn, run, item, identity):
-    """(version_id, existing row or None, current version of the record for a fetch or None)."""
-    version_id = sha256(canonical(identity))
-    existing = conn.execute(
-        text("SELECT version_id FROM history_versions WHERE version_id=:id"),
-        {"id": version_id},
-    ).first()
-    current = _current_version(conn, run, item) if run["kind"] == "fetch" else None
-    stable = stable_raw(run["source_id"], item.raw_content) if current is not None else None
-    if (
-        stable is not None
-        and stable_raw(run["source_id"], current["payload"].get("raw_content")) == stable
-        and _same_identity(current["payload"], identity, ignore_raw=True)
-    ):
-        # 公开观察只差JSON序列化（键顺序、空白）、来源每次改写的数据日期（ClinicalTrials versionHolder），
-        # 或网页原件里的 HTML（解析结果和附件清单没变）：仍是当前版本；原件、raw_sha256、first_seen 都保留
-        # 首次所见。取舍：网页只有解析结果或附件清单变了才出新版本，HTML 里解析没读到的变动不记。
-        # 不看 existing：A→A'（只 HTML 不同）→A 也始终是同一个版本。档案导入不走这里。
-        version_id, existing = current["version_id"], (current["version_id"],)
-    elif run["kind"] == "fetch" and existing is not None and current is not None:
-        # 公开观察只把“与当前相同”当重复；A→B→A是一次新的采用。
-        # 档案导入仍按原件/证明去重，不把迟到的旧档案改成当前状态。
-        if _same_identity(current["payload"], identity):
-            # 恢复后的连续A复用A3，不能重新引用A1或再增加一个版本。
-            version_id = current["version_id"]
-        else:
-            # 首次出现的内容ID不变；再次采用旧内容时，以前一版区分这次变化。
-            version_id = sha256(canonical({
-                "content_version_id": version_id,
-                "previous_version_id": current["version_id"],
-            }))
-            existing = conn.execute(
-                text("SELECT version_id FROM history_versions WHERE version_id=:id"),
-                {"id": version_id},
-            ).first()
-    return version_id, existing, current
+def _fingerprint_of(source_id, current) -> str:
+    # 加指纹列以前存的版本没有指纹（ops/backfill_fingerprint.py 补）：没补的当场按原件算
+    return current["fingerprint"] or fingerprint(source_id, current["payload"]["raw_content"])
 
 
 def stored_unchanged(source_id, item) -> bool:
-    """存下这条原件会不会多出新版本？不会（库里这条记录的当前版本就是它）= True。增量读取（FetchRequest.known_stop）
-    用它判断“读到旧的了”。直接走 _adopted_version，和 _publish 判断“新版本还是没变”的是同一段代码，不会两套规则。
-    原件投影失败时返回 False：不在这里报错，留给存版本时按原样报。"""
-    run = {"source_id": source_id, "is_demo": False, "kind": "fetch"}
-    try:
-        projected = project_record(source_id, item)
-    except HistoryError:
-        return False
-    identity = _version_identity(run, item, projected, AvailabilityProof(kind="unverified"), None)
+    """增量读取用（fetch/transport.py 的 Budget.known）：这条原件库里已经有了、而且没变？"""
     with history_engine().begin() as conn:
-        return _adopted_version(conn, run, item, identity)[1] is not None
+        current = _current(conn, source_id, False, item.source_record_id)
+    return current is not None and _fingerprint_of(source_id, current) == fingerprint(source_id, item.raw_content)
 
 
-def _insert_version(conn, run, item, projected, proof, mapping_review, version_id, seq, now, current):
+def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=None):
+    """把一次运行读到的原件存成版本（调用方的事务里），然后结束这次运行。prepared：[(原件, 投影)]。
+    available_at：档案导入声明的公开可见时间（只给 public_history_reconstruction 模式用）。"""
+    source_id, is_demo = run["source_id"], run["is_demo"]
+    seq = _source(conn, source_id, lock=True)["published_seq"]
+    version_ids, new_ids = [], []
+    for item, projected in prepared:
+        fp = fingerprint(source_id, item.raw_content)
+        current = _current(conn, source_id, is_demo, item.source_record_id, _role(projected))
+        if current is not None and _fingerprint_of(source_id, current) == fp:
+            version_ids.append(current["version_id"])  # 没变：不存
+            continue
+        seq += 1
+        version_id = sha256(f"{source_id}|{item.source_record_id}|{fp}|{seq}")
+        _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at)
+        if current is not None:
+            conn.execute(text("UPDATE history_versions SET replaced_by=:new WHERE version_id=:old"),
+                         {"new": version_id, "old": current["version_id"]})
+        registry_changes.record(  # 临床登记：和上一版逐字段的差分，与新版本同一事务
+            conn, source_id=source_id, is_demo=is_demo, record_id=item.source_record_id, previous=current,
+            to_version_id=version_id, facts=projected.get("facts"), locators=projected.get("field_locators"),
+            pairing="current_at_adoption", summary=projected.get("clean_text"), raw=item.raw_content)
+        version_ids.append(version_id)
+        new_ids.append(version_id)
+    _link_attachments(conn, run, prepared, version_ids)
+    conn.execute(text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
+                 {"seq": seq, "id": source_id})
+    _close_run(conn, run, version_ids, new_ids, coverage, error, now)
+
+
+def _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at):
+    proof = AvailabilityProof(kind="declared_archive", available_at=available_at) if available_at else \
+        AvailabilityProof(kind="unverified")
     payload = HistoryRecord(
-        source_id=run["source_id"],
-        source_record_id=item.source_record_id,
-        version_id=version_id,
-        is_demo=run["is_demo"],
-        raw_content=item.raw_content,
-        raw_media_type=item.raw_media_type,
-        raw_sha256=sha256(item.raw_content),
-        first_seen_at=now,
-        received_at=now,
-        availability_proof=proof,
-        mapping_review=mapping_review,
-        published_seq=seq,
-        **projected,
+        source_id=run["source_id"], source_record_id=item.source_record_id, version_id=version_id,
+        is_demo=run["is_demo"], raw_content=item.raw_content, raw_media_type=item.raw_media_type,
+        raw_sha256=sha256(item.raw_content), first_seen_at=now, received_at=now, availability_proof=proof,
+        published_seq=seq, **projected,
     )
-    proof_at = proof.available_at.upper_bound() if proof.kind == "reviewed_archive" else None
-    conn.execute(
-        text("""
-        INSERT INTO history_versions
-          (version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,
-           proof_available_at,published_seq,payload)
-        VALUES (:id,:source,:demo,:native,:kind,:first,:received,:proof,:seq,CAST(:payload AS jsonb))
-    """),
-        {
-            "id": version_id,
-            "source": run["source_id"],
-            "demo": run["is_demo"],
-            "native": item.source_record_id,
-            "kind": item.record_kind,
-            "first": now,
-            "received": now,
-            "proof": proof_at,
-            "seq": seq,
-            "payload": payload.model_dump_json(),
-        },
-    )
-    conn.execute(
-        text(
-            _DERIVE + " FROM history_versions h WHERE h.version_id=:id AND NOT EXISTS "
-            "(SELECT 1 FROM history_version_rank r WHERE r.version_id=h.version_id)"
-        ),
-        {"id": version_id},
-    )
-    if run["kind"] == "fetch":
-        # 确定性加工和版本同一事务：版本可见时，它与上一版的登记差分也已就绪
-        registry_changes.record(
-            conn,
-            source_id=run["source_id"],
-            is_demo=run["is_demo"],
-            record_id=item.source_record_id,
-            previous=current,
-            to_version_id=version_id,
-            facts=projected.get("facts"),
-            locators=projected.get("field_locators"),
-            pairing="current_at_adoption",
-            summary=projected.get("clean_text"),
-            raw=item.raw_content,
-        )
-
-
-# 因为条数、页数或截止时间停下的读取，来源没读完：状态是 partial，不是 completed
-_LIMIT_STOPS = ("page_budget", "record_budget", "deadline")
-
-
-def _close_run(conn, run, prepared, version_ids, new_ids, coverage, error, now):
-    state = "partial" if error and version_ids else "failed" if error else "completed"
-    if run["kind"] == "fetch" and not error and coverage.get("stop_reason") in _LIMIT_STOPS:
-        state = "partial"
-    coverage = {
-        **coverage,
-        "new_version_count": len(new_ids),
-        "same_version_count": len(version_ids) - len(new_ids),
-        "adopted_count": len(version_ids),
-    }
-    if "backfill" in coverage:
-        # Only what this run created is background: a version an earlier run already adopted was first seen then.
-        coverage["backfill"] = {**coverage["backfill"], "background_version_ids": new_ids}
-    attempts = list(run["attempts"]) + [
-        {
-            "attempt": run["attempt"],
-            "state": state,
-            "completed_at": now.isoformat(),
-            "version_ids": version_ids,
-            "error": error,
-        }
-    ]
-    conn.execute(
-        text("""
-        UPDATE history_runs SET state=:state,completed_at=:now,version_ids=CAST(:ids AS jsonb),
-          coverage=CAST(:coverage AS jsonb),error=CAST(:error AS jsonb),attempts=CAST(:attempts AS jsonb),
-          manifest_sha256=:manifest WHERE id=:id AND attempt=:attempt
-    """),
-        {
-            "state": state,
-            "now": now,
-            "ids": canonical(version_ids),
-            "coverage": canonical(coverage),
-            "error": canonical(error),
-            "attempts": canonical(attempts),
-            "manifest": archive_manifest_hash([item for item, _ in prepared]),
-            "id": run["id"],
-            "attempt": run["attempt"],
-        },
-    )
+    conn.execute(text("""
+        INSERT INTO history_versions (version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,
+          received_at,proof_available_at,published_seq,fingerprint,payload)
+        VALUES (:id,:source,:demo,:record,:kind,:now,:now,:proof,:seq,:fp,CAST(:payload AS jsonb))"""),
+        {"id": version_id, "source": run["source_id"], "demo": run["is_demo"], "record": item.source_record_id,
+         "kind": item.record_kind, "now": now, "proof": available_at.upper_bound() if available_at else None,
+         "seq": seq, "fp": fp, "payload": payload.model_dump_json()})
+    conn.execute(text(_DERIVE + " FROM history_versions WHERE version_id=:id"), {"id": version_id})
 
 
 def _link_attachments(conn, run, prepared, version_ids):
-    """附件版本 → 固定父版本（attachment_of）。父页面在同一次读取里就记下它这次的版本；不在（例如按旧库
-    链接补抓附件、父页面没有重抓）就如实记父版本未知，不猜。同一组关系只记一次。"""
+    """附件版本 → 它的父页面版本。父页面在同一次读取里就记下它这次的版本；不在（例如只补抓了附件）就记父版本
+    未知，不猜。同一组关系只记一次。"""
     by_record = {item.source_record_id: version for (item, _), version in zip(prepared, version_ids)}
     for (item, projected), version in zip(prepared, version_ids):
         facts = projected.get("facts") or {}
         if facts.get("role") != "attachment" or not facts.get("parent_record_id"):
             continue
-        parent = facts["parent_record_id"]
-        parent_version = by_record.get(parent)
-        conn.execute(
-            text("""
-              INSERT INTO history_attachment_links
-                (attachment_version_id,parent_record_id,parent_version_id,link_basis,run_id)
-              SELECT :a,:p,:pv,:basis,:run
-              WHERE NOT EXISTS (SELECT 1 FROM history_attachment_links WHERE attachment_version_id=:a
-                                AND parent_record_id=:p AND COALESCE(parent_version_id,'')=COALESCE(:pv,''))
-            """),
-            {
-                "a": version,
-                "p": parent,
-                "pv": parent_version,
-                "basis": "same_run_parent_version" if parent_version else "parent_version_unknown",
-                "run": run["id"],
-            },
-        )
+        parent_version = by_record.get(facts["parent_record_id"])
+        conn.execute(text("""
+          INSERT INTO history_attachment_links (attachment_version_id,parent_record_id,parent_version_id,link_basis,run_id)
+          SELECT :a,:p,:pv,:basis,:run WHERE NOT EXISTS (SELECT 1 FROM history_attachment_links
+            WHERE attachment_version_id=:a AND parent_record_id=:p AND COALESCE(parent_version_id,'')=COALESCE(:pv,''))"""),
+            {"a": version, "p": facts["parent_record_id"], "pv": parent_version, "run": run["id"],
+             "basis": "same_run_parent_version" if parent_version else "parent_version_unknown"})
 
 
-def create_fetch(request: FetchRequest, key: str):
-    from fetch.fetch_job import freeze_demo_fetch, require_fetch_allowed
-
-    require_fetch_allowed(request)
-    body = request.model_dump(mode="json", exclude_none=True)
-    # Preserve hashes of pre-demo public requests and their existing idempotency keys.
-    if not request.is_demo:
-        body.pop("is_demo")
-    if not request.known_stop:  # likewise for a read that is not an incremental one
-        body.pop("known_stop")
-    with history_engine().begin() as conn:
-        stored = None
-        if request.is_demo:
-            existing = conn.execute(
-                text("SELECT id FROM history_runs WHERE idempotency_key=:key"), {"key": key}
-            ).first()
-            if existing is None:
-                stored = {**body, "_demo_fetch": freeze_demo_fetch(request)}
-        row, fresh = _new_run(
-            conn, request.source_id, request.is_demo, "fetch", body, key,
-            ("隔离模拟补采：" if request.is_demo else "公开有界检索：") + request.query,
-            stored_body=stored,
-        )
-        return _view(row), fresh
+# 因为条数、页数或时间用完而停下的读取：来源没读完，状态记 partial
+_LIMIT_STOPS = ("page_budget", "record_budget", "deadline")
 
 
-def job_input(run_id, attempt):
-    with history_engine().begin() as conn:
-        row = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id FOR UPDATE"),
-                {"id": run_id},
-            )
-            .mappings()
-            .first()
-        )
-        if (
-            row is None
-            or row["kind"] != "fetch"
-            or row["state"] != "queued"
-            or row["attempt"] != attempt
-        ):
-            raise HistoryError("stale_attempt", "该任务尝试已失效，不重新发布", 409)
-        _source(conn, row["source_id"])
-        from fetch.fetch_job import require_fetch_allowed
-
-        body = dict(row["request_payload"])
-        frozen = body.pop("_demo_fetch", None)
-        request = FetchRequest.model_validate(body)
-        require_fetch_allowed(request)
-        if request.is_demo != row["is_demo"]:
-            raise HistoryError("fetch_identity_mismatch", "补采任务与模拟身份不匹配", 409)
-        conn.execute(
-            text("UPDATE history_runs SET state='running' WHERE id=:id"), {"id": run_id}
-        )
-        return request, frozen
-
-
-def _reported_coverage(batch):
-    """The parts of a read's coverage that only some plugins report: where to resume, how each attachment went,
-    which items could not be read (url and reason), for a windowed read what each window returned and which
-    intervals may be cut short, and for a read made by an explicit backfill its receipt (ops.who_backfill),
-    which marks the run's new versions as background."""
-    reported = {}
-    if batch.get("next_continuation") is not None:
-        reported["next_continuation"] = batch["next_continuation"]
-    if batch.get("attachment_coverage"):
-        # 本次读取每个附件读没读到（站点插件），留在读取记录里，不进原件
-        reported["attachment_coverage"] = batch["attachment_coverage"][:500]
-    if batch.get("unread_items"):
-        # 本次读取里读不到的条目（站点插件）：没存版本，只在这里留一份
-        reported["unread_items"] = batch["unread_items"][:500]
-    if batch.get("skipped_items"):
-        # 来源列了、但没有内容可存的行（openFDA 待发布的信函）：不是读不到，不影响“读完”，留一份说明
-        reported["skipped_items"] = batch["skipped_items"][:500]
-    for key in ("window_coverage", "truncated_intervals", "backfill"):
-        if key in batch:
-            reported[key] = batch[key]
-    return reported
+def _close_run(conn, run, version_ids, new_ids, coverage, error, now):
+    state = "partial" if error and version_ids else "failed" if error else "completed"
+    if run["kind"] == "fetch" and not error and coverage.get("stop_reason") in _LIMIT_STOPS:
+        state = "partial"
+    coverage = {**coverage, "new_version_count": len(new_ids), "same_version_count": len(version_ids) - len(new_ids),
+                "adopted_count": len(version_ids)}
+    if "backfill" in coverage:  # 回填（ops/who_backfill.py）新存的版本是背景材料，不是新动态
+        coverage["backfill"] = {**coverage["backfill"], "background_version_ids": new_ids}
+    conn.execute(text("""
+        UPDATE history_runs SET state=:state, completed_at=:now, version_ids=CAST(:ids AS jsonb),
+          coverage=CAST(:coverage AS jsonb), error=CAST(:error AS jsonb) WHERE id=:id AND attempt=:attempt"""),
+        {"state": state, "now": now, "ids": canonical(version_ids), "coverage": canonical(coverage),
+         "error": canonical(error), "id": run["id"], "attempt": run["attempt"]})
 
 
 def background_version_ids(conn) -> list[str]:
-    """The versions an explicit backfill created: the receipts in the coverage of its runs (ops.who_backfill) list
-    them as background. Material that is not new activity; a version an earlier run had adopted is not in them."""
+    """回填运行新存的版本（背景材料，clean/measure_runs.py 不测它们）。"""
     return [r[0] for r in conn.execute(text(
         "SELECT DISTINCT jsonb_array_elements_text(coverage->'backfill'->'background_version_ids') FROM history_runs "
         "WHERE jsonb_typeof(coverage->'backfill'->'background_version_ids') = 'array'"))]
 
 
-def finish_fetch(run_id, attempt, batch):
-    with history_engine().begin() as conn:
-        run = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id FOR UPDATE"),
-                {"id": run_id},
-            )
-            .mappings()
-            .one()
-        )
-        if run["attempt"] != attempt or run["state"] != "running":
-            raise HistoryError("stale_attempt", "旧任务尝试不得发布", 409)
-        from fetch.fetch_job import read_demo_fetch, require_fetch_allowed
+# ---- 运行：采集任务和导入 ----------------------------------------------------------------------------------
 
-        body = dict(run["request_payload"])
-        frozen = body.pop("_demo_fetch", None)
-        request = FetchRequest.model_validate(body)
-        require_fetch_allowed(request)
-        if request.is_demo != run["is_demo"]:
-            raise HistoryError("fetch_identity_mismatch", "补采任务与模拟身份不匹配", 409)
-        if request.is_demo:
-            expected = read_demo_fetch(request, frozen)
-            if (batch.get("demo_instance_id") != request.demo_instance_id
-                    or batch.get("input_sha256") != expected["input_sha256"]
-                    or [item.model_dump(mode="json") for item in batch["records"]]
-                       != [item.model_dump(mode="json") for item in expected["records"]]):
-                raise HistoryError("demo_input_invalid", "模拟补采结果与冻结原件不匹配", 422)
-            batch = expected
-        prepared = [
-            (item, project_record(run["source_id"], item)) for item in batch["records"]
-        ]
-        coverage = {
-            key: batch[key]
-            for key in (
-                "complete",
-                "upstream_pagination_exhausted",
-                "stop_reason",
-                "requests",
-                "bytes",
-                "source_total",
-            )
-        }
-        coverage.update(_reported_coverage(batch))
-        if request.is_demo:
-            coverage.update(
-                is_demo=True, fetch_mode="simulated", demo_instance_id=request.demo_instance_id,
-                input_sha256=batch["input_sha256"],
-            )
-        coverage.update(
-            mode="bounded_demo_query" if request.is_demo else "bounded_public_query",
-            limitations=[
-                "隔离模拟包的字面查询与有界采用；不是外部公开采集或完整领域队列"
-                if request.is_demo else
-                "有界公开检索不是完整历史队列；不据此训练成功项目筛选后的伪队列"
-            ],
-        )
-        if batch.get("count_drift"):
-            coverage["count_drift"] = batch["count_drift"]
-            coverage["limitations"].append(
-                "来源命中数在翻页中途下降；按上游结束标记收尾，已读数少于最初命中数"
-            )
-        _publish(
-            conn,
-            run,
-            prepared,
-            AvailabilityProof(kind="unverified"),
-            _now(conn),
-            coverage,
-            error=batch["error"],
-        )
-        return _view(
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id"), {"id": run_id}
-            )
-            .mappings()
-            .one()
-        )
+
+def _view(row):
+    values = {key: row[key] for key in RunView.model_fields if key in row}
+    return RunView(**{**values, "id": str(row["id"])})
+
+
+def _run(conn, run_id, *, lock=False):
+    row = conn.execute(text("SELECT * FROM history_runs WHERE id=:id" + (" FOR UPDATE" if lock else "")),
+                       {"id": run_id}).mappings().first()
+    if row is None:
+        raise HistoryError("run_not_found", "任务不存在", 404)
+    return row
+
+
+def read_run(run_id):
+    with history_engine().begin() as conn:
+        row = _run(conn, run_id)
+        _source(conn, row["source_id"])
+        return _view(row)
+
+
+def _new_run(conn, source_id, is_demo, kind, body, key, scope):
+    """新建一次运行，状态 queued。带了幂等键而且这个键用过：返回原来那次（fresh=False），不再建。"""
+    _source(conn, source_id)
+    key = key or str(uuid.uuid4())
+    row = conn.execute(text("""
+        INSERT INTO history_runs (id,source_id,is_demo,kind,state,idempotency_key,request_payload,scope_description)
+        VALUES (:id,:source,:demo,:kind,'queued',:key,CAST(:body AS jsonb),:scope)
+        ON CONFLICT (idempotency_key) DO NOTHING RETURNING *"""),
+        {"id": str(uuid.uuid4()), "source": source_id, "demo": is_demo, "kind": kind, "key": key,
+         "body": canonical(body), "scope": scope}).mappings().first()
+    if row is not None:
+        return row, True
+    return conn.execute(text("SELECT * FROM history_runs WHERE idempotency_key=:key"), {"key": key}).mappings().one(), False
+
+
+LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥 legacy_documents 已退役：不再写入，旧版本按旧编号仍可读")
+
+
+def import_archive(request: ArchiveImport, key: str | None = None):
+    """导入一包原件（场景回放、图谱发布、本地文件），和抓取一样存成版本。proof.available_at 给了的，这批新版本在
+    public_history_reconstruction 模式下从那个时间起可见。图包在导入前由 graph/publish/history_graph.py 核对。"""
+    if request.source_id == "legacy_documents":
+        raise HistoryError(*LEGACY_RETIRED, 410)
+    prepared = [(item, project_record(request.source_id, item)) for item in request.records]
+    body = request.model_dump(mode="json")
+    body["records"] = [{"source_record_id": r.source_record_id, "record_kind": r.record_kind}
+                       for r in request.records]  # 原件已存在版本里，运行只记清单
+    with history_engine().begin() as conn:
+        run, fresh = _new_run(conn, request.source_id, request.is_demo, "archive", body, key,
+                              request.scope_description)
+        if fresh:
+            coverage = {"declared_count": request.declared_count, "complete": request.declared_complete,
+                        "stop_reason": "end_of_declared_manifest"}
+            _publish(conn, run, prepared, _now(conn), coverage,
+                     available_at=request.proof.available_at if request.proof else None)
+        return _view(_run(conn, run["id"]))
+
+
+def create_fetch(request: FetchRequest, key: str | None = None):
+    """建一条采集任务（还没读）。返回 (运行, 是否新建)：幂等键用过就是原来那条。"""
+    with history_engine().begin() as conn:
+        row, fresh = _new_run(conn, request.source_id, False, "fetch", request.model_dump(mode="json", exclude_none=True),
+                              key, "公开有界检索：" + request.query)
+        return _view(row), fresh
+
+
+def job_input(run_id, attempt) -> FetchRequest:
+    """采集作业开始：任务从 queued 改成 running，返回要读的请求。"""
+    with history_engine().begin() as conn:
+        row = _run(conn, run_id, lock=True)
+        if row["kind"] != "fetch" or row["state"] != "queued" or row["attempt"] != attempt:
+            raise HistoryError("stale_attempt", "该任务已经在跑或跑完了", 409)
+        _source(conn, row["source_id"])
+        conn.execute(text("UPDATE history_runs SET state='running' WHERE id=:id"), {"id": run_id})
+        return FetchRequest.model_validate(row["request_payload"])
+
+
+# 读取结果里原样记进运行 coverage 的部分（不是每个读取插件都有）
+REPORTED = ("complete", "upstream_pagination_exhausted", "stop_reason", "requests", "bytes", "source_total",
+            "next_continuation", "attachment_coverage", "unread_items", "skipped_items", "window_coverage",
+            "truncated_intervals", "backfill", "count_drift")
+
+
+def finish_fetch(run_id, attempt, batch):
+    """采集作业读完：把读到的原件存成版本，记下这次读取的情况（读到哪、为什么停、哪些没读到）。"""
+    with history_engine().begin() as conn:
+        run = _run(conn, run_id, lock=True)
+        if run["attempt"] != attempt or run["state"] != "running":
+            raise HistoryError("stale_attempt", "旧任务尝试不得存版本", 409)
+        prepared = [(item, project_record(run["source_id"], item)) for item in batch["records"]]
+        coverage = {key: batch.get(key) for key in REPORTED[:6]}
+        coverage.update({key: batch[key] for key in REPORTED[6:] if batch.get(key)})
+        for key in ("attachment_coverage", "unread_items", "skipped_items"):
+            if key in coverage:
+                coverage[key] = coverage[key][:500]
+        _publish(conn, run, prepared, _now(conn), coverage, error=batch.get("error"))
+        return _view(_run(conn, run_id))
 
 
 def fail_job(run_id, attempt, code, message):
     with history_engine().begin() as conn:
-        conn.execute(
-            text("""
-          UPDATE history_runs SET state='failed',completed_at=clock_timestamp(),
-            error=CAST(:error AS jsonb)
-          WHERE id=:id AND attempt=:attempt AND state IN ('queued','running')
-        """),
-            {
-                "id": run_id,
-                "attempt": attempt,
-                "error": canonical({"code": code, "message": message}),
-            },
-        )
+        conn.execute(text("""
+          UPDATE history_runs SET state='failed', completed_at=clock_timestamp(), error=CAST(:error AS jsonb)
+          WHERE id=:id AND attempt=:attempt AND state IN ('queued','running')"""),
+            {"id": run_id, "attempt": attempt, "error": canonical({"code": code, "message": message})})
 
 
-def enqueue_failed(run_id, attempt):
-    with history_engine().begin() as conn:
-        conn.execute(
-            text("""
-          UPDATE history_runs SET state='enqueue_failed',error=CAST(:error AS jsonb)
-          WHERE id=:id AND attempt=:attempt AND state='queued'
-        """),
-            {
-                "id": run_id,
-                "attempt": attempt,
-                "error": canonical(
-                    {
-                        "code": "enqueue_unknown",
-                        "message": "队列提交结果未知；先核对固定job_id，再显式恢复",
-                    }
-                ),
-            },
-        )
-
-
-def retry_fetch(run_id, expected_attempt, *, job_inactive):
-    if not job_inactive:
-        raise HistoryError("job_may_be_active", "原任务可能仍在执行，不能重发", 409)
-    from fetch.fetch_job import require_retry_allowed
-
-    require_retry_allowed()
-    with history_engine().begin() as conn:
-        row = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id FOR UPDATE"),
-                {"id": run_id},
-            )
-            .mappings()
-            .first()
-        )
-        if row is None:
-            raise HistoryError("run_not_found", "任务不存在", 404)
-        _source(conn, row["source_id"])
-        if (
-            row["kind"] != "fetch"
-            or row["attempt"] != expected_attempt
-            or row["state"] == "completed"
-        ):
-            raise HistoryError(
-                "retry_conflict", "任务类型、状态或尝试版本不允许恢复", 409
-            )
-        from fetch.fetch_job import require_fetch_allowed
-
-        require_fetch_allowed(_view(row))
-        attempt = expected_attempt + 1
-        history = list(row["attempts"])
-        if not any(item["attempt"] == expected_attempt for item in history):
-            history.append(
-                {
-                    "attempt": expected_attempt,
-                    "state": row["state"],
-                    "error": row["error"]
-                    or {
-                        "code": "recovered_after_inactive_job",
-                        "message": "已核对原RQ任务不再活动",
-                    },
-                    "version_ids": list(row["version_ids"]),
-                }
-            )
-        conn.execute(
-            text("""
-          UPDATE history_runs SET state='queued',attempt=:attempt,job_id=:job,completed_at=NULL,
-            error=NULL,attempts=CAST(:history AS jsonb) WHERE id=:id
-        """),
-            {
-                "attempt": attempt,
-                "job": "history-" + run_id + "-" + str(attempt),
-                "history": canonical(history),
-                "id": run_id,
-            },
-        )
-        return _view(
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id"), {"id": run_id}
-            )
-            .mappings()
-            .one()
-        )
-
-
-def run_job_id(run_id):
-    with history_engine().begin() as conn:
-        row = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id"), {"id": run_id}
-            )
-            .mappings()
-            .first()
-        )
-        if row is None:
-            raise HistoryError("run_not_found", "任务不存在", 404)
-        _source(conn, row["source_id"])
-        return row["job_id"]
-
-
-def _signature_secret():
-    secret = os.environ.get("DATAFABRIC_HISTORY_READ_TOKEN", "")
-    if not secret:
-        raise HistoryError("history_not_configured", "历史读取凭据未配置", 503)
-    return secret.encode()
-
-
-def _cursor(payload):
-    raw = canonical(payload).encode()
-    packed = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    return (
-        packed
-        + "."
-        + hmac.new(_signature_secret(), packed.encode(), hashlib.sha256).hexdigest()
-    )
-
-
-def _decode_cursor(value, binding):
-    try:
-        packed, sig = value.rsplit(".", 1)
-        if not hmac.compare_digest(
-            sig,
-            hmac.new(_signature_secret(), packed.encode(), hashlib.sha256).hexdigest(),
-        ):
-            raise ValueError
-        payload = json.loads(
-            base64.urlsafe_b64decode(packed + "=" * (-len(packed) % 4))
-        )
-        if payload["binding"] != binding:
-            raise ValueError
-        return payload
-    except (ValueError, KeyError, TypeError):
-        raise HistoryError(
-            "invalid_cursor", "分页游标不匹配来源、范围、模式或截止时间", 422
-        ) from None
+# ---- 读 -----------------------------------------------------------------------------------------------
 
 
 def _cutoff(value):
@@ -1091,6 +362,7 @@ def _cutoff(value):
 
 
 def _eligibility(mode):
+    """这个模式下，截止时间 :cutoff 时版本可见的条件。"""
     if mode in ("current", "operational_replay"):
         return "first_seen_at <= :cutoff"
     if mode == "public_history_reconstruction":
@@ -1098,93 +370,25 @@ def _eligibility(mode):
     raise HistoryError("unsupported_mode", "不支持该历史读取模式")
 
 
-# 整源字面检索（ILIKE 扫正文）只在不大的来源上做；超过这个版本数立即返回 query_budget，引导用 WeKnora 检索
-# （POST /api/history/search）。给了记录编号或采用范围的读取不受影响。
-LITERAL_SEARCH_MAX_VERSIONS = 20000
+def _derived_mode(source_id, mode):
+    """图谱和旧文档桥没有公开历史可见时间，不能按 public_history_reconstruction 读。"""
+    if source_id in {"primekg_graph", "reviewed_graph", "legacy_documents"} and mode == "public_history_reconstruction":
+        raise HistoryError("graph_history_unsupported", "图谱和旧文档桥没有公开历史可见时间，只能按首次看到的时间读")
 
 
-def _read_filters(
-    conn, source_id, is_demo, mode, cutoff, max_seq, run_id, ids, terms, kind
-):
+def _open_read(conn, source_id, mode, cutoff):
+    """每个按模式读的接口开头都一样：来源可读、模式支持、截止时间不晚于现在。返回 UTC 截止时间。"""
+    _derived_mode(source_id, mode)
     source = _source(conn, source_id)
-    if terms and not ids and not run_id and source["published_seq"] > LITERAL_SEARCH_MAX_VERSIONS:
-        raise HistoryError(
-            "query_budget",
-            "该来源有 " + str(source["published_seq"]) + " 个版本，整源字面检索超出读取预算；"
-            "请用 POST /api/history/search（WeKnora 检索），或给出记录编号、采用范围",
-            422,
-        )
     cutoff = _cutoff(cutoff)
     if cutoff > _now(conn):
         raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
-    if (
-        len(ids) > 5000
-        or len(terms) > 3
-        or any(not 2 <= len(term) <= 120 for term in terms)
-    ):
-        raise HistoryError("query_budget", "来源ID或字面检索词超过读取预算")
-    where = ["source_id=:source", "is_demo=:demo", "published_seq<=:max_seq"]
-    params = {
-        "source": source_id,
-        "demo": is_demo,
-        "cutoff": cutoff,
-        "max_seq": max_seq,
-    }
-    run = None
-    if run_id:
-        run = (
-            conn.execute(
-                text("SELECT * FROM history_runs WHERE id=:id"), {"id": run_id}
-            )
-            .mappings()
-            .first()
-        )
-        if run is None or run["source_id"] != source_id or run["is_demo"] != is_demo:
-            raise HistoryError("manifest_mismatch", "采用范围与来源或demo类别不匹配")
-        if run["state"] not in ("completed", "partial", "failed"):
-            raise HistoryError(
-                "manifest_not_ready", "采用任务尚未形成可读取的冻结范围", 409
-            )
-        # run_id冻结原站ID清单，版本仍在本次max_seq/cutoff下选择。
-        # 清单不是过去已知事实；未来才出现的成员单独计not_visible。
-        declared_ids = run["request_payload"].get("scope_record_ids") or [
-            item["source_record_id"]
-            for item in run["request_payload"].get("records", [])
-        ]
-        if run["kind"] == "fetch":
-            declared_ids = (
-                conn.execute(
-                    text(
-                        "SELECT source_record_id FROM history_versions WHERE version_id=ANY(CAST(:ids AS text[]))"
-                    ),
-                    {"ids": run["version_ids"]},
-                )
-                .scalars()
-                .all()
-            )
-        where.append("source_record_id=ANY(CAST(:declared_ids AS text[]))")
-        params["declared_ids"] = declared_ids
-    if ids:
-        where.append("source_record_id=ANY(CAST(:native_ids AS text[]))")
-        params["native_ids"] = sorted(set(ids))
-    if kind:
-        where.append("record_kind=:kind")
-        params["kind"] = kind
-    term_clauses = []
-    for index, term in enumerate(sorted(set(terms))):
-        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        term_clauses.append(
-            "(payload->>'title' ILIKE :term"
-            + str(index)
-            + " ESCAPE '\\' OR payload->>'clean_text' ILIKE :term"
-            + str(index)
-            + " ESCAPE '\\')"
-        )
-        params["term" + str(index)] = "%" + escaped + "%"
-    return " AND ".join(where), params, run, " AND ".join(term_clauses) or "true"
+    return source, cutoff
 
 
-# 同一归档可见点内只用已解析的来源修订日期排先后，不用本地导入顺序冒充源顺序。
+# 一条记录"在截止时间下可见的版本"：先按模式和截止时间筛，再排第一。排序：来源自己的版本先于 legacy 迁入的；
+# 再看最晚的公开可见/首次看到时间，来源自己的更新时间，最后看发布序号。排序键在 history_version_rank
+# （V021 以前的版本没有那一行，就从载荷里现算，结果一样）。
 _SOURCE_UPDATED_FROM_PAYLOAD = """CASE payload->'source_updated_at'->>'precision'
  WHEN 'instant' THEN (payload->'source_updated_at'->>'value')::timestamptz
  WHEN 'day' THEN (((payload->'source_updated_at'->>'value')::date + interval '1 day' - interval '1 microsecond') AT TIME ZONE 'UTC')
@@ -1192,513 +396,259 @@ _SOURCE_UPDATED_FROM_PAYLOAD = """CASE payload->'source_updated_at'->>'precision
  WHEN 'year' THEN ((((payload->'source_updated_at'->>'value') || '-01-01')::date + interval '1 year' - interval '1 microsecond') AT TIME ZONE 'UTC')
  ELSE NULL END"""
 _ROLE_FROM_PAYLOAD = "COALESCE(payload->'facts'->>'publication_role','source_record')"
-# V021: ranking reads the derived keys; a version not derived yet (no rank row, publication_role NULL) is
-# ranked from its payload, the same values, so a partial backfill changes no result.
 _VERSIONS = "history_versions LEFT JOIN history_version_rank USING (version_id)"
 _ROLE = "COALESCE(publication_role," + _ROLE_FROM_PAYLOAD + ")"
 _SOURCE_UPDATED_ORDER = (
     "(CASE WHEN publication_role IS NULL THEN " + _SOURCE_UPDATED_FROM_PAYLOAD + " ELSE source_updated_rank END)"
 )
-# 一条记录的“最新版本”：原生版本先于 v3 6.3 迁入的旧版本（旧内容晚迁入不抢原生现版，也不让原生的撤回/
-# 更正“复活”）；同类之间看最晚的证明或首次可见时间，再看来源自己的更新时间，最后看发布序号。
-# 来源更新时间只在前一项相同时才排先后，不表示“来源改过”；它是什么时间看该字段自带的 meaning（GDELT 的是观察时间）。
-# 当前头版、截止时间下可见的版本（先按模式和截止时间筛，再排序）、变更列表的头版都用这一条规则。
 _LATEST = (
     "(" + _ROLE + "='migrated_record'),"
     "COALESCE(proof_available_at,first_seen_at) DESC," + _SOURCE_UPDATED_ORDER + " DESC NULLS LAST,published_seq DESC"
 )
+_DERIVE = (
+    "INSERT INTO history_version_rank(version_id,publication_role,source_updated_rank) SELECT version_id,"
+    + _ROLE_FROM_PAYLOAD + "," + _SOURCE_UPDATED_FROM_PAYLOAD
+)
 
 
 def _ranked(where, mode):
-    """截止资格先筛（不含 context_reference），再按 _LATEST 给每条记录的版本排序；ranked 里 n=1 是此刻可见的版本。
-    list_records 与 visible_versions 共用这一段，可见性只有一套规则。"""
+    """WITH 子句：符合 where、在截止时间下可见的版本，每条记录按 _LATEST 编号；n=1 就是此刻可见的那个。"""
     return (
         "WITH eligible AS (SELECT * FROM " + _VERSIONS + " WHERE " + where + " AND " + _eligibility(mode)
         + " AND " + _ROLE + "!='context_reference'), ranked AS (SELECT *,row_number() OVER "
         "(PARTITION BY source_record_id ORDER BY " + _LATEST + ") n FROM eligible) "
     )
-_DERIVE = (
-    "INSERT INTO history_version_rank(version_id,publication_role,source_updated_rank) SELECT version_id,"
-    + _ROLE_FROM_PAYLOAD
-    + ","
-    + _SOURCE_UPDATED_FROM_PAYLOAD
-)
 
 
 def backfill_rank(source_id, *, batch=500):
-    """Derive the ranking keys of up to `batch` versions of one source written before V021; returns how
-    many were added (0 when done). Idempotent; reads each payload once; history_versions is not touched."""
+    """给 V021 以前存的版本补排序键（ops/backfill_history_rank.py），一次最多 batch 个；返回补了几个。"""
     with history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '30000ms'"))
-        return conn.execute(
-            text(
-                _DERIVE + " FROM history_versions WHERE version_id IN (SELECT h.version_id FROM history_versions h "
-                "LEFT JOIN history_version_rank r ON r.version_id=h.version_id "
-                "WHERE h.source_id=:source AND r.version_id IS NULL LIMIT :batch)"
-            ),
-            {"source": source_id, "batch": batch},
-        ).rowcount
+        return conn.execute(text(
+            _DERIVE + " FROM history_versions WHERE version_id IN (SELECT h.version_id FROM history_versions h "
+            "LEFT JOIN history_version_rank r ON r.version_id=h.version_id "
+            "WHERE h.source_id=:source AND r.version_id IS NULL LIMIT :batch)"),
+            {"source": source_id, "batch": batch}).rowcount
 
 
-def legacy_retired() -> bool:
-    """v3 6.3: the legacy_documents bridge is retired - nothing new is written to it (documents come in through
-    their real sources, collected or migrated) and no new query chooses it; versions already there stay readable
-    by their old ids (reports, graphs, audit, aliases). There is no environment switch that reopens it. The function
-    is the one place the old writer's code paths ask, kept for the contract tests of the old writer, which replace it
-    explicitly; the service never does."""
-    return True
+# 整源字面检索（ILIKE 扫正文）只在不大的来源上做；大来源请用 POST /api/history/search（WeKnora 检索）
+LITERAL_SEARCH_MAX_VERSIONS = 20000
 
 
-LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥已退役（v3 6.3）：不再写入、不再作新查询的来源；文档经各真实来源进入，"
-                  "旧版本按旧编号仍可读")
+def _read_filters(conn, source, is_demo, cutoff, max_seq, run_id, ids, terms, kind):
+    """list_records 的筛选条件 (where, 参数, 字面检索条件)。run_id：只读这次运行存下（或用到）的那些记录。"""
+    if terms and not ids and not run_id and source["published_seq"] > LITERAL_SEARCH_MAX_VERSIONS:
+        raise HistoryError("query_budget", f"该来源有 {source['published_seq']} 个版本，整源字面检索太慢；"
+                           "请用 POST /api/history/search，或给出记录编号、运行编号", 422)
+    if len(ids) > 5000 or len(terms) > 3 or any(not 2 <= len(term) <= 120 for term in terms):
+        raise HistoryError("query_budget", "记录编号最多 5000 个，检索词最多 3 个、每个 2–120 字")
+    where = ["source_id=:source", "is_demo=:demo", "published_seq<=:max_seq"]
+    params = {"source": source["source_id"], "demo": is_demo, "cutoff": cutoff, "max_seq": max_seq}
+    if run_id:
+        run = _run(conn, run_id)
+        if run["source_id"] != source["source_id"] or run["is_demo"] != is_demo:
+            raise HistoryError("manifest_mismatch", "运行与来源或 demo 类别不匹配")
+        if run["state"] not in ("completed", "partial", "failed"):
+            raise HistoryError("manifest_not_ready", "运行还没结束", 409)
+        where.append("source_record_id IN (SELECT source_record_id FROM history_versions "
+                     "WHERE version_id=ANY(CAST(:run_versions AS text[])))")
+        params["run_versions"] = list(run["version_ids"])
+    if ids:
+        where.append("source_record_id=ANY(CAST(:ids AS text[]))")
+        params["ids"] = sorted(set(ids))
+    if kind:
+        where.append("record_kind=:kind")
+        params["kind"] = kind
+    term_clauses = []
+    for index, term in enumerate(sorted(set(terms))):
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        term_clauses.append(f"(payload->>'title' ILIKE :term{index} ESCAPE '\\' "
+                            f"OR payload->>'clean_text' ILIKE :term{index} ESCAPE '\\')")
+        params[f"term{index}"] = "%" + escaped + "%"
+    return " AND ".join(where), params, " AND ".join(term_clauses) or "true"
 
 
-def _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit, window):
-    """Cursor binding: a cursor is only valid for the exact read it was issued for."""
-    binding = {
-        "source": source_id,
-        "demo": is_demo,
-        "mode": mode,
-        "cutoff": _cutoff(cutoff).isoformat(),
-        "run": run_id,
-        "ids": sorted(set(source_record_ids)),
-        "terms": sorted(set(terms)),
-        "kind": record_kind,
-        "limit": limit,
-    }
-    if window:  # a read without a window keeps the binding it always had
-        binding["window"] = [moment.isoformat() for moment in window]
-    return sha256(canonical(binding))
-
-
-# A lead listing reads a source's records by the time its source_updated_at holds. For GDELT that is the time GDELT
-# first observed the article (meaning gdelt_first_observed), the very field its read windows are cut by.
+# GDELT 线索按它自己的观察时间（source_updated_at，meaning gdelt_first_observed）分窗口读；读每个窗口时留下回执
+# （fetch/gdelt_news.py 写进运行的 coverage.window_coverage）。按窗口列线索时，把这些回执一并给出。
 LEAD_WINDOW_SOURCES = ("gdelt_doc",)
-WINDOW_LIMITATION = ["窗口回执只记本系统对该窗口的读取：条数少于上限只说明没碰到上限，不是来源在该窗口的全量；"
-                     "possibly_truncated、failed、not_read 的区间可能漏了线索"]
+MAX_WINDOW_RUNS = 200
 
 
 def _lead_window(source_id, window):
-    """The (start, end) UTC range of a lead listing, or None when no window is asked for."""
+    """线索窗口 (起, 止) 的 UTC 时间，不按窗口读时为 None。"""
     if window == (None, None):
         return None
     try:
         bounds = (utc(window[0]), utc(window[1]))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         bounds = None
     if source_id not in LEAD_WINDOW_SOURCES or bounds is None or bounds[0] >= bounds[1]:
-        raise HistoryError("invalid_window", "线索窗口须给出含时区的起止时间（起点早于终点），且只适用于 GDELT 新闻索引", 422)
+        raise HistoryError("invalid_window", "线索窗口须给出含时区的起止时间（起点早于终点），且只适用于 GDELT", 422)
     return bounds
 
 
-def _in_window(where, params, window):
-    """`where` narrowed to the versions whose source_updated_at lies in [start, end)."""
-    if window is None:
-        return where
-    params.update(window_start=window[0], window_end=window[1])
-    return where + " AND " + _SOURCE_UPDATED_ORDER + ">=:window_start AND " + _SOURCE_UPDATED_ORDER + "<:window_end"
+def _window_receipts(conn, source_id, is_demo, cutoff, window):
+    """这个窗口里各次读取留下的回执：截止时间前结束、读取范围碰到这个窗口的运行；同一个检索词同一个区间，
+    以最近一次为准（前一次没读到的，后一次读了）。返回 (回执, 可能没读全的区间)。"""
+    rows = conn.execute(text(
+        "SELECT request_payload->>'query' AS query, coverage FROM history_runs "
+        "WHERE source_id=:source AND is_demo=:demo AND kind='fetch' AND state IN ('completed','partial','failed') "
+        "AND completed_at<=:cutoff AND jsonb_typeof(coverage->'window_coverage')='array' "
+        "AND COALESCE((request_payload->>'updated_until')::timestamptz,completed_at)>:start "
+        "AND COALESCE((request_payload->>'updated_since')::timestamptz,completed_at-interval '24 hours')<:end "
+        "ORDER BY completed_at,id LIMIT :limit"),
+        {"source": source_id, "demo": is_demo, "cutoff": cutoff, "start": window[0], "end": window[1],
+         "limit": MAX_WINDOW_RUNS + 1}).mappings().all()
+    if len(rows) > MAX_WINDOW_RUNS:
+        raise HistoryError("window_too_wide", f"窗口内的读取超过 {MAX_WINDOW_RUNS} 次，请缩小窗口", 422)
+    latest = {}
+    for row in rows:
+        for receipt in row["coverage"]["window_coverage"]:
+            start, end = receipt.get("start"), receipt.get("end")
+            if start is None or end is None or (parse_timestamp(start) < window[1] and parse_timestamp(end) > window[0]):
+                latest[(row["query"], start, end)] = receipt
+    receipts = list(latest.values())
+    return receipts, [{"start": r.get("start"), "end": r.get("end")} for r in receipts if r.get("possibly_truncated")]
 
 
-def _window_receipts(conn, source_id, is_demo, run, cutoff, window):
-    """(receipts, truncated intervals) a listing carries: those of the named run, or - for a window without a run -
-    those of the source's finished fetch runs that ended by the cutoff and read a range that meets the window."""
-    if run is not None:
-        runs = [(run["request_payload"].get("query"), run["coverage"])]
-    elif window is None:
-        return [], []
-    else:
-        rows = conn.execute(text(
-            "SELECT request_payload->>'query' AS query,coverage FROM history_runs "
-            "WHERE source_id=:source AND is_demo=:demo AND kind='fetch' AND state IN ('completed','partial','failed') "
-            "AND completed_at<=:cutoff AND jsonb_typeof(coverage->'window_coverage')='array' "
-            "AND COALESCE((request_payload->>'updated_until')::timestamptz,completed_at)>:start "
-            "AND COALESCE((request_payload->>'updated_since')::timestamptz,completed_at-interval '24 hours')<:end "
-            "ORDER BY completed_at,id LIMIT :limit"
-        ), {"source": source_id, "demo": is_demo, "cutoff": _cutoff(cutoff), "start": window[0], "end": window[1],
-            "limit": MAX_RUNS + 1}).mappings().all()
-        if len(rows) > MAX_RUNS:
-            raise HistoryError("window_too_wide", "窗口内的读取运行超过 %d 次，请缩小窗口" % MAX_RUNS, 422)
-        runs = [(row["query"], row["coverage"]) for row in rows]
-    return effective_receipts(runs, window)
-
-
-def _take_page(conn, rows, limit, mode, cutoff):
-    """The records of one page within the response byte budget, and whether more follow."""
-    items, used_bytes = [], 0
+def _page(rows, limit):
+    """一页的版本（不超过响应字节上限）和后面还有没有。"""
+    items, size = [], 0
     for row in rows[:limit]:
         record = HistoryRecord.model_validate(row["payload"])
-        _check_observation_visibility(conn, record, mode, cutoff)
-        record_bytes = len(record.model_dump_json().encode())
-        if used_bytes + record_bytes > MAX_RESPONSE_BYTES:
+        size += len(record.model_dump_json().encode())
+        if size > MAX_RESPONSE_BYTES:
             break
         items.append(record)
-        used_bytes += record_bytes
-    more = len(rows) > len(items)
-    if more and not items:
-        raise HistoryError(
-            "response_budget", "单条来源记录超过响应预算，请联系维护者", 413
-        )
-    return items, more
+    if rows[:limit] and not items:
+        raise HistoryError("response_budget", "单条来源记录超过响应上限", 413)
+    return items, len(rows) > len(items)
 
 
-def _list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered, windows):
-    """What the page does and does not prove about the source; `filtered` = ids/terms/kind narrowed the read."""
-    run_coverage = run["coverage"] if run else {}
-    declared_count = len(set(params.get("declared_ids", []))) if run else None
-    # 对声明包再筛ID/词/类型属于条件子集，不能继承原队列完整性。
-    complete = bool(
-        run
-        and run_coverage.get("complete")
-        and not filtered
-        and eligible_count == declared_count
-    )
-    return {
-        "mode": run_coverage.get("mode", "adopted_records"),
-        "scope_description": run["scope_description"]
-        if run
-        else "本应用已采用版本；不是原站全量",
-        "complete": complete,
-        "upstream_pagination_exhausted": run_coverage.get(
-            "upstream_pagination_exhausted"
-        ),
-        "as_of": _cutoff(cutoff),
-        "run_id": str(run["id"]) if run else None,
-        "max_seq": max_seq,
-        "declared_count": run_coverage.get("declared_count"),
-        "declared_scope_count": declared_count,
-        "time_eligible_count": eligible_count,
-        "not_visible_in_scope": max(0, declared_count - eligible_count)
-        if declared_count is not None
-        else 0,
-        "adopted_count": run_coverage.get("adopted_count", 0),
-        "stop_reason": "page_has_more" if more else "end_of_frozen_selection",
-        "limitations": list(run_coverage.get("limitations", []))
-        + [
-            "一页结束不证明来源全量；候选词/ID筛选不构成完整同期队列",
-            "截止资格先筛后选latest；补录和身份补充不倒填首次可见时间",
-        ]
-        + (WINDOW_LIMITATION if windows[0] else []),
-        "window_coverage": windows[0],
-        "truncated_intervals": windows[1],
-    }
-
-
-def _count_ineligible(conn, base, eligible, params):
-    return (
-        conn.execute(
-            text(
-                "SELECT count(*) FILTER (WHERE NOT ("
-                + eligible
-                + ")) AS excluded FROM ("
-                + base
-                + ") b"
-            ),
-            params,
-        )
-        .mappings()
-        .one()["excluded"]
-    )
-
-
-def _page_rows(conn, where, mode, term_filter, params):
-    return (
-        conn.execute(
-            text(
-                _ranked(where, mode)
-                + """
-          SELECT payload FROM ranked WHERE n=1 AND source_record_id>:last AND """
-                + term_filter
-                + """ ORDER BY source_record_id LIMIT :limit
-        """
-            ),
-            params,
-        )
-        .mappings()
-        .all()
-    )
-
-
-def _count_eligible_records(conn, base, eligible, params):
-    return conn.execute(
-        text(
-            "SELECT count(DISTINCT source_record_id) FROM ("
-            + base
-            + " AND "
-            + eligible
-            + ") b"
-        ),
-        params,
-    ).scalar_one()
-
-
-def list_records(
-    source_id,
-    is_demo,
-    mode,
-    cutoff,
-    *,
-    run_id=None,
-    source_record_ids=(),
-    terms=(),
-    record_kind=None,
-    limit=25,
-    cursor=None,
-    window=(None, None),
-):
-    if source_id == "legacy_documents" and legacy_retired() and not source_record_ids:
-        raise HistoryError(*LEGACY_RETIRED, 410)  # 按旧编号（source_record_ids）的读取不受影响
-    _derived_mode(source_id, mode)
+def list_records(source_id, is_demo, mode, cutoff, *, run_id=None, source_record_ids=(), terms=(), record_kind=None,
+                 limit=25, cursor=None, window=(None, None)):
+    """GET /api/history/records：每条记录在截止时间下可见的版本，按记录号排序分页。cursor 是上一页给的
+    "发布序号上界|最后一个记录号"，原样传回即可。"""
+    if source_id == "legacy_documents" and not source_record_ids:
+        raise HistoryError(*LEGACY_RETIRED, 410)  # 按旧编号读不受影响
     if not 1 <= limit <= 100:
         raise HistoryError("query_budget", "每页条数须为1至100")
     window = _lead_window(source_id, window)
-    binding = _list_binding(source_id, is_demo, mode, cutoff, run_id, source_record_ids, terms, record_kind, limit, window)
-    position = _decode_cursor(cursor, binding) if cursor else None
     with history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        source = _source(conn, source_id)
-        max_seq = position["max_seq"] if position else source["published_seq"]
-        where, params, run, term_filter = _read_filters(
-            conn,
-            source_id,
-            is_demo,
-            mode,
-            cutoff,
-            max_seq,
-            run_id,
-            source_record_ids,
-            terms,
-            record_kind,
-        )
-        where = _in_window(where, params, window)
-        membership_hash = sha256(canonical(params.get("declared_ids", [])))
-        if position and position.get("membership_hash") != membership_hash:
-            raise HistoryError(
-                "manifest_changed",
-                "该读取清单已改变，请重新开始读取；旧游标不切换范围",
-                409,
-            )
-        base = "SELECT * FROM " + _VERSIONS + " WHERE " + where
-        eligible = (
-            _eligibility(mode)
-            + " AND "
-            + _ROLE
-            + "!='context_reference'"
-        )
-        excluded = _count_ineligible(conn, base, eligible, params)
-        params.update(last=position["last"] if position else "", limit=limit + 1)
-        rows = _page_rows(conn, where, mode, term_filter, params)
-        items, more = _take_page(conn, rows, limit, mode, cutoff)
-        next_cursor = (
-            _cursor(
-                {
-                    "binding": binding,
-                    "max_seq": max_seq,
-                    "last": items[-1].source_record_id,
-                    "membership_hash": membership_hash,
-                }
-            )
-            if more
-            else None
-        )
-        eligible_count = _count_eligible_records(conn, base, eligible, params)
-        filtered = bool(source_record_ids or terms or record_kind or window)
-        windows = _window_receipts(conn, source_id, is_demo, run, cutoff, window)
-        return RecordCollection(
-            items=items,
-            next_cursor=next_cursor,
-            excluded_counts={"ineligible_version_count": excluded},
-            coverage=_list_coverage(run, params, eligible_count, max_seq, cutoff, more, filtered, windows),
-        )
+        source, cutoff = _open_read(conn, source_id, mode, cutoff)
+        max_seq, last = source["published_seq"], ""
+        if cursor:
+            try:
+                max_seq, last = int(cursor.split("|", 1)[0]), cursor.split("|", 1)[1]
+            except (ValueError, IndexError):
+                raise HistoryError("invalid_cursor", "分页游标无效", 422) from None
+        where, params, term_filter = _read_filters(conn, source, is_demo, cutoff, max_seq, run_id,
+                                                   source_record_ids, terms, record_kind)
+        if window:
+            where += " AND " + _SOURCE_UPDATED_ORDER + ">=:window_start AND " + _SOURCE_UPDATED_ORDER + "<:window_end"
+            params.update(window_start=window[0], window_end=window[1])
+        rows = conn.execute(text(
+            _ranked(where, mode) + "SELECT payload FROM ranked WHERE n=1 AND source_record_id>:last AND "
+            + term_filter + " ORDER BY source_record_id LIMIT :limit"),
+            {**params, "last": last, "limit": limit + 1}).mappings().all()
+        items, more = _page(rows, limit)
+        coverage = {"max_seq": max_seq, "has_more": more}
+        if window:
+            coverage["window_coverage"], coverage["truncated_intervals"] = _window_receipts(
+                conn, source_id, is_demo, cutoff, window)
+        return RecordCollection(items=items, coverage=coverage,
+                                next_cursor=f"{max_seq}|{items[-1].source_record_id}" if more else None)
 
 
 def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff):
-    _derived_mode(source_id, mode)
+    """GET /api/history/versions/{version_id}：这个固定版本，只要它在这个模式和截止时间下可见。"""
     if not re.fullmatch(r"[0-9a-f]{64}", version_id):
         raise HistoryError("version_not_found", "版本不存在", 404)
     with history_engine().begin() as conn:
-        _source(conn, source_id)
-        cutoff = _cutoff(cutoff)
-        if cutoff > _now(conn):
-            raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
-        row = (
-            conn.execute(
-                text(
-                    """
-            SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source
-             AND source_record_id=:native AND is_demo=:demo AND """
-                    + _eligibility(mode)
-                ),
-                {
-                    "id": version_id,
-                    "source": source_id,
-                    "native": source_record_id,
-                    "demo": is_demo,
-                    "cutoff": cutoff,
-                },
-            )
-            .mappings()
-            .first()
-        )
+        _, cutoff = _open_read(conn, source_id, mode, cutoff)
+        row = conn.execute(text(
+            "SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source "
+            "AND source_record_id=:record AND is_demo=:demo AND " + _eligibility(mode)),
+            {"id": version_id, "source": source_id, "record": source_record_id, "demo": is_demo, "cutoff": cutoff},
+        ).mappings().first()
         if row is None:
-            raise HistoryError(
-                "version_not_found", "该版本在当前许可、范围或截止时间下不可见", 404
-            )
+            raise HistoryError("version_not_found", "该版本在当前来源、范围或截止时间下不可见", 404)
         record = HistoryRecord.model_validate(row["payload"])
-        _check_observation_visibility(conn, record, mode, cutoff)
-        if record.record_kind == "graph":
-            from graph.publish.history_graph import _check_graph_document_visibility
-
-            _check_graph_document_visibility(conn, record, mode, cutoff)
         if source_id == "legacy_documents":
             record = _with_legacy_alias(conn, record, mode, cutoff)
         return record
 
 
 def _with_legacy_alias(conn, record, mode, cutoff):
-    """v3 6.3: a legacy version read by its old id stays exactly that version (content, locators, times) and
-    says what it became. Migrated: the real source must be readable now, or the old id is blocked too (no way
-    round a revoked source); the alias then reports the real version's visibility at this mode and cutoff and
-    the real record's current version there (withdrawn or not). Pending: its reason; no access is widened."""
+    """按旧编号读 legacy 版本：版本原样，附上它迁成了哪个真实来源的哪个版本（legacy_aliases，fetch/legacy_migration.py）。"""
     from fetch.legacy_migration import alias
 
-    # the bridge's permission is the intersection of its original sites: a revoked site stops its old versions whether
-    # or not they were migrated (the bridge row's own dependency list may be empty)
     site = (record.facts or {}).get("source_site")
     if site:
-        _source(conn, site)
-    target = conn.execute(text(
-        "SELECT real_source_id FROM legacy_aliases WHERE legacy_version_id=:v AND status='imported'"),
-        {"v": record.version_id}).scalar()
-    if target:
-        _source(conn, target)
+        _source(conn, site)  # 原站不可读，旧版本也不可读
     info = alias(conn, record.version_id, mode, cutoff)
     return record.model_copy(update={"migration": info}) if info else record
 
 
 def visible_versions(source_id, is_demo, mode, cutoff, source_record_ids):
-    """每条记录在本模式和截止时间下可见的那个版本 → {source_record_id: version_id}；此时不可见的不在结果里。
-    与 list_records 同一套条件（_read_filters：来源许可、未来截止时间、已发布范围；_ranked：截止资格先筛再取最新），
-    只是不读载荷。供检索命中的校验用（store.retrieval）；来源不可读、模式不支持时照常报错。"""
-    _derived_mode(source_id, mode)
+    """{记录号: 在这个模式和截止时间下可见的版本号}（store/retrieval.py 核对检索命中用）；不可见的不在结果里。"""
     ids = sorted(set(source_record_ids))
     if not 1 <= len(ids) <= 200:
         raise HistoryError("query_budget", "一次最多核对 200 条记录")
     with history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        source = _source(conn, source_id)
-        where, params, _, _ = _read_filters(
-            conn, source_id, is_demo, mode, cutoff, source["published_seq"], None, ids, (), None)
-        rows = conn.execute(text(
-            _ranked(where, mode) + "SELECT source_record_id,version_id FROM ranked WHERE n=1"), params).mappings()
+        source, cutoff = _open_read(conn, source_id, mode, cutoff)
+        where, params, _ = _read_filters(conn, source, is_demo, cutoff, source["published_seq"], None, ids, (), None)
+        rows = conn.execute(text(_ranked(where, mode) + "SELECT source_record_id,version_id FROM ranked WHERE n=1"),
+                            params).mappings()
         return {row["source_record_id"]: row["version_id"] for row in rows}
 
 
-def list_changes(source_id, is_demo, *, after=0, limit=25, cursor=None):
-    if not 0 <= after or not 1 <= limit <= 100:
+def list_changes(source_id, is_demo, *, after=0, limit=25):
+    """GET /api/history/changes：发布序号 after 之后新存的版本，按序号。雷达用它跟新增：下次从 next_after 接着读。"""
+    if after < 0 or not 1 <= limit <= 100:
         raise HistoryError("query_budget", "变更读取参数不合法")
-    binding = sha256(
-        canonical(
-            {"source": source_id, "demo": is_demo, "after": after, "limit": limit}
-        )
-    )
-    pos = _decode_cursor(cursor, binding) if cursor else None
     with history_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        source = _source(conn, source_id)
-        max_seq, last = (
-            (pos["max_seq"], pos["last"]) if pos else (source["published_seq"], after)
-        )
-        rows = (
-            conn.execute(
-                text("""
-          SELECT payload FROM history_versions WHERE source_id=:source AND is_demo=:demo
-           AND published_seq>:last AND published_seq<=:max_seq ORDER BY published_seq LIMIT :limit
-        """),
-                {
-                    "source": source_id,
-                    "demo": is_demo,
-                    "last": last,
-                    "max_seq": max_seq,
-                    "limit": limit + 1,
-                },
-            )
-            .mappings()
-            .all()
-        )
-        items, size = [], 0
-        for row in rows[:limit]:
-            item = HistoryRecord.model_validate(row["payload"])
-            if size + len(item.model_dump_json().encode()) > MAX_RESPONSE_BYTES:
-                break
-            items.append(item)
-            size += len(item.model_dump_json().encode())
-        more = len(rows) > len(items)
-        if more and not items:
-            raise HistoryError("response_budget", "单条记录超过响应预算", 413)
-        # 采用序号不是源事实的新旧顺序；仅本页ID返回固定发布边界内的当前头版。
-        head_ids = [item.source_record_id for item in items]
-        heads = conn.execute(
-            text(
-                "SELECT DISTINCT ON (source_record_id) source_record_id,version_id "
-                "FROM " + _VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
-                "AND published_seq<=:max_seq AND source_record_id=ANY(:ids) "
-                "AND " + _ROLE + "!='context_reference' "
-                "ORDER BY source_record_id," + _LATEST
-            ),
-            {"source": source_id, "demo": is_demo, "max_seq": max_seq, "ids": head_ids},
-        ).mappings()
-        return {
-            "schema_version": "datafabric.history.changes.v1",
-            "current_version_ids": {
-                **dict.fromkeys(head_ids),
-                **{row["source_record_id"]: row["version_id"] for row in heads},
-            },
-            "items": [item.model_dump(mode="json") for item in items],
-            "max_seq": max_seq,
-            "next_after": items[-1].published_seq if more else max_seq,
-            "next_cursor": _cursor(
-                {
-                    "binding": binding,
-                    "max_seq": max_seq,
-                    "last": items[-1].published_seq,
-                }
-            )
-            if more
-            else None,
-            "scope": "committed_adoptions_not_source_change_feed",
-        }
+        max_seq = _source(conn, source_id)["published_seq"]
+        rows = conn.execute(text(
+            "SELECT payload FROM history_versions WHERE source_id=:source AND is_demo=:demo AND published_seq>:after "
+            "AND published_seq<=:max_seq ORDER BY published_seq LIMIT :limit"),
+            {"source": source_id, "demo": is_demo, "after": after, "max_seq": max_seq, "limit": limit + 1},
+        ).mappings().all()
+        items, more = _page(rows, limit)
+        return {"schema_version": "datafabric.history.changes.v1",
+                "items": [item.model_dump(mode="json") for item in items], "max_seq": max_seq,
+                "next_after": items[-1].published_seq if more else max_seq}
 
 
-def _check_observation_visibility(conn, record, mode, cutoff):
-    if record.parser_version != "datafabric.observation.projection.v0.1":
-        return
-    from fetch.observations import observation
-    from fetch.sources import parse_json
+def version_differences(source_id, is_demo, version_ids, mode, cutoff):
+    """GET /api/history/version-differences：每个版本的上一版。版本只在原件指纹变了时才新存，所以有上一版就是
+    原件变了（kind=raw_changed）；没有上一版是这条记录第一次存（first_adoption）；看不到的是 not_visible。"""
+    if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
+        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
+    with history_engine().begin() as conn:
+        _, cutoff = _open_read(conn, source_id, mode, cutoff)
+        visible = _eligibility(mode).replace("proof_available_at", "v.proof_available_at").replace(
+            "first_seen_at", "v.first_seen_at")
+        previous = _eligibility(mode).replace("proof_available_at", "p.proof_available_at").replace(
+            "first_seen_at", "p.first_seen_at")
+        rows = conn.execute(text(
+            "SELECT v.version_id, v.source_record_id, p.version_id AS previous FROM history_versions v "
+            "LEFT JOIN history_versions p ON p.replaced_by=v.version_id AND " + previous + " "
+            "WHERE v.version_id=ANY(:ids) AND v.source_id=:source AND v.is_demo=:demo AND " + visible),
+            {"ids": list(version_ids), "source": source_id, "demo": is_demo, "cutoff": cutoff}).mappings().all()
+    found = {row["version_id"]: row for row in rows}
 
-    item = observation(parse_json(record.raw_content))
-    for ref in (item.basis.ref, item.supersedes):
-        if ref is None:
-            continue
-        _derived_mode(ref.source_id, mode)
-        _source(conn, ref.source_id)
-        original = conn.execute(
-            text(
-                "SELECT payload FROM history_versions WHERE source_id=:source AND source_record_id=:native "
-                "AND version_id=:version AND is_demo=:demo AND " + _eligibility(mode)
-            ),
-            {
-                "source": ref.source_id,
-                "native": ref.source_record_id,
-                "version": ref.version_id,
-                "demo": record.is_demo,
-                "cutoff": _cutoff(cutoff),
-            },
-        ).scalar_one_or_none()
-        if original is None or original["raw_sha256"] != ref.raw_sha256:
-            raise HistoryError(
-                "observation_basis_not_visible",
-                "观测所引原件在同一许可、模式和截止时间下不可见",
-                404,
-            )
+    def answer(version_id):
+        row = found.get(version_id)
+        if row is None:
+            return {"state": "not_visible"}
+        if row["previous"] is None:
+            return {"state": "first_adoption", "source_record_id": row["source_record_id"]}
+        return {"state": "compared", "source_record_id": row["source_record_id"], "from_version_id": row["previous"],
+                "kind": "raw_changed"}
 
-
+    return {"schema_version": "datafabric.history.version_differences.v1", "source_id": source_id, "mode": mode,
+            "as_of": cutoff.isoformat(), "versions": {v: answer(v) for v in version_ids}}

@@ -59,19 +59,6 @@ def test_every_spec_declares_decision_and_rate_group():
         assert spec.rate_group and spec.min_interval_seconds > 0
 
 
-def test_read_public_refuses_unconnected_plugin(monkeypatch):
-    from fetch import sources
-
-    monkeypatch.setitem(sources.PLUGINS, "who_don", None)
-    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
-    request = FetchRequest.model_validate(
-        {"source_id": "who_don", "query": "*", "updated_since": "2026-11-01T00:00:00Z"}
-    )
-    with pytest.raises(HistoryError) as exc:
-        sources.read_public(request)
-    assert exc.value.code == "source_plugin_missing"
-
-
 # ——调度：实时/回填、上限、旧键不变——
 
 

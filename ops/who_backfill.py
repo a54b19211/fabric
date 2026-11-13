@@ -96,7 +96,7 @@ def _stopped_by(batch: dict, spent: Counts, bounds: Counts) -> str | None:
 
 def _read_leg(store, run) -> dict:
     """Read one leg (its record count is what the bounds leave, see _leg_request; the bytes are checked after it)."""
-    request, _ = store.job_input(run.id, run.attempt)
+    request = store.job_input(run.id, run.attempt)
     try:
         return read_public(request)
     except HistoryError as exc:

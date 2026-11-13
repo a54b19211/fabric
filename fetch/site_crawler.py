@@ -329,7 +329,6 @@ class _Reader:
             "role": "web_capture",
             "site": self.site,
             "url": url,
-            "html_sha256": html_sha,
             "parsed": {k: parsed.get(k) for k in ("title", "publish_date", "markdown", "parse_method", "extra")},
             "attachments": [],
         }
@@ -532,7 +531,6 @@ def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
     next_continuation = None
     if resume and error is None:
         next_continuation = {
-            "scope_hash": request.scope_hash(),
             "cursor": json.dumps({"i": resume[0], "a": resume[1], "p": int(resume[2]), **({"g": reader.group} if reader.group else {})}),
             "read_count": reader.group or resume[0],  # 读到第几组 / 第几条
         }
@@ -561,7 +559,6 @@ def _web_capture_fields(data):
     facts = {
         "role": "web_capture",
         "parse_method": parsed.get("parse_method"),
-        "html_sha256": data.get("html_sha256"),
         "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
         "extra": parsed.get("extra") or {},
     }

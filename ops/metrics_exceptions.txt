@@ -22,14 +22,12 @@ graph/api/documents.py:list_documents  82/22  document endpoint with many option
 graph/api/extraction.py:trigger_extraction  96/14  legacy extraction trigger, retires with the old extraction queue (audit 1.4)
 graph/api/review.py:get_review_stats  98/10  review graph/statistics endpoint building the whole view in one pass; split per view section
 fetch/extractors/dates.py:normalize_date  109/18  date normaliser with one branch per accepted format; table-driven rewrite
-fetch/document_evidence.py:attach_document_evidence  71/35  evidence attachment: one branch per source/material kind; split per kind
 graph/extraction/extraction_prompts.py:get_pubmed_extraction_prompt  88/21  prompt text builder, long because of the embedded schema description; move the text to data
 fetch/extractors/chictr/chictr.py:extract_chictr_detail  79/22  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
 fetch/extractors/nccn/nccn.py:extract_nccn_detail  107/30  HTML detail-page parser of one site, one branch per field; site markup dictates the shape
 fetch/extractors/roche/roche_web_fetcher.py:_parse_list_page  55/25  list/paging parser of one site; site markup dictates the shape
 graph/publish/graph_tools.py:paths  56/34  graph query helper with the traversal and its filters inline
 graph/publish/graph_tools.py:subgraph  25/25  graph query helper with the traversal and its filters inline
-store/history_models.py:FetchRequest.fixed_scope  32/23  request validator with one check per scope rule; keep the rules in one place
 fetch/sources.py:_project_pubmed  91/20  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
 graph/extraction/native_extraction.py:_index_json  53/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 graph/extraction/native_extraction.py:_index_json.walk  46/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
@@ -48,7 +46,6 @@ graph/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merg
 fetch/api_fields.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
 graph/extraction/llm_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
 fetch/page_parser.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
-store/history.py:_read_filters  79/22  history store queries and validators with many optional filters inline
 graph/db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation
 graph/db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/review SQL with one branch per case; split by operation
 graph/db/identity.py:merge_dictionary_identities  64/40  identity merge/rollback/review SQL with one branch per case; split by operation
@@ -70,5 +67,3 @@ graph/disambiguation/llm_ranker.py:rank_with_reranker  69/26  LLM/reranker call 
 graph/publish/graph_publish.py:_read_primekg  82/24  graph publication flow: capture and bundle build in long functions; split per step
 graph/publish/graph_publish.py:capture_primekg  137/31  graph publication flow: capture and bundle build in long functions; split per step
 graph/publish/graph_publish.py:main  94/8  graph publication flow: capture and bundle build in long functions; split per step
-fetch/fetch_job.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place
-fetch/fetch_job.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
