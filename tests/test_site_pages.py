@@ -290,15 +290,15 @@ def test_nccn_detail_attaches_only_the_pdfs_that_can_be_downloaded_and_leaves_ou
     assert [a["url"].rsplit("/", 1)[1] for a in parsed["attachment_links"]] == ["all-patient.pdf", "ALL-es-patient.pdf"]
 
 
-def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_guideline_without_rendering_the_ones_before(monkeypatch):
-    """序号跨分类、去重后数：第二个分类里和第一个分类重复的指南不占序号。从第 start 份读起：前面的分类列表页还要渲染（数序号、
-    去重靠它），前面指南的详情页不渲染。"""
+def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_group_without_rendering_what_is_before_it(monkeypatch):
+    """组号 = 分类编号 × 1000 + 它在分类列表里的序号。从组号 start 读起：前面的指南详情页不渲染，整个在 start 之前的分类连列表页也
+    不渲染（续读每段只渲染一页列表）。"""
     import scrapling.fetchers
 
     from biz_rules.extractors.nccn import nccn_fetcher
     from biz_rules.history_models import GroupStart
 
-    by_category = {"1": ["a0", "a1", "a2"], "2": ["a0", "b1", "b2"]}  # 第 2 类的 a0 和第 1 类重复
+    by_category = {"1": ["a0", "a1", "a2"], "2": ["b0", "b1"]}
     rendered = []
 
     class Fetcher:
@@ -324,12 +324,13 @@ def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_guideline_without_
         items = list(nccn_fetcher.iter_nccn(api, start))
         groups = [i.index for i in items if isinstance(i, GroupStart)]
         records = [i["guideline_id"] for i in items if isinstance(i, dict)]
+        lists = [u.rsplit("_", 1)[1] for u in rendered if "category_" in u]
         details = [u.rsplit("/", 1)[1] for u in rendered if "category_" not in u]  # 渲染过的详情页
-        return groups, records, details
+        return groups, records, lists, details
 
-    assert read(0) == ([0, 1, 2, 3, 4], ["a0", "a1", "a2", "b1", "b2"], ["a0", "a1", "a2", "b1", "b2"])
-    assert read(3) == ([3, 4], ["b1", "b2"], ["b1", "b2"])  # a0..a2 的详情页没有渲染
-    assert [u for u in rendered if "category_" in u] == [f"https://www.nccn.org/guidelines/category_{n}" for n in (1, 2)]
+    assert read(0) == ([1000, 1001, 1002, 2000, 2001], ["a0", "a1", "a2", "b0", "b1"], ["1", "2"], ["a0", "a1", "a2", "b0", "b1"])
+    assert read(1002) == ([1002, 2000, 2001], ["a2", "b0", "b1"], ["1", "2"], ["a2", "b0", "b1"])  # a0、a1 的详情页没有渲染
+    assert read(2001) == ([2001], ["b1"], ["2"], ["b1"])  # 第 1 类整个在前面：连列表页也没有渲染
 
 
 def test_nccn_pages_are_rendered_without_waiting_for_network_idle_or_loading_images():

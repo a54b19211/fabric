@@ -6,8 +6,8 @@
   3. 对每条指南渲染详情页，按 section（Guidelines / Evidence Blocks / Frameworks /
      Guidelines for Patients / International）提取所有 PDF 链接 + 版本号
   4. yield 标准记录 dict（uuid/title/markdown/structured_data/attachment_links/...）
-一份指南是一组（collection.site_crawler 的分组读取）：每份开头给一个 GroupStart(第几份)，从第 start 份读起，续读时前面
-的指南不再渲染详情页（分类列表页要渲染：要靠它数出序号，并跨分类去重）。
+一份指南是一组（collection.site_crawler 的分组读取）：每份开头给一个 GroupStart(组号)，从组号 start 读起，续读时前面
+的指南不再渲染详情页，整个在 start 之前的分类连列表页也不渲染。组号 = 分类编号 × GROUP_SPAN + 它在这个分类列表里的序号。
 """
 
 import re
@@ -19,6 +19,7 @@ from biz_rules.extractors.nccn.nccn import extract_nccn_detail
 from biz_rules.history_models import GroupStart, ItemUnreadable, make_uuid
 
 BASE_URL = "https://www.nccn.org"
+GROUP_SPAN = 1000  # 组号 = 分类编号 × GROUP_SPAN + 序号：续读只渲染它所在的那一个分类列表页（以前四页都渲染，一段 120 秒里占了一半）
 
 # 分类编号 → (分类名, 列表页 URL)
 CATEGORIES = {
@@ -182,7 +183,9 @@ def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
     api_cfg 字段：
       - categories:       要抓取的分类名列表，默认全部 4 个分类
       - max_per_category: 每个分类最多抓取条数，0 = 全量（默认 0）
-    start：从第几份指南读起（跨分类、去重后的序号，从 0 起）。
+    start：从哪个组号读起（分类编号 × GROUP_SPAN + 它在分类列表里的序号，从 0 起）。以前跨分类按 guideline_id 去重：续读不渲染
+    前面的分类就去不了重，也没有必要：两个分类里的同一份指南详情页网址不同，各是一条记录（2026-11-13 实测前两个分类 69 份和 7 份
+    指南没有一份重复）。
     """
     cat_names: list[str] = api_cfg.get("categories", [v[0] for v in CATEGORIES.values()])
     max_per_cat: int = api_cfg.get("max_per_category", 0)
@@ -194,15 +197,14 @@ def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
         logger.error("[NCCN] scrapling 未安装，无法运行")
         return
 
-    seen_globally: set = set()   # 跨分类去重
-    total = 0                    # 前面的分类一共有几份指南（去重后）
-
     for cat_name in cat_names:
         cat_num = _NAME_TO_NUM.get(cat_name)
         if not cat_num:
             logger.warning(f"[NCCN] 未知分类名: {cat_name!r}，跳过")
             continue
         cat_url = CATEGORIES[cat_num][1]
+        if (int(cat_num) + 1) * GROUP_SPAN <= start:
+            continue  # 这个分类整个在 start 之前，上一段读过了
 
         logger.info(f"[NCCN] 渲染分类列表页: {cat_name} → {cat_url}")
         list_page = _render(fetcher, cat_url, LIST_READY)  # 渲染失败就让异常出去：整次读取失败，不能当成“这个分类没有指南”
@@ -211,21 +213,16 @@ def iter_nccn(api_cfg: dict, start: int = 0) -> Iterator[dict]:
             yield ItemUnreadable(cat_url, "分类列表页一条指南都没解析到，可能改版")
             continue
 
-        # 跨分类去重
-        items = [it for it in items if it["guideline_id"] not in seen_globally]
-        for it in items:
-            seen_globally.add(it["guideline_id"])
-
         if max_per_cat > 0:
             items = items[:max_per_cat]
 
         logger.info(f"[NCCN] 分类 '{cat_name}' 有效条目 {len(items)} 条")
 
-        first, total = total, total + len(items)  # 这个分类的指南是第 first 到 total-1 份
-        for number, item in enumerate(items, first):
-            if number < start:
+        for index, item in enumerate(items):
+            group = int(cat_num) * GROUP_SPAN + index
+            if group < start:
                 continue  # 前面的指南上一段读过了
-            yield GroupStart(number)
+            yield GroupStart(group)
             try:
                 record = _read_item(fetcher, item)
             except Exception as e:  # noqa: BLE001 -- 原因写进读不到的记录

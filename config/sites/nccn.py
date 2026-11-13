@@ -25,7 +25,7 @@ CONFIG = {
         "max_per_category": 0,
     },
     "api_fetcher": iter_nccn,
-    "by_group": True,  # 一份指南一组：续读位置记第几份指南（collection.site_crawler）
+    "by_group": True,  # 一份指南一组：续读位置记组号（分类编号 × 1000 + 序号，见 nccn_fetcher；collection.site_crawler）
     # iter_nccn 内部已生成 UUID，field_map 直接映射
     "uid_field": "",
     "field_map": {
