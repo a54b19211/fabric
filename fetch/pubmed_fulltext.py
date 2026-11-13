@@ -166,7 +166,7 @@ def _pmc(client, budget, pmid, pmcid):
 def _download(url, *, pmid, cap, timeout):
     from fetch.web_client import download_pdf
 
-    return download_pdf.fn(url, parent_uuid=pmid, source_site="pubmed", max_bytes=cap, timeout=timeout)
+    return download_pdf(url, parent_uuid=pmid, source_site="pubmed", max_bytes=cap, timeout=timeout)
 
 
 def _unpaywall(client, budget, pmid, doi):

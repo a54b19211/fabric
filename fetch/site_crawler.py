@@ -68,20 +68,20 @@ from fetch.site_profiles import SITE_PROFILES  # noqa: E402  站点配置
 def _fetch_page(url, **kwargs):
     from fetch.web_client import fetch_page
 
-    return fetch_page.fn(url, **kwargs)
+    return fetch_page(url, **kwargs)
 
 
 def _route_webpage(page_data, site_key=None):
     from fetch.page_parser import route_webpage
 
-    return route_webpage.fn(page_data, site_key=site_key)
+    return route_webpage(page_data, site_key=site_key)
 
 
 def _download(pdf_url, parent_uuid="", source_site="", force=False, cookies=None, store_as=""):
     from fetch.web_client import download_pdf
 
-    return download_pdf.fn(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies,
-                           store_as=store_as, proxy=site_proxy(source_site))
+    return download_pdf(pdf_url, parent_uuid=parent_uuid, source_site=source_site, force=force, cookies=cookies,
+                        store_as=store_as, proxy=site_proxy(source_site))
 
 
 def site_proxy(site):

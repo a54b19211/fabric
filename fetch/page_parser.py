@@ -15,7 +15,6 @@ LLM 实体抽取在后续阶段（graph/extraction/extraction_flow.py）单独�
 
 import trafilatura
 from loguru import logger
-from prefect import task
 
 from fetch.extractors.fields import clean_title, remove_extra_whitespace
 from fetch.site_profiles import SITE_PROFILES
@@ -31,7 +30,6 @@ def _identify_site(url: str) -> str:
     return ""
 
 
-@task(name="route_webpage")
 def route_webpage(page_data: dict, site_key: str = None) -> dict:
     """
     网页解析路由：先尝试特解，特解为空则走通解。

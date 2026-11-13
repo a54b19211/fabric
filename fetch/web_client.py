@@ -15,7 +15,6 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 from loguru import logger
-from prefect import task
 
 # 引入 Scrapling 的高级反爬抓取器
 from scrapling.fetchers import Fetcher, StealthyFetcher
@@ -186,7 +185,7 @@ def store_original(content: bytes, identifier: str, source_site: str, file_ext: 
 
 
 # ---------------------------------------------------------------------------
-#  Prefect Tasks
+#  抓页面、下附件
 # ---------------------------------------------------------------------------
 
 # 简单请求（use_simple_fetch）的超时（连接秒数，读取秒数）和次数（次数 = 最多发几次，scrapling 的 retries 就是这个意思）。
@@ -198,11 +197,6 @@ SIMPLE_FETCH_TRIES = 2
 CONNECT_SECONDS = 10  # 下载附件时，建立连接（含 TLS 握手）最多等几秒，见 download_pdf
 
 
-@task(
-    name="fetch_page",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
 def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector: str = None, disable_resources: bool = True, solve_cloudflare: bool = False, network_idle: bool = True, use_simple_fetch: bool = False):
     """
     抓取单个网页，返回 scrapling 页面对象。
@@ -250,8 +244,7 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")
 
-    # 非 2xx 状态码视为失败，抛出异常。这里是经 fetch_page.fn 直接调用的，Prefect 的 retries 不生效；
-    # 超时和 429 的有界重试在 fetch.transport，其他错误不重试
+    # 非 2xx 状态码视为失败，抛出异常。超时和 429 的有界重试在 fetch.transport，其他错误不重试
     if not (200 <= page.status < 300):
         raise RuntimeError(f"HTTP {page.status}，页面请求被拒绝: {url}")
 
@@ -264,11 +257,6 @@ def fetch_page(url: str, headers: dict = None, delay: float = 1.0, wait_selector
     }
 
 
-@task(
-    name="download_pdf",
-    retries=APP.TASK_RETRIES,
-    retry_delay_seconds=APP.TASK_RETRY_DELAY,
-)
 def download_pdf(
     pdf_url: str,
     parent_uuid: str = "",

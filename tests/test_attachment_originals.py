@@ -41,7 +41,7 @@ def _budget():
 
 
 def download(**kwargs):
-    return client.download_pdf.fn(URL, source_site="synthetic_files", **kwargs)
+    return client.download_pdf(URL, source_site="synthetic_files", **kwargs)
 
 
 def test_a_connection_that_does_not_come_up_is_given_up_after_ten_seconds_so_the_transport_can_try_another(

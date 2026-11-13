@@ -92,7 +92,7 @@ class BasePaginationDriver(ABC):
         """在独立线程里调用 fetch_page，避免 asyncio 冲突。"""
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(
-                in_context(fetch_page.fn),
+                in_context(fetch_page),
                 url=url,
                 delay=0,  # 两次传输之间的间隔由共享限速（fetch.rate）在发出处控制
                 wait_selector=self.wait_sel,
