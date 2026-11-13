@@ -23,8 +23,6 @@ def _setup(monkeypatch):
         if hasattr(module, "get_session"):
             monkeypatch.setattr(module, "get_session", graph.db.session.get_session)
 
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
-                       '["clinicaltrials","legacy_documents","reviewed_graph","external_archive"]')
     monkeypatch.setattr(tq, "is_extraction_paused", lambda: False)
     monkeypatch.setattr(flow, "run_extraction_for_uuids", lambda uuids: {"submitted": len(uuids)})
     monkeypatch.setattr(flow, "_disambiguate", lambda entities, session=None, **_: entities)

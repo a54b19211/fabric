@@ -28,7 +28,6 @@ ADMIN = "test-admin-only"
 
 @pytest.fixture
 def chain(pg, monkeypatch, tmp_path):  # noqa: F811
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["local_files","pubmed"]')
     monkeypatch.setattr(client.APP, "DATA_ROOT", tmp_path)
     monkeypatch.delenv("DATAFABRIC_UNPAYWALL_EMAIL", raising=False)
     monkeypatch.delenv("DATAFABRIC_PUBMED_FULLTEXT", raising=False)

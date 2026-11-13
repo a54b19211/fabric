@@ -33,10 +33,7 @@ def adopt(item, key):
                               True, "current", datetime.now(timezone.utc))
 
 
-def prepared(pg, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps([
-        "clinicaltrials", "reviewed_graph", "legacy_documents", "external_archive",
-    ]))
+def prepared(pg):
     record = adopt(source_record(), "synthetic-native-source-a")
     run = publish_native_graph([record], "synthetic-native-graph-a")
     with pg.begin() as conn:
@@ -45,8 +42,8 @@ def prepared(pg, monkeypatch):
     return record, run, payload
 
 
-def test_native_graph_real_publication_replay_and_old_fixed_field_version(pg, monkeypatch):
-    source, run, old = prepared(pg, monkeypatch)
+def test_native_graph_real_publication_replay_and_old_fixed_field_version(pg):
+    source, run, old = prepared(pg)
     assert run.state == "completed" and len(run.version_ids) == 1
     assert publish_native_graph([source], "synthetic-native-graph-a").version_ids == run.version_ids
     graph = GraphBundle.model_validate_json(old["raw_content"])
@@ -81,8 +78,8 @@ def test_native_graph_real_publication_replay_and_old_fixed_field_version(pg, mo
     assert error.value.code == "version_not_found"
 
 
-def test_invalid_native_field_or_predicate_never_changes_real_published_graph(pg, monkeypatch):
-    _source, _run, payload = prepared(pg, monkeypatch)
+def test_invalid_native_field_or_predicate_never_changes_real_published_graph(pg):
+    _source, _run, payload = prepared(pg)
     for change in ("value", "predicate", "native_id", "approved_node", "approved_edge", "empty_projection"):
         graph = GraphBundle.model_validate_json(payload["raw_content"])
         if change == "value":
@@ -109,7 +106,7 @@ def test_invalid_native_field_or_predicate_never_changes_real_published_graph(pg
                                     title="SYNTHETIC invalid", scope_description="SYNTHETIC invalid",
                                     nodes=[unsupported], edges=[])
         with pytest.raises(HistoryError) as error:
-            store.import_archive(ArchiveImport(source_id="reviewed_graph", is_demo=True,
+            history_graph.import_graph(ArchiveImport(source_id="reviewed_graph", is_demo=True,
                 scope_description="invalid synthetic field binding", declared_count=1,
                 declared_complete=False, records=[ArchiveRecord(
                     source_record_id=payload["source_record_id"], record_kind="graph", raw_content=graph.model_dump_json(),

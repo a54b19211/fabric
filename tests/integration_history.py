@@ -917,7 +917,7 @@ def test_registry_diff_backfill_pairs_existing_versions_once(pg):
 # ——附件（V023）：旧站点插件的附件版本 → 加工层 attachment_parse → 派生正文——
 
 
-def _fetch_attachment(tmp_path, monkeypatch, key, content=b"%PDF-1.4 synthetic notice"):
+def _fetch_attachment(tmp_path, key, content=b"%PDF-1.4 synthetic notice"):
     from fetch.site_crawler import attachment_record_id
 
     path = tmp_path / (key + ".pdf")
@@ -938,7 +938,7 @@ def test_attachment_parsed_once_with_retry_on_failure_and_read_with_visibility(p
     from clean import attachment_parse as ap
     from clean import derived_text
 
-    version, path = _fetch_attachment(tmp_path, monkeypatch, "att-1")
+    version, path = _fetch_attachment(tmp_path, "att-1")
     answers = iter([{"success": False, "markdown": "", "error": "timeout"},
                     {"success": True, "markdown": "# 附件\n\n药品注册证书信息。", "error": ""}])
     monkeypatch.setattr(ap, "_mineru", lambda p: next(answers))
@@ -961,7 +961,7 @@ def test_attachment_failures_stop_after_the_attempt_limit(pg, tmp_path, monkeypa
     from clean import attachment_parse as ap
     from clean import derived_text
 
-    version, path = _fetch_attachment(tmp_path, monkeypatch, "att-2")
+    version, path = _fetch_attachment(tmp_path, "att-2")
     monkeypatch.setattr(ap, "_mineru", lambda p: {"success": False, "markdown": "", "error": "x"})
     for _ in range(derived_text.MAX_ATTEMPTS + 2):
         derived_text.process(batch=10, retry_after_seconds=0)
@@ -969,7 +969,7 @@ def test_attachment_failures_stop_after_the_attempt_limit(pg, tmp_path, monkeypa
         assert conn.execute(text("SELECT count(*) FROM derived_clean_text WHERE version_id=:v"),
                             {"v": version}).scalar_one() == derived_text.MAX_ATTEMPTS
     # 原件被改动：摘要不符，直接记失败、不调解析服务
-    version3, path3 = _fetch_attachment(tmp_path, monkeypatch, "att-3")
+    version3, path3 = _fetch_attachment(tmp_path, "att-3")
     path3.write_bytes(b"tampered")
     monkeypatch.setattr(ap, "_mineru", lambda p: pytest.fail("must not parse a tampered original"))
     derived_text.process(batch=10, retry_after_seconds=0)
@@ -983,8 +983,8 @@ def test_same_file_twice_is_parsed_once(pg, tmp_path, monkeypatch):
 
     calls = []
     monkeypatch.setattr(ap, "_mineru", lambda p: calls.append(p) or {"success": True, "markdown": "# 同一份", "error": ""})
-    first, _ = _fetch_attachment(tmp_path, monkeypatch, "same-a", content=b"%PDF-1.4 identical")
-    second, _ = _fetch_attachment(tmp_path, monkeypatch, "same-b", content=b"%PDF-1.4 identical")
+    first, _ = _fetch_attachment(tmp_path, "same-a", content=b"%PDF-1.4 identical")
+    second, _ = _fetch_attachment(tmp_path, "same-b", content=b"%PDF-1.4 identical")
     derived_text.process(batch=10, retry_after_seconds=0)
     derived_text.process(batch=10, retry_after_seconds=0)
     got = derived_text.for_versions("nmpa", False, [first, second], "current", datetime.now(timezone.utc))["versions"]
@@ -997,7 +997,7 @@ def test_an_attachment_being_parsed_is_skipped_by_a_second_worker(pg, tmp_path, 
     from clean import attachment_parse as ap
     from clean import derived_text
 
-    _fetch_attachment(tmp_path, monkeypatch, "claim-1")
+    _fetch_attachment(tmp_path, "claim-1")
     second = []
 
     def slow_parse(p):  # 第一个进程还在解析：第二个进程来领活
@@ -1053,7 +1053,7 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
     assert entry["locator_kind"] == "pdf_page" and entry["segments"][0]["page"] == 3
     assert entry["text"].startswith("〔第3页〕")
     # 按旧库链接补抓（父页面没重读）：父版本未知，如实记录
-    legacy, _ = _fetch_attachment(tmp_path, monkeypatch, "link-legacy")
+    legacy, _ = _fetch_attachment(tmp_path, "link-legacy")
     derived_text.process(batch=5, retry_after_seconds=0)
     got = derived_text.for_versions("nmpa", False, [legacy], "current", datetime.now(timezone.utc))
     assert got["versions"][legacy]["attachment_of"][0]["parent_version_id"] is None

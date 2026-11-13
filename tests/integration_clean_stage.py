@@ -22,13 +22,6 @@ from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 
 
-def allow(monkeypatch):
-    monkeypatch.setenv(
-        "DATAFABRIC_HISTORY_SOURCE_ALLOWLIST",
-        '["external_archive","clinicaltrials","pubmed","fda_crl","europe_pmc","nmpa"]',
-    )
-
-
 def rows(pg, sql, **params):
     with pg.begin() as conn:
         return [dict(r) for r in conn.execute(text(sql), params).mappings()]
@@ -50,10 +43,9 @@ def nmpa_page(markdown, key):
     }).version_ids[0]
 
 
-def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, monkeypatch, tmp_path):
+def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, tmp_path):
     from clean import clean_stage
 
-    allow(monkeypatch)
     ct = _fetch_study("NCT09990011", "cs-ct").version_ids[0]
     paper = _fetch_europe_pmc_raw(json.dumps({
         "source": "MED", "id": "123", "title": "XYZ-101 in NASH",
@@ -94,10 +86,9 @@ def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, monkeyp
     assert clean_stage.process(batch=50)["profiled"] == 0  # 幂等
 
 
-def test_short_and_empty_material_are_kept_and_routed_honestly(pg, monkeypatch):
+def test_short_and_empty_material_are_kept_and_routed_honestly(pg):
     from clean import clean_stage
 
-    allow(monkeypatch)
     title_only = _fetch_europe_pmc_raw(json.dumps({"source": "MED", "id": "123", "title": "Case report"}),
                                        "cs-short").version_ids[0]
     empty = nmpa_page("首页 > 公告\n\n打印本页", "cs-empty")
@@ -114,9 +105,8 @@ def test_attachments_are_profiled_on_their_parsed_text_and_failed_ones_quarantin
     from clean import attachment_parse as ap
     from clean import clean_stage, derived_text
 
-    allow(monkeypatch)
-    good, _ = _fetch_attachment(tmp_path, monkeypatch, "cs-att-ok")
-    bad, _ = _fetch_attachment(tmp_path, monkeypatch, "cs-att-bad", content=b"%PDF-1.4 other bytes")
+    good, _ = _fetch_attachment(tmp_path, "cs-att-ok")
+    bad, _ = _fetch_attachment(tmp_path, "cs-att-bad", content=b"%PDF-1.4 other bytes")
     assert clean_stage.process(batch=50)["waiting_for_attachment_text"] == 2  # 还没解析：等，不画像
     answers = {"ok": {"success": True, "markdown": "受理号 CXHL2300123 的审评结论：不予批准。", "error": ""}}
 
@@ -136,10 +126,9 @@ def test_attachments_are_profiled_on_their_parsed_text_and_failed_ones_quarantin
     assert failed["profile"]["route"] == "quarantine"
 
 
-def test_derived_tables_are_append_only(pg, monkeypatch):
+def test_derived_tables_are_append_only(pg):
     from clean import clean_stage
 
-    allow(monkeypatch)
     _fetch_study("NCT09990013", "cs-append")
     clean_stage.process(batch=50)
     assert rows(pg, "SELECT count(*) AS n FROM derived_profiles")[0]["n"] == 1
@@ -151,7 +140,6 @@ def test_derived_tables_are_append_only(pg, monkeypatch):
 def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows(pg, monkeypatch):
     from clean import clean_stage
 
-    allow(monkeypatch)
     ct = _fetch_study("NCT09990014", "cs-upgrade").version_ids[0]
     clean_stage.process(batch=50)
     monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v9")
@@ -168,7 +156,6 @@ def test_a_cleaner_upgrade_recomputes_identifiers_and_profile_and_keeps_old_rows
 def test_a_version_already_cleaned_keeps_its_text_when_only_the_profile_is_redone(pg, monkeypatch):
     from clean import clean_stage, profile
 
-    allow(monkeypatch)
     calls = []
     real = clean_text.clean_literature
     monkeypatch.setattr(clean_text, "clean_literature", lambda raw: calls.append(raw) or real(raw))
@@ -182,12 +169,11 @@ def test_a_version_already_cleaned_keeps_its_text_when_only_the_profile_is_redon
     assert len(row["text_sha256"]) == 64 and row["input_sha256"] is None  # one digest per text, no input digest
 
 
-def test_two_workers_never_process_the_same_version(pg, monkeypatch):
+def test_two_workers_never_process_the_same_version(pg):
     from concurrent.futures import ThreadPoolExecutor
 
     from clean import clean_stage
 
-    allow(monkeypatch)
     for i in range(12):
         _fetch_study(f"NCT0999{i:04d}", f"conc-{i}")
     with ThreadPoolExecutor(3) as pool:
@@ -197,10 +183,9 @@ def test_two_workers_never_process_the_same_version(pg, monkeypatch):
     assert rows(pg, "SELECT count(DISTINCT version_id) AS n FROM derived_clean_text")[0]["n"] == 12
 
 
-def test_a_version_locked_by_another_worker_is_skipped_until_it_lets_go(pg, monkeypatch):
+def test_a_version_locked_by_another_worker_is_skipped_until_it_lets_go(pg):
     from clean import clean_stage
 
-    allow(monkeypatch)
     _fetch_study("NCT09998881", "lock-1")
     with pg.connect() as other:  # another worker holds the version
         other.begin()
@@ -213,7 +198,6 @@ def test_a_version_locked_by_another_worker_is_skipped_until_it_lets_go(pg, monk
 def test_a_failing_version_is_reported_does_not_hold_up_the_others_and_is_tried_again(pg, monkeypatch):
     from clean import clean_stage
 
-    allow(monkeypatch)
     bad = _fetch_study("NCT09998882", "fail-1", summary="Synthetic summary the cleaner trips on.").version_ids[0]
     _fetch_study("NCT09998883", "fail-2")
     real = clean_text.clean_registry
@@ -232,10 +216,9 @@ def test_a_failing_version_is_reported_does_not_hold_up_the_others_and_is_tried_
     assert clean_stage.process()["profiled"] == 1
 
 
-def test_stage_status_counts_what_is_done_and_what_is_left(pg, monkeypatch):
+def test_stage_status_counts_what_is_done_and_what_is_left(pg):
     from clean import clean_stage
 
-    allow(monkeypatch)
     for i in range(5):
         _fetch_study(f"NCT0997{i:04d}", f"wm-{i}")
 
@@ -247,11 +230,10 @@ def test_stage_status_counts_what_is_done_and_what_is_left(pg, monkeypatch):
     assert (ct()["profiled"], ct()["waiting"], ct()["todo"]) == (5, 0, 0)
 
 
-def test_registry_summary_comes_from_the_original_brief_summary(pg, monkeypatch):
+def test_registry_summary_comes_from_the_original_brief_summary(pg):
     """CT 投影在没有摘要时用标题顶替；清洗只认原件 briefSummary：有摘要不报 summary_missing。"""
     from clean import clean_stage
 
-    allow(monkeypatch)
     ct = _fetch_study("NCT09990014", "cs-summary", summary="A phase 3 study of drug X.").version_ids[0]
     bare = _fetch_study("NCT09990015", "cs-no-summary").version_ids[0]
     clean_stage.process(batch=50)
@@ -268,9 +250,8 @@ def test_unready_waiting_attachment_does_not_starve_a_ready_one(pg, monkeypatch,
 
     from clean import attachment_parse, clean_stage, derived_text
 
-    allow(monkeypatch)
-    first, path1 = _fetch_attachment(tmp_path, monkeypatch, "codex-waiting-first", content=b"%PDF-1.4 synthetic blocked")
-    second, path2 = _fetch_attachment(tmp_path, monkeypatch, "codex-waiting-second", content=b"%PDF-1.4 synthetic ready")
+    first, path1 = _fetch_attachment(tmp_path, "codex-waiting-first", content=b"%PDF-1.4 synthetic blocked")
+    second, path2 = _fetch_attachment(tmp_path, "codex-waiting-second", content=b"%PDF-1.4 synthetic ready")
     assert clean_stage.process()["waiting_for_attachment_text"] == 2
     head = rows(pg, "SELECT version_id FROM derived_stage_waiting WHERE stage_key=:k "
                     "ORDER BY created_at, version_id LIMIT 1", k=clean_stage.stage_key())[0]["version_id"]
@@ -288,10 +269,9 @@ def test_unready_waiting_attachment_does_not_starve_a_ready_one(pg, monkeypatch,
     assert left == [head]  # 没解析完的还在等，已解析的已补做
 
 
-def test_profile_business_categories_are_stored_and_returned(pg, monkeypatch):
+def test_profile_business_categories_are_stored_and_returned(pg):
     from clean import clean_stage
 
-    allow(monkeypatch)
     ct = _fetch_study("NCT09990016", "cs-categories").version_ids[0]
     clean_stage.process()
     prof = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW())["versions"][ct]["profile"]

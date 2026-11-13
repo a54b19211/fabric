@@ -1,8 +1,6 @@
 """The WHO backfill over the real history store (isolated PostgreSQL): its legs are history runs, the receipt lands
 in their coverage, and only the versions the backfill created are listed there as background."""
 
-import json
-
 import integration_publication as publication_fixtures
 import pytest
 from sqlalchemy import text
@@ -24,7 +22,6 @@ def open_gate(monkeypatch):
 
 def test_backfill_runs_carry_the_background_mark_for_the_versions_they_created(databases, monkeypatch):
     _, target = databases
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(["who_don"]))
     who = WhoStandIn(monkeypatch, count=200)
     # a scheduled read adopted the first notice since 2024 before the backfill: it was first seen as new activity
     seed = FetchRequest(source_id="who_don", query="*", max_records=1, max_pages=1, updated_since=SINCE)

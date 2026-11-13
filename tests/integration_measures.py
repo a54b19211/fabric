@@ -22,7 +22,7 @@ from clean import measure_extract as mx
 from clean import measure_runs as runs
 from run import measure
 from store import history as store
-from store.history_models import ArchiveImport, ArchiveRecord, archive_manifest_hash
+from store.history_models import ArchiveImport, ArchiveRecord
 
 CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "measurement_feed_contract.json").read_text("utf-8"))
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731  (as the other suites)
@@ -89,8 +89,7 @@ class FakeModel:
 
 
 @pytest.fixture
-def db(pg, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["who_don","external_archive"]')
+def db(pg):
     with pg.begin() as conn:
         conn.execute(text("TRUNCATE " + TABLES + " CASCADE"))
     return pg
@@ -114,8 +113,7 @@ def who_version(raw=None, key="who-a"):
     raw = raw or who_raw()
     records = [ArchiveRecord(source_record_id=raw["Id"], record_kind="document",
                              raw_content=json.dumps(raw, ensure_ascii=False))]
-    proof = {"available_at": {"value": "2026-10-29", "precision": "day"}, "uri": "fixture://who-don-archive",
-             "sha256": archive_manifest_hash(records), "reviewed": True, "review_note": "synthetic WHO DON fixture"}
+    proof = {"available_at": {"value": "2026-10-29", "precision": "day"}}
     run = store.import_archive(ArchiveImport(source_id="who_don", is_demo=True, scope_description="synthetic WHO DON",
                                              declared_count=1, records=records, proof=proof), key)
     clean_stage.process(time_budget_seconds=60)
@@ -244,7 +242,7 @@ def test_a_window_another_worker_holds_is_skipped(db, fake):
         other.rollback()
 
 
-def test_the_routes_serve_what_the_radar_accepts(db, fake, monkeypatch):
+def test_the_routes_serve_what_the_radar_accepts(db, fake):
     from api.main import app
 
     version = who_version()
@@ -264,7 +262,8 @@ def test_the_routes_serve_what_the_radar_accepts(db, fake, monkeypatch):
         "version_ids": [version], "include_history": "true"}, headers=auth).json()["measurements"]
     assert len(pulled) == expect["objects"] and all(map(valid_receipt, pulled))
     assert all(set(CONTRACT["pull"]["receipt_keys"]) <= set(r) for r in pulled)
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["external_archive"]')  # who_don revoked
+    with db.begin() as conn:  # who_don revoked
+        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='who_don'"))
     withheld = client.get("/api/history/measurements/changes", params={"is_demo": "true"}, headers=auth).json()
     assert withheld["items"] == [] and withheld["withheld"] == {"who_don": 3} and withheld["next_after"] == 3
     assert client.get("/api/history/measurements", params={

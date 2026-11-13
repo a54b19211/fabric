@@ -41,9 +41,9 @@ def test_a_fresh_database_gets_every_file_once_and_a_new_file_later(pg, tmp_path
     _, history = pg("history")
     assert runner.apply("history", history) == [p.name for p in runner.files_for("history")]
     assert runner.apply("history", history) == [] and runner.plan("history", history) == []
-    (runner.VERSIONS / "V042__synthetic.sql").write_text("CREATE TABLE synthetic_v042 (id int);", encoding="utf-8")
-    assert runner.plan("history", history) == ["V042__synthetic.sql"]
-    assert runner.apply("history", history) == ["V042__synthetic.sql"]
+    (runner.VERSIONS / "V999__synthetic.sql").write_text("CREATE TABLE synthetic_v999 (id int);", encoding="utf-8")
+    assert runner.plan("history", history) == ["V999__synthetic.sql"]
+    assert runner.apply("history", history) == ["V999__synthetic.sql"]
     assert runner.apply("history", history) == []
 
     _, app = pg("app")

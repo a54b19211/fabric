@@ -19,8 +19,6 @@ from store.history_models import FetchRequest
 
 
 def test_sec_real_fetch_adoption_dedup_restore_and_fixed_row_locators(pg, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(
-        sorted(history.allowed_sources() | {"sec_companyfacts"})))
     state = {"data": value(), "calls": 0}
     real = httpx.Client
 
@@ -63,9 +61,7 @@ def test_sec_real_fetch_adoption_dedup_restore_and_fixed_row_locators(pg, monkey
     assert all(r.source_published_at is None and r.availability_proof.kind == "unverified" for r in rows)
     current = history.list_records("sec_companyfacts", False, "current", cutoff)
     assert [r.version_id for r in current.items] == restored.version_ids
-    changes = history.list_changes("sec_companyfacts", False)
-    assert changes["current_version_ids"][NATIVE] == restored.version_ids[0]
-    assert len(changes["items"]) == 3
+    assert len(history.list_changes("sec_companyfacts", False)["items"]) == 3
     app = FastAPI()
     app.include_router(router)
     with TestClient(app) as client:

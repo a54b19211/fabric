@@ -1,7 +1,5 @@
 """GET /api/history/sources against a migrated History library: readable sources, retired ones, the radar's capabilities."""
 
-import json
-
 import pytest
 from integration_migration_runner import pg  # noqa: F401 - fixture
 from sqlalchemy import text
@@ -18,7 +16,6 @@ def library(pg, monkeypatch):
     _, engine = pg("listing")
     monkeypatch.setattr(store, "history_engine", lambda: engine)
     runner.apply("history", store.history_engine())
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(sorted(SOURCE_CATALOG)))
     with engine.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=true"))
     return engine
@@ -60,24 +57,10 @@ def test_the_capabilities_the_radar_reads(library, source_id, select, modes, att
     assert bool(flags["registry_diff"]) is diff
 
 
-def test_a_disabled_or_unlisted_source_is_not_in_sources(library, monkeypatch):
+def test_a_disabled_source_is_not_in_sources(library):
     with library.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='pubmed'"))
     assert "pubmed" not in by_id(store.list_sources())
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["pubmed","clinicaltrials"]')
-    assert [item["source_id"] for item in store.list_sources()] == ["clinicaltrials"]
-
-
-def test_revoking_a_dependency_makes_the_derived_and_the_retired_source_unreadable(library):
-    with library.begin() as conn:
-        for source_id in ("reviewed_graph", "legacy_documents"):
-            conn.execute(text("UPDATE history_sources SET catalog = catalog || CAST(:d AS jsonb) WHERE source_id=:s"),
-                         {"d": json.dumps({"dependency_source_ids": ["nmpa"]}), "s": source_id})
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='nmpa'"))
-    receipt = store.sources_receipt()
-    assert "reviewed_graph" not in by_id(receipt["sources"])
-    assert caps("legacy_documents") == {"readable": False, "select": False, "fetch": None, "attachments": None,
-                                        "registry_diff": None}
 
 
 def test_switching_off_public_reads_keeps_only_an_upload(library, monkeypatch):

@@ -49,13 +49,11 @@ def pg_engine():
 
 @pytest.fixture
 def pg(pg_engine, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["external_archive","legacy_documents","clinicaltrials"]')
-    legacy_bridge.open_old_writer(monkeypatch)  # withdrawal fixtures are legacy versions (cutover mode)
     monkeypatch.setattr(history, "history_engine", lambda: pg_engine)
     runner.apply("history", history.history_engine())
     with pg_engine.begin() as conn:
         assert conn.execute(text("SELECT current_schema()")).scalar_one().startswith("test_index_")
-        conn.execute(text("TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,index_claim_cursor,index_send_bucket,index_gate_stats,derived_extraction_check_tasks,derived_extraction_checks,history_versions,history_runs"))
+        conn.execute(text("TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,index_claim_cursor,index_send_bucket,index_gate_stats,derived_extraction_check_tasks,derived_extraction_checks,history_versions,history_runs,history_version_rank"))
         conn.execute(text("UPDATE history_sources SET published_seq=0,read_enabled=true"))
     set_targets(monkeypatch)
     return pg_engine
@@ -108,7 +106,7 @@ def add_collected(*, withdrawn=False):
     value = collected_document(snapshot, datetime.now(timezone.utc), "insert")
     request = ArchiveImport(source_id="legacy_documents", is_demo=True, scope_description="synthetic fixed-version withdrawal test", declared_count=1, declared_complete=False,
                             records=[ArchiveRecord(source_record_id="legacy:clinicaltrials:SYNTHETIC-collected", record_kind="document", raw_content=value.model_dump_json())])
-    return history.import_archive(request, "collected-" + uuid4().hex).version_ids[0]
+    return legacy_bridge.write(request, "collected-" + uuid4().hex).version_ids[0]  # withdrawal on an old entry
 
 
 def profile():
@@ -499,7 +497,7 @@ def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
     assert saved["manifest"]["content_sha256"] == meta["artifact_sha256"] == saved["artifact_key"].split(":")[1]
     assert meta["source_id"] == "external_archive" and meta["version_id"] == version
     assert meta["processor_version"] == clean_text.PROCESSOR_VERSION and meta["first_seen_at"]
-    assert meta["proof_kind"] == "reviewed_archive" and meta["proof_available_at"].startswith("2019-01-01")
+    assert meta["proof_kind"] == "declared_archive" and meta["proof_available_at"].startswith("2019-01-01")
     assert meta["doc_type"] and "doc_category" in meta
     with pg.begin() as conn:
         assert conn.execute(text("SELECT count(*) FROM derived_profiles WHERE version_id=:v AND processor_version=:p"),
@@ -585,7 +583,7 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
     from clean import attachment_parse as ap
     from clean import derived_text
 
-    version, _ = _fetch_attachment(tmp_path, monkeypatch, "idx-att")
+    version, _ = _fetch_attachment(tmp_path, "idx-att")
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
         "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
         "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
@@ -610,7 +608,7 @@ def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
     from clean import attachment_parse as ap
     from clean import derived_text
 
-    _fetch_attachment(tmp_path, monkeypatch, "idx-att-fail")
+    _fetch_attachment(tmp_path, "idx-att-fail")
     monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{
         "source_instance": "synthetic.index.pg", "source_id": "nmpa", "is_demo": False,
         "knowledge_base_id": "synthetic-isolated-kb", "source_scope": "research"}]))
@@ -733,7 +731,7 @@ def test_crowded_candidates_report_insufficient_results_and_unlocatable_chunks(p
     assert result["coverage"] == {}
 
 
-def test_literal_search_over_a_huge_source_returns_query_budget(pg, monkeypatch):
+def test_literal_search_over_a_huge_source_returns_query_budget(pg):
     add_document("SYNTHETIC-literal")
     with pg.begin() as conn:
         conn.execute(text("UPDATE history_sources SET published_seq=published_seq+30000 WHERE source_id='external_archive'"))
@@ -1058,8 +1056,7 @@ def test_a_profile_upgrade_before_reprofiling_disables_nothing(pg, monkeypatch):
 
 def test_a_retired_source_is_not_recalled_is_named_in_the_receipt_and_a_mixed_query_keeps_the_others(pg, monkeypatch):
     """With legacy_documents retired semantic search does not choose it: not by default, not when asked for it alone (410),
-    and a mixed query searches only the other sources and says which one it left out. No environment setting changes it."""
-    legacy_bridge.close_old_writer(monkeypatch)
+    and a mixed query searches only the other sources and says which one it left out."""
     set_targets(monkeypatch)  # external_archive
     client = SearchClient(pg)
     asked = []
@@ -1069,13 +1066,9 @@ def test_a_retired_source_is_not_recalled_is_named_in_the_receipt_and_a_mixed_qu
     mixed = search(client, sources=("external_archive", "legacy_documents"))
     assert mixed["excluded_sources"] == [{"source_id": "legacy_documents", "reason": "retired"}]
     assert set(asked) == {"synthetic-isolated-kb"}
-    for setting in ("off", "on"):
-        monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", setting)  # the old cutover switch is read by nothing
-        with pytest.raises(HistoryError) as error:
-            search(client, sources=("legacy_documents",))
-        assert (error.value.code, error.value.status) == ("legacy_retired", 410)
-        assert search(client, sources=("external_archive", "legacy_documents"))["excluded_sources"] == [
-            {"source_id": "legacy_documents", "reason": "retired"}]
+    with pytest.raises(HistoryError) as error:
+        search(client, sources=("legacy_documents",))
+    assert (error.value.code, error.value.status) == ("legacy_retired", 410)
 
 
 def test_an_index_target_naming_a_retired_source_is_a_configuration_error_found_at_start(pg, monkeypatch):
