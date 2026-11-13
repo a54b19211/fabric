@@ -195,7 +195,10 @@ class _Read:
                 raise HistoryError("source_deadline", "新闻索引读取超时")
         self.bytes += len(body)
         raw = body.decode("utf-8")
-        if not isinstance(parse_json(raw).get("articles"), list):
+        found = parse_json(raw)
+        if found == {}:  # GDELT's answer to a window without a single article: 200 with the body {} (measured 2026-11-13)
+            return []
+        if not isinstance(found.get("articles"), list):
             raise HistoryError("gdelt_response_shape", "新闻索引没有返回articles数组，不能当空结果")
         articles = list(_raw_array_items(raw, ["articles"]))
         if len(articles) > request.max_records:

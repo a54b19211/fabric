@@ -97,7 +97,7 @@ def test_gdelt_failure_never_becomes_zero_news(monkeypatch, waits, failure):
         if failure == "rate":
             return httpx.Response(429)
         if failure == "shape":
-            return httpx.Response(200, json={})
+            return httpx.Response(200, json={"unexpected": "shape"})
         if failure == "bad_json":
             return httpx.Response(200, text="upstream unavailable")
         return httpx.Response(200, json={"articles": [article(), article(title="changed in same response")]})
@@ -107,6 +107,16 @@ def test_gdelt_failure_never_becomes_zero_news(monkeypatch, waits, failure):
     assert result["stop_reason"] == "source_failed" and result["requests"] == (gdelt_news.TRIES if failure == "rate" else 1)
     if failure == "conflict":
         assert result["records"] == []
+
+
+def test_gdelt_answers_a_window_without_articles_with_an_empty_object_and_that_is_an_empty_window_not_a_failure(monkeypatch):
+    """Measured 2026-11-13: for a window in which nothing matches GDELT answers 200 with the body {} (no articles key). That is
+    read as an empty window; any other JSON without an articles list is still a failed read (test above)."""
+    client(monkeypatch, lambda request: httpx.Response(200, json={}))
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="no match", **HOUR))
+    assert result["records"] == [] and result["error"] is None
+    [receipt] = result["window_coverage"]
+    assert (receipt["status"], receipt["returned"], receipt["possibly_truncated"]) == ("read", 0, False)
 
 
 def test_gdelt_confirmed_empty_response_is_distinct_from_failure(monkeypatch):
