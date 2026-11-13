@@ -21,7 +21,7 @@ def import_graph(request, key=None):
         run = {"source_id": request.source_id, "is_demo": request.is_demo}
         for item in request.records:
             _validate_graph_bundle(conn, run, GraphBundle.model_validate(parse_json(item.raw_content)), now)
-    return store.import_archive(request, key)
+    return store.import_archive(request, key, graph_checked=True)
 
 
 def _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff):
@@ -29,6 +29,11 @@ def _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff):
     record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     if record.record_kind != "graph":
         raise HistoryError("not_a_graph_version", "所选版本不是图包")
+    return check_cited(record, mode, cutoff)
+
+
+def check_cited(record, mode, cutoff):
+    """图版本引用的原件（和旧文档桥的原站）在同一模式和截止时间下都看得到、引文一致，才把图版本交出去。"""
     with store.history_engine().begin() as conn:
         _check_graph_document_visibility(conn, record, mode, store._cutoff(cutoff))
     return record
@@ -255,6 +260,8 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
                 "cutoff": cutoff,
             },
         ).scalar_one_or_none()
+        if row is not None and ref.source_id == "legacy_documents" and (row.get("facts") or {}).get("source_site"):
+            store._source(conn, row["facts"]["source_site"])  # 旧文档桥的原站被撤，图里引它的也不可读
         if row is None or row["raw_sha256"] != ref.raw_sha256:
             raise HistoryError(
                 "graph_evidence_not_visible",

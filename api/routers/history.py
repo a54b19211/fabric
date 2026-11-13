@@ -92,6 +92,16 @@ def _call(function, *args, **kwargs):
         ) from None
 
 
+def _read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff):
+    """一个固定版本；图版本另要核对它引用的原件此刻也看得到（graph/publish/history_graph.py）。"""
+    record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
+    if record.record_kind == "graph":
+        from graph.publish.history_graph import check_cited
+
+        check_cited(record, mode, cutoff)
+    return record
+
+
 class SourceList(BaseModel):
     capabilities_version: str
     sources: list[dict]
@@ -105,7 +115,11 @@ def sources():
 
 @router.post("/archives", response_model=RunView, dependencies=[Depends(require_admin)])
 def archive(body: ArchiveImport, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
-    return _call(store.import_archive, body, idempotency_key)
+    """导入一包原件。图包（reviewed_graph、primekg_graph）先核对引文再存（graph/publish/history_graph.py）。"""
+    from fetch.catalog import GRAPH_SOURCES
+    from graph.publish.history_graph import import_graph
+
+    return _call(import_graph if body.source_id in GRAPH_SOURCES else store.import_archive, body, idempotency_key)
 
 
 @router.post("/local-files", response_model=RunView, dependencies=[Depends(require_admin)])
@@ -192,15 +206,7 @@ def version(
     mode: Mode,
     cutoff: datetime,
 ):
-    return _call(
-        store.read_version,
-        version_id,
-        source_id,
-        source_record_id,
-        is_demo,
-        mode,
-        cutoff,
-    )
+    return _call(_read_version, version_id, source_id, source_record_id, is_demo, mode, cutoff)
 
 
 @router.get("/versions/{version_id}/raw", dependencies=[Depends(require_read)])
@@ -212,15 +218,7 @@ def raw(
     mode: Mode,
     cutoff: datetime,
 ):
-    record = _call(
-        store.read_version,
-        version_id,
-        source_id,
-        source_record_id,
-        is_demo,
-        mode,
-        cutoff,
-    )
+    record = _call(_read_version, version_id, source_id, source_record_id, is_demo, mode, cutoff)
     return Response(
         content=record.raw_content,
         media_type=record.raw_media_type,

@@ -23,6 +23,7 @@ from functools import lru_cache
 from sqlalchemy import create_engine, text
 
 from clean import registry_changes
+from fetch.catalog import GRAPH_SOURCES
 from fetch.sources import project_record
 from store.history_models import (
     MAX_RESPONSE_BYTES,
@@ -276,17 +277,22 @@ def _new_run(conn, source_id, is_demo, kind, body, key, scope):
          "body": canonical(body), "scope": scope}).mappings().first()
     if row is not None:
         return row, True
-    return conn.execute(text("SELECT * FROM history_runs WHERE idempotency_key=:key"), {"key": key}).mappings().one(), False
+    row = conn.execute(text("SELECT * FROM history_runs WHERE idempotency_key=:key"), {"key": key}).mappings().one()
+    if (row["source_id"], row["kind"]) != (source_id, kind):
+        raise HistoryError("idempotency_conflict", "这个幂等键已用于别的来源或别的任务", 409)
+    return row, False
 
 
 LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥 legacy_documents 已退役：不再写入，旧版本按旧编号仍可读")
 
 
-def import_archive(request: ArchiveImport, key: str | None = None):
+def import_archive(request: ArchiveImport, key: str | None = None, *, graph_checked=False):
     """导入一包原件（场景回放、图谱发布、本地文件），和抓取一样存成版本。proof.available_at 给了的，这批新版本在
     public_history_reconstruction 模式下从那个时间起可见。图包在导入前由 graph/publish/history_graph.py 核对。"""
     if request.source_id == "legacy_documents":
         raise HistoryError(*LEGACY_RETIRED, 410)
+    if request.source_id in GRAPH_SOURCES and not graph_checked:
+        raise HistoryError("graph_import_unchecked", "图包要经 graph/publish/history_graph.py 的 import_graph 导入", 422)
     prepared = [(item, project_record(request.source_id, item)) for item in request.records]
     body = request.model_dump(mode="json")
     body["records"] = [{"source_record_id": r.source_record_id, "record_kind": r.record_kind}
