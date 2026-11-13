@@ -6,7 +6,8 @@
   加 --rounds N 每个来源抓 N 次（--twice 就是 --rounds 2）。
   加 --incremental 按固定刷新的读法抓（连续读到 3 条已存且没变的就停）：第一次和平常一样，第二次起"停止原因"应该是
   reached_known、版本数只有 3 个左右。只对目录里增量键是 stop_at_known 的来源生效；别的来源（有更新窗口的）照常整抓。
-  港交所、NCCN 是分组的（一家公司、一份指南一组）：每组各自读到已存的就停，读完一段（--max 条）再接着读要用固定刷新或 backfill_source。
+  港交所、NCCN 是分组的（一家公司、一份指南一组）：每组各自读到已存的就停。体检只读 --max 条、每次从第一家公司（第一份指南）读起，
+  读不完全部；一个完整周期要用固定刷新（DATAFABRIC_HISTORY_WATCHES），历史存量用 backfill_source.py。
 怎么跑（仓库根目录，用本仓的 .venv；来源一个接一个跑，不并发，不给对方网站压力）：
   python ops/check_sources.py                          # 全部来源，各抓一次
   python ops/check_sources.py nmpa chictr --twice      # 只测这两个，各抓两次

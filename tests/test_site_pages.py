@@ -257,6 +257,17 @@ def test_hkex_a_company_is_a_group_and_a_read_can_start_at_any_company_without_a
     assert rest[1]["stock_code"] == "01177" and len(sent) == 1 and sent[0]["stockId"] == 6833
 
 
+def test_hkex_the_rmb_counter_of_a_dual_counter_stock_is_not_read_again_but_a_lone_8xxxx_code_is(monkeypatch):
+    """86618 (RMB counter) lists the same documents as 06618 (HKD counter). Reading both let the version of each of those
+    announcements change at every visit, because the stock code we store differs; only the HKD counter is read."""
+    companies = [{"code": "06618", "name": "京東健康", "stock_id": 1}, {"code": "86618", "name": "京東健康－人民幣", "stock_id": 2},
+                 {"code": "80737", "name": "沒有港元柜台的", "stock_id": 3}]
+    rows = {1: HKEX_ROWS[:1], 2: HKEX_ROWS[:1], 3: HKEX_ROWS[2:3]}
+    announcements, sent = _hkex_read(monkeypatch, {"companies": companies}, rows_of=rows.get)
+    assert [params["stockId"] for params in sent] == [1, 3]  # 2 is the twin of 1: no request
+    assert [a["stock_code"] for a in announcements] == ["06618", "80737"]
+
+
 def test_hkex_a_joint_announcement_under_two_companies_is_given_once(monkeypatch):
     """联合公告会出现在几家公司名下，指向同一个 PDF：同一个文件只给一次，不然同一条记录一次读两遍。"""
     rows = {1000001102: HKEX_ROWS[:1], 6833: HKEX_ROWS[:1]}

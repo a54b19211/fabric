@@ -99,6 +99,14 @@ def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
     return rows
 
 
+def _is_rmb_counter(company: Dict, codes: set) -> bool:
+    """双柜台股票的人民币柜台（代码 8xxxx，港元柜台的代码加 80000），而且港元柜台也在清单里。两个柜台列的是同一批公告（实测 86618
+    和 06618 的 139 份文件完全相同，每行的股票代码栏都是“06618<br/>86618”）：读两遍，同一份公告每次都在两个柜台的版本之间来回变
+    （我们存的股票代码不同），每个周期都多出新版本。所以只读港元柜台。"""
+    code = company.get("code") or ""
+    return code.startswith("8") and code.isdigit() and str(int(code) - 80000).zfill(5) in codes
+
+
 def fetch_hkex_announcements(api_config: Dict, start: int = 0) -> Iterator[Dict]:
     """从港交所披露易拉取上市公司公告，一条一条给，从第 start 家公司读起。每家公司开头先给 GroupStart（再发请求，请求超时
     停在这里，续读位置就是这一家）。读不到的公司给一个 ItemUnreadable（写明哪家、为什么，采集插件记下它、不存版本），接着读下一家。"""
@@ -106,9 +114,12 @@ def fetch_hkex_announcements(api_config: Dict, start: int = 0) -> Iterator[Dict]
     skip_headlines, skip_titles = api_config.get("skip_headlines", ()), api_config.get("skip_titles", ())
     logger.info(f"[HKEX] 公司数量: {len(companies)}，从第 {start} 家读起")
     seen = set()  # 联合公告会出现在几家公司名下，同一个文件只给一次（续读后只管这一次读取里读到的）
+    codes = {company.get("code") for company in companies}
     for number in range(start, len(companies)):
         company = companies[number]
         yield GroupStart(number)
+        if _is_rmb_counter(company, codes):
+            continue
         try:
             rows = _read_company(api_config, company)
         except HistoryError as exc:
