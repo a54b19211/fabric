@@ -145,6 +145,7 @@ def _read_article(url: str) -> dict:
                 network_idle=False,
                 disable_resources=True,
                 timeout=60000,
+                extra_flags=transport.site_only(url),  # 不拦第三方的广告脚本，文章页 60 秒等不到 load
             )
         except Exception as e:  # noqa: BLE001 -- 原因写进下面的错误
             why = type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120]

@@ -153,6 +153,7 @@ def _fetch_detail(url: str) -> str:
                 network_idle=False,
                 disable_resources=True,
                 timeout=60000,
+                extra_flags=transport.site_only(url),
             )
         except Exception as e:  # noqa: BLE001 -- 原因写进下面的错误
             why = type(e).__name__ + "：" + (str(e).splitlines() or [""])[0][:120]
@@ -238,6 +239,7 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
                     wait_selector=LIST_READY,
                     disable_resources=True,
                     timeout=LIST_TIMEOUT,
+                    extra_flags=transport.site_only(target_url),
                 )
             except Exception as e:  # 读不到列表页是失败，不是“这一年读完了”：抛出去，运行记为失败（以前 break，被当作读到底）
                 logger.error(f"[Roche] 列表页抓取失败: {target_url} | {e}")

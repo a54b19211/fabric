@@ -30,7 +30,7 @@ def load_driver():
     namespace = {
         "ABC": ABC, "abstractmethod": abstractmethod, "urlparse": urlparse,
         "urljoin": urljoin, "json": json, "concurrent": concurrent, "queue": queue, "threading": threading, "re": re,
-        "transport": SimpleNamespace(wait=lambda url: None),
+        "transport": SimpleNamespace(wait=lambda url: None, site_only=lambda url: []),
         "SITE_PROFILES": {}, "DEFAULT_HEADERS": {"User-Agent": "synthetic"},
         "logger": Quiet(), "time": SimpleNamespace(sleep=lambda _delay: None),
         "make_uuid": lambda value: value,

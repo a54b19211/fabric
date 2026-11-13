@@ -483,6 +483,7 @@ def test_roche_starts_at_this_year_when_the_start_year_is_zero_or_not_given(monk
     from fetch.extractors.roche import roche_web_fetcher as fetcher
 
     seen = []
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
 
     def fetch(url, **kwargs):
         seen.append(url)

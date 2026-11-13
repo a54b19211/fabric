@@ -6,11 +6,19 @@ tests/fixtures/site_pages/ 里的 HTML 是 2026-11-11 从真实页面存下来�
 
 from pathlib import Path
 
+import pytest
 from scrapling.parser import Selector
 
+from fetch import rate
 from fetch.site_profiles import SITE_PROFILES
 
 PAGES = Path(__file__).parent / "fixtures" / "site_pages"
+
+
+@pytest.fixture(autouse=True)
+def _no_rate_wait(monkeypatch):
+    """打开页面之前的限速等待（fetch.transport.wait）不是这里要查的。"""
+    monkeypatch.setattr(rate, "wait", lambda *a, **k: None)
 
 
 def page(name):

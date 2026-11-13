@@ -241,7 +241,7 @@ class JsClickDriver(BasePaginationDriver):
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled", *transport.site_only(self.start_url)],
             )
             ctx = None
             try:
@@ -320,7 +320,7 @@ class JsClickDriver(BasePaginationDriver):
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled", *transport.site_only(self.start_url)],
             )
             ctx = None
             try:

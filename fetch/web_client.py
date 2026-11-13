@@ -237,6 +237,7 @@ def fetch_page(url: str, wait_selector: str = None, disable_resources: bool = Tr
             wait_selector=wait_selector,
             solve_cloudflare=solve_cloudflare,
             page_action=_collect_cookies,
+            extra_flags=transport.site_only(url),
         )
 
     logger.info(f"页面抓取成功: {url} | 状态码: {page.status}")

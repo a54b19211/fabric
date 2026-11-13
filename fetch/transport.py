@@ -2,7 +2,8 @@
 
 - get(url)：先等这个站点的限速间隔（fetch.rate），再发 GET；超时和 429 有界重试，每次重发前重新等限速；
   单个响应超过 cap 字节就放弃（防内存）。返回普通的 httpx.Response（正文已读完）。
-- wait(url)：用浏览器或 scrapling 打开页面之前调一次：只等限速、记一个请求。
+- wait(url)：用浏览器或 scrapling 打开页面之前调一次：只等限速、记一个请求。site_only(url) 是开浏览器时加的参数：
+  页面上只有这个站点自己的请求发得出去。
 - Budget：读取插件自己建一个、在自己的循环里调：存一条之前 take_record（读满了就停），要发请求之前
   check（到截止时间就停）；增量读取每读到一条父记录问一次 known（连续 known_stop 条已存且没变就停）。
 - SENT：这个进程发了几个请求、读到多少字节。read_public 每次读取前清零，读完写进读取结果。
@@ -12,6 +13,7 @@
 from __future__ import annotations
 
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -71,6 +73,14 @@ def wait(url):
     """发一个请求之前：等这个站点的限速间隔，记一个请求。"""
     rate.wait_for_url(url)
     SENT["requests"] += 1
+
+
+def site_only(url) -> list[str]:
+    """浏览器的启动参数（StealthyFetcher 的 extra_flags）：只解析这个站点自己的域名（url 的主机去掉开头的 www.，和它的
+    子域），别的主机一律解析失败。页面上第三方的广告、统计脚本会拖住 load 事件：2026-11-13 实测 FiercePharma 的文章页不拦
+    就 60 秒等不到 load（三次都超时），拦了 4 秒。经代理（NCCN）时域名由代理解析，这条不起作用。"""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return [f"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE {host}, EXCLUDE *.{host}"]
 
 
 def get(url, params=None, *, client=None, headers=None, cap=8 * 1024 * 1024, timeout=20.0, tries=None,
