@@ -227,7 +227,7 @@ class MetadataEnvelope(BaseModel):
     # T3 标准标识符对齐结果：{原始药名: {found, std_id, source_id, raw_value,
     # resolved_value, confidence, candidates, degraded}}
     # 阶段说明：当前仅进入 JSON 信封与 data/authority/ 旁路存档，尚未入库；
-    # 落库形态见 task_doc/B2_标识符对齐落库设计.md（doc_authority_resolution 表）。
+    # 落库形态是 doc_authority_resolution 表（迁移 V033）。
     authority_resolutions: Dict[str, Any] = Field(
         default_factory=dict,
         description="药名 → 权威库标识符对齐结果（暂不入库，仅信封/旁路存档）",

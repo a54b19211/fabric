@@ -2,7 +2,7 @@
 API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）的请求逻辑。
 
 非流式的对话调用（qwen_extract_structured、qwen_chat）的 HTTP 一侧是共享的 llm_transport；流式调试输出和 embedding
-仍走 OpenAI SDK（docs/decisions/0007-llm-transport-chat-calls.md）。
+仍走 OpenAI SDK。
 """
 
 import json

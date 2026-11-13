@@ -1204,7 +1204,7 @@ def test_a_web_page_whose_html_alone_changed_is_not_a_new_version(pg, monkeypatc
 def test_a_version_stored_before_document_evidence_still_matches_its_original(pg, monkeypatch):
     """Versions first seen before fetch.document_evidence existed carry no document_evidence. It is derived from
     the original and the projection, so it is not part of the version identity: observing the same original again
-    reuses that version instead of adding one per record (docs/decisions/0001-merge-server-fix.md)."""
+    reuses that version instead of adding one per record."""
     from fetch import document_evidence
 
     raw = json.dumps({"source": "MED", "id": "123", "title": "Example", "abstractText": "A"}, sort_keys=True)

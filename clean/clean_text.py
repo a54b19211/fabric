@@ -27,7 +27,7 @@ import re
 from json.decoder import scanstring
 
 # Any rule change is a new version: results are stored per processor version and earlier artifacts are kept
-# (what each version changed: docs/decisions/0002-processor-versions.md).
+# (what each version changed: git log -p clean/clean_text.py).
 PROCESSOR_VERSION = "datafabric.clean_text.v12"
 
 # ---------------------------------------------------------------- 空白与语言

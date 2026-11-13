@@ -3,7 +3,7 @@ WeKnora 图同步 HTTP 客户端。
 调用 WeKnora 的 4 个图同步 API 端点，将 ZK 侧的实体字典、抽取实体、抽取关系
 推送到 WeKnora，再由 WeKnora 投影到 Neo4j。
 
-API 端点（参考 task_doc/graph-sync.md）：
+API 端点：
   1. POST /entity-dict/batch-upsert            → 同步 entity_dict 镜像表
   2. POST /entity-dict/{kbId}/init-copies      → 初始化 PrimeKG 副本到 graph_entities
   3. POST /kb/:id/graph/entities/batch-upsert  → 批量 upsert 抽取实体

@@ -1,4 +1,4 @@
-# The one entry point for this checkout (README: 开发环境与测试).
+# The one entry point for this checkout (README: 怎么跑).
 # uv 0.13.0 from PATH (~/.local/bin/uv) or UV=<path>. requirements.lock is resolved for CPython 3.10 (the
 # interpreter of the running Fabric) on x86_64-unknown-linux-gnu, with a sha256 for every distribution;
 # `make venv` installs only from it.
@@ -54,7 +54,7 @@ check-lock:
 	@tmp=$$(mktemp -d) && trap 'rm -rf $$tmp' EXIT && cp requirements.lock $$tmp/lock && \
 	if ! $(UV) pip compile --quiet $(LOCK_INPUTS) $(LOCK_FLAGS) -o $$tmp/lock; then \
 	  echo 'check-lock did not run: resolving $(LOCK_INPUTS) failed (see the uv error above: package index or' \
-	    'network unreachable - on zktest see the README for the proxy - or inputs that do not resolve);' \
+	    'network unreachable - on zktest add HTTPS_PROXY=http://127.0.0.1:7890 for this command - or inputs that do not resolve);' \
 	    'requirements.lock was not compared.' >&2; \
 	  exit 2; \
 	fi; \

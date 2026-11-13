@@ -4,7 +4,7 @@ strict BioCheck contract-v3 request item - every literal located at its real off
 
 These rules were moved from BioRadar (measure.v10: research/measure_checks.py, research/continuation.py and
 material.py at b452279) without changing them; tests/test_measure_rules.py compares them with BioRadar's output on
-the same artifacts and the same model outputs (tests/fixtures/measure_golden.json, docs/decisions/0006). Only the
+the same artifacts and the same model outputs (tests/fixtures/measure_golden.json). Only the
 places that read BioRadar's own tables changed: a measure's cited sources are the window and the contexts this
 processor itself sent with it (`Sent`), never a workspace's records. The one other change is the end of window 0
 (see windows_of).

@@ -1,7 +1,7 @@
 """The measurement extraction processor datafabric.measure_extract.v5: what one model call over one reading window
 of a fixed cleaned artifact asks, what output it accepts, and how each measure it returns becomes a reading.
 
-Identity (docs/decisions/0006): a run is keyed by the fixed original (source, record, version, raw sha256), the
+Identity: a run is keyed by the fixed original (source, record, version, raw sha256), the
 clean artifact (text processor version, text sha256) and the producer (this processor's version and the sha256 of
 the canonical model configuration - provider kind, model, endpoint id, thinking, temperature, max tokens; another
 model is another producer, never an overwrite). A reading's id covers the whole canonical candidate - the strict

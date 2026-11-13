@@ -11,7 +11,7 @@ Modes:
   the object of its check's answer supersedes it.
 - operational_replay: what the system actually showed at the cutoff - objects produced by then, events produced by
   then whose material was visible by then; no later processor or checker result. Which checker was in force at the
-  cutoff is not recorded (docs/decisions/0006: an append-only activation history is the follow-up), so an object
+  cutoff is not recorded (an append-only activation history is a follow-up), so an object
   of a checker other than the one configured now is not current in replay (checker_history_unknown) - never ok.
 - public_history_reconstruction: today's processors and checker over material proven public by the cutoff - the
   version's proof, and corrections only from their own proof; the receipt says reconstruction: true and names the
