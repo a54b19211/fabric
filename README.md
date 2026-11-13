@@ -56,7 +56,7 @@ python main_etl.py --only index                           # 测量、送知识�
 |---|---|---|
 | datafabric-scheduler | `python -m run.scheduler` | 到点给各来源建采集任务，放进队列 |
 | datafabric-history-worker | `rq worker … extraction` | 执行采集任务（`fetch/fetch_job.py`），原件存成版本 |
-| datafabric-clean | `python -m run.clean --loop` | 新版本的正文、编号、画像、登记差分；之后给画像过的版本打质量分（每轮约 60 秒） |
+| datafabric-clean | `python -m run.clean --loop` | 新版本的正文、编号、画像、登记差分；之后给画像过的版本打质量分（每轮限时 60 秒，到点做完手上那个版本才停） |
 | datafabric-index | `python -m run.index` | 清洗正文送进 WeKnora |
 | datafabric-measure | `python -m run.measure` | 从 WHO 通报正文读数字（未核的读数也带标记往下流） |
 | datafabric-history | `uvicorn api.main:app` | HTTP 接口 |
