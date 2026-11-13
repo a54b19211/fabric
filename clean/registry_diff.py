@@ -186,7 +186,7 @@ def _names_detail(old, new) -> dict:
 
 def covered() -> tuple[str, ...]:
     """已投影比较过的原件路径：登记字段的 JSON 路径 + 简介。剩余部分另行比较。"""
-    from fetch.sources import TRIAL_PATHS
+    from fetch.projection import TRIAL_PATHS
 
     return tuple(TRIAL_PATHS.values()) + (SUMMARY_POINTER,) + BOOKKEEPING
 

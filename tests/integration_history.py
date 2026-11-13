@@ -227,7 +227,7 @@ def test_stored_unchanged_answers_what_storing_would_do(pg):
 
 def _old_version(conn, native, abstract, seq):
     """V042 以前存下的一个 Europe PMC 版本：没有 fingerprint、replaced_by。"""
-    from fetch.sources import project_record
+    from fetch.projection import project_record
     from store.history_models import AvailabilityProof, HistoryRecord
 
     record_id, raw = "MED:" + native, _epmc(abstract, native)
@@ -851,10 +851,11 @@ def test_graph_manifest_cannot_bind_demo_document_into_real_package(pg):
     assert error.value.code == "graph_demo_mismatch"
 
 
-# ——登记差分（V022）：和版本同一事务写入；读取遵守模式和截止时间——
+# ——登记差分（V022）：清洗时和上一版比着写；读取遵守模式和截止时间——
 
 
-def test_registry_diff_written_with_version_and_read_with_visibility(pg):
+def test_registry_diff_written_when_cleaned_and_read_with_visibility(pg):
+    from clean import clean_stage
     from clean.registry_changes import for_versions
 
     first = _fetch_study("NCT09990001", "rd-1")
@@ -863,6 +864,9 @@ def test_registry_diff_written_with_version_and_read_with_visibility(pg):
     second = _fetch_study("NCT09990001", "rd-3", status="TERMINATED", why="Futility", pcd="2027-06")
     v1, v2 = first.version_ids[0], second.version_ids[0]
     assert v1 != v2
+    assert for_versions("clinicaltrials", False, [v2], "current", datetime.now(timezone.utc))["versions"][v2] == {
+        "state": "not_processed"}  # 还没清洗
+    clean_stage.process(batch=50)
     with pg.begin() as conn:
         runs = conn.execute(text(
             "SELECT to_version_id,from_version_id,pairing,change_count,material_count "

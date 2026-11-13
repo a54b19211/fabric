@@ -32,7 +32,7 @@ PATHS = {
 
 
 def project_who(item, data):
-    from fetch.sources import _facts
+    from fetch.projection import _facts
 
     try:
         native = str(UUID(data["Id"]))
@@ -109,7 +109,8 @@ def project_who(item, data):
 
 
 def read_who(request):
-    from fetch.sources import _raw_array_items, parse_json
+    from fetch.projection import parse_json
+    from fetch.sources import _raw_array_items
 
     records, error = [], None
     exhausted, stop, continuation = False, "record_budget", None

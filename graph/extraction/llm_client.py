@@ -1,5 +1,5 @@
 """
-API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）的请求逻辑。
+API 客户端 —— 封装 Qwen（结构化提取）和 embedding 的请求逻辑（MinerU 的 PDF 解析在 clean/mineru_local.py）。
 
 非流式的对话调用（qwen_extract_structured、qwen_chat）的 HTTP 一侧是共享的 llm_transport；流式调试输出和 embedding
 仍走 OpenAI SDK。
@@ -8,7 +8,6 @@ API 客户端 —— 封装 MinerU（PDF 解析）和 Qwen（结构化提取）�
 import json
 import tempfile
 import time
-from pathlib import Path
 
 import httpx
 import llm_transport as lt
@@ -54,75 +53,6 @@ def _strip_json_fence(raw: str) -> str:
     if s.endswith("```"):
         s = s[:-3]
     return s.strip()
-
-
-# ===================================================================
-#  MinerU 自部署 API —— PDF → Markdown
-# ===================================================================
-
-_MIME_MAP = {
-    ".pdf":  "application/pdf",
-    ".doc":  "application/pdf",   # MinerU 服务端只认 application/pdf，强制覆盖
-    # 自部署 MinerU 3.4 原生解析 docx（11-04 实测），按真实类型发；.doc 仍不支持，由加工层另走云端或转 PDF
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xls":  "application/vnd.ms-excel",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-}
-
-
-def _mineru_parse(file_path: str, base: str | None = None, content_list: bool = False, timeout: float = 300) -> dict:
-    """
-    通用 MinerU 解析内核，根据文件扩展名自动选择 MIME type。
-    支持 .pdf / .doc / .docx / .xls / .xlsx。
-    """
-    # base 可由调用方给（加工层 attachment_parse 用 DATAFABRIC_MINERU_URL）；默认沿用旧配置
-    base = (base or APP.MINERU_API_BASE).rstrip("/")
-    path_obj = Path(file_path)
-    fname = path_obj.name
-    mime = _MIME_MAP.get(path_obj.suffix.lower(), "application/octet-stream")
-    logger.info(f"[MinerU] 同步解析: {file_path} (mime={mime})")
-    try:
-        with open(file_path, "rb") as f:
-            resp = httpx.post(
-                f"{base}/file_parse",
-                files=[("files", (fname, f, mime))],
-                # content_list 给出每个内容块的页码（page_idx），加工层用它做定位
-                data={"return_md": "true", "backend": "pipeline",
-                      **({"return_content_list": "true"} if content_list else {})},
-                timeout=timeout,
-            )
-        resp.raise_for_status()
-
-        data = resp.json()
-        markdown = ""
-        blocks = None
-        if isinstance(data, dict):
-            results = data.get("results", {})
-            if isinstance(results, dict) and results:
-                first = next(iter(results.values()))
-                markdown = first.get("md_content") or first.get("md") or first.get("markdown") or ""
-                blocks = first.get("content_list")
-                if isinstance(blocks, str):
-                    import json as _json
-
-                    blocks = _json.loads(blocks)
-            if not markdown:
-                markdown = data.get("md_content") or data.get("md") or data.get("markdown") or ""
-        elif isinstance(data, list) and data:
-            markdown = data[0].get("md_content") or data[0].get("md") or data[0].get("markdown") or ""
-        elif isinstance(data, str):
-            markdown = data
-
-        if not markdown:
-            return {"markdown": "", "success": False, "error": f"响应中未找到 markdown 内容，原始响应: {resp.text[:300]}"}
-        logger.info(f"[MinerU] 解析完成，Markdown 长度: {len(markdown)}")
-        out = {"markdown": markdown, "success": True, "error": ""}
-        if content_list:
-            out["content_list"] = blocks if isinstance(blocks, list) else None
-        return out
-    except Exception as e:
-        logger.error(f"[MinerU] 调用异常: {e}")
-        return {"markdown": "", "success": False, "error": str(e)}
 
 
 # ===================================================================

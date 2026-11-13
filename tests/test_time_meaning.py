@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from fetch.gdelt_news import article_id
-from fetch.sources import project_record
+from fetch.projection import project_record
 from store import index_publication as index
 from store.history_models import ArchiveRecord, AvailabilityProof, HistoryRecord, sha256
 

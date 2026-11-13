@@ -98,7 +98,7 @@ def financial_rows(data):
 
 
 def project_sec(item, data):
-    from fetch.sources import _facts
+    from fetch.projection import _facts
 
     cik, taxonomy, tag = split_native(item.source_record_id)
     if (item.record_kind != "document" or not isinstance(data.get("cik"), int)
@@ -130,7 +130,7 @@ def project_sec(item, data):
 
 
 def read_sec(request):
-    from fetch.sources import parse_json
+    from fetch.projection import parse_json
 
     if request.query.strip() != "*" or not request.source_record_ids:
         raise HistoryError("sec_explicit_scope", "SEC读取须query='*'并给明确CIK:taxonomy:tag原生ID清单")

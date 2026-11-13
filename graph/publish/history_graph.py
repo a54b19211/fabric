@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from fetch.sources import parse_json
+from fetch.projection import parse_json
 from store import history as store
 from store.history_models import HistoryError
 
@@ -194,7 +194,7 @@ def read_graph_neighborhood(
     max_edges=100,
     review_scope=None,
 ):
-    from fetch.sources import parse_json
+    from fetch.projection import parse_json
     from graph.publish.reviewed_graph import (
         GRAPH_SOURCES,
         GraphBundle,
@@ -239,7 +239,7 @@ def read_graph_neighborhood(
 
 
 def _check_graph_document_visibility(conn, record, mode, cutoff):
-    from fetch.sources import parse_json
+    from fetch.projection import parse_json
     from graph.publish.reviewed_graph import GraphBundle
 
     bundle = GraphBundle.model_validate(parse_json(record.raw_content))
@@ -318,7 +318,7 @@ def read_graph_resolution(
     limit=20,
     review_scope=None,
 ):
-    from fetch.sources import parse_json
+    from fetch.projection import parse_json
     from graph.publish.reviewed_graph import GRAPH_SOURCES, GraphBundle, GraphRef, resolve
 
     if source_id not in GRAPH_SOURCES:

@@ -1,4 +1,5 @@
-"""临床登记差分的存取。写入和新版本在同一事务里（store.history._publish 调 record），存量用 backfill 补。"""
+"""临床登记差分的存取。清洗段（clean/clean_stage.py）给新版本写差分（record_versions：和它取代的上一版比，与清洗结果
+同一事务），存量用 backfill 补；for_versions 读给 /api/history/registry-changes。"""
 
 from __future__ import annotations
 
@@ -85,6 +86,27 @@ def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, fact
                 "reason": change["material_reason"],
             },
         )
+
+
+def record_versions(conn, rows):
+    """一批清洗中的版本里，临床登记的各和它取代的上一版（replaced_by 指向它的那个）比，写差分。rows 是清洗段的行
+    （version_id、source_id、is_demo、source_record_id、facts、locators、clean_text）。"""
+    todo = [r for r in rows if r["source_id"] in DIFF_SOURCES]
+    if not todo:
+        return
+    found = {r["to_version_id"]: r for r in conn.execute(text(
+        "SELECT n.version_id AS to_version_id, n.payload->>'raw_content' AS raw, p.version_id AS from_version_id, "
+        "p.payload->'facts' AS facts, p.payload->>'clean_text' AS clean_text, p.payload->>'raw_content' AS raw_content "
+        "FROM history_versions n LEFT JOIN history_versions p ON p.replaced_by = n.version_id "
+        "WHERE n.version_id = ANY(:ids)"), {"ids": [r["version_id"] for r in todo]}).mappings()}
+    for r in todo:
+        mine = found[r["version_id"]]
+        previous = None if mine["from_version_id"] is None else {
+            "version_id": mine["from_version_id"],
+            "payload": {k: mine[k] for k in ("facts", "clean_text", "raw_content")}}
+        record(conn, source_id=r["source_id"], is_demo=r["is_demo"], record_id=r["source_record_id"],
+               previous=previous, to_version_id=r["version_id"], facts=r["facts"], locators=r["locators"],
+               pairing="current_at_adoption", summary=r["clean_text"], raw=mine["raw"])
 
 
 def _eligible(history, mode, alias):

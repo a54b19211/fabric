@@ -2,7 +2,7 @@
 
 11-04 实测自部署 MinerU 3.4.0（旧配置 APP.MINERU_API_BASE）：PDF、DOCX 原生解析；DOC、XLS 返回
 “Unsupported file type”。MinerU 4.x 和云端 API 原生支持 DOC/PPT/XLS 等 Office 格式。所以：
-- PDF / DOCX：自部署 MinerU 原生解析（graph.extraction.llm_client._mineru_parse）；失败且配置了云端 token → 云端；
+- PDF / DOCX：自部署 MinerU 原生解析（clean/mineru_local.py）；失败且配置了云端 token → 云端；
 - DOC / PPT / PPTX：配置了云端 token → 云端原生解析（clean.mineru_cloud）；否则 LibreOffice 转 PDF
   （clean.docx_to_pdf._doc_to_pdf，在临时目录里转）再交自部署 MinerU；
 - XLS / XLSX：openpyxl / xlrd 直读成 Markdown 表格（clean.excel_parser.excel_to_markdown）；
@@ -59,9 +59,9 @@ def mineru_base() -> str:
 
 
 def _mineru(path: str) -> dict:
-    from graph.extraction.llm_client import _mineru_parse
+    from clean import mineru_local
 
-    return _mineru_parse(path, base=mineru_base(), content_list=True, timeout=300)
+    return mineru_local.parse(path, base=mineru_base(), content_list=True, timeout=300)
 
 
 def _mineru_cloud(path: str) -> dict:

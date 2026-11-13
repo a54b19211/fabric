@@ -8,7 +8,8 @@ import json
 import pytest
 
 from fetch import catalog, rate, site_crawler, transport
-from fetch.sources import project_record, read_public
+from fetch.projection import project_record
+from fetch.sources import read_public
 from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
 PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/20261101120000123.html"

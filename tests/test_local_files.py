@@ -19,7 +19,8 @@ from api.routers import history as history_router
 from clean import attachment_parse as ap
 from fetch import catalog, local_files
 from fetch import web_client as client
-from fetch.sources import SOURCE_CATALOG, project_record, read_public
+from fetch.projection import project_record
+from fetch.sources import SOURCE_CATALOG, read_public
 from store import history as store
 from store.history_models import FetchRequest, HistoryError
 

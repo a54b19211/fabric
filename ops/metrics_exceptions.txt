@@ -28,7 +28,7 @@ fetch/extractors/nccn/nccn.py:extract_nccn_detail  107/30  HTML detail-page pars
 fetch/extractors/roche/roche_web_fetcher.py:_parse_list_page  55/25  list/paging parser of one site; site markup dictates the shape
 graph/publish/graph_tools.py:paths  56/34  graph query helper with the traversal and its filters inline
 graph/publish/graph_tools.py:subgraph  25/25  graph query helper with the traversal and its filters inline
-fetch/sources.py:_project_pubmed  91/20  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
+fetch/projection.py:_project_pubmed  91/20  per-source record projection, one branch per source field; moves to the source catalog (audit 3.4)
 graph/extraction/native_extraction.py:_index_json  53/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 graph/extraction/native_extraction.py:_index_json.walk  46/21  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
 graph/extraction/native_extraction.py:_project  102/39  projection of source JSON into attributes, one branch per field kind; table-driven rewrite
@@ -44,7 +44,7 @@ graph/agents/runner.py:AgentRunner.run_document_review  122/31  legacy graph age
 graph/agents/runner.py:AgentRunner.run_entity_merge_stream  191/42  legacy streaming entity-merge run (nesting 9); split with the legacy graph feature
 graph/agents/entity_merge.py:build_entity_merge_graph  83/23  legacy entity-merge agent graph assembly
 fetch/api_fields.py:_extract_extra_value  61/23  legacy API router value extraction with one branch per response shape
-graph/extraction/llm_client.py:_mineru_parse  53/24  MinerU cloud client polling/parsing loop (32% of its lines are this round's; the module is being reworked separately)
+clean/mineru_local.py:parse  48/23  self-hosted MinerU client, one branch per response shape (moved from graph/extraction/llm_client.py:_mineru_parse)
 fetch/page_parser.py:route_webpage  85/14  web page router choosing among extraction routes, one branch per route
 graph/db/identity.py:evidence_values  29/26  identity merge/rollback/review SQL with one branch per case; split by operation
 graph/db/identity.py:get_current_review_evidence  65/53  identity merge/rollback/review SQL with one branch per case; split by operation

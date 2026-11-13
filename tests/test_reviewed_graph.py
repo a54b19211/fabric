@@ -281,7 +281,7 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
 
 
 def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract():
-    from fetch.sources import _pointer, parse_json, project_record
+    from fetch.projection import _pointer, parse_json, project_record
     from store.history_models import ArchiveRecord
 
     graph = bundle()
@@ -321,7 +321,7 @@ def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract
 
 
 def test_missing_optional_graph_fact_has_no_invented_null_locator():
-    from fetch.sources import project_record
+    from fetch.projection import project_record
     from store.history_models import ArchiveRecord
 
     raw = bundle().model_dump_json(exclude={"selection_truncated"})

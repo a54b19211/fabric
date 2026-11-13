@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from fetch.sources import project_record
+from fetch.projection import project_record
 from store.history_models import ArchiveRecord
 
 

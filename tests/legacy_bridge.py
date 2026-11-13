@@ -3,7 +3,7 @@ bridge was retired, but the live database keeps what the bridge wrote: the legac
 the graph packages published before the retirement read those versions. write() stores one as the bridge did;
 open_old_writer() lets a graph package cite one, as packages did before the retirement."""
 
-from fetch.sources import project_record
+from fetch.projection import project_record
 from graph.publish import history_graph
 from store import history
 

@@ -3,7 +3,7 @@
 import re
 
 from clean.identifiers import NCT_ID
-from fetch.sources import parse_json
+from fetch.projection import parse_json
 from graph.extraction.native_extraction import TRIAL_ATTRIBUTE_PATHS, clinical_trial_attributes, field_value
 from graph.publish.reviewed_graph import (
     GraphBundle,

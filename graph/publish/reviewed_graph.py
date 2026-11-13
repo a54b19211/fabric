@@ -581,7 +581,7 @@ def primekg_bundle(observation):
 
 def project_graph_record(source_id, item, data):
     """只有这三个固定派生来源可使用图桥结构；保留旧四种原件投影不变。"""
-    from fetch.sources import _facts
+    from fetch.projection import _facts
 
     if source_id == "legacy_documents":
         if data.get("schema_version") == "datafabric.collected.document.v1":

@@ -7,8 +7,9 @@ import pytest
 
 from fetch import gdelt_news, rate, transport
 from fetch.gdelt_news import article_id
+from fetch.projection import project_record
 from fetch.source_refresh import SourceWatch, _segment_done
-from fetch.sources import project_record, read_public
+from fetch.sources import read_public
 from fetch.windows import cycle_request
 from settings import APP
 from store.history import _lead_window

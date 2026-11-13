@@ -6,7 +6,7 @@ https://www.fda.gov/safety/enforcement-reports/enforcement-report-information-an
 import re
 from dataclasses import dataclass
 
-from fetch.sources import DECODER, parse_json
+from fetch.projection import DECODER, parse_json
 from graph.extraction.clinical_research import (
     FIELD_PATHS,
     MAX_DOCUMENT_BYTES,

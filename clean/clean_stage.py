@@ -1,4 +1,5 @@
-"""清洗段：每个版本只处理一次，写出干净正文、编号和画像。结果只追加、可重跑，同样的输入得到同样的结果。
+"""清洗段：每个版本只处理一次，写出干净正文、编号和画像（临床登记另写和上一版的逐字段差分）。结果只追加、可重跑，
+同样的输入得到同样的结果。
 领活用 SELECT ... FOR NO KEY UPDATE SKIP LOCKED，可多进程并行：别的进程正在处理的版本直接跳过。
 
 从哪读起：process()。它一批一批地领还没画像的版本（_process_batch），一批的活在 _process_rows 里：_prepare_rows
@@ -7,8 +8,8 @@
 run/clean.py。
 
 读写的表：读 history_versions 和 history_sources；derived_stage_waiting 记附件还没解析完的版本；写 derived_clean_text
-（清洗正文）、derived_identifiers（编号）、derived_profiles（画像）。写画像的同一个事务里还会给 index_publications
-（建索引待办）排活。
+（清洗正文）、derived_identifiers（编号）、derived_profiles（画像）、derived_registry_diff_runs / derived_registry_changes
+（临床登记差分）。写画像的同一个事务里还会给 index_publications（建索引待办）排活。
 
 运行方式（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）：
 - 领活：一批 = 还没有当前画像、也不在等附件正文的版本，按（来源, published_seq）先后；领到的版本行锁到这批写完。
@@ -21,7 +22,7 @@ run/clean.py。
 - stage_status() 给出每个来源的版本数、已画像数、等附件的数和还没做的数。
 
 每个还没有画像（derived_profiles，当前画像处理器版本）的版本，在一个事务里写：
-1. 清洗正文（derived_clean_text，processor_version=datafabric.clean_text.v1）：
+1. 清洗正文（derived_clean_text，processor_version 是 clean/clean_text.py 的 PROCESSOR_VERSION）：
    - clinicaltrials：登记字段逐字段成段（JSON 路径定位），简介在前；
    - europe_pmc：原件 JSON 的标题 + 摘要（偏移回到原件 JSON）；
    - nmpa / cde / chictr 的网页版本：旧提取器解析出的 Markdown（偏移回到原件 JSON 里的 /parsed/markdown）；
@@ -29,8 +30,10 @@ run/clean.py。
      就先不画像，等下一轮；
    - 其他来源：投影里的 clean_text 按 Markdown 规则清洗（偏移回到投影正文，写明定位基准）。
 2. 编号（derived_identifiers）：在这份正文上抽取，偏移指这份正文。
-3. 画像（derived_profiles）：分类、四维质量、分流（clean.profile）。
-4. 索引待办（store.index_publication.enqueue_versions）：画像写下的同一事务里，按画像所基于的那份正文入队。
+3. 画像（derived_profiles）：分类、四项质量状态（格式、来源可信度、实体匹配、事实核验，不算分）、分流（clean.profile）。
+   徐子雯的五维质量分不在这里，是之后的质量段（clean/quality_stage.py）。
+4. 临床登记差分（clean/registry_changes.py · record_versions）：和这个版本取代的上一版逐字段比。
+5. 索引待办（store.index_publication.enqueue_versions）：画像写下的同一事务里，按画像所基于的那份正文入队。
 图谱等派生来源不在这一层处理。
 """
 
@@ -43,7 +46,7 @@ import time
 
 from sqlalchemy import text
 
-from clean import attachment_parse, clean_text, identifiers, profile
+from clean import attachment_parse, clean_text, identifiers, profile, registry_changes
 from clean.processors import UNCLEANED_SOURCES
 from store.history_models import HistoryError
 
@@ -52,7 +55,6 @@ from fetch.catalog import SITE_SOURCES  # noqa: E402  站点插件采集的来�
 
 REGISTRY_IDS = {"nct", "ctr", "chictr"}
 REGISTRY_SOURCES = {"clinicaltrials", "chictr", "cde_ctr"}
-
 
 BATCH = 200  # 一批（一个事务）处理几个版本
 
@@ -188,6 +190,7 @@ def _process_rows(conn, key, rows, counts):
         profile_rows.append(_profile_row(r, prof, text_pv))
         counts[prof["route"]] = counts.get(prof["route"], 0) + 1
     _write_rows(conn, clean_rows, id_rows, profile_rows, counts)
+    registry_changes.record_versions(conn, work)
 
 
 def _prepare_rows(conn, key, work, counts):
@@ -501,7 +504,6 @@ def _processed_on(out, row):
             "processor_version"]:
         return entry
     return None
-
 
 def identifier_links(version_id):
     """和这个版本共享编号的其他版本。relation（从这个版本的角度）：

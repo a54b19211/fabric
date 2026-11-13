@@ -1,15 +1,21 @@
 """History 库：存版本、记采集任务、按模式和截止时间读版本。
 
 存（finish_fetch 抓取 / import_archive 导入 → _publish，一个事务）：
-  每条原件算一个内容指纹 fingerprint(source_id, raw)，和这条记录当前版本（replaced_by 为空的那个）的指纹比：
+  每条原件先投影（fetch/projection.py · project_record：标题、正文、事实字段，纯函数），再算一个内容指纹
+  fingerprint(source_id, raw)，和这条记录当前版本（replaced_by 为空的那个）的指纹比：
   相同 → 不存，记"没变"；不同 → 插一个新版本（来源的 published_seq + 1），旧版本的 replaced_by 指向新版本。
   原件只追加：已存的版本只会被补上 fingerprint、replaced_by 两列，别的不改不删。A→B→A 是第三个版本。
+  临床登记的逐字段差分不在这里算：清洗时（clean/clean_stage.py）和上一版（replaced_by 指向它的那个）比。
 读（list_records、read_version、list_changes、visible_versions）：
   current / operational_replay 模式看 first_seen_at <= cutoff；public_history_reconstruction 看 proof_available_at
   （档案导入时声明的公开可见时间）。一条记录在截止时间下可见的版本按 _LATEST 排第一的那个。
 
 表：history_sources（来源，read_enabled 关掉就不可读）、history_runs（采集/导入任务）、history_versions（版本）、
 history_version_rank（排序用的派生键）、history_attachment_links（附件属于哪个父页面版本）。
+
+依赖方向：抓（fetch/）、洗（clean/）调用这里；这里不调读取和清洗，只用不连库、不联网的来源目录（fetch/catalog.py）、
+投影（fetch/projection.py）和数据形状（store/history_models.py）。唯一的例外是按旧编号读 legacy 版本时查迁移别名
+（fetch/legacy_migration.py · alias，旧文档迁移，见那个文件）。
 """
 
 from __future__ import annotations
@@ -23,9 +29,8 @@ from functools import lru_cache
 
 from sqlalchemy import create_engine, text
 
-from clean import registry_changes
 from fetch.catalog import GRAPH_SOURCES
-from fetch.sources import project_record
+from fetch.projection import project_record
 from store.history_models import (
     MAX_RESPONSE_BYTES,
     ArchiveImport,
@@ -104,9 +109,11 @@ def list_sources():
 
 # 来源每次响应都会改写、但不说明记录变了的字段：ClinicalTrials 给每条登记盖上数据快照日期
 VOLATILE_FIELDS = {"clinicaltrials": [("derivedSection", "miscInfoModule", "versionHolder")]}
-# 网页抓取（role=web_capture）保存了当时的 HTML，但 HTML 每次都不一样（随机 id、每次新的下载路径）：
-# 比较的是解析出的标题、正文和附件清单，HTML 里解析没读到的变动不算新版本
-WEB_CAPTURE_HTML = ("html", "html_sha256", "html_store_path")
+# 原件里每次都可能不一样、但不说明内容变了的键，按原件的 role 列：
+# - 网页抓取（web_capture）保存了当时的 HTML，HTML 每次都不一样（随机 id、每次新的下载路径）：比较的是解析出的标题、
+#   正文和附件清单，HTML 里解析没读到的变动不算新版本；
+# - 附件（attachment）的 store_path 是本机落盘路径，换一台机器、换一个数据目录就变；文件本身看 sha256。
+UNCOMPARED_KEYS = {"web_capture": ("html", "html_sha256", "html_store_path"), "attachment": ("store_path",)}
 
 
 def normalized_raw(source_id: str, raw: str) -> str:
@@ -117,9 +124,8 @@ def normalized_raw(source_id: str, raw: str) -> str:
     except (TypeError, ValueError):
         return raw
     if isinstance(data, dict):
-        if data.get("role") == "web_capture":
-            for key in WEB_CAPTURE_HTML:
-                data.pop(key, None)
+        for key in UNCOMPARED_KEYS.get(data.get("role"), ()):
+            data.pop(key, None)
         for *path, last in VOLATILE_FIELDS.get(source_id, ()):
             node = data
             for key in path:
@@ -144,9 +150,10 @@ def _role(projected) -> str:
 
 
 def _current(conn, source_id, is_demo, record_id, role="source_record"):
-    """这条记录现在的版本（没有被 replaced_by 指走的最新一个）：version_id、fingerprint、原件和载荷。"""
+    """这条记录现在的版本（没有被 replaced_by 指走的最新一个）：version_id、fingerprint；没有指纹的老版本另带原件。"""
     return conn.execute(text(
-        "SELECT version_id, fingerprint, payload FROM history_versions "
+        "SELECT version_id, fingerprint, CASE WHEN fingerprint IS NULL THEN payload->>'raw_content' END AS raw_content "
+        "FROM history_versions "
         "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:record AND replaced_by IS NULL "
         "AND COALESCE(payload->'facts'->>'publication_role','source_record')=:role "
         "ORDER BY published_seq DESC LIMIT 1"),
@@ -156,7 +163,7 @@ def _current(conn, source_id, is_demo, record_id, role="source_record"):
 
 def _fingerprint_of(source_id, current) -> str:
     # 加指纹列以前存的版本没有指纹（ops/backfill_fingerprint.py 补）：没补的当场按原件算
-    return current["fingerprint"] or fingerprint(source_id, current["payload"]["raw_content"])
+    return current["fingerprint"] or fingerprint(source_id, current["raw_content"])
 
 
 def stored_unchanged(source_id, item) -> bool:
@@ -184,10 +191,6 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
         if current is not None:
             conn.execute(text("UPDATE history_versions SET replaced_by=:new WHERE version_id=:old"),
                          {"new": version_id, "old": current["version_id"]})
-        registry_changes.record(  # 临床登记：和上一版逐字段的差分，与新版本同一事务
-            conn, source_id=source_id, is_demo=is_demo, record_id=item.source_record_id, previous=current,
-            to_version_id=version_id, facts=projected.get("facts"), locators=projected.get("field_locators"),
-            pairing="current_at_adoption", summary=projected.get("clean_text"), raw=item.raw_content)
         version_ids.append(version_id)
         new_ids.append(version_id)
     _link_attachments(conn, run, prepared, version_ids)

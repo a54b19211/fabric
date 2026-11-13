@@ -176,7 +176,7 @@ def _narrative_text(raw, source_site):
 
 
 def project_collected(item, data):
-    from fetch.sources import TRIAL_PATHS, _facts
+    from fetch.projection import TRIAL_PATHS, _facts
 
     document = CollectedDocument.model_validate(data)
     native = "legacy:" + document.source_site + ":" + document.source_doc_uuid

@@ -7,7 +7,8 @@ import httpx
 import pytest
 
 from fetch import sec_xbrl as sec
-from fetch.sources import _pointer, project_record, read_public
+from fetch.projection import _pointer, project_record
+from fetch.sources import read_public
 from store.history_models import ArchiveRecord, FetchRequest, HistoryError
 
 NATIVE = "CIK0001682852:us-gaap:NetIncomeLoss"

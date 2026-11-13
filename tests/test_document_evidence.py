@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from fetch.sources import project_record
+from fetch.projection import project_record
 from store.history_models import ArchiveRecord
 
 
@@ -83,7 +83,7 @@ def test_pubmed_correction_direction_and_native_xml_locator():
                  "letter_type": "CRL", "application_number": ["NDA123456"]}),
 ])
 def test_official_identity_does_not_prove_body_is_present(source, raw):
-    from fetch.sources import crl_id
+    from fetch.projection import crl_id
     native = raw["Id"] if source == "who_don" else crl_id(raw)
     result = project_record(source, ArchiveRecord(source_record_id=native, record_kind="document",
                             raw_content=json.dumps(raw)))

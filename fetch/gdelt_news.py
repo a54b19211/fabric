@@ -185,7 +185,8 @@ class _Read:
 
     def _articles(self, response):
         """The articles of one answer, as (parsed, original text) pairs."""
-        from fetch.sources import _raw_array_items, parse_json
+        from fetch.projection import parse_json
+        from fetch.sources import _raw_array_items
         request = self.request
         response.raise_for_status()
         raw = response.content.decode("utf-8")
