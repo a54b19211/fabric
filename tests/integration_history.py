@@ -521,7 +521,7 @@ def test_migration_leaves_a_seeded_row_alone_and_the_list_shows_the_declared_nam
     with pg.begin() as conn:
         catalog = conn.execute(text("SELECT catalog FROM history_sources WHERE source_id='nmpa'")).scalar_one()
     assert catalog["name"] == "旧说明"  # the row is the snapshot taken when it was seeded
-    listed = {row["source_id"]: row for row in store.list_sources()}["nmpa"]
+    listed = {row["source_id"]: row for row in store.sources_receipt()["sources"]}["nmpa"]
     assert listed["name"] == SOURCE_CATALOG["nmpa"]["name"]
 
 

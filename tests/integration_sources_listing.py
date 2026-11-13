@@ -60,7 +60,7 @@ def test_the_capabilities_the_radar_reads(library, source_id, select, modes, att
 def test_a_disabled_source_is_not_in_sources(library):
     with library.begin() as conn:
         conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='pubmed'"))
-    assert "pubmed" not in by_id(store.list_sources())
+    assert "pubmed" not in by_id(store.sources_receipt()["sources"])
 
 
 def test_switching_off_public_reads_keeps_only_an_upload(library, monkeypatch):

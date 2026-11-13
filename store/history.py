@@ -101,10 +101,6 @@ def sources_receipt():
     return source_listing.listing(rows)
 
 
-def list_sources():
-    return sources_receipt()["sources"]
-
-
 # ---- 内容指纹 -------------------------------------------------------------------------------------------
 
 # 来源每次响应都会改写、但不说明记录变了的字段：ClinicalTrials 给每条登记盖上数据快照日期

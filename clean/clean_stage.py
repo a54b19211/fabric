@@ -53,9 +53,6 @@ from store.history_models import HistoryError
 SKIP_SOURCES = UNCLEANED_SOURCES
 from fetch.catalog import SITE_SOURCES  # noqa: E402  站点插件采集的来源
 
-REGISTRY_IDS = {"nct", "ctr", "chictr"}
-REGISTRY_SOURCES = {"clinicaltrials", "chictr", "cde_ctr"}
-
 BATCH = 200  # 一批（一个事务）处理几个版本
 
 
@@ -504,41 +501,3 @@ def _processed_on(out, row):
             "processor_version"]:
         return entry
     return None
-
-def identifier_links(version_id):
-    """和这个版本共享编号的其他版本。relation（从这个版本的角度）：
-    - mentions_record：我提到了对方的编号，对方就是这个编号的记录本身（如论文摘要写了 CT 的 NCT 号）；
-    - mentioned_by：对方提到了我的编号；
-    - identity_candidate：两个不同登记平台的记录都写着同一个登记号（CT 的 secondary_ids 写了 ChiCTR 号，
-      ChiCTR 页面也写着它）——只是身份候选，审核后才能建立关联；
-    - same_identifier：其他共享编号的情况（如同一 DOI 出现在两份材料里），用于同源去重，不删任何一份。"""
-    from store.history import history_engine
-
-    with history_engine().begin() as conn:
-        mine = conn.execute(text("SELECT source_id, source_record_id FROM history_versions WHERE version_id=:v"),
-                            {"v": version_id}).mappings().one()
-        rows = conn.execute(text("""
-            SELECT DISTINCT o.version_id, h.source_id, h.source_record_id, o.kind, o.value
-            FROM derived_identifiers m JOIN derived_identifiers o ON o.kind=m.kind AND o.value=m.value
-              AND o.version_id<>m.version_id AND o.processor_version=m.processor_version
-            JOIN history_versions h ON h.version_id=o.version_id
-            WHERE m.version_id=:v AND m.processor_version=:pv
-        """), {"v": version_id, "pv": identifiers.PROCESSOR_VERSION}).mappings().all()
-    out = []
-    for r in rows:
-        value = r["value"].upper()
-        mine_is = mine["source_record_id"].upper() == value
-        other_is = r["source_record_id"].upper() == value
-        if other_is and not mine_is:
-            relation = "mentions_record"
-        elif mine_is and not other_is:
-            relation = "mentioned_by"
-        elif (r["kind"] in REGISTRY_IDS and mine["source_id"] in REGISTRY_SOURCES
-              and r["source_id"] in REGISTRY_SOURCES and r["source_id"] != mine["source_id"]):
-            relation = "identity_candidate"
-        else:
-            relation = "same_identifier"
-        out.append({"version_id": r["version_id"], "source_id": r["source_id"], "kind": r["kind"],
-                    "value": r["value"], "relation": relation})
-    return out
-

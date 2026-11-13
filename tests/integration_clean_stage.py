@@ -79,10 +79,6 @@ def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, tmp_pat
     notice = clean_stage.for_versions("nmpa", False, [page], "current", NOW())["versions"][page]
     assert "首页 > 公告" not in notice["clean"]["text"] and "未见安全性问题" in notice["clean"]["text"]
     assert [i["value"] for i in notice["identifiers"]] == ["国药准字H20234567"]
-    # 论文摘要里写了 NCT 号：和 CT 登记按同一编号关联（提及，不是同一份材料）
-    links = clean_stage.identifier_links(paper)
-    assert {"version_id": ct, "source_id": "clinicaltrials", "kind": "nct", "value": "NCT09990011",
-            "relation": "mentions_record"} in links
     assert clean_stage.process(batch=50)["profiled"] == 0  # 幂等
 
 

@@ -35,10 +35,8 @@ class _AppSettings(BaseSettings):
     EXTRACTION_LLM_API_BASE: str = ""
     EXTRACTION_LLM_MODEL_NAME: str = ""
 
-    # 消歧精排专用模型（可选，留空则复用 LLM_* 配置）
-    RERANK_LLM_API_KEY: str = ""
+    # 消歧精排服务地址（图谱用，可选，留空则复用 LLM_API_BASE）
     RERANK_LLM_API_BASE: str = ""
-    RERANK_LLM_MODEL_NAME: str = ""
 
     # ── Embedding（DashScope text-embedding-v3，消歧向量检索用）──
     EMBEDDING_API_KEY: str = ""          # 留空则复用 LLM_API_KEY
@@ -51,16 +49,8 @@ class _AppSettings(BaseSettings):
         return self.EMBEDDING_API_KEY or self.LLM_API_KEY
 
     @property
-    def RERANK_API_KEY(self) -> str:
-        return self.RERANK_LLM_API_KEY or self.LLM_API_KEY
-
-    @property
     def RERANK_API_BASE(self) -> str:
         return self.RERANK_LLM_API_BASE or self.LLM_API_BASE
-
-    @property
-    def RERANK_MODEL_NAME(self) -> str:
-        return self.RERANK_LLM_MODEL_NAME or self.LLM_MODEL_NAME
 
     @property
     def EXTRACTION_API_KEY(self) -> str:
