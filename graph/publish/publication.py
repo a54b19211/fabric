@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -21,6 +20,7 @@ from graph.publish.reviewed_graph import (
     document_native_id,
 )
 from store import history
+from store.history import disk_status
 from store.history_models import (
     MAX_RECORD_BYTES,
     ArchiveImport,
@@ -98,28 +98,6 @@ def enqueue_changed_document(session, envelope):
     return {
         "publication_pending": pending != "published",
         "documents_cache_retained": True,
-    }
-
-
-def disk_status():
-    path = os.environ.get(
-        "DATAFABRIC_PUBLICATION_DISK_PATH", "/home/zk_test/zk_projects"
-    )
-    try:
-        minimum = int(
-            os.environ.get("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", str(15 * 1024**3))
-        )
-        if minimum < 0:
-            raise ValueError()
-        free = shutil.disk_usage(path).free
-    except (ValueError, OSError):
-        raise HistoryError(
-            "publication_disk_unknown", "无法核对磁盘安全余量；存量回填暂停", 503
-        ) from None
-    return {
-        "free_bytes": free,
-        "minimum_free_bytes": minimum,
-        "backfill_paused": free < minimum,
     }
 
 
@@ -472,30 +450,18 @@ def _known_commits(row):
     prepared = row["prepared"]
     if not prepared:
         return False
-    required = []
+    required = []  # 已经发表过的固定请求（同一幂等键的运行已完成）才算数
     if prepared.get("existing_document_version") is None:
-        required.append(("document", prepared["document_request"]))
+        required.append("document")
     if row["kind"] == "graph":
         if not prepared.get("graph_request"):
             return False
-        required.append(("graph", prepared["graph_request"]))
+        required.append("graph")
     with history.history_engine().begin() as conn:
-        for kind, request in required:
-            saved = (
-                conn.execute(
-                    text(
-                        "SELECT state,request_hash FROM history_runs WHERE idempotency_key=:key"
-                    ),
-                    {"key": prepared["idempotency_prefix"] + ":" + kind},
-                )
-                .mappings()
-                .first()
-            )
-            if (
-                not saved
-                or saved["state"] not in {"completed", "partial"}
-                or saved["request_hash"] != sha256(canonical(request))
-            ):
+        for kind in required:
+            state = conn.execute(text("SELECT state FROM history_runs WHERE idempotency_key=:key"),
+                                 {"key": prepared["idempotency_prefix"] + ":" + kind}).scalar()
+            if state not in {"completed", "partial"}:
                 return False
     return True
 
@@ -530,15 +496,15 @@ def _validation_error(exc):
 def publish_once(engine=None):
     engine = engine or publication_engine()
     disk = disk_status()
-    row = _claim(engine, prepared_only=disk["backfill_paused"])
+    row = _claim(engine, prepared_only=disk["low"])
     if row is None:
         return (
             {"state": "resource_blocked", "reason": "disk_low", "disk": disk}
-            if disk["backfill_paused"]
+            if disk["low"]
             else {"state": "idle"}
         )
     try:
-        if disk["backfill_paused"] and not _known_commits(row):
+        if disk["low"] and not _known_commits(row):
             raise HistoryError(
                 "publication_resource_blocked",
                 "磁盘低水位，暂停新原件发表并保留待办",
@@ -685,7 +651,7 @@ def publication_status(source_id, engine=None):
     state = heartbeat.get("publisher_state", "not_started")
     if last_at and (now - last_at).total_seconds() > 120:
         state = "stale"
-    if disk["backfill_paused"]:
+    if disk["low"]:
         state = "resource_blocked"
     return {
         "schema_version": "datafabric.publication.status.v1",
@@ -704,7 +670,7 @@ def publication_status(source_id, engine=None):
         "disk": {
             "free_bytes": disk["free_bytes"],
             "minimum_free_bytes": disk["minimum_free_bytes"],
-            "paused": disk["backfill_paused"],
+            "paused": disk["low"],
         },
         "backfill": backfills,
         "limitations": [

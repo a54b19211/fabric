@@ -39,8 +39,7 @@ def test_publish_loop_no_longer_runs_indexing():
 
 
 def test_source_failure_exits_nonzero(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["publisher", "--once"])
-    monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda *_: None)
+    monkeypatch.setattr(sys, "argv", ["scheduler", "--once"])
 
     def unavailable():
         raise HistoryError("synthetic_source_failure", "explicit fault", 503)
@@ -53,10 +52,8 @@ def test_source_failure_exits_nonzero(monkeypatch):
 
 @pytest.mark.parametrize("state", ["failed", "blocked"])
 def test_reported_source_failure_exits_nonzero(monkeypatch, state):
-    monkeypatch.setattr(sys, "argv", ["publisher", "--once"])
-    monkeypatch.setattr(scheduler, "publisher_heartbeat", lambda *_: None)
+    monkeypatch.setattr(sys, "argv", ["scheduler", "--once"])
     monkeypatch.setattr(scheduler, "refresh_once", lambda: [{"state": state}])
-    monkeypatch.setattr(scheduler, "publish_once", lambda: {"state": "idle"})
     with pytest.raises(SystemExit) as exc:
         scheduler.main()
     assert exc.value.code == 1

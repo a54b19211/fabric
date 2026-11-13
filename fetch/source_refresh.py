@@ -7,8 +7,9 @@
   3. 任务读完了（_segment_done）：有续读位置就下一轮读下一段；读到底、读到已存的、或读够 SEGMENTS_PER_CYCLE 段就收工，
      记下窗口检查点，cadence_seconds 秒后开始下一周期。
   出错（_failed）：cadence_seconds 秒后换一个新任务重读这一段；连续 GIVE_UP_AFTER 次就放弃这一周期。
-每个 watch 的状态是 publication_outbox 里 kind='control'、event_key 为 _key(watch) 的那一行的 snapshot（一个 JSON）。
+每个 watch 的状态是 History 库 history_source_watches 里 watch_key 为 _key(watch) 的那一行的 state（一个 JSON）。
 几个派活程序同时跑时，一步在锁住这一行的事务里走（SELECT ... FOR UPDATE SKIP LOCKED），别人锁着就跳过，不会重复派活。
+磁盘余量不够（store/history.py · disk_status）时不建新的采集任务。抓只用 History 库和采集队列（Redis），不用图谱的库。
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from sqlalchemy import text
 from fetch import fetch_job, transport
 from fetch.catalog import WATCHABLE, spec
 from fetch.windows import SEGMENTS_PER_CYCLE, cycle_request, first_unread
-from graph.publish import publication
 from store import history
 from store.history_models import FetchRequest, HistoryError, Model, canonical, sha256
 from store.timestamps import parse_timestamp
@@ -68,35 +68,37 @@ def watches():
 
 
 def _key(watch):
-    """状态行的键：配置（补齐默认值）的 sha256。和改造前同一算法，已在跑的 watch 接着用原来的状态；改了配置就是新 watch。"""
+    """状态行的键：配置（补齐默认值）的 sha256；改了配置就是新 watch。和以前存在 publication_outbox 时的 event_key 同一算法
+    （所以不算后来才有的 known_stop），旧状态要搬过来时按键对得上。"""
     data = watch.model_dump(mode="json")
-    data["request"].pop("known_stop")  # 后来才有的字段（配置里总是 0），不改动已有的键
+    data["request"].pop("known_stop")
     return "source-watch:" + sha256(canonical(data))
 
 
-def refresh_once(engine=None):
+def refresh_once():
     """每个到点的 watch 走一步，返回这一轮走了的 [{"watch_id", "state"}]。没有配置时什么都不做。"""
     configured = watches()
     if not configured:
         return []
-    engine = engine or publication.publication_engine()
+    engine = history.history_engine()
     results = []
     for watch in configured:
         key = _key(watch)
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO publication_outbox (event_key, kind, source_doc_uuid, snapshot) "
-                              "VALUES (:key, 'control', :key, '{}') ON CONFLICT (event_key) DO NOTHING"), {"key": key})
+            conn.execute(text("INSERT INTO history_source_watches (watch_key, watch_id) VALUES (:key, :id) "
+                              "ON CONFLICT (watch_key) DO NOTHING"), {"key": key, "id": watch.id})
         with engine.begin() as conn:
-            row = conn.execute(text("SELECT snapshot, clock_timestamp() AS now FROM publication_outbox "
-                                    "WHERE event_key = :key FOR UPDATE SKIP LOCKED"), {"key": key}).first()
+            row = conn.execute(text("SELECT state, clock_timestamp() AS now FROM history_source_watches "
+                                    "WHERE watch_key = :key FOR UPDATE SKIP LOCKED"), {"key": key}).first()
             if row is None:  # 另一个派活程序正在走这一步
                 continue
-            state, now = dict(row.snapshot), row.now
+            state, now = dict(row.state), row.now
             waiting = state.get("state") in ("idle", "failed", "blocked") and state.get("next_check_at")
             if waiting and parse_timestamp(state["next_check_at"]) > now:
                 continue
             _step(watch, state, now)
-            conn.execute(text("UPDATE publication_outbox SET snapshot = CAST(:state AS jsonb) WHERE event_key = :key"),
+            conn.execute(text("UPDATE history_source_watches SET state = CAST(:state AS jsonb), "
+                              "updated_at = clock_timestamp() WHERE watch_key = :key"),
                          {"key": key, "state": canonical(state)})
         results.append({"watch_id": watch.id, "state": state["state"]})
     return results
@@ -113,7 +115,7 @@ def _step(watch, state, now):
         if state.get("active_run_id"):
             run = history.read_run(state["active_run_id"])
         else:
-            if publication.disk_status()["backfill_paused"]:
+            if history.disk_status()["low"]:
                 raise HistoryError("source_watch_disk_low", "磁盘低水位，暂停新的采集", 503)
             request = {**state["request"], "known_stop": 0} if state.get("retry") else state["request"]
             run, _ = history.create_fetch(FetchRequest.model_validate(request))
@@ -183,14 +185,13 @@ WATCH_FIELDS = ("state", "window_started_at", "window_ended_at", "window_checkpo
                 "last_success_at", "last_failure_at", "active_run_id", "error")
 
 
-def source_health(source_id, engine=None):
+def source_health(source_id):
     """GET /api/history/source-health：这个来源各固定刷新的状态。雷达读 collection 的 state、last_recorded_success_at、
     last_recorded_failure_at、scope、coverage，和 watches[] 的 watch_id、scope、window_ended_at、state。"""
+    configured = {_key(watch): watch for watch in watches() if watch.request.source_id == source_id}
     with history.history_engine().begin() as conn:
         history._source(conn, source_id)  # 不可读的来源：403
-    configured = {_key(watch): watch for watch in watches() if watch.request.source_id == source_id}
-    with (engine or publication.publication_engine()).begin() as conn:
-        found = conn.execute(text("SELECT event_key, snapshot FROM publication_outbox WHERE event_key = ANY(:keys)"),
+        found = conn.execute(text("SELECT watch_key, state FROM history_source_watches WHERE watch_key = ANY(:keys)"),
                              {"keys": list(configured)})
         saved = dict(found.all())
     rows = []

@@ -1,0 +1,22 @@
+[Unit]
+Description=Data-Fabric scheduler: due source watches become fetch runs on the extraction queue
+After=network.target
+StartLimitIntervalSec=0
+
+# What it does: every round, each due watch of DATAFABRIC_HISTORY_WATCHES takes one step (read run/scheduler.py).
+# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL, DATAFABRIC_HISTORY_REDIS_URL, DATAFABRIC_HISTORY_WATCHES.
+# Paths: WorkingDirectory and the python below are this host's checkout and venv; change both for another deployment.
+
+[Service]
+WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+EnvironmentFile=%h/.config/datafabric-publication/runtime.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m run.scheduler --poll-seconds 30
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=default.target

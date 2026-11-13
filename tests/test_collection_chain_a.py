@@ -221,7 +221,7 @@ def stub_runs(monkeypatch, runs):
     monkeypatch.setattr(source_refresh.history, "read_run", lambda run_id: runs[len(calls["created"]) - 1])
     monkeypatch.setattr(source_refresh.history, "fail_job", lambda *args: calls["failed"].append(args))
     monkeypatch.setattr(source_refresh.fetch_job, "enqueue_fetch", lambda run: calls["enqueued"].append(run))
-    monkeypatch.setattr(source_refresh.publication, "disk_status", lambda: {"backfill_paused": False})
+    monkeypatch.setattr(source_refresh.history, "disk_status", lambda: {"low": False})
     return calls
 
 

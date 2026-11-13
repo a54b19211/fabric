@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import uuid
 from functools import lru_cache
 
@@ -52,6 +53,21 @@ def history_engine():
     if not url:
         raise HistoryError("history_not_configured", "历史资料数据库尚未配置", 503)
     return _engine(url)
+
+
+def disk_status():
+    """原件（附件文件、网页 HTML）落盘的那块磁盘还剩多少。低于下限（low）时定时刷新不建新的采集任务，图发布也不复制新原件。
+    看哪块盘：DATAFABRIC_PUBLICATION_DISK_PATH（默认当前目录）；下限：DATAFABRIC_PUBLICATION_MIN_FREE_BYTES（默认 15 GB）。
+    两个变量名是图发布那边沿用下来的。"""
+    path = os.environ.get("DATAFABRIC_PUBLICATION_DISK_PATH", ".")
+    try:
+        minimum = int(os.environ.get("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", str(15 * 1024**3)))
+        if minimum < 0:
+            raise ValueError()
+        free = shutil.disk_usage(path).free
+    except (ValueError, OSError):
+        raise HistoryError("disk_unknown", "看不到磁盘余量（DATAFABRIC_PUBLICATION_DISK_PATH）：暂停新的采集", 503) from None
+    return {"free_bytes": free, "minimum_free_bytes": minimum, "low": free < minimum}
 
 
 def _now(conn):
