@@ -5,6 +5,7 @@ Run explicitly with DATAFABRIC_PUBLICATION_DATABASE_URL pointing at the coordina
 The fixed-document validator below is an explicit fixture; History's real reader is
 covered separately by the object-evidence integration suite.
 """
+import hashlib
 import json
 import os
 import sys
@@ -264,13 +265,13 @@ def test_primekg_stays_candidate_until_trusted_identity_and_checked_evidence(ses
 
 
 def test_migration_runner_executes_v021_transactionally_and_tracks_it_once(engine, monkeypatch):
-    from store.migrations import app_ledger, runner
+    from store.migrations import runner
     migration = Path(__file__).resolve().parents[1] / 'store' / 'migrations' / 'versions' / 'V035__identity_evidence.sql'
     runner.apply('app', engine)
     runner.apply('app', engine)
     with engine.begin() as conn:
         row = conn.execute(text("SELECT count(*),min(checksum) FROM schema_migrations WHERE version='V035'")).one()
-    assert row[0] == 1 and row[1] == app_ledger._checksum(migration.read_text())
+    assert row[0] == 1 and row[1] == hashlib.md5(migration.read_text().encode()).hexdigest()
 
 
 @pytest.fixture(scope='module')

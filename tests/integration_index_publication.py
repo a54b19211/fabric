@@ -19,7 +19,7 @@ from graph.publish.collected_document import collected_document
 from store import history, retrieval
 from store import index_publication as index
 from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, canonical
-from store.migrations import manifests, runner
+from store.migrations import runner
 from store.weknora_index_client import IndexServiceError, publication_id
 
 
@@ -1110,7 +1110,7 @@ def rerun_file(engine, name):
     """Run one migration file on a store that was built before it (a file is idempotent; the runner runs it once, on
     a ledger that has not recorded it, and this is that run)."""
     with engine.begin() as conn:
-        conn.exec_driver_sql((manifests.VERSIONS_DIR / name).read_text(encoding="utf-8"))
+        conn.exec_driver_sql((runner.VERSIONS / name).read_text(encoding="utf-8"))
 
 
 def test_a_store_built_with_ordinal_piece_keys_upgrades_in_place_and_reruns(pg, monkeypatch):

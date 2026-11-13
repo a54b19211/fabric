@@ -338,7 +338,7 @@ def test_a_sending_job_after_a_restart_is_polled_not_uploaded_again(pg, monkeypa
 
 
 def test_migration_recovers_the_size_of_earlier_uploads(pg):
-    from store.migrations import manifests
+    from store.migrations import runner
 
     base = base_job(pg)
     (piece,) = clone(pg, base, state="'indexing'", desired_state="'active'", **SENT,
@@ -350,7 +350,7 @@ def test_migration_recovers_the_size_of_earlier_uploads(pg):
                                      "AND processor_version||':'||text_sha256=:k"),
                                 {"v": base["version_id"], "k": base["artifact_key"]}).first()
     with pg.begin() as conn:  # a store from before V031 has no record of it: its file runs on it
-        conn.exec_driver_sql((manifests.VERSIONS_DIR / "V031__index_scheduling.sql")
+        conn.exec_driver_sql((runner.VERSIONS / "V031__index_scheduling.sql")
                              .read_text(encoding="utf-8"))
     got = {r["id"]: (r["sent_chars"], r["sent_bytes"]) for r in rows(pg, "SELECT id,sent_chars,sent_bytes FROM index_publications")}
     assert got[piece] == (123, 456)

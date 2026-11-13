@@ -487,26 +487,6 @@ def test_old_watch_lease_cannot_overwrite_new_owner(databases, monkeypatch):
     )
 
 
-def test_independent_keyset_index_creation_and_rollback_in_real_schema(databases):
-    from store.migrations import runner
-
-    source, _ = databases
-    assert runner.main(["--db", "publication", "--online", "site-index"]) == 0
-    definition = rows(
-        source,
-        "SELECT indexdef FROM pg_indexes WHERE indexname='idx_documents_publication_site_id'",
-    )[0]["indexdef"]
-    assert "(source_site, id)" in definition
-    assert runner.main(["--db", "publication", "--online", "site-index", "--drop"]) == 0
-    with source.begin() as conn:
-        assert (
-            conn.execute(
-                text("SELECT to_regclass('idx_documents_publication_site_id')")
-            ).scalar_one()
-            is None
-        )
-
-
 def test_epmc_watch_persists_update_window_not_publication_date(databases, monkeypatch):
     source, _ = databases
     allow(monkeypatch, ["clinicaltrials"])

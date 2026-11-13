@@ -72,4 +72,3 @@ graph/publish/graph_publish.py:capture_primekg  137/31  graph publication flow: 
 graph/publish/graph_publish.py:main  94/8  graph publication flow: capture and bundle build in long functions; split per step
 fetch/fetch_job.py:freeze_demo_fetch  42/27  demo-fetch guard with one check per condition; keep the conditions in one place
 fetch/fetch_job.py:require_demo_fetch  34/33  demo-fetch guard with one check per condition; keep the conditions in one place
-store/migrations/sqltext.py:split_sql  92/22  SQL statement splitter: a state machine with one branch per PostgreSQL quoting case

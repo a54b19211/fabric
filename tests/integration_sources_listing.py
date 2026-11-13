@@ -5,7 +5,7 @@ import json
 import re
 
 import pytest
-from integration_migration_baselines import pg  # noqa: F401 - fixture
+from integration_migration_runner import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
 from api.routers import history as router
