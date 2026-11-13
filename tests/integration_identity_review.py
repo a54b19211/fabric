@@ -297,16 +297,15 @@ def real_history_engine():
 def real_history(real_history_engine, monkeypatch):
     from store import history
     monkeypatch.setattr(history, 'history_engine', lambda: real_history_engine)
-    monkeypatch.setenv('DATAFABRIC_HISTORY_SOURCE_ALLOWLIST', '["legacy_documents","pubmed","clinicaltrials","primekg_graph"]')
     monkeypatch.setenv('DATAFABRIC_PUBLICATION_IS_DEMO', 'true')
-    legacy_bridge.open_old_writer(monkeypatch)  # these tests freeze documents through the legacy bridge
+    with real_history_engine.begin() as conn:  # the schema is kept between tests
+        conn.execute(text('UPDATE history_sources SET read_enabled=true'))
     return real_history_engine
 
 
 def freeze_document(doc_uuid, raw, source_site='pubmed'):
     from graph.publish.collected_document import collected_document
     from graph.publish.reviewed_graph import document_native_id
-    from store import history
     from store.history_models import ArchiveImport, ArchiveRecord
     document = collected_document({'uuid': doc_uuid, 'source_site': source_site, 'title': 'Explicit synthetic source',
                                    'raw_content': raw}, datetime.now(timezone.utc), 'insert')
@@ -314,7 +313,7 @@ def freeze_document(doc_uuid, raw, source_site='pubmed'):
         scope_description='Explicit synthetic identity evidence; no production documents', declared_count=1,
         records=[ArchiveRecord(source_record_id=document_native_id(document), record_kind='trial' if document.source_projection is not None else 'document',
                                raw_content=document.model_dump_json())])
-    run = history.import_archive(request, 'identity-source-' + uuid4().hex)
+    run = legacy_bridge.write(request, 'identity-source-' + uuid4().hex)  # documents frozen as the bridge did
     return {'source_id': 'legacy_documents', 'source_record_id': document_native_id(document),
             'version_id': run.version_ids[0], 'source_doc_uuid': doc_uuid, 'source_site': source_site,
             'quote': raw, 'char_start': 0, 'char_end': len(raw), 'is_demo': True,
@@ -351,7 +350,8 @@ def test_real_history_validator_binds_source_sha_unicode_and_permission(real_his
     with pytest.raises(ValueError, match='真实/演示'):
         validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
     monkeypatch.setenv('DATAFABRIC_PUBLICATION_IS_DEMO', 'true')
-    monkeypatch.setenv('DATAFABRIC_HISTORY_SOURCE_ALLOWLIST', '["legacy_documents"]')
+    with real_history.begin() as conn:
+        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='pubmed'"))
     with pytest.raises(HistoryError):
         validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
 

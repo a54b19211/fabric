@@ -18,13 +18,10 @@ from store import history as store
 from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, sha256
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
-SOURCES = ["legacy_documents", "clinicaltrials", "nmpa", "fda_api_drug_label", "cde_xxgk", "external_archive"]
 
 
 @pytest.fixture
-def lpg(pg, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", json.dumps(SOURCES))
-    legacy_bridge.open_old_writer(monkeypatch)  # fixtures write legacy versions (cutover mode)
+def lpg(pg):
     with pg.begin() as conn:
         conn.execute(text("TRUNCATE legacy_aliases"))
     return pg
@@ -40,7 +37,7 @@ def legacy(site, doc_uuid, url, markdown, key, created="2019-03-01 08:00:00"):
                             original_raw_content=markdown, original_raw_sha256=sha256(markdown),
                             original_created_at=created, state_observed_at=NOW(), capture_reason="backfill")
     native = document_native_id(doc)
-    run = store.import_archive(ArchiveImport(
+    run = legacy_bridge.write(ArchiveImport(
         source_id="legacy_documents", is_demo=False, scope_description="synthetic legacy " + key, declared_count=1,
         records=[ArchiveRecord(source_record_id=native, record_kind="document", raw_content=doc.model_dump_json())]),
         "legacy-fixture:" + key)
@@ -152,11 +149,11 @@ def test_an_alias_follows_the_real_records_state_and_the_real_sources_permission
                                            source_record_id=NMPA_URL, record_kind="document",
                                            raw_content=withdrawn_raw)]), "native-withdrawn")
     with lpg.begin() as conn:  # simulated: the native version becomes the record's withdrawal notice
-        conn.execute(text("ALTER TABLE history_versions DISABLE RULE history_versions_no_update"))
+        conn.execute(text("ALTER TABLE history_versions DISABLE TRIGGER history_versions_append_only"))
         changed = conn.execute(text("""
             UPDATE history_versions SET payload=jsonb_set(payload,'{facts,publication_state}','"withdrawn"')
             WHERE source_id='nmpa' AND payload->'facts'->>'role'='web_capture'""")).rowcount
-        conn.execute(text("ALTER TABLE history_versions ENABLE RULE history_versions_no_update"))
+        conn.execute(text("ALTER TABLE history_versions ENABLE TRIGGER history_versions_append_only"))
         now = store._now(conn)
     assert changed == 1, rows(lpg, "SELECT source_id, payload->'facts'->>'role' AS r FROM history_versions")
     m = store.read_version(page_v, "legacy_documents", page, False, "current", now).migration
@@ -209,18 +206,17 @@ def test_plan_is_pure_and_names_every_reason():
         "reason"] == "embedded_json_incomplete"
 
 
-def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_still_read(lpg, monkeypatch):
-    """Codex r92: retirement is real - with the switch off (the default) nothing new is written to
-    legacy_documents (archive import, the publisher's inventory seeding), no new query chooses it, and an old id
-    still reads its version (with its alias). Nothing is deleted."""
+def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_still_read(lpg):
+    """Codex r92: retirement is real - nothing new is written to legacy_documents, no new query chooses it, and an
+    old id still reads its version (with its alias). Nothing is deleted."""
 
-    page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page")  # written in cutover mode (fixture)
+    page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page")  # written before the retirement (fixture)
     migrate(is_demo=False, apply=True)
-    legacy_bridge.close_old_writer(monkeypatch)
     with lpg.begin() as conn:
         now = store._now(conn)
     with pytest.raises(HistoryError) as error:
-        legacy("nmpa", u5(NMPA_URL + "?2"), NMPA_URL + "?2", PAGE, "new-after-retirement")
+        store.import_archive(ArchiveImport(source_id="legacy_documents", is_demo=False, scope_description="new",
+                                           declared_count=0, records=[]))
     assert (error.value.code, error.value.status) == ("legacy_retired", 410)
     with pytest.raises(HistoryError) as error:  # a new query does not choose legacy
         store.list_records("legacy_documents", False, "current", now, terms=["公告"])
@@ -232,24 +228,12 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
     assert len(rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")) == 1  # kept
 
 
-def test_the_old_cutover_switch_reopens_nothing(lpg, monkeypatch):
-    """N5: whatever DATAFABRIC_LEGACY_WRITES says, the service refuses to write to the retired bridge."""
-    legacy_bridge.close_old_writer(monkeypatch)
-    for setting in ("on", "off", "true", "1"):
-        monkeypatch.setenv("DATAFABRIC_LEGACY_WRITES", setting)
-        with pytest.raises(HistoryError) as error:
-            legacy("nmpa", u5(NMPA_URL + setting), NMPA_URL + setting, PAGE, "switch-" + setting)
-        assert (error.value.code, error.value.status) == ("legacy_retired", 410)
-    assert not rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")
-
-
-def test_a_pending_legacy_version_is_blocked_when_its_original_site_is_revoked(lpg, monkeypatch):
+def test_a_pending_legacy_version_is_blocked_when_its_original_site_is_revoked(lpg):
     """A version that never became a real-source version has no real source to re-check; the bridge's own dependency
     list is empty. Its original site is the permission: revoking it stops the old id too, restoring it restores it."""
     listed, listed_v = legacy("cde_xxgk", str(uuid.uuid4()), "https://www.cde.org.cn/main/xxgk/listpage/abc",
                               "---\nsource_site: cde_xxgk\n---\n\n表格", "pending-site")
     assert migrate(is_demo=False, apply=True)["counts"] == {"pending:detail_url_not_proven": 1}
-    legacy_bridge.close_old_writer(monkeypatch)
     with lpg.begin() as conn:
         now = store._now(conn)
     assert store.read_version(listed_v, "legacy_documents", listed, False, "current", now).migration["status"] == "pending"
@@ -263,7 +247,7 @@ def test_a_pending_legacy_version_is_blocked_when_its_original_site_is_revoked(l
     assert store.read_version(listed_v, "legacy_documents", listed, False, "current", now).version_id == listed_v
 
 
-def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time(lpg, monkeypatch):
+def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time(lpg):
     """N9: the legacy rows are byte-identical after the migration; the migrated version is visible from when it was
     adopted, never from the crawl or creation time the old system claimed."""
     page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page", created="2019-03-01 08:00:00")
@@ -285,9 +269,8 @@ def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time
 def test_a_new_graph_package_may_not_cite_a_retired_source_and_an_old_one_still_reads(lpg, monkeypatch):
     """N12: a package published now cites the real version a legacy one became; a package published before keeps
     validating and reading."""
-    from integration_history import _graph_sources, _publish_fixture_graph, _synthetic_graph_observation
+    from integration_history import _publish_fixture_graph, _synthetic_graph_observation
 
-    _graph_sources(monkeypatch)
     observation = _synthetic_graph_observation()
     old = _publish_fixture_graph(observation, "before-retirement")  # the bridge and its refusal are open (fixture)
     assert old.version_ids
