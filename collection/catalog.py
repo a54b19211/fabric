@@ -396,10 +396,17 @@ _ENTRIES: tuple[CollectionSpec, ...] = (
             "GDELT 观察到这条新闻的时间；不是新闻发布时间，也不是本地首次见到的时间", overlap_days=0,
         ),
         rate_group="gdeltproject.org",
-        min_interval_seconds=6.0,  # GDELT 要求每 5 秒最多一个请求；多留 1 秒
+        min_interval_seconds=6.0,  # GDELT 要求每 5 秒最多一个请求；多留 1 秒。实测更慢也不更安全（见 notes），不再调
         outbound_cap=OutboundCap(per_day=900, per_hour_per_query=7),  # 5 个查询 x 24 小时 x 7 次 = 最多 840
         coverage={"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
-        notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条",
+        notes="新闻索引线索，不是独立证据；没有连续分页，单次最多 max_records 条。"
+        "限流 2026-11-13 实测：是对方限速，不是网络问题。从 zktest 直连和经本机代理（mihomo）各 40 次请求（间隔 6、15、30、60 秒"
+        "各 10 次）：直连 8 次、代理 6 次成功，其余都是 429；换 6 个查询词 2/6 成功，间隔 300 秒 0/6 成功。成功率约 17%，"
+        "和路线、间隔、查询词都无关；连接 0.3 秒，每个响应（200 和 429 都是）约 12 秒才回；429 正文写“每 5 秒一个请求”，"
+        "没有 Retry-After。官方只说限速是为了保护 ElasticSearch 集群（2022-02-28 官方博客），没给数字。所以不走代理，也没有"
+        "“更慢就安全”的速率：间隔和上限（已比对方要求的慢很多）不动；每个请求最多发 6 次，每次等对方说的间隔"
+        "（biz_rules.gdelt_news.TRIES）。每个查询每小时最多 7 次请求，约 17% 成功，一天平均约 28 次成功，够读 24 个整点窗口"
+        "（读不到的下个周期接着读，有延迟）",
     ),
     CollectionSpec(
         source_id="drugs_fda",

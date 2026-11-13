@@ -104,7 +104,7 @@ def test_gdelt_failure_never_becomes_zero_news(monkeypatch, waits, failure):
     client(monkeypatch, respond)
     result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia"))
     assert result["error"] and not result["upstream_pagination_exhausted"]
-    assert result["stop_reason"] == "source_failed" and result["requests"] == (2 if failure == "rate" else 1)  # a 429 is asked twice
+    assert result["stop_reason"] == "source_failed" and result["requests"] == (gdelt_news.TRIES if failure == "rate" else 1)
     if failure == "conflict":
         assert result["records"] == []
 
@@ -121,9 +121,9 @@ def test_gdelt_confirmed_empty_response_is_distinct_from_failure(monkeypatch):
 LIMITED = "Please limit requests to one every 5 seconds or contact kalev.leetaru5@gmail.com for larger queries."
 
 
-def test_gdelt_429_waits_the_interval_it_names_and_asks_once_more(monkeypatch, waits):
-    """GDELT asks for one request every 5 seconds. A 429 is answered once: wait that interval (plus a second of
-    margin) and send the request again; the second answer is read as usual."""
+def test_gdelt_429_waits_the_interval_it_names_and_asks_again(monkeypatch, waits):
+    """GDELT asks for one request every 5 seconds. A 429 is answered by waiting that interval (plus a second of
+    margin) and sending the request again; the answer that is not a 429 is read as usual."""
     answers = [httpx.Response(429, text=LIMITED), httpx.Response(200, json={"articles": [article()]})]
     seen = []
     client(monkeypatch, lambda request: seen.append(request) or answers.pop(0))
@@ -132,13 +132,15 @@ def test_gdelt_429_waits_the_interval_it_names_and_asks_once_more(monkeypatch, w
     assert len(seen) == 2 and result["requests"] == 2 and waits == [6]
 
 
-def test_gdelt_second_429_ends_the_read_and_says_the_other_side_limited_us(monkeypatch, waits):
-    """After the one wait and resend a second 429 stops the read: a failed read whose reason says "对方限流",
-    never an empty successful response."""
+def test_gdelt_429_after_every_try_ends_the_read_and_says_the_other_side_limited_us(monkeypatch, waits):
+    """The request is sent TRIES times, each after the wait GDELT names; the last 429 stops the read: a failed read
+    whose reason says "对方限流", never an empty successful response. (Measured: 429 to most requests, whatever the
+    spacing, so a single resend is not enough.)"""
     seen = []
     client(monkeypatch, lambda request: seen.append(request) or httpx.Response(429, text=LIMITED))
-    result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia"))
-    assert len(seen) == 2 and result["requests"] == 2 and result["records"] == [] and waits == [6]
+    result = read_public(FetchRequest(source_id="gdelt_doc", query="pneumonia", deadline_seconds=120))
+    assert len(seen) == gdelt_news.TRIES and result["requests"] == gdelt_news.TRIES and result["records"] == []
+    assert waits == [6] * (gdelt_news.TRIES - 1)
     assert result["stop_reason"] == "source_failed" and not result["upstream_pagination_exhausted"]
     assert result["error"]["code"] == "source_rate_limited"
     assert "对方限流" in result["error"]["message"] and "仍是 429" in result["error"]["message"]

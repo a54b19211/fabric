@@ -6,9 +6,12 @@ read again, down to FINEST_WINDOW; one query-hour costs at most 1 + 2 + 4 = 7 re
 only says that this system's cap was not hit, never that the window is whole. Every window leaves a receipt in the
 run's coverage; the ones still full at the finest size are marked possibly_truncated.
 
-GDELT asks for one request every 5 seconds (the catalog spaces them 6 s apart) and takes 12-20 s to answer. When it
-still answers 429, the read waits the interval the answer names and sends the request once more; a second 429, or no
-time left for the wait, ends the read as a failure that says so.
+GDELT asks for one request every 5 seconds (the catalog spaces them 6 s apart) and takes 12-20 s to answer. It answers
+429 to most requests whatever the spacing (measured 2026-11-13 from zktest, direct and through the proxy, gaps of 6 s to
+5 minutes, about 80% of 160 requests; see collection/catalog.py), so a request is not asked once but up to TRIES times: after
+each 429 the read waits the interval the answer names and sends the request again. After the last 429, or when there is
+no time left for the wait, the read ends as a failure that says so. Every request counts against the catalog's own
+hourly and daily ceilings, the retries too.
 """
 import re
 import time
@@ -26,6 +29,7 @@ FINEST_WINDOW = timedelta(minutes=15)
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 RESPONSE_SECONDS = 45  # GDELT needs 12-20 s to answer a query; a 20 s limit cut some of them off
 DEFAULT_429_INTERVAL = 5  # what GDELT asks for when its 429 does not name an interval
+TRIES = 6  # how many times a request is sent when GDELT keeps answering 429 (about 18 s each: they fit a 120 s read)
 RETRY_MARGIN = 1  # seconds added to the interval GDELT names
 
 
@@ -159,18 +163,18 @@ class _Read:
         self.receipts.append(_receipt(window, "read", possibly_truncated=full, reason=reason, **counts))
 
     def _fetch(self, client, window):
-        """One request for the window: its articles as (parsed, original text) pairs. A 429 is answered once: wait the
-        interval GDELT names, then ask again (collection.transport does not resend a 429 for a site with a cap: every
-        resend counts against the hour's quota, so the one resend is made here)."""
-        for attempt in (1, 2):
+        """One request for the window: its articles as (parsed, original text) pairs. A 429 is answered by waiting the
+        interval GDELT names and asking again, up to TRIES times (collection.transport does not resend a 429 for a site
+        with a cap: every resend counts against the hour's quota, so the resends are made here)."""
+        for attempt in range(1, TRIES + 1):
             with client.stream("GET", ENDPOINT, params=_params(self.request, window)) as response:
                 if response.status_code != 429:
                     return self._articles(response)
                 response.read()
                 asked = _interval_asked(response.text)
-            if attempt == 2:
+            if attempt == TRIES:
                 raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，按它要求的间隔（{asked} 秒）等过再发，"
-                                   "仍是 429；请隔一段时间再读", 503)
+                                   f"共发 {TRIES} 次仍是 429；请隔一段时间再读", 503)
             wait = asked + RETRY_MARGIN
             if time.monotonic() - self.started + wait >= self.request.deadline_seconds:
                 raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，要求间隔 {asked} 秒，期限内等不到重试；"
