@@ -108,13 +108,16 @@ def index(rounds=20):
     """存：把清洗正文送进知识库（WeKnora）。没配置知识库时什么也不做；先补扫待办，再最多处理 rounds 批到期的待办。"""
     if not index_publication.configured():
         return "没有配置知识库（DATAFABRIC_INDEX_TARGETS），跳过"
-    index_publication.scan_committed()  # 第一次跑时登记索引目标，并补上清洗时还没能登记的待办
     done = Counter()
-    for _ in range(rounds):
-        batch = index_publication.work_once()
-        if not batch:
-            break
-        done.update(batch)
+    try:
+        index_publication.scan_committed()  # 第一次跑时登记索引目标，并补上清洗时还没能登记的待办
+        for _ in range(rounds):
+            batch = index_publication.work_once()
+            if not batch:
+                break
+            done.update(batch)
+    except HistoryError as exc:  # 例如没配置桥接服务（WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN）
+        return f"失败：{exc.message}（{exc.code}）"
     return f"处理了 {sum(done.values())} 个待办（{counted(done.elements())}）" if done else "没有到期的待办，跳过"
 
 
