@@ -50,7 +50,8 @@ def test_a_profiled_version_is_scored_once_with_its_alignments_and_its_clean_tex
     assert lines["Placebo"]["skipped"] and not lines["Placebo"]["found"]
     aspirin = lines["Aspirin Tablets 100 mg"]
     assert (aspirin["std_id"], aspirin["candidate"], aspirin["rule"]) == ("LOCAL:aspirin", "Aspirin", "cut_descriptor")
-    assert not lines["approval_number"]["found"]  # 国药准字不是 FDA 申请号：格式校验不过，照实记
+    assert (lines["approval_number"]["id_type"], lines["approval_number"]["std_id"]) == (
+        "nmpa_approval", "NMPA:国药准字H20234567")  # NMPA 的批准文号按国药准字校验
     assert quality_stage.process(ask=[align.local])["scored"] == 0  # 重跑不重复
     # 雷达读的东西不变：清洗正文、不加 quality 的 /clean-text
     plain = clean_text_route("nmpa", False, "current", NOW(), [version])
@@ -94,6 +95,19 @@ def test_when_the_authorities_are_down_nothing_degraded_is_stored_and_the_round_
     assert rows(pg, "SELECT version_id FROM derived_quality_scores WHERE version_id = ANY(:ids)", ids=mine) == [
         {"version_id": without_names}]
     assert rows(pg, "SELECT 1 FROM derived_authority_resolutions WHERE degraded AND version_id = ANY(:ids)", ids=mine) == []
+
+
+def test_an_instance_without_network_pages_past_a_full_page_of_versions_it_cannot_align(pg, monkeypatch):
+    """不出网的实例只有本地白名单，有药名的版本永远存不成；它们占满一页时，翻到下一页，没有药名的照样打分。"""
+    plain = nmpa_page("qs-page-plain", "")  # 最早的
+    names = [nmpa_page("qs-page-" + str(i), "Nivolumab") for i in range(3)]
+    clean_stage.process(batch=50)
+    monkeypatch.setattr(quality_stage, "TODO_LIMIT", 2)
+    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "false")
+    counts = quality_stage.process(batch=1)
+    assert counts["offline"] and counts["scored"] == 1 and counts["deferred"] == 2
+    assert rows(pg, "SELECT version_id FROM derived_quality_scores WHERE version_id = ANY(:ids)",
+                ids=[plain, *names]) == [{"version_id": plain}]
 
 
 def test_a_version_another_process_is_scoring_is_skipped(pg):

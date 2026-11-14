@@ -11,6 +11,8 @@ markdown 就是雷达读的清洗正文（clean/clean_text.py 的产物），这
 - traced(doc)：血缘要追踪的字段和它们现在的值（通用 4 个 + 站点特有字段 SITE_FIELDS）。
 - sniff_pdf_meta(text)：附件正文头部的 DOI、期刊名、标题（来源权威分要用）。
 都是纯函数：返回新 dict，不改传入的，不联网、不连库。
+空白、全角、去标签、日期这几个小工具用站点抽取器的那一份（fetch/extractors/text_tools.py、dates.py）：她原来也是
+同一份，洗字段和抽取的口径一致。
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import copy
 import re
 
 from fetch.extractors.dates import normalize_date
-from fetch.extractors.fields import clean_title, full_to_half, normalize_whitespace
+from fetch.extractors.text_tools import clean_title, full_to_half, normalize_whitespace
 
 DOC_TYPES = {
     "cde": "regulatory_notice", "cde_zdyz": "guideline", "nmpa": "regulatory_notice",
@@ -29,14 +31,17 @@ DOC_TYPES = {
     "fiercepharma": "industry_news", "phirda_rd": "industry_news", "phirda_policy": "industry_news",
     "phirda_healthcare_reform": "industry_news", "phirda_industry": "industry_news", "roche": "industry_news",
     "hkex": "company_announcement",
-    # 主线比她多的来源：按她给新来源预留的类型补上（她 document_validator 的枚举注释）
+    # 主线比她多的来源：从她的枚举里挑最接近的类型补上（她 document_validator 给新来源预留了这几个）
     "europe_pmc": "literature", "fda_crl": "regulatory_document", "cde_xxgk": "regulatory_notice", "nccn": "guideline",
+    "who_don": "regulatory_notice", "gdelt_doc": "industry_news", "sec_companyfacts": "company_announcement",
+    "local_files": "",  # 上传的原件什么都有，不判类型（结构校验空值不查枚举）；别的来源的附件随所属来源
 }
 LANGUAGES = {
     "cde": "zh", "cde_zdyz": "zh", "nmpa": "zh", "chictr": "zh", "phirda_rd": "zh", "phirda_policy": "zh",
     "phirda_healthcare_reform": "zh", "phirda_industry": "zh", "hkex": "zh", "cde_xxgk": "zh",
     "fda_press": "en", "fda_drug_safety": "en", "fda_api_enforcement": "en", "fda_api_drug_label": "en",
     "clinicaltrials": "en", "pubmed": "en", "fiercepharma": "en", "roche": "en", "europe_pmc": "en", "fda_crl": "en",
+    "who_don": "en", "sec_companyfacts": "en",  # gdelt_doc 收各种语言的新闻、local_files 是上传件：看正文判
 }
 _ZH = re.compile(r"[一-鿿]")
 

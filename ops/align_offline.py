@@ -13,32 +13,33 @@ from __future__ import annotations
 import math
 from collections import Counter
 
-from clean.align import _found, _none_found, _pick, source_hierarchy
+from clean.align import hits, none_found, pick, source_hierarchy
 
 # 证据加权用的来源权重
 WEIGHTS = {"gsrs": 1.2, "pubchem": 1.0, "chembl": 1.0, "uniprot": 0.9, "ols4": 0.8, "format": 0.7, "local": 0.5}
-_STRUCTURED = ("NCT:", "PMID:", "DOI:", "NDA:", "ANDA:", "BLA:", "UNII:", "PUBCHEM:", "CHEMBL:", "UNIPROT:", "OLS4:")
+_STRUCTURED = ("NCT:", "PMID:", "DOI:", "NDA:", "ANDA:", "BLA:", "NMPA:", "UNII:", "PUBCHEM:", "CHEMBL:", "UNIPROT:",
+               "OLS4:")
 
 
 def majority_vote(results):
     """多数投票：得票最多的编号胜出；置信度 = 得票占比 × 这组的平均置信度。"""
-    found = _found(results)
+    found = hits(results)
     if not found:
-        return _none_found(results)
+        return none_found(results)
     counts = Counter(r["std_id"] for r in found)
     top, votes = counts.most_common(1)[0]
     peers = [r for r in found if r["std_id"] == top]
     best = max(peers, key=lambda r: r.get("confidence") or 0)
     average = sum(r.get("confidence") or 0 for r in peers) / len(peers)
-    return _pick(best, peers, votes / len(found) * average,
+    return pick(best, peers, votes / len(found) * average,
                  [{"std_id": k, "votes": v} for k, v in counts.most_common()])
 
 
 def evidence_weighted(results):
     """证据加权：每个编号累加 置信度 × 来源权重，取最大；置信度 = 它占总证据的比例。"""
-    found = _found(results)
+    found = hits(results)
     if not found:
-        return _none_found(results)
+        return none_found(results)
     weight = {}
     for r in found:
         weight[r["std_id"]] = weight.get(r["std_id"], 0.0) + (r.get("confidence") or 0) * WEIGHTS.get(r["authority"], 1.0)
@@ -46,7 +47,7 @@ def evidence_weighted(results):
     peers = [r for r in found if r["std_id"] == top]
     best = max(peers, key=lambda r: r.get("confidence") or 0)
     ranked = sorted(({"std_id": k, "evidence": round(v, 4)} for k, v in weight.items()), key=lambda x: -x["evidence"])
-    return _pick(best, peers, weight[top] / (sum(weight.values()) or 1.0), ranked)
+    return pick(best, peers, weight[top] / (sum(weight.values()) or 1.0), ranked)
 
 
 def _structural(std_id):
@@ -56,12 +57,12 @@ def _structural(std_id):
 
 def structural_criterion(results):
     """结构判据优先：自带校验位的（CAS）最强，其次结构化编号，本地兜底最弱；同结构看置信度。"""
-    found = _found(results)
+    found = hits(results)
     if not found:
-        return _none_found(results)
+        return none_found(results)
     best = max(found, key=lambda r: (_structural(r["std_id"]), r.get("confidence") or 0))
     peers = [r for r in found if r["std_id"] == best["std_id"]]
-    return _pick(best, peers, best.get("confidence") or 0,
+    return pick(best, peers, best.get("confidence") or 0,
                  [{"std_id": r["std_id"], "structural": _structural(r["std_id"])} for r in found])
 
 

@@ -1,5 +1,6 @@
 """
-站点提取器用的字段工具（空白、全角、标题、日期）。正文清洗只在 clean.clean_text。
+站点提取器和徐子雯的字段清洗（clean/fields.py）共用的文本小工具：空白、全角、去标签、标题。
+日期规范在 fetch/extractors/dates.py；正文清洗只在 clean/clean_text.py。
 """
 
 import re
@@ -15,7 +16,7 @@ def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
     if not text:
         return ""
     # 统一不可见空白：nbsp、全角空格、Tab → 普通空格
-    text = text.replace("\u00a0", " ").replace("\u3000", " ").replace("\t", " ")
+    text = text.replace(" ", " ").replace("　", " ").replace("\t", " ")
     if preserve_newlines:
         # 行内连续空白 → 单个空格；连续 3+ 换行 → 双换行
         text = re.sub(r"[^\S\n]+", " ", text)
@@ -26,7 +27,7 @@ def normalize_whitespace(text: str, preserve_newlines: bool = False) -> str:
     return text.strip()
 
 
-_FULLWIDTH_ALNUM = re.compile(r"[\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]")
+_FULLWIDTH_ALNUM = re.compile(r"[０-９Ａ-Ｚａ-ｚ]")
 
 
 def full_to_half(text: str, alnum_only: bool = False) -> str:
@@ -40,7 +41,7 @@ def full_to_half(text: str, alnum_only: bool = False) -> str:
     if not text:
         return ""
     if alnum_only:
-        return _FULLWIDTH_ALNUM.sub(lambda m: chr(ord(m.group()) - 0xFEE0), text.replace("\u3000", " "))
+        return _FULLWIDTH_ALNUM.sub(lambda m: chr(ord(m.group()) - 0xFEE0), text.replace("　", " "))
     from clean.identifiers import fold_fullwidth
 
     return fold_fullwidth(text)
@@ -55,21 +56,7 @@ def remove_html_tags(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
 
 
-# 日期规范只在 field/date_format.py
-from fetch.extractors.dates import normalize_date  # noqa: E402
-
-
 def clean_title(title: str) -> str:
     title = remove_html_tags(title)
     title = normalize_whitespace(title)
     return title
-
-
-__all__ = [
-    "normalize_whitespace",
-    "full_to_half",
-    "remove_extra_whitespace",
-    "remove_html_tags",
-    "normalize_date",
-    "clean_title",
-]

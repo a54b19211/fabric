@@ -35,7 +35,7 @@ TO_READ = ("pending", "failed", "budget_spent")
 
 
 def readable(conn, source_id) -> bool:
-    """Whether the source may be read now (the history permission: allowlist and read switch)."""
+    """Whether the source may be read now (read_enabled in history_sources)."""
     try:
         history._source(conn, source_id)
         return True

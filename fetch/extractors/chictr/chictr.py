@@ -7,7 +7,7 @@ DownloadTest?path=<令牌>，令牌每次打开页面都不同，path 为空表�
 
 from urllib.parse import urljoin
 
-from fetch.extractors.fields import normalize_whitespace
+from fetch.extractors.text_tools import normalize_whitespace
 
 # 字段名到内部 key 的映射（中文标签 → key）
 _FIELD_MAP = {

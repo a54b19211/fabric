@@ -7,8 +7,9 @@
 - source_catalog()：history_sources 每行的种子（迁移时没有的行才插入），也给 /api/history/sources 名称。
 
 status 的三种取值：active 已接通，可以按声明读取；declared 已登记、还没有插件；
-blocked 试过接入但被来源拒绝（例如反爬拦截），原因写在 blocked_reason。
-许可：主持人定的口径是学术、非商用、不再分发；每个来源还要管理员在 history_sources 里逐源打开（read_enabled）。
+blocked 不抓：试过接入但被来源拒绝（例如反爬拦截），或者决定了不在线抓（DrugBank），原因写在 blocked_reason。
+许可：主持人定的口径是学术、非商用、不再分发。history_sources 里每个来源有一个可读开关 read_enabled，
+迁移补行时默认打开；管理员要停读哪个来源就把它关掉。
 """
 
 from __future__ import annotations
@@ -212,6 +213,9 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     # 批准资料看 Drugs@FDA；说明书/召回覆盖数不能冒充批准覆盖
     _declared("drugs_fda", "Drugs@FDA", ("regulatory_approval",), ("A",), "fda.gov"),
+    # 徐子雯原版有 DrugBank 的站点配置和抓取器（config/sites/drugbank.py、drugbank_fetcher.py），主线不搬
+    _declared("drugbank", "DrugBank", ("drug_database",), ("A", "B"), "drugbank.com",
+              blocked_reason="不在线抓：主持人 2026-11-14 决定退出采集，以后下载 DrugBank 数据库文件（学术许可）离线导入"),
     # ——业务验收和 v3 缺口清单点名需要、还没有插件的——
     _declared("ema", "EMA", ("regulatory_approval",), ("A",), "ema.europa.eu"),
     _declared("company_ir", "企业 IR 管线页和财报演示（不是独立无偏来源）", ("company_disclosure",), ("A", "C"), "company_ir"),

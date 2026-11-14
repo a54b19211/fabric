@@ -11,10 +11,17 @@ v1 = 徐子雯 11-13 版：
 - 时效性：发布年离今年 ≤5 年 1.0、≤10 年 0.7、≤20 年 0.5、更早 0.3；没有日期 0.5。
 - 权威性：source_confidence()——官方站点 0.90～0.98（再看顶刊、DOI、期刊名）、顶刊 0.85、有 DOI 0.70/0.75、只有期刊名 0.50、都没有 0.30。
 - 可追溯性：网址是 http(s) 0.40 + 血缘覆盖“解析”“清洗”两步 0.35 + 字段有值变化的记录 0.25。
-和她原版不一样的三处：
+和她原版不一样的地方（公式、权重、阈值一样，不同的是下面几处口径和输入）：
 1. “今天”是参数（打分那天），同一份资料同一天重算分数相同；她原版用运行时的 datetime.now()。
 2. 药名对齐算命中要 found 且 std_id 非空，和她的命中率口径（ops/align_offline.py 的 summarize）一致；她原版看 resolved_value，占位名和降级也算命中。
 3. 隔离只是等级，不拦截：所有版本照常建索引、给雷达（主持人：前期多出产出，未核的也带标记往下流）。
+4. 正文是主线的清洗正文：前面没有她加的 YAML 头，也没有她站点清洗器的改写（临床登记改写成叙述段、Fierce 截导航），
+   ClinicalTrials 也不是整条 study JSON。准确性里“字段在正文找得到”、编号、单位三个子信号因此会不同。
+5. PubMed：她的正文是一行行元数据（pmid、作者、DOI……）加全文，主线清洗正文只有标题和摘要，字段在正文里大多找不到；
+   她抓取当场打分时 extra 还是空的（落库时才补），不做 pmid、doi 的格式校验，主线按落库后的 extra 校验，多两条对齐血缘。
+6. 结构校验不查 status：主线没有她的审核状态。
+7. 编号格式族按来源选（clean/align.py）：她 approval_number 一律按 NDA/ANDA/BLA 校验，国药准字必判不合格；主线 NMPA、
+   CDE 按国药准字，FDA 完整回应函的 application_number 也逐个校验。校验结果不进分数，只进对齐血缘。
 """
 
 from __future__ import annotations
@@ -86,8 +93,10 @@ def completeness(doc) -> float:
 
 def _checkable_fields(structured):
     """站点特有字段里能拿去正文里找的值：(字段, 值)，只要字符串、至少 2 个字。"""
+    if not isinstance(structured, dict):
+        return []
     out = []
-    for key, value in (structured or {}).items() if isinstance(structured, dict) else ():
+    for key, value in structured.items():
         if key in GENERIC_FIELDS:
             continue
         for item in value if isinstance(value, (list, tuple, set)) else [value]:
@@ -116,7 +125,8 @@ def _identifiers_valid(text) -> float:
 
 
 def _units_known(text) -> float:
-    units = re.findall(r"\d+(?:\.\d+)?\s*([a-zA-Zμ]+(?:/[a-zA-Zμ%]+)?%?)", text)
+    # (?<!\d)：从一串数字的开头匹配（结果不变；不加的话长数字串要从每一位重试一遍，5 万位要一分钟）
+    units = re.findall(r"(?<!\d)\d+(?:\.\d+)?\s*([a-zA-Zμ]+(?:/[a-zA-Zμ%]+)?%?)", text)
     return sum(1 for u in units if u.lower() in KNOWN_UNITS) / len(units) if units else NEUTRAL
 
 
@@ -190,14 +200,15 @@ def _core_entries(lineage):
 
 
 def traceability(doc) -> float:
-    url = doc.get("source_url") or ""
+    """有出处网址 0.40 + “解析”“清洗”两步的覆盖 0.35 + 有值变化记录的字段占比 0.25。"""
+    source = 1.0 if (doc.get("source_url") or "").startswith(("http://", "https://")) else 0.0
     fields = _core_entries(doc.get("lineage"))
-    covered = changed = 0.0
-    if fields:
-        covered = sum(sum(1 for s in ("parse", "clean") if s in {e.get("step") for e in entries})
-                      for entries in fields) / (2 * len(fields))
-        changed = sum(1 for entries in fields if any(e.get("input") != e.get("output") for e in entries)) / len(fields)
-    return 0.40 * url.startswith(("http://", "https://")) + 0.35 * covered + 0.25 * changed
+    if not fields:
+        return 0.40 * source
+    steps = [{e.get("step") for e in entries} for entries in fields]
+    covered = sum(("parse" in s) + ("clean" in s) for s in steps) / (2 * len(fields))
+    changed = sum(1 for entries in fields if any(e.get("input") != e.get("output") for e in entries)) / len(fields)
+    return 0.40 * source + 0.35 * covered + 0.25 * changed
 
 
 def dimensions(doc, today: date) -> dict:

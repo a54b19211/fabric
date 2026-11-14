@@ -9,7 +9,7 @@
 import re
 
 from clean import identifiers
-from fetch.extractors.fields import full_to_half
+from fetch.extractors.text_tools import full_to_half
 
 # 标签字段取值：标签名后接冒号/空白，再取到下一个空白或中文标点为止
 _LABEL_VALUE_RE = re.compile(r"[:：]?\s*([^\s，。；、,，:：]{1,40})")
