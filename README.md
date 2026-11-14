@@ -17,7 +17,7 @@
 | `api/` 对外 | 雷达读的 HTTP 接口：`api/routers/history.py`（`/api/history/*`）和 `measurements.py` |
 | `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗和打分 `clean.py`、附件 `attachments.py`、索引 `index.py`、测量 `measure.py` |
 | `graph/` 图谱 | 对象库、模型抽取、消歧、人工审核、图发布（常驻 `graph/publish/publisher.py`）和审核页面（唐组维护，徐组不用读） |
-| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、对齐离线评估 `align_offline.py`、服务文件 `systemd/`、代码门槛 |
+| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、对齐离线评估 `align_offline.py`、徐子雯论文评估的适配 `xu_eval_adapter.py`、服务文件 `systemd/`、代码门槛 |
 
 谁调谁：`run/`、`api/` → `fetch/`、`clean/` → `store/`。存（`store/history.py`）不调读取和清洗，只用来源目录、投影和数据形状
 这些不连库、不联网的东西。`graph/` 用上面这些；反过来只有存图包时的投影交给 `graph/`（图包只有图谱自己存）。抓洗存不用图谱的库。
@@ -29,13 +29,13 @@
 （`replaced_by` 为空的那个）比：相同就不存；不同就存一个新版本，旧版本的 `replaced_by` 指向它。原件只追加，A→B→A 是第三个版本。
 附件文件按 sha256 去重；定时刷新连续读到 3 条“已存且没变”就停。
 
-## 质量分（徐子雯的那一段，`clean/quality_stage.py`）
+## 质量分（徐子雯的那一段，`clean/quality_stage.py`；和她原版的不同写在 `clean/quality.py` 开头）
 
-画像过的版本再走一遍她的“洗”：字段清洗和 L3 规范化（`fields.py`）→ 编号对齐（`align.py`：编号字段本地查格式；药名切成候选名
-依次问 GSRS（配了才问）、PubChem、ChEMBL、OLS4、UniProt，GSRS/PubChem 查到就停，按“来源分层”取舍）→ 五维打分（`quality.py`），
+画像过的版本再走一遍她的“洗”：字段清洗和 L3 规范化（`fields.py`）→ 编号对齐（`align.py`：编号字段按来源本地查格式；药名切成
+候选名依次问 GSRS（配了才问）、PubChem、ChEMBL、OLS4、UniProt，GSRS/PubChem 查到就停，按“来源分层”取舍）→ 五维打分（`quality.py`），
 写 `derived_quality_scores`、`derived_authority_resolutions`。清洗正文一字不动，等级“隔离”不拦截；`/clean-text?quality=true` 带出分数。
 别和画像混：画像（`profile.py`）的 `quality` 是格式、来源可信度等四项状态（不算分），`route=quarantine` 是没有正文的分流。
-权威库连不上时，药名没查成的版本不存、下一轮再查，这一轮之后只做不用联网的；多个进程可同时打分（`FOR UPDATE SKIP LOCKED`）。
+有库没查成的版本不存、下一轮再查；全都没查成（断网、不出网的实例）这一轮之后只做不用联网的，待打分的一页页往下翻，不会被堵住；多个进程可同时打分（`FOR UPDATE SKIP LOCKED`）。
 
 ## 怎么跑
 
