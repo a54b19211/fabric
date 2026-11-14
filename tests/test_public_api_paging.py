@@ -210,6 +210,18 @@ def test_crl_old_letter_with_a_text_but_no_identity_is_unread_and_the_read_is_pa
     assert partial["error"]["code"] == "items_unread" and partial["stop_reason"] == "items_unread"
 
 
+def test_a_study_over_the_record_limit_is_unread_and_the_rest_of_the_page_is_kept(monkeypatch):
+    """M1 rehearsal: one ClinicalTrials study over 1 MiB (a large results section) failed the whole segment, and the watch
+    read that page again every cycle. It is now an unread item with its NCT id; the other study is stored."""
+    big = study("NCT00000009")
+    big["protocolSection"]["descriptionModule"] = {"detailedDescription": "x" * (1024 * 1024)}
+    serve(monkeypatch, [(200, {"studies": [study("NCT00000001"), big], "totalCount": 2})])
+    result = sources._read_public_api(FetchRequest(source_id="clinicaltrials", query="obesity", max_records=5))
+    assert [r.source_record_id for r in result["records"]] == ["NCT00000001"]
+    assert [item["url"] for item in result["unread_items"]] == ["NCT00000009"]
+    assert result["error"]["code"] == "items_unread" and result["stop_reason"] == "items_unread"
+
+
 def test_a_read_that_came_to_a_known_record_on_a_later_page_gives_no_continuation(monkeypatch):
     """增量读取在第二页读到已存的：读到旧的了，上一页留下的“下一页位置”不能再给出去（固定刷新会接着读那一页）。"""
     from fetch import rate

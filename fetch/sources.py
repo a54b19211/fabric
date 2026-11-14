@@ -15,7 +15,7 @@ from clean.identifiers import NCT_ID
 from fetch import transport
 from fetch.catalog import source_catalog
 from fetch.projection import DECODER, TRIAL_PATHS, _pointer, _project_pubmed, crl_id, parse_json, project_record
-from store.record_models import ArchiveRecord, FabricError, FetchRequest, sha256
+from store.record_models import MAX_RECORD_BYTES, ArchiveRecord, FabricError, FetchRequest, sha256
 
 # every source with a fabric_sources row and its name (fetch.catalog)
 SOURCE_CATALOG = source_catalog()
@@ -246,6 +246,11 @@ class _PublicApiRead:
                     self.unread.append({"url": name, "reason": exc.message})
                 else:
                     self.skipped.append({"id": name, "reason": "信函待发布：没有类型、申请号和正文"})
+                continue
+            if len(raw.encode("utf-8")) > MAX_RECORD_BYTES:
+                # 一条原件超过单条上限（例如结果表很大的 ClinicalTrials 登记）：记为读不到、带上编号，同页别的照存。
+                # 以前它让整段读取失败，定时刷新每个周期重读这一页又失败（M1 演练：ct-phase3）
+                self.unread.append({"url": native, "reason": "原件超过单条 1 MiB 上限，没有存"})
                 continue
             item = ArchiveRecord(source_record_id=native, record_kind=kind, raw_content=raw)
             project_record(self.source, item)
