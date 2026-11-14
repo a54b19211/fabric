@@ -242,14 +242,18 @@ def migrate(*, is_demo: bool, after_seq: int = 0, limit: int = 200, apply: bool 
 
     counts, last = {}, after_seq
     with records.fabric_engine().begin() as conn:
+        # no condition on the payload in SQL: with one, PostgreSQL may scan and unpack every later version
+        # (about a minute per page on the live copy) instead of walking the (source_id, published_seq) index
         rows = conn.execute(text("""
             SELECT published_seq, payload FROM fabric_versions WHERE source_id='legacy_documents'
               AND is_demo=:d AND published_seq>:after
-              AND COALESCE(payload->'facts'->>'publication_role','source_record')='source_record'
             ORDER BY published_seq LIMIT :n"""), {"d": is_demo, "after": after_seq, "n": limit}).mappings().all()
     plans = []
     for row in rows:
         last = row["published_seq"]
+        if ((row["payload"].get("facts") or {}).get("publication_role") or "source_record") != "source_record":
+            counts["skipped:not_source_record"] = counts.get("skipped:not_source_record", 0) + 1
+            continue  # a graph's context reference to an old document, not a source record: nothing to migrate
         p = plan(row["payload"])
         plans.append(p)
         key = p["status"] if p["status"] == "ready" else "pending:" + p["reason"]
