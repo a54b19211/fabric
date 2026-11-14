@@ -26,6 +26,9 @@ of some real source's record. Here it is mapped to that real source and record a
 - Same content is not merged: every legacy version keeps its own migrated version; a CT version whose sections
   equal those of a native version gets that version as content_equivalent, a relation, nothing more.
 - legacy_aliases records, per legacy version, the outcome: imported (real source, record, version) or pending.
+
+    python -m fetch.legacy_migration            # plan only: count ready / pending by reason, writes nothing
+    python -m fetch.legacy_migration --apply    # import page by page; rerunnable, --after <seq> to continue
 """
 
 from __future__ import annotations
@@ -327,3 +330,29 @@ def alias(conn, version_id: str, mode: str, cutoff) -> dict | None:
                 record_current_version_id=head["version_id"] if head else None,
                 record_current_is_migrated=bool(head) and head["role"] == "migrated_record",
                 record_withdrawn=bool(head) and head["state"] in WITHDRAWN)
+
+
+def main(argv=None) -> None:
+    """Every legacy version, one page after another; one line per page and the totals at the end."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m fetch.legacy_migration")
+    parser.add_argument("--apply", action="store_true", help="import (without it: plan and count only)")
+    parser.add_argument("--after", type=int, default=0, help="continue after this published_seq")
+    parser.add_argument("--page", type=int, default=500)
+    parser.add_argument("--demo", action="store_true", help="the is_demo=true legacy versions")
+    args = parser.parse_args(argv)
+    totals, after = {}, args.after
+    while True:
+        page = migrate(is_demo=args.demo, after_seq=after, limit=args.page, apply=args.apply)
+        if not page["read"]:
+            break
+        after = page["last_seq"]
+        for key, n in page["counts"].items():
+            totals[key] = totals.get(key, 0) + n
+        print(json.dumps({"last_seq": after, **page["counts"]}), flush=True)
+    print(json.dumps({"done": True, "apply": args.apply, "last_seq": after, "totals": totals}), flush=True)
+
+
+if __name__ == "__main__":
+    main()
