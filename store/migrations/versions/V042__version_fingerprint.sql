@@ -26,7 +26,12 @@ DROP TRIGGER IF EXISTS history_versions_append_only ON history_versions;
 CREATE TRIGGER history_versions_append_only BEFORE UPDATE ON history_versions
   FOR EACH ROW EXECUTE FUNCTION history_versions_append_only();
 
--- 旧版本的上一版/下一版：同一条记录（同一身份：来源自己的 / legacy 迁入的）按发布序号排，前一个指向后一个
+-- 旧版本的上一版/下一版：同一条记录（同一身份：来源自己的 / legacy 迁入的）按发布序号排，前一个指向后一个。
+-- 身份要读每个版本的 payload：顺序扫全表、在内存里排序，比按索引一条条跳着读快得多（M1 演练，现役库复制品
+-- 129 万个版本：按索引走，整个 V042 用了 23 分钟；同一个查询顺序扫 2 分 13 秒）。只在这一句里这样设，下面恢复。
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_bitmapscan = off;
+SET LOCAL work_mem = '256MB';
 UPDATE history_versions h SET replaced_by = n.next_id
 FROM (SELECT version_id, lead(version_id) OVER (
         PARTITION BY source_id, is_demo, source_record_id,
@@ -34,6 +39,9 @@ FROM (SELECT version_id, lead(version_id) OVER (
         ORDER BY published_seq) AS next_id
       FROM history_versions) n
 WHERE h.version_id = n.version_id AND n.next_id IS NOT NULL AND h.replaced_by IS NULL;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET work_mem;
 
 CREATE INDEX IF NOT EXISTS history_versions_current ON history_versions (source_id, is_demo, source_record_id)
   WHERE replaced_by IS NULL;
