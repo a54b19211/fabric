@@ -3,7 +3,7 @@
 从哪读起：plan() 排运行，process_once() 读一个窗口。
 - 运行（derived_measure_runs）：一条路线读一个版本的一份清洗正文一次，run_id = sha256(版本|正文哈希|producer)。
   同一份正文已经被同一条路线读过就不再排（换 producer 版本不会自动重读旧正文）；清洗器升级出了新正文才排新运行。
-  回填进来的背景版本（store.history.background_version_ids）不排。
+  回填进来的背景版本（store.records.background_version_ids）不排。
 - 窗口（derived_measure_windows）就是待办：process_once() 用 SELECT ... FOR UPDATE SKIP LOCKED 认领一个到期窗口，
   在同一个事务里读完、写完；进程中断时锁随事务释放，窗口留给下一轮。读失败的窗口退避重试，失败 3 次是 failed_final
   （运行记 partial）；模型说“现在不行”（429/503）的窗口记 budget_spent，稍后再读，不算失败。
@@ -24,8 +24,8 @@ import httpx
 from sqlalchemy import text
 
 from clean import measure_extract as mx
-from store import history
-from store.history_models import HistoryError
+from store import records
+from store.record_models import FabricError
 
 MAX_ATTEMPTS = 3
 CONTRACT = "datafabric.data_objects.v2"  # the shape of a measurement object, as the API serves it
@@ -35,11 +35,11 @@ TO_READ = ("pending", "failed", "budget_spent")
 
 
 def readable(conn, source_id) -> bool:
-    """Whether the source may be read now (read_enabled in history_sources)."""
+    """Whether the source may be read now (read_enabled in fabric_sources)."""
     try:
-        history._source(conn, source_id)
+        records._source(conn, source_id)
         return True
-    except HistoryError as exc:
+    except FabricError as exc:
         if exc.status != 403:
             raise
         return False
@@ -65,7 +65,7 @@ def _sources(conn):
 _CANDIDATES = """
     SELECT DISTINCT ON (c.version_id) c.version_id, c.processor_version, c.text_sha256, c.text, v.source_id,
            v.source_record_id, v.is_demo, COALESCE(v.payload->>'raw_sha256', '') AS raw_sha256
-      FROM derived_clean_text c JOIN history_versions v ON v.version_id = c.version_id
+      FROM derived_clean_text c JOIN fabric_versions v ON v.version_id = c.version_id
      WHERE c.processor_version = :tpv AND c.status = 'parsed' AND length(c.text) > 0 AND v.source_id = ANY(:sources)
        AND v.record_kind <> 'graph' AND v.version_id <> ALL(CAST(:background AS text[]))
        AND NOT EXISTS (SELECT 1 FROM derived_measure_runs r WHERE r.version_id = c.version_id
@@ -80,9 +80,9 @@ def plan(*, model=None, with_rules=True, batch=100) -> int:
     from clean import clean_text
 
     made = 0
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         params = {"tpv": clean_text.PROCESSOR_VERSION, "sources": _sources(conn), "mark": mx.RULES_MARK, "n": batch,
-                  "background": history.background_version_ids(conn)}
+                  "background": records.background_version_ids(conn)}
         for route, identity, config in routes(model, with_rules):
             for row in conn.execute(text(_CANDIDATES), {**params, "rules": route == mx.RULES}).mappings().all():
                 made += _plan_one(conn, dict(row), identity, config)
@@ -117,7 +117,7 @@ _CLAIM = """
            r.source_record_id, r.is_demo, r.text_processor_version, r.text_sha256, r.producer_identity,
            v.first_seen_at, v.proof_available_at, v.payload->>'title' AS title
       FROM derived_measure_windows w JOIN derived_measure_runs r ON r.run_id = w.run_id
-      JOIN history_versions v ON v.version_id = r.version_id
+      JOIN fabric_versions v ON v.version_id = r.version_id
      WHERE r.state = 'reading' AND w.state IN ('pending','failed','budget_spent') AND w.next_at <= clock_timestamp()
        AND r.source_id = ANY(:sources) AND r.producer_identity = ANY(:identities)
      ORDER BY w.next_at, w.run_id, w.window_index
@@ -130,7 +130,7 @@ def process_once(*, model=None, with_rules=True, client: httpx.Client | None = N
     mine = routes(model, with_rules)
     if not mine:
         return {"state": "disabled"}
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         w = conn.execute(text(_CLAIM), {"sources": _sources(conn),
                                         "identities": [identity for _, identity, _ in mine]}).mappings().first()
         if w is None:

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from fetch.gdelt_news import article_id
 from fetch.projection import project_record
 from store import index_publication as index
-from store.history_models import ArchiveRecord, AvailabilityProof, HistoryRecord, sha256
+from store.record_models import ArchiveRecord, AvailabilityProof, VersionRecord, sha256
 
 SEEN = datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
 ARTIFACT = {"doc_type": "notice", "doc_category": "official", "evidence_types": [],
@@ -17,7 +17,7 @@ def version(source_id, record_id, data):
     raw = json.dumps(data)
     projected = project_record(
         source_id, ArchiveRecord(source_record_id=record_id, record_kind="document", raw_content=raw))
-    return HistoryRecord(
+    return VersionRecord(
         source_id=source_id, source_record_id=record_id, version_id="a" * 64, is_demo=True, raw_content=raw,
         raw_sha256=sha256(raw), first_seen_at=SEEN, received_at=SEEN,
         availability_proof=AvailabilityProof(kind="unverified"), published_seq=1, **projected)

@@ -1,23 +1,23 @@
-"""GET /api/history/sources against a migrated History library: readable sources, retired ones, the radar's capabilities."""
+"""GET /api/fabric/sources against a migrated fabric library: readable sources, retired ones, the radar's capabilities."""
 
 import pytest
 from integration_migration_runner import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
-from api.routers import history as router
+from api.routers import fabric as router
 from fetch.catalog import RETIRED
 from fetch.sources import SOURCE_CATALOG
-from store import history as store
+from store import records as store
 from store.migrations import runner
 
 
 @pytest.fixture
 def library(pg, monkeypatch):
     _, engine = pg("listing")
-    monkeypatch.setattr(store, "history_engine", lambda: engine)
-    runner.apply("history", store.history_engine())
+    monkeypatch.setattr(store, "fabric_engine", lambda: engine)
+    runner.apply("fabric", store.fabric_engine())
     with engine.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=true"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=true"))
     return engine
 
 
@@ -59,11 +59,11 @@ def test_the_capabilities_the_radar_reads(library, source_id, select, modes, att
 
 def test_a_disabled_source_is_not_in_sources(library):
     with library.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='pubmed'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='pubmed'"))
     assert "pubmed" not in by_id(store.sources_receipt()["sources"])
 
 
 def test_switching_off_public_reads_keeps_only_an_upload(library, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "false")
+    monkeypatch.setenv("DATAFABRIC_FETCH_ENABLED", "false")
     assert caps("pubmed")["fetch"] is None
     assert caps("local_files")["fetch"] == {"modes": ["upload"]}

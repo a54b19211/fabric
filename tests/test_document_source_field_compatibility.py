@@ -5,7 +5,7 @@ import json
 import pytest
 
 from fetch.projection import project_record
-from store.history_models import ArchiveRecord
+from store.record_models import ArchiveRecord
 
 
 def document(**fields):

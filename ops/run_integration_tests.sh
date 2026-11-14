@@ -111,7 +111,7 @@ free_port() { for p in $(seq "$1" 19990); do ss -ltn | grep -q ":$p " || { echo 
 P1=$(free_port 19871); P2=$(free_port $((P1 + 1))); P3=$(free_port $((P2 + 1)))
 mkdir -p "$SOCK"
 
-start pg "$PG" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_DB=fabric_history \
+start pg "$PG" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_DB=zk_fabric_test \
   -v "$SOCK":/var/run/postgresql -p "127.0.0.1:$P1:5432" "$PG_IMAGE" >/dev/null || exit 2
 start pg-runtime "$RTPG" -e POSTGRES_USER=datafabric_runtime_test -e POSTGRES_DB=datafabric_runtime_test \
   -e POSTGRES_HOST_AUTH_METHOD=trust -p "127.0.0.1:$P2:5432" "$PG_IMAGE" >/dev/null || exit 2
@@ -121,8 +121,8 @@ for c in "$PG" "$RTPG"; do
   for _ in $(seq 60); do docker exec "$c" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
 done
 sleep 3  # the image restarts PostgreSQL once after its init scripts
-for db in fabric_history bioradar_kdd_opus_fabric bioradar_kdd_opus_history; do
-  [ "$db" = fabric_history ] || docker exec "$PG" psql -U postgres -c "CREATE DATABASE $db" >/dev/null
+for db in zk_fabric_test bioradar_kdd_opus_fabric zk_fabric_identity_test; do
+  [ "$db" = zk_fabric_test ] || docker exec "$PG" psql -U postgres -c "CREATE DATABASE $db" >/dev/null
   for _ in $(seq 30); do
     docker exec "$PG" psql -U postgres -d "$db" -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null 2>&1 && break
     sleep 1
@@ -164,12 +164,12 @@ group() {  # name, then the command; records a failing group
   "$@" || FAILED="$FAILED $name"
 }
 if [ -n "$NS" ]; then
-  DATAFABRIC_HISTORY_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18436/fabric_history \
+  DATAFABRIC_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18436/zk_fabric_test \
     group "netns group:$NS" in_ns "$NS"
 fi
 if [ -n "$ID" ]; then
   DATAFABRIC_PUBLICATION_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18636/bioradar_kdd_opus_fabric \
-  DATAFABRIC_HISTORY_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18636/bioradar_kdd_opus_history \
+  DATAFABRIC_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18636/zk_fabric_identity_test \
     group "identity group:$ID" in_ns "$ID"
 fi
 if [ -n "$RT" ]; then

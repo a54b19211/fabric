@@ -1,4 +1,4 @@
-"""固定原件投影和旧链路保护；联网完全用HTTP替身，PG另在integration_history运行。"""
+"""固定原件投影和旧链路保护；联网完全用HTTP替身，PG另在integration_records运行。"""
 
 import json
 from contextlib import contextmanager
@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from fetch import sources
-from store.history_models import (
+from store.record_models import (
     ArchiveRecord,
     FetchRequest,
     TimeValue,
@@ -289,10 +289,10 @@ def test_epmc_empty_first_page_with_hits_is_not_eof(monkeypatch):
 def test_a_fetch_that_stopped_at_a_budget_is_partial_not_completed(stop_reason, state):
     from datetime import datetime, timezone
 
-    from store import history
+    from store import records
 
     written = []
     conn = SimpleNamespace(execute=lambda statement, params: written.append(params))
     run = {"id": "r", "attempt": 1, "kind": "fetch", "attempts": []}
-    history._close_run(conn, run, [], [], {"stop_reason": stop_reason}, None, datetime.now(timezone.utc))
+    records._close_run(conn, run, [], [], {"stop_reason": stop_reason}, None, datetime.now(timezone.utc))
     assert written[0]["state"] == state

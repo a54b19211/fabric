@@ -3,8 +3,8 @@ Description=Data-Fabric scheduler: due source watches become fetch runs on the e
 After=network.target
 StartLimitIntervalSec=0
 
-# What it does: every round, each due watch of DATAFABRIC_HISTORY_WATCHES takes one step (read run/scheduler.py).
-# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL, DATAFABRIC_HISTORY_REDIS_URL, DATAFABRIC_HISTORY_WATCHES.
+# What it does: every round, each due watch of DATAFABRIC_WATCHES takes one step (read run/scheduler.py).
+# Environment (runtime.env): DATAFABRIC_DATABASE_URL, DATAFABRIC_REDIS_URL, DATAFABRIC_WATCHES.
 # Paths: WorkingDirectory and the python below are this host's checkout and venv; change both for another deployment.
 
 [Service]

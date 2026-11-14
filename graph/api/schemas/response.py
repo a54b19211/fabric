@@ -52,8 +52,8 @@ class DocumentDetailResponse(BaseModel):
     language: str
     extra: dict = {}
     attachments: list[AttachmentItem] = []
-    # 主体是 history 固定版本时的引用（正文来自该版本的清洗正文）
-    history_ref: dict | None = None
+    # 主体是资料库固定版本时的引用（正文来自该版本的清洗正文）
+    fabric_ref: dict | None = None
     extraction_status: str
     extraction_model: str = ""
     extraction_error: str = ""

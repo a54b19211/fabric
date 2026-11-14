@@ -14,7 +14,7 @@ from graph.extraction.clinical_research import (
     _value,
     project_clinical_trial,
 )
-from store.history_models import sha256
+from store.record_models import sha256
 
 RULE_VERSION = "native-fields.20261031.v1"
 NATIVE_SOURCES = {"clinicaltrials", "fda_crl", "fda_api_enforcement", "fda_api_drug_label"}

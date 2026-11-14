@@ -19,7 +19,7 @@ from scrapling.fetchers import StealthyFetcher
 
 from fetch import transport
 from fetch.extractors.fiercepharma.fiercepharma import extract_fiercepharma_detail
-from store.history_models import ItemUnreadable, make_uuid
+from store.record_models import ItemUnreadable, make_uuid
 
 # RSS 命名空间
 _DC_NS = "http://purl.org/dc/elements/1.1/"

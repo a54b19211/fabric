@@ -1,4 +1,4 @@
-"""给加指纹列（迁移 V042）以前存的版本补上内容指纹（store.history.fingerprint）。
+"""给加指纹列（迁移 V042）以前存的版本补上内容指纹（store.records.fingerprint）。
 
     python ops/backfill_fingerprint.py [--batch 500]
 
@@ -13,19 +13,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import text  # noqa: E402
 
-from store import history  # noqa: E402
+from store import records  # noqa: E402
 
 
 def backfill(batch: int) -> int:
     done = 0
     while True:
-        with history.history_engine().begin() as conn:
+        with records.fabric_engine().begin() as conn:
             rows = conn.execute(text(
-                "SELECT version_id, source_id, payload->>'raw_content' AS raw FROM history_versions "
+                "SELECT version_id, source_id, payload->>'raw_content' AS raw FROM fabric_versions "
                 "WHERE fingerprint IS NULL LIMIT :n FOR UPDATE SKIP LOCKED"), {"n": batch}).mappings().all()
             for row in rows:
-                conn.execute(text("UPDATE history_versions SET fingerprint=:fp WHERE version_id=:id"),
-                             {"fp": history.fingerprint(row["source_id"], row["raw"]), "id": row["version_id"]})
+                conn.execute(text("UPDATE fabric_versions SET fingerprint=:fp WHERE version_id=:id"),
+                             {"fp": records.fingerprint(row["source_id"], row["raw"]), "id": row["version_id"]})
         done += len(rows)
         if len(rows) < batch:
             return done

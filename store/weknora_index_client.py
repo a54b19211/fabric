@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from store.history_models import HistoryError, canonical, sha256
+from store.record_models import FabricError, canonical, sha256
 
 
 def publication_id(manifest):
@@ -26,7 +26,7 @@ def publication_id(manifest):
     return sha256(canonical(parts))
 
 
-class IndexServiceError(HistoryError):
+class IndexServiceError(FabricError):
     pass
 
 

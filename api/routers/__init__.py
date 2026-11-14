@@ -1,1 +1,1 @@
-"""雷达读的接口：历史资料 history.py、测量 measurements.py。"""
+"""雷达读的接口：资料库 fabric.py、测量 measurements.py。"""

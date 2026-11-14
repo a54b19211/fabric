@@ -1,5 +1,5 @@
-"""定时刷新在真实 PostgreSQL 上（一个临时 schema 当 History 库）：一段一段读完一个周期、出错重读、锁住的 watch 跳过、
-/source-health 给雷达的键。只用 History 库（watch 状态在 history_source_watches），队列换成桩，不联网。"""
+"""定时刷新在真实 PostgreSQL 上（一个临时 schema 当资料库）：一段一段读完一个周期、出错重读、锁住的 watch 跳过、
+/source-health 给雷达的键。只用资料库（watch 状态在 fabric_source_watches），队列换成桩，不联网。"""
 
 import json
 import os
@@ -11,30 +11,30 @@ from sqlalchemy.engine import make_url
 from test_source_refresh import who_value
 
 from fetch import fetch_job, source_refresh
-from store import history
-from store.history_models import ArchiveRecord, HistoryError
+from store import records
 from store.migrations import runner
+from store.record_models import ArchiveRecord, FabricError
 
-STATE = "SELECT watch_key, state FROM history_source_watches"
+STATE = "SELECT watch_key, state FROM fabric_source_watches"
 
 
 @pytest.fixture
 def target(monkeypatch):
-    url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL")
+    url = os.environ.get("DATAFABRIC_DATABASE_URL")
     if not url:
         pytest.skip("needs the throwaway PostgreSQL of ops/run_integration_tests.sh")
     parsed = make_url(url)
-    assert parsed.host == "127.0.0.1" and (parsed.port, parsed.database) == (18436, "fabric_history")
+    assert parsed.host == "127.0.0.1" and (parsed.port, parsed.database) == (18436, "zk_fabric_test")
     admin = create_engine(url)
-    name = "t_refresh_history_" + uuid4().hex[:12]
+    name = "t_refresh_fabric_" + uuid4().hex[:12]
     with admin.begin() as conn:
         conn.execute(text("CREATE SCHEMA " + name))
     engine = create_engine(url, connect_args={"options": "-csearch_path=" + name})
-    monkeypatch.setattr(history, "history_engine", lambda: engine)
+    monkeypatch.setattr(records, "fabric_engine", lambda: engine)
     monkeypatch.setattr(fetch_job, "enqueue_fetch", lambda run: run)  # the worker is played by finish()
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
     monkeypatch.delenv("DATAFABRIC_PUBLICATION_DATABASE_URL", raising=False)  # fetching needs no graph database
-    runner.apply("history", engine)
+    runner.apply("fabric", engine)
     try:
         yield engine
     finally:
@@ -52,7 +52,7 @@ def rows(engine, sql, **params):
 def watch(monkeypatch, source="who_don", query="*"):
     config = [{"id": "synthetic-watch", "request": {"source_id": source, "query": query, "max_records": 1},
                "cadence_seconds": 3600, "lookback_days": 30}]
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps(config))
+    monkeypatch.setenv("DATAFABRIC_WATCHES", json.dumps(config))
 
 
 def state(target):
@@ -60,22 +60,22 @@ def state(target):
 
 
 def payloads(target):
-    return [r["request_payload"] for r in rows(target, "SELECT request_payload FROM history_runs ORDER BY created_at")]
+    return [r["request_payload"] for r in rows(target, "SELECT request_payload FROM fabric_runs ORDER BY created_at")]
 
 
-def finish(target, records=(), continuation=None, exhausted=False, error=None, stop=None):
+def finish(target, items=(), continuation=None, exhausted=False, error=None, stop=None):
     """The fetch worker's part: the watch's active run is read and stored."""
-    run = history.read_run(state(target)["active_run_id"])
-    history.job_input(run.id, run.attempt)
+    run = records.read_run(state(target)["active_run_id"])
+    records.job_input(run.id, run.attempt)
     stop = stop or ("upstream_exhausted" if exhausted else "record_budget")
-    return history.finish_fetch(run.id, run.attempt, {
-        "records": list(records), "complete": False, "upstream_pagination_exhausted": exhausted, "stop_reason": stop,
+    return records.finish_fetch(run.id, run.attempt, {
+        "records": list(items), "complete": False, "upstream_pagination_exhausted": exhausted, "stop_reason": stop,
         "error": error, "requests": 1, "bytes": 100, "source_total": None, "next_continuation": continuation})
 
 
 def make_due(target):  # the cadence has passed
     with target.begin() as conn:
-        conn.execute(text("UPDATE history_source_watches SET state = jsonb_set(state, '{next_check_at}', "
+        conn.execute(text("UPDATE fabric_source_watches SET state = jsonb_set(state, '{next_check_at}', "
                           "to_jsonb('2000-01-01T00:00:00+00:00'::text))"))
 
 
@@ -103,7 +103,7 @@ def test_a_cycle_is_read_segment_by_segment_then_waits_for_its_cadence(target, m
     assert done["state"] == "idle" and done["last_success_at"] and "request" not in done
     assert done["window_checkpoint"] == first["window_ended_at"]  # the next cycle reads on from here
     assert source_refresh.refresh_once() == []  # waits for its cadence
-    assert rows(target, "SELECT count(*) AS n FROM history_versions")[0]["n"] == 2
+    assert rows(target, "SELECT count(*) AS n FROM fabric_versions")[0]["n"] == 2
 
 
 def test_a_failed_segment_is_read_again_without_stopping_at_stored_records(target, monkeypatch):
@@ -130,10 +130,10 @@ def test_a_watch_locked_by_another_scheduler_is_skipped(target, monkeypatch):
     watch(monkeypatch)
     key = source_refresh._key(source_refresh.watches()[0])
     with target.begin() as conn:
-        conn.execute(text("INSERT INTO history_source_watches (watch_key, watch_id) VALUES (:key, 'synthetic-watch')"),
+        conn.execute(text("INSERT INTO fabric_source_watches (watch_key, watch_id) VALUES (:key, 'synthetic-watch')"),
                      {"key": key})
     with target.begin() as other:  # another scheduler is in the middle of this watch's step
-        other.execute(text("SELECT 1 FROM history_source_watches WHERE watch_key = :key FOR UPDATE"), {"key": key})
+        other.execute(text("SELECT 1 FROM fabric_source_watches WHERE watch_key = :key FOR UPDATE"), {"key": key})
         assert source_refresh.refresh_once() == []
     assert payloads(target) == []
     assert source_refresh.refresh_once()[0]["state"] == "running" and len(payloads(target)) == 1
@@ -155,7 +155,7 @@ def test_source_health_gives_the_radar_its_keys_and_refuses_a_closed_source(targ
     assert row["window_ended_at"] == state(target)["window_ended_at"]
     assert source_refresh.source_health("nmpa")["watches"] == []  # a source without a watch
     with target.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled = false WHERE source_id = 'who_don'"))
-    with pytest.raises(HistoryError) as exc:
+        conn.execute(text("UPDATE fabric_sources SET read_enabled = false WHERE source_id = 'who_don'"))
+    with pytest.raises(FabricError) as exc:
         source_refresh.source_health("who_don")
     assert exc.value.status == 403

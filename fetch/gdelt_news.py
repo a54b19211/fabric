@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from fetch import transport
-from store.history_models import ArchiveRecord, HistoryError, sha256, source_time
+from store.record_models import ArchiveRecord, FabricError, sha256, source_time
 
 ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
 FINEST_WINDOW = timedelta(minutes=15)
@@ -35,25 +35,25 @@ RETRY_MARGIN = 1  # seconds added to the interval GDELT names
 def article_id(value):
     url = value.get("url")
     if not isinstance(url, str) or not url or len(url) > 8000:
-        raise HistoryError("gdelt_article_url", "新闻索引缺少可核对的原网址")
+        raise FabricError("gdelt_article_url", "新闻索引缺少可核对的原网址")
     parts = urlsplit(url)
     if parts.scheme not in {"https", "http"} or not parts.hostname or parts.username or parts.password:
-        raise HistoryError("gdelt_article_url", "新闻索引原网址格式不合法")
+        raise FabricError("gdelt_article_url", "新闻索引原网址格式不合法")
     return "url:" + sha256(url)  # 保留完整query；不同原网址不按标题合并。
 
 
 def project_gdelt(item, data):
     if item.source_record_id != article_id(data):
-        raise HistoryError("native_id_mismatch", "新闻索引编号与原网址不一致")
+        raise FabricError("native_id_mismatch", "新闻索引编号与原网址不一致")
     title = data.get("title")
     if not isinstance(title, str) or not title.strip():
-        raise HistoryError("gdelt_article_title", "新闻索引缺少标题")
+        raise FabricError("gdelt_article_title", "新闻索引缺少标题")
     observed = None
     if data.get("seendate"):
         try:
             observed = datetime.strptime(data["seendate"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
-            raise HistoryError("gdelt_seen_date", "GDELT观察时间无法核对") from None
+            raise FabricError("gdelt_seen_date", "GDELT观察时间无法核对") from None
     fields = ("url", "title", "seendate", "domain", "language", "sourcecountry")
     return {
         "record_kind": "document", "title": title, "source_url": data["url"],
@@ -175,11 +175,11 @@ class _Read:
                 return self._articles(response)
             asked = _interval_asked(response.text)
             if attempt == TRIES:
-                raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，按它要求的间隔（{asked} 秒）等过再发，"
+                raise FabricError("source_rate_limited", f"对方限流：GDELT 返回 429，按它要求的间隔（{asked} 秒）等过再发，"
                                    f"共发 {TRIES} 次仍是 429；请隔一段时间再读", 503)
             wait = asked + RETRY_MARGIN
             if time.monotonic() - self.started + wait >= self.request.deadline_seconds:
-                raise HistoryError("source_rate_limited", f"对方限流：GDELT 返回 429，要求间隔 {asked} 秒，期限内等不到重试；"
+                raise FabricError("source_rate_limited", f"对方限流：GDELT 返回 429，要求间隔 {asked} 秒，期限内等不到重试；"
                                    "请隔一段时间再读", 503)
             time.sleep(wait)
 
@@ -194,10 +194,10 @@ class _Read:
         if found == {}:  # GDELT's answer to a window without a single article: 200 with the body {} (measured 2026-11-13)
             return []
         if not isinstance(found.get("articles"), list):
-            raise HistoryError("gdelt_response_shape", "新闻索引没有返回articles数组，不能当空结果")
+            raise FabricError("gdelt_response_shape", "新闻索引没有返回articles数组，不能当空结果")
         articles = list(_raw_array_items(raw, ["articles"]))
         if len(articles) > request.max_records:
-            raise HistoryError("source_record_budget", "新闻索引超过声明的条数限制")
+            raise FabricError("source_record_budget", "新闻索引超过声明的条数限制")
         return articles
 
     def _take(self, articles):
@@ -211,7 +211,7 @@ class _Read:
             if native in self.seen:
                 if self.seen[native] != item.raw_content:
                     self.records = [record for record in self.records if record.source_record_id != native]
-                    raise HistoryError("ambiguous_native_id", "同批同网址返回不同内容，不能猜修订顺序")
+                    raise FabricError("ambiguous_native_id", "同批同网址返回不同内容，不能猜修订顺序")
                 continue
             self.seen[native] = item.raw_content
             self.records.append(item)
@@ -245,7 +245,7 @@ class _Read:
 
 def read_gdelt(request):
     if request.source_record_ids:
-        raise HistoryError("by_id_unsupported", "GDELT索引暂不支持原编号点查；已采用资料可读固定版本")
+        raise FabricError("by_id_unsupported", "GDELT索引暂不支持原编号点查；已采用资料可读固定版本")
     read = _Read(request)
     error = stop = None
     try:
@@ -253,7 +253,7 @@ def read_gdelt(request):
             read.run(client)
     except transport.Stop as stopped:
         stop = stopped.reason
-    except HistoryError as exc:
+    except FabricError as exc:
         error = {"code": exc.code, "message": exc.message}
     except (httpx.HTTPError, ValueError, KeyError, TypeError, UnicodeError):
         error = {"code": "source_read_failed", "message": "GDELT新闻索引读取失败；不能当作零新闻"}

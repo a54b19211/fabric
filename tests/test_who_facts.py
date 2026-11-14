@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 
 from fetch.who_don import WHO_PARSER, project_who
 from fetch.who_facts import extract_counts
-from store.history_models import ArchiveRecord, HistoryRecord
+from store.record_models import ArchiveRecord, VersionRecord
 
 
 def projection(summary="", overview="", *, title="SYNTHETIC disease - Country A and Country B", **fields):
@@ -185,8 +185,8 @@ def test_projection_retains_raw_native_locators_and_has_new_parser_version():
     assert WHO_PARSER == p["parser_version"] == "datafabric.who.don.projection.v0.2"
     assert p["facts"]["summary"] == data["Summary"]
     assert p["field_locators"]["summary"] == {"json_pointer": "/Summary"}
-    # Validate the existing History contract without widening its str-only locators.
-    HistoryRecord(source_id="who_don", source_record_id=data["Id"], version_id="a" * 64,
+    # Validate the existing fabric record contract without widening its str-only locators.
+    VersionRecord(source_id="who_don", source_record_id=data["Id"], version_id="a" * 64,
                   is_demo=True, raw_content=json.dumps(data), raw_sha256="b" * 64,
                   first_seen_at="2030-01-11T00:00:00Z", received_at="2030-01-11T00:00:00Z",
                   availability_proof={"kind": "unverified"}, published_seq=1, **p)

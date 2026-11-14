@@ -184,7 +184,7 @@ def test_nmpa_unverified_page_identifiers_remain_weak_even_after_a_match(runtime
     assert entity["entity_data"]["_native"]["limitations"]
 
 
-def test_fixed_source_reference_is_forwarded_without_inventing_a_history_version():
+def test_fixed_source_reference_is_forwarded_without_inventing_a_fabric_version():
     reference = {"source_id": "legacy_documents", "source_record_id": "document-uuid",
                  "version_id": "a" * 64, "raw_sha256": "b" * 64, "is_demo": True}
     result = project(trial_raw(True), source_ref=reference)

@@ -15,14 +15,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pdf_fixture import make_pdf
 
-from api.routers import history as history_router
+from api.routers import fabric as fabric_router
 from clean import attachment_parse as ap
 from fetch import catalog, local_files
 from fetch import web_client as client
 from fetch.projection import project_record
 from fetch.sources import SOURCE_CATALOG, read_public
-from store import history as store
-from store.history_models import FetchRequest, HistoryError
+from store import records as store
+from store.record_models import FabricError, FetchRequest
 
 ADMIN = "test-admin-only"
 PDF = make_pdf("Local import evidence")
@@ -30,14 +30,14 @@ PDF = make_pdf("Local import evidence")
 
 @pytest.fixture
 def api(monkeypatch, tmp_path):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_ADMIN_TOKEN", ADMIN)
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", '["local_files"]')
+    monkeypatch.setenv("DATAFABRIC_ADMIN_TOKEN", ADMIN)
+    monkeypatch.setenv("DATAFABRIC_SOURCE_ALLOWLIST", '["local_files"]')
     monkeypatch.delenv("DATAFABRIC_LOCAL_FILE_MAX_BYTES", raising=False)
     monkeypatch.setattr(client.APP, "DATA_ROOT", tmp_path)
     imported = []
 
     def import_archive(request, key):
-        # 与 store.history.import_archive 相同的第一步：全包先投影校验
+        # 与 store.records.import_archive 相同的第一步：全包先投影校验
         prepared = [(item, project_record(request.source_id, item)) for item in request.records]
         imported.append({"request": request, "key": key, "prepared": prepared})
         return {
@@ -49,13 +49,13 @@ def api(monkeypatch, tmp_path):
 
     monkeypatch.setattr(store, "import_archive", import_archive)
     app = FastAPI()
-    app.include_router(history_router.router)
+    app.include_router(fabric_router.router)
     return TestClient(app), imported, tmp_path
 
 
 def upload(test_client, content, name="报告.pdf", key="k1", collection="t28-evidence", token=ADMIN, demo="true"):
     return test_client.post(
-        "/api/history/local-files",
+        "/api/fabric/local-files",
         headers={"Authorization": "Bearer " + token, "Idempotency-Key": key},
         files={"file": (name, content, "application/octet-stream")},
         data={"collection": collection, "is_demo": demo},
@@ -175,7 +175,7 @@ def test_size_limit_credentials_and_collection(api, monkeypatch):
 def test_client_paths_in_file_names_are_dropped():
     assert local_files.clean_name("C:\\Users\\x\\a.pdf") == "a.pdf"
     assert local_files.clean_name("dir/b.pdf") == "b.pdf"
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         local_files.clean_name("..")
 
 
@@ -227,6 +227,6 @@ def test_projection_rejects_a_record_whose_identity_does_not_match(api):
     assert upload(test_client, PDF).status_code == 200
     item = imported[0]["prepared"][0][0]
     forged = item.model_copy(update={"source_record_id": "local-file:t28-evidence/other.pdf"})
-    with pytest.raises(HistoryError) as exc:
+    with pytest.raises(FabricError) as exc:
         project_record("local_files", forged)
     assert exc.value.code == "native_id_mismatch"

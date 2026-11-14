@@ -22,7 +22,7 @@ from scrapling.fetchers import Fetcher, StealthyFetcher
 from fetch import transport
 from fetch.site_profiles import DEFAULT_HEADERS
 from settings import APP
-from store.history_models import make_uuid
+from store.record_models import make_uuid
 
 # ---------------------------------------------------------------------------
 #  工具函数

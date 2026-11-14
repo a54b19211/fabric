@@ -1,4 +1,4 @@
-"""唐组图谱在 /api/history 下的接口：固定图版本的邻域、实体解析、路径、子图，原生图捕获，图发布状态。
+"""唐组图谱在 /api/fabric 下的接口：固定图版本的邻域、实体解析、路径、子图，原生图捕获，图发布状态。
 雷达只用 /graph/{version_id}/resolve。"""
 
 from datetime import datetime
@@ -7,14 +7,14 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.routers.history import _call, require_admin, require_read
-from graph.publish import history_graph
+from api.routers.fabric import _call, require_admin, require_read
+from graph.publish import fabric_graph
 from graph.publish.graph_tools import GraphPaths, GraphSubgraph, ReviewScope
 from graph.publish.reviewed_graph import GraphNeighborhood, GraphResolution
-from store import history as store
-from store.history_models import Mode, RunView
+from store import records as store
+from store.record_models import Mode, RunView
 
-router = APIRouter(prefix="/api/history", tags=["图谱"])
+router = APIRouter(prefix="/api/fabric", tags=["图谱"])
 
 
 @router.get(
@@ -38,7 +38,7 @@ def graph_neighborhood(
     max_edges: int = Query(default=100, ge=1, le=200),
 ):
     return _call(
-        history_graph.read_graph_neighborhood,
+        fabric_graph.read_graph_neighborhood,
         version_id,
         source_id,
         source_record_id,
@@ -74,7 +74,7 @@ def graph_resolve(
     limit: int = Query(default=20, ge=1, le=20),
 ):
     return _call(
-        history_graph.read_graph_resolution,
+        fabric_graph.read_graph_resolution,
         version_id,
         source_id,
         source_record_id,
@@ -108,7 +108,7 @@ def graph_paths(version_id: str, source_id: str, source_record_id: str, is_demo:
                 max_depth: int = Query(default=4, ge=1, le=4),
                 max_paths: int = Query(default=10, ge=1, le=20),
                 max_expansions: int = Query(default=1000, ge=1, le=5000)):
-    return _call(history_graph.read_graph_paths, version_id, source_id, source_record_id,
+    return _call(fabric_graph.read_graph_paths, version_id, source_id, source_record_id,
                  is_demo, mode, cutoff, start=start, target=target,
                  relation_types=relation_types or (), direction=direction,
                  review_scope=review_scope, max_depth=max_depth, max_paths=max_paths,
@@ -124,7 +124,7 @@ def graph_subgraph(version_id: str, source_id: str, source_record_id: str, is_de
                    review_scope: ReviewScope = "reviewed",
                    max_nodes: int = Query(default=100, ge=1, le=100),
                    max_edges: int = Query(default=200, ge=1, le=200)):
-    return _call(history_graph.read_graph_subgraph, version_id, source_id, source_record_id,
+    return _call(fabric_graph.read_graph_subgraph, version_id, source_id, source_record_id,
                  is_demo, mode, cutoff, node_ids=node_ids,
                  relation_types=relation_types or (), review_scope=review_scope,
                  max_nodes=max_nodes, max_edges=max_edges)

@@ -2,13 +2,13 @@
 
 - SPECS：从外面采集的来源，一个来源一份 CollectionSpec（名称、证据类型、许可、限速、增量读法、读取插件、覆盖说明）。
   调度（fetch.source_refresh）、限速（fetch.rate）、增量窗口（fetch.windows）、读取（fetch.sources.read_public）、
-  加工画像（clean.profile）和 /api/history/collection/catalog 都只读这里。业务需要但还没接的来源也登记（declared）。
+  加工画像（clean.profile）和 /api/fabric/collection/catalog 都只读这里。业务需要但还没接的来源也登记（declared）。
 - DERIVED：不从外面采集、在 Fabric 里派生或受控导入的来源；RETIRED：已退役的来源。它们只有名称。
-- source_catalog()：history_sources 每行的种子（迁移时没有的行才插入），也给 /api/history/sources 名称。
+- source_catalog()：fabric_sources 每行的种子（迁移时没有的行才插入），也给 /api/fabric/sources 名称。
 
 status 的三种取值：active 已接通，可以按声明读取；declared 已登记、还没有插件；
 blocked 不抓：试过接入但被来源拒绝（例如反爬拦截），或者决定了不在线抓（DrugBank），原因写在 blocked_reason。
-许可：主持人定的口径是学术、非商用、不再分发。history_sources 里每个来源有一个可读开关 read_enabled，
+许可：主持人定的口径是学术、非商用、不再分发。fabric_sources 里每个来源有一个可读开关 read_enabled，
 迁移补行时默认打开；管理员要停读哪个来源就把它关掉。
 """
 
@@ -54,7 +54,7 @@ class CollectionSpec:
     incremental: Incremental
     rate_group: str  # 限速组：主机名后缀（fetch.rate 按最长后缀找）
     min_interval_seconds: float  # 同一限速组里两次请求的最短间隔（秒）
-    read_modes: tuple[ReadMode, ...] = ()  # 来源真实支持的读法；/api/history/sources 的 fetch.modes 就是它
+    read_modes: tuple[ReadMode, ...] = ()  # 来源真实支持的读法；/api/fabric/sources 的 fetch.modes 就是它
     # 覆盖说明：metadata 元数据、abstract 摘要、fulltext 全文、results 登记结果表、attachments 附件各读到哪一层；
     # 写了 attachments 的已接通来源才产出附件版本（ATTACHMENT_SOURCES）
     coverage: dict = field(default_factory=dict)
@@ -144,7 +144,7 @@ SPECS: tuple[CollectionSpec, ...] = (
         _FULL_REREAD, "api.fda.gov", 0.4, ("query",), {"metadata": "原生字段", "fulltext": "信函文本"},
         license_url="https://open.fda.gov/license/",
     ),
-    # 入口：POST /api/history/local-files（multipart）或 /fetch query=inbox（服务器收件目录）；许可由上传者负责。
+    # 入口：POST /api/fabric/local-files（multipart）或 /fetch query=inbox（服务器收件目录）；许可由上传者负责。
     # 不发对外请求，限速组只是因为每个来源都要有一个
     CollectionSpec(
         "local_files", "本地文件原件导入（PDF / Office）", "active", "local_file_import", ("uploaded_document",),
@@ -245,11 +245,11 @@ SPECS: tuple[CollectionSpec, ...] = (
     _declared("grants", "公开的基金资助信息", ("funding",), ("B",), "grants"),
 )
 
-# 不从外面采集、在 Fabric 里派生或受控导入的来源：在 history_sources 里有一行（管理员的可读开关），不进采集目录
+# 不从外面采集、在 Fabric 里派生或受控导入的来源：在 fabric_sources 里有一行（管理员的可读开关），不进采集目录
 DERIVED = {
     "reviewed_graph": "唐的有界审核图发布",
     "primekg_graph": "PrimeKG 当前有界背景",
-    "external_archive": "受控历史归档",  # 固定原件的受控导入（POST /api/history/archives）
+    "external_archive": "受控历史归档",  # 固定原件的受控导入（POST /api/fabric/archives）
 }
 # 图包：只经图谱接口读，不能被选作分析来源
 GRAPH_SOURCES = ("reviewed_graph", "primekg_graph")
@@ -271,7 +271,7 @@ def spec(source_id: str) -> CollectionSpec:
 
 
 def source_catalog() -> dict[str, dict]:
-    """history_sources 每行的 catalog 种子（只有名称）：能采集的来源、派生来源、退役来源。"""
+    """fabric_sources 每行的 catalog 种子（只有名称）：能采集的来源、派生来源、退役来源。"""
     names = {s.source_id: s.name for s in SPECS if s.fetchable} | DERIVED | RETIRED
     return {source_id: {"name": name} for source_id, name in names.items()}
 

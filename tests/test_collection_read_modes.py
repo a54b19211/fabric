@@ -3,7 +3,7 @@
 import pytest
 
 from fetch.catalog import FETCHABLE, spec
-from store.history_models import FetchRequest
+from store.record_models import FetchRequest
 
 
 @pytest.mark.parametrize("source,modes", [

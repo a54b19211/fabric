@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
-from store.history_models import HistoryError, HistoryRecord
+from store.record_models import FabricError, VersionRecord
 
 
 def validate_object_evidence(evidence: dict, *, source_doc_uuid: str, source_site: str) -> dict:
-    from store import history
+    from store import records
 
     value = dict(evidence)
     nested = value.get("source_quote")
@@ -33,16 +33,16 @@ def validate_object_evidence(evidence: dict, *, source_doc_uuid: str, source_sit
         raise ValueError("原文位置必须使用Unicode字符下标")
 
     try:
-        with history.history_engine().begin() as conn:
+        with records.fabric_engine().begin() as conn:
             conn.execute(text("SET TRANSACTION READ ONLY"))
             conn.execute(text("SET LOCAL statement_timeout='3s'"))
             payload = conn.execute(
-                text("SELECT payload FROM history_versions WHERE version_id=:version"),
+                text("SELECT payload FROM fabric_versions WHERE version_id=:version"),
                 {"version": version},
             ).scalar_one_or_none()
         if payload is None:
-            raise HistoryError("object_evidence_missing", "固定原文版本尚未发表", 409)
-        candidate = HistoryRecord.model_validate(payload)
+            raise FabricError("object_evidence_missing", "固定原文版本尚未发表", 409)
+        candidate = VersionRecord.model_validate(payload)
         for key in ("source_id", "source_record_id", "raw_sha256", "is_demo"):
             if key in value and value[key] is not None and value[key] != getattr(candidate, key):
                 raise ValueError("证据标识与固定版本不一致")
@@ -51,14 +51,14 @@ def validate_object_evidence(evidence: dict, *, source_doc_uuid: str, source_sit
             raise ValueError("对象来源空间配置无效")
         if candidate.is_demo != (demo_config == "true"):
             raise ValueError("不能跨真实/演示空间确认对象")
-        record = history.read_version(
+        record = records.read_version(
             version, candidate.source_id, candidate.source_record_id, candidate.is_demo,
             "current", datetime.now(timezone.utc),
         )
-    except (HistoryError, ValueError):
+    except (FabricError, ValueError):
         raise
     except Exception:
-        raise HistoryError("object_evidence_unavailable", "固定原文暂不可核对", 503) from None
+        raise FabricError("object_evidence_unavailable", "固定原文暂不可核对", 503) from None
 
     if record.record_kind == "graph":
         raise ValueError("图包不能代替对象的原始文档")

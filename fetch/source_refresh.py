@@ -1,15 +1,15 @@
-"""定时刷新：DATAFABRIC_HISTORY_WATCHES 里配置的每个固定刷新（watch）到点就去抓，一段一段读完一个周期。
+"""定时刷新：DATAFABRIC_WATCHES 里配置的每个固定刷新（watch）到点就去抓，一段一段读完一个周期。
 
 常驻派活程序 run/scheduler.py 每隔几秒调一次 refresh_once()，每个到点的 watch 走一步（_step）：
   1. 没有进行中的周期：按 fetch/windows.py 的 cycle_request 定这一周期的请求（更新时间窗口，或"遇到已存的就停"）。
-  2. 没有进行中的任务：建一条采集任务（store.history.create_fetch），放进队列（fetch.fetch_job.enqueue_fetch），
+  2. 没有进行中的任务：建一条采集任务（store.records.create_fetch），放进队列（fetch.fetch_job.enqueue_fetch），
      由采集工人去读。任务还没读完：下一轮再看。
   3. 任务读完了（_segment_done）：有续读位置就下一轮读下一段；读到底、读到已存的、或读够 SEGMENTS_PER_CYCLE 段就收工，
      记下窗口检查点，cadence_seconds 秒后开始下一周期。
   出错（_failed）：cadence_seconds 秒后换一个新任务重读这一段；连续 GIVE_UP_AFTER 次就放弃这一周期。
-每个 watch 的状态是 History 库 history_source_watches 里 watch_key 为 _key(watch) 的那一行的 state（一个 JSON）。
+每个 watch 的状态是资料库 fabric_source_watches 里 watch_key 为 _key(watch) 的那一行的 state（一个 JSON）。
 几个派活程序同时跑时，一步在锁住这一行的事务里走（SELECT ... FOR UPDATE SKIP LOCKED），别人锁着就跳过，不会重复派活。
-磁盘余量不够（store/history.py · disk_status）时不建新的采集任务。抓只用 History 库和采集队列（Redis），不用图谱的库。
+磁盘余量不够（store/records.py · disk_status）时不建新的采集任务。抓只用资料库和采集队列（Redis），不用图谱的库。
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from sqlalchemy import text
 from fetch import fetch_job, transport
 from fetch.catalog import WATCHABLE, spec
 from fetch.windows import SEGMENTS_PER_CYCLE, cycle_request, first_unread
-from store import history
-from store.history_models import FetchRequest, HistoryError, Model, canonical, sha256
+from store import records
+from store.record_models import FabricError, FetchRequest, Model, canonical, sha256
 from store.timestamps import parse_timestamp
 
 GIVE_UP_AFTER = 3  # 同一周期连续失败这么多次，放弃这一周期
@@ -58,12 +58,12 @@ class SourceWatch(Model):
 def watches():
     """配置里的固定刷新。配置不对报错，一个也不刷新。"""
     try:
-        config = json.loads(os.environ.get("DATAFABRIC_HISTORY_WATCHES", "[]"))
+        config = json.loads(os.environ.get("DATAFABRIC_WATCHES", "[]"))
         values = [SourceWatch.model_validate(value) for value in config]
     except (ValueError, TypeError):
-        raise HistoryError("source_watch_configuration", "固定刷新配置无效") from None
+        raise FabricError("source_watch_configuration", "固定刷新配置无效") from None
     if len({value.id for value in values}) != len(values):
-        raise HistoryError("source_watch_configuration", "固定刷新的 id 重复")
+        raise FabricError("source_watch_configuration", "固定刷新的 id 重复")
     return values
 
 
@@ -80,15 +80,15 @@ def refresh_once():
     configured = watches()
     if not configured:
         return []
-    engine = history.history_engine()
+    engine = records.fabric_engine()
     results = []
     for watch in configured:
         key = _key(watch)
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO history_source_watches (watch_key, watch_id) VALUES (:key, :id) "
+            conn.execute(text("INSERT INTO fabric_source_watches (watch_key, watch_id) VALUES (:key, :id) "
                               "ON CONFLICT (watch_key) DO NOTHING"), {"key": key, "id": watch.id})
         with engine.begin() as conn:
-            row = conn.execute(text("SELECT state, clock_timestamp() AS now FROM history_source_watches "
+            row = conn.execute(text("SELECT state, clock_timestamp() AS now FROM fabric_source_watches "
                                     "WHERE watch_key = :key FOR UPDATE SKIP LOCKED"), {"key": key}).first()
             if row is None:  # 另一个派活程序正在走这一步
                 continue
@@ -97,7 +97,7 @@ def refresh_once():
             if waiting and parse_timestamp(state["next_check_at"]) > now:
                 continue
             _step(watch, state, now)
-            conn.execute(text("UPDATE history_source_watches SET state = CAST(:state AS jsonb), "
+            conn.execute(text("UPDATE fabric_source_watches SET state = CAST(:state AS jsonb), "
                               "updated_at = clock_timestamp() WHERE watch_key = :key"),
                          {"key": key, "state": canonical(state)})
         results.append({"watch_id": watch.id, "state": state["state"]})
@@ -113,17 +113,17 @@ def _step(watch, state, now):
                          cycle_started_at=now.isoformat(), window_started_at=start.isoformat() if start else None,
                          window_ended_at=end.isoformat() if end else None)
         if state.get("active_run_id"):
-            run = history.read_run(state["active_run_id"])
+            run = records.read_run(state["active_run_id"])
         else:
-            if history.disk_status()["low"]:
-                raise HistoryError("source_watch_disk_low", "磁盘低水位，暂停新的采集", 503)
+            if records.disk_status()["low"]:
+                raise FabricError("source_watch_disk_low", "磁盘低水位，暂停新的采集", 503)
             request = {**state["request"], "known_stop": 0} if state.get("retry") else state["request"]
-            run, _ = history.create_fetch(FetchRequest.model_validate(request))
+            run, _ = records.create_fetch(FetchRequest.model_validate(request))
             state["active_run_id"] = run.id
         if run.state in ("queued", "running"):
             if (now - run.created_at).total_seconds() > 3 * fetch_job.JOB_TIMEOUT:  # 采集工人中途死了，任务停在那里
-                history.fail_job(run.id, run.attempt, "run_stalled", "采集任务长时间没有结束")
-                raise HistoryError("source_watch_failed", "采集任务长时间没有结束", 503)
+                records.fail_job(run.id, run.attempt, "run_stalled", "采集任务长时间没有结束")
+                raise FabricError("source_watch_failed", "采集任务长时间没有结束", 503)
             if run.state == "queued":
                 fetch_job.enqueue_fetch(run)  # 已经在队列里的不会再放一次
             state["state"] = "running"
@@ -131,10 +131,10 @@ def _step(watch, state, now):
         # items_unread：读到底了，只是有几条读不到（下一周期整份读，见 _segment_done），不算这一段失败
         unread_only = run.coverage.get("stop_reason") == "items_unread"
         if run.state not in ("completed", "partial") or (run.error and not unread_only):
-            raise HistoryError("source_watch_failed", "这一段读取失败", 503)
+            raise FabricError("source_watch_failed", "这一段读取失败", 503)
         state.pop("active_run_id")
         _segment_done(watch, state, run.coverage, now)
-    except HistoryError as exc:
+    except FabricError as exc:
         _failed(watch, state, exc, now)
 
 
@@ -144,9 +144,9 @@ def _segment_done(watch, state, coverage, now):
     stop = coverage.get("stop_reason")
     ended = coverage.get("upstream_pagination_exhausted") or stop in (transport.KNOWN, "items_unread")
     if after and after["cursor"] == (request.get("continuation") or {}).get("cursor"):
-        raise HistoryError("source_watch_no_progress", "续读位置没有前进", 503)
+        raise FabricError("source_watch_no_progress", "续读位置没有前进", 503)
     if not (after or ended or "window_coverage" in coverage):
-        raise HistoryError("source_watch_no_cursor", "来源提前停下，又没给续读位置", 503)
+        raise FabricError("source_watch_no_cursor", "来源提前停下，又没给续读位置", 503)
     state.update(segments=state.get("segments", 0) + 1, fail_streak=0, retry=False, error=None,
                  unclean=state.get("unclean", False) or bool(coverage.get("unread_items")))
     incremental = spec(watch.request.source_id).incremental
@@ -186,12 +186,12 @@ WATCH_FIELDS = ("state", "window_started_at", "window_ended_at", "window_checkpo
 
 
 def source_health(source_id):
-    """GET /api/history/source-health：这个来源各固定刷新的状态。雷达读 collection 的 state、last_recorded_success_at、
+    """GET /api/fabric/source-health：这个来源各固定刷新的状态。雷达读 collection 的 state、last_recorded_success_at、
     last_recorded_failure_at、scope、coverage，和 watches[] 的 watch_id、scope、window_ended_at、state。"""
     configured = {_key(watch): watch for watch in watches() if watch.request.source_id == source_id}
-    with history.history_engine().begin() as conn:
-        history._source(conn, source_id)  # 不可读的来源：403
-        found = conn.execute(text("SELECT watch_key, state FROM history_source_watches WHERE watch_key = ANY(:keys)"),
+    with records.fabric_engine().begin() as conn:
+        records._source(conn, source_id)  # 不可读的来源：403
+        found = conn.execute(text("SELECT watch_key, state FROM fabric_source_watches WHERE watch_key = ANY(:keys)"),
                              {"keys": list(configured)})
         saved = dict(found.all())
     rows = []

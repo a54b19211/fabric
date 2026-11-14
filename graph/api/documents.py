@@ -15,7 +15,7 @@ from graph.api.schemas.response import (
 from graph.db.extraction_subjects import listed, subject_text
 from graph.db.models import Attachment, DocExtra, Document
 from graph.db.session import get_session
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -160,8 +160,8 @@ def get_document(uuid: str):
             ]
 
             try:
-                content = subject_text(doc)  # history 主体：先过权威访问检查
-            except HistoryError as exc:
+                content = subject_text(doc)  # 资料库主体：先过权威访问检查
+            except FabricError as exc:
                 raise HTTPException(status_code=exc.status, detail=exc.code) from None
 
             # 构建响应
@@ -170,7 +170,7 @@ def get_document(uuid: str):
                 uuid=doc.uuid,
                 title=doc.title or "",
                 raw_content=content,
-                history_ref={"source_id": doc.history_source_id, "record_id": doc.history_record_id,
+                fabric_ref={"source_id": doc.history_source_id, "record_id": doc.history_record_id,
                              "version_id": doc.history_version_id, "text_processor_version": doc.history_text_version,
                              "text_sha256": doc.history_text_sha256} if doc.history_version_id else None,
                 source_site=doc.source_site or "",

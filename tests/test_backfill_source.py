@@ -10,8 +10,8 @@ from ops import backfill_source
 
 def run_with(monkeypatch, capsys, args, legs):
     """按 args 跑一遍命令，每一段依次给出 legs 里的 (state, coverage)；返回 (退出码, 打印的文字, 各段收到的任务键摘要)。"""
-    monkeypatch.setenv("DATAFABRIC_HISTORY_DATABASE_URL", "postgresql://unused.invalid/none")
-    monkeypatch.setenv("DATAFABRIC_HISTORY_SOURCE_ALLOWLIST", "")
+    monkeypatch.setenv("DATAFABRIC_DATABASE_URL", "postgresql://unused.invalid/none")
+    monkeypatch.setenv("DATAFABRIC_SOURCE_ALLOWLIST", "")
     monkeypatch.setattr(sys, "argv", ["backfill_source.py", *args])
     tags, answers = [], iter(legs)
 

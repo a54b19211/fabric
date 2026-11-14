@@ -1,13 +1,13 @@
-"""固定图版本（reviewed_graph、primekg_graph）在 History 库里的读取和发布前核对：图包引用的原件、证据引文、
-邻域/解析/路径/子图。原在 store/history.py，唐组维护；雷达只经 /graph/{version_id}/resolve 读 read_graph_resolution。"""
+"""固定图版本（reviewed_graph、primekg_graph）在资料库里的读取和发布前核对：图包引用的原件、证据引文、
+邻域/解析/路径/子图。原在 store/records.py，唐组维护；雷达只经 /graph/{version_id}/resolve 读 read_graph_resolution。"""
 
 from __future__ import annotations
 
 from sqlalchemy import text
 
 from fetch.projection import parse_json
-from store import history as store
-from store.history_models import HistoryError
+from store import records as store
+from store.record_models import FabricError
 
 
 def import_graph(request, key=None):
@@ -15,8 +15,8 @@ def import_graph(request, key=None):
     from graph.publish.reviewed_graph import GraphBundle
 
     if request.proof is not None:
-        raise HistoryError("graph_history_unsupported", "图包没有公开历史可见时间，不能带可见证明导入")
-    with store.history_engine().begin() as conn:
+        raise FabricError("graph_history_unsupported", "图包没有公开历史可见时间，不能带可见证明导入")
+    with store.fabric_engine().begin() as conn:
         now = store._now(conn)
         run = {"source_id": request.source_id, "is_demo": request.is_demo}
         for item in request.records:
@@ -28,13 +28,13 @@ def _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff):
     """读一个固定图版本，并核对它引用的原件在同一模式和截止时间下也看得到、引文一致。"""
     record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     if record.record_kind != "graph":
-        raise HistoryError("not_a_graph_version", "所选版本不是图包")
+        raise FabricError("not_a_graph_version", "所选版本不是图包")
     return check_cited(record, mode, cutoff)
 
 
 def check_cited(record, mode, cutoff):
     """图版本引用的原件（和旧文档桥的原站）在同一模式和截止时间下都看得到、引文一致，才把图版本交出去。"""
-    with store.history_engine().begin() as conn:
+    with store.fabric_engine().begin() as conn:
         _check_graph_document_visibility(conn, record, mode, store._cutoff(cutoff))
     return record
 
@@ -48,7 +48,7 @@ def _evidence_text(conn, row, locator):
         "ORDER BY attempt DESC LIMIT 1"), {"v": row["version_id"], "pv": locator.text_processor_version}
     ).mappings().first()
     if derived is None or derived["text_sha256"] != locator.text_sha256:
-        raise HistoryError("graph_quote_mismatch", "图证据指认的派生清洗正文不存在或已不一致")
+        raise FabricError("graph_quote_mismatch", "图证据指认的派生清洗正文不存在或已不一致")
     return derived["text"] or ""
 
 
@@ -69,7 +69,7 @@ def _refuse_retired_refs(refs):
 
     retired = sorted({ref.source_id for ref in refs if ref.source_id in RETIRED})
     if retired:
-        raise HistoryError(
+        raise FabricError(
             "graph_evidence_retired_source",
             "新图包不能引用已退役来源 " + ",".join(retired) + "；请引用迁入后的真实来源版本（legacy_aliases.real_version_id）")
 
@@ -82,7 +82,7 @@ def _graph_documents(conn, run, bundle, now):
         store._source(conn, ref.source_id)
         row = conn.execute(
             text(
-                "SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source AND source_record_id=:native AND is_demo=:demo AND first_seen_at<=:now"
+                "SELECT payload FROM fabric_versions WHERE version_id=:id AND source_id=:source AND source_record_id=:native AND is_demo=:demo AND first_seen_at<=:now"
             ),
             {
                 "id": ref.version_id,
@@ -97,12 +97,12 @@ def _graph_documents(conn, run, bundle, now):
             or row["raw_sha256"] != ref.raw_sha256
             or row["record_kind"] == "graph"
         ):
-            raise HistoryError(
+            raise FabricError(
                 "graph_evidence_version_mismatch", "图包原件引用与已采用文档版本不一致"
             )
         if ref.source_id == "legacy_documents":
             if row["facts"].get("origin_doc_uuid") != ref.origin_doc_uuid:
-                raise HistoryError(
+                raise FabricError(
                     "graph_document_uuid_mismatch", "图引用的旧文档UUID不一致"
                 )
             original_source = row["facts"]["source_site"]
@@ -111,7 +111,7 @@ def _graph_documents(conn, run, bundle, now):
         dependencies.add(ref.source_id)
         key = _ref_key(ref)
         if key in documents:
-            raise HistoryError("duplicate_graph_document", "图包文档清单重复")
+            raise FabricError("duplicate_graph_document", "图包文档清单重复")
         documents[key] = row
     return documents, dependencies
 
@@ -119,10 +119,10 @@ def _graph_documents(conn, run, bundle, now):
 def _check_graph_times(bundle, now):
     for node in bundle.nodes:
         if node.review.reviewed_at is not None and node.review.reviewed_at > now:
-            raise HistoryError("future_graph_review", "源审核时间晚于本次服务器采用")
+            raise FabricError("future_graph_review", "源审核时间晚于本次服务器采用")
     for edge in bundle.edges:
         if edge.review.reviewed_at is not None and edge.review.reviewed_at > now:
-            raise HistoryError("future_graph_review", "源审核时间晚于本次服务器采用")
+            raise FabricError("future_graph_review", "源审核时间晚于本次服务器采用")
 
 
 def _check_graph_quotes(conn, bundle, documents):
@@ -131,38 +131,38 @@ def _check_graph_quotes(conn, bundle, documents):
     ]:
         original = documents.get(_ref_key(ref))
         if original is None:
-            raise HistoryError(
+            raise FabricError(
                 "graph_evidence_outside_manifest", "图证据不属于本包声明的文档版本"
             )
         locator = ref.locator
         body = _evidence_text(conn, original, locator)
         if body[locator.start : locator.end] != ref.quote or locator.end > len(body):
-            raise HistoryError(
+            raise FabricError(
                 "graph_quote_mismatch", "图证据与冻结原文字符范围不一致，不能标记已绑定"
             )
 
 
 def _validate_graph_bundle(conn, run, bundle, now):
     if bundle.is_demo != run["is_demo"]:
-        raise HistoryError("graph_demo_mismatch", "图包和采用请求的demo标记不一致")
+        raise FabricError("graph_demo_mismatch", "图包和采用请求的demo标记不一致")
     if run["source_id"] == "primekg_graph":
         if bundle.graph_kind != "background":
-            raise HistoryError("graph_kind_mismatch", "PrimeKG只能发布当前背景")
+            raise FabricError("graph_kind_mismatch", "PrimeKG只能发布当前背景")
         return set()
     if bundle.graph_kind != "reviewed":
-        raise HistoryError("graph_kind_mismatch", "审核图来源不接收背景图")
+        raise FabricError("graph_kind_mismatch", "审核图来源不接收背景图")
 
     if bundle.origin == "legacy_reviewed_export" and (
         not bundle.selected_document_uuids
         or set(bundle.selected_document_uuids)
         != {ref.origin_doc_uuid for ref in bundle.document_refs}
     ):
-        raise HistoryError(
+        raise FabricError(
             "legacy_graph_document_scope", "旧图导出的所选UUID须全部绑定精确冻结文档"
         )
     documents, dependencies = _graph_documents(conn, run, bundle, now)
     if dependencies != set(bundle.dependency_source_ids):
-        raise HistoryError(
+        raise FabricError(
             "graph_source_dependencies_mismatch",
             "图包依赖必须等于服务器核对的原件及原站许可",
         )
@@ -171,7 +171,7 @@ def _validate_graph_bundle(conn, run, bundle, now):
     if any(
         item.merged_at is not None and item.merged_at > now for item in bundle.redirects
     ):
-        raise HistoryError("future_graph_merge", "源身份合并时间晚于本次服务器采用")
+        raise FabricError("future_graph_merge", "源身份合并时间晚于本次服务器采用")
     from graph.publish.native_graph import validate_field_bindings
 
     validate_field_bindings(bundle, documents)
@@ -204,17 +204,17 @@ def read_graph_neighborhood(
     )
 
     if source_id not in GRAPH_SOURCES:
-        raise HistoryError("unsupported_graph_source", "请选择固定图来源")
+        raise FabricError("unsupported_graph_source", "请选择固定图来源")
     record = _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     seeds = []
     for value in seed_ids:
         if value.count("|") != 1:
-            raise HistoryError("invalid_graph_identity", "身份格式须为namespace|id")
+            raise FabricError("invalid_graph_identity", "身份格式须为namespace|id")
         namespace, identity = value.split("|")
         try:
             seeds.append(GraphIdentity(namespace=namespace, id=identity))
         except ValueError:
-            raise HistoryError(
+            raise FabricError(
                 "invalid_graph_identity", "身份命名空间或ID无效"
             ) from None
     bundle = GraphBundle.model_validate(parse_json(record.raw_content))
@@ -249,7 +249,7 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
         store._source(conn, ref.source_id)
         row = conn.execute(
             text(
-                "SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source AND source_record_id=:native AND is_demo=:demo AND "
+                "SELECT payload FROM fabric_versions WHERE version_id=:id AND source_id=:source AND source_record_id=:native AND is_demo=:demo AND "
                 + store._eligibility(mode)
             ),
             {
@@ -263,7 +263,7 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
         if row is not None and ref.source_id == "legacy_documents" and (row.get("facts") or {}).get("source_site"):
             store._source(conn, row["facts"]["source_site"])  # 旧文档桥的原站被撤，图里引它的也不可读
         if row is None or row["raw_sha256"] != ref.raw_sha256:
-            raise HistoryError(
+            raise FabricError(
                 "graph_evidence_not_visible",
                 "图引用原件在同一许可/模式/截止时间下不可见",
                 404,
@@ -295,7 +295,7 @@ def _check_graph_document_visibility(conn, record, mode, cutoff):
             or body[evidence.locator.start : evidence.locator.end] != evidence.quote
             or evidence.locator.end > len(body)
         ):
-            raise HistoryError(
+            raise FabricError(
                 "graph_quote_mismatch", "图证据不属于同截止下可见的冻结原文"
             )
 
@@ -322,7 +322,7 @@ def read_graph_resolution(
     from graph.publish.reviewed_graph import GRAPH_SOURCES, GraphBundle, GraphRef, resolve
 
     if source_id not in GRAPH_SOURCES:
-        raise HistoryError("unsupported_graph_source", "请选择固定图来源")
+        raise FabricError("unsupported_graph_source", "请选择固定图来源")
     record = _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     return resolve(
         GraphBundle.model_validate(parse_json(record.raw_content)),
@@ -346,7 +346,7 @@ def _fixed_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     from graph.publish.reviewed_graph import GRAPH_SOURCES, GraphBundle, GraphRef
 
     if source_id not in GRAPH_SOURCES:
-        raise HistoryError("unsupported_graph_source", "请选择固定图来源")
+        raise FabricError("unsupported_graph_source", "请选择固定图来源")
     record = _read_graph(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     return GraphBundle.model_validate_json(record.raw_content), GraphRef(
         source_id=record.source_id, source_record_id=record.source_record_id,

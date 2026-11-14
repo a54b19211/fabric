@@ -225,7 +225,7 @@ html { scroll-behavior: smooth; }
   <h2>实现状态（2026-11-14，已并进主线）</h2>
   <div class="oneline"><b>一句话：</b>按主持人 11-13 的决定（不迁就她的代码结构，“适配”可以是把她的功能重写进我们的架构），
   她的“洗、存”没有原样搬入，而是按主线 <b>抓 → 洗 → 存</b> 重写进 <code>clean/</code>（规则照她 11-13 版，命名说清楚做什么），
-  存进 History 库两张只追加的新表。雷达读的清洗正文、<code>text_sha256</code>、各接口的返回都没变。
+  存进资料库两张只追加的新表。雷达读的清洗正文、<code>text_sha256</code>、各接口的返回都没变。
   11-14 又按一次独立核对（Fable）补了 12 条：降级口径、翻页、PubMed 字段、doc_type、编号格式族、DrugBank、健壮性和几处难读的代码。</div>
   <pre>run/clean.py --loop（同一个常驻程序，每轮清洗完再打分，限时）
   clean/clean_stage.py · process     正文、编号、画像（不变）
@@ -236,7 +236,7 @@ html { scroll-behavior: smooth; }
                                      按“来源分层”取舍，各库原始结果都存下（离线可换策略）；有库没查成就记降级，这次不存
     clean/quality.py                 五维分、等级、结构校验、来源权威分；带字段血缘
   → derived_quality_scores（V043）、derived_authority_resolutions（V044）
-GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加参数返回和以前一样（雷达不加）</pre>
+GET /api/fabric/clean-text?quality=true   另带分数和对齐结果；不加参数返回和以前一样（雷达不加）</pre>
   <div class="table-wrap"><table class="wide">
     <thead><tr><th>她的功能</th><th>她的文件 · 函数</th><th>主线文件 · 函数</th><th>状态</th></tr></thead>
     <tbody><tr><td>字段清洗、日期精度、doc_type / language</td><td><code>pipeline/content_cleaner.py · clean_content</code></td><td><code>clean/fields.py · clean_fields</code></td><td>重写；只洗字段，清洗正文一字不动；主线多出的来源（含 who_don、gdelt_doc、sec_companyfacts）从她的枚举里挑最接近的类型，本地上传件不判</td></tr><tr><td>L3：药名同义词、单位换到 g / L</td><td><code>pipeline/cleaners/normalizer_l3.py · normalize_l3</code></td><td><code>clean/fields.py · normalize_l3、synonym、unit_expression</code></td><td>重写，同表同规则</td></tr><tr><td>药名切候选名、占位名</td><td><code>authority/drug_name_normalizer.py · generate_candidates、is_placeholder</code></td><td><code>clean/drug_names.py · candidates、is_placeholder、names_of</code></td><td>重写，正则逐条照搬</td></tr><tr><td>编号格式校验（CAS 校验位、NCT、NDA/ANDA/BLA、PMID、DOI）</td><td><code>authority/authority_client.py · _FORMAT_VALIDATORS</code></td><td><code>clean/align.py · FORMATS、check_format、check_identifiers</code></td><td>重写；<b>和她不同</b>：批准文号按来源选格式族（NMPA、CDE 是国药准字，她原版一律按 NDA/ANDA/BLA，国药准字必判不合格），FDA 完整回应函的申请号逐个校验</td></tr><tr><td>单源对齐 PubChem → ChEMBL → 本地</td><td><code>authority/authority_client.py · resolve_identifier</code></td><td><code>clean/align.py · pubchem、chembl、local</code></td><td>重写；出网走 fetch/transport.py · get，ChEMBL 每秒最多一个请求；降级照她：问到的库有一个没查成就记降级、不进分母</td></tr><tr><td>多源取舍四策略、Platt 校准</td><td><code>authority/authority_resolver.py · resolve_identifier_multi 等</code></td><td><code>clean/align.py · align_name、source_hierarchy；ops/align_offline.py · 另三种策略、platt_scale、summarize</code></td><td>重写；主线接上来源分层（她原版只在单测里调用），另三种策略和 Platt 放离线评估</td></tr><tr><td>对齐接线（每篇 ≤8 个药名、有序回退、降级就停）</td><td><code>pipeline/transform_pipeline.py · apply_identifier_alignment</code></td><td><code>clean/align.py · align</code></td><td>重写</td></tr><tr><td>五维打分、四级</td><td><code>pipeline/quality_checker.py · check_quality</code></td><td><code>clean/quality.py · score、dimensions、SCORER_VERSION</code></td><td>重写；权重阈值照 11-13</td></tr><tr><td>来源权威分</td><td><code>domain/source_mapper.py · calculate_confidence</code></td><td><code>clean/quality.py · source_confidence</code></td><td>重写</td></tr><tr><td>结构校验 T5</td><td><code>domain/document_validator.py · validate_document</code></td><td><code>clean/quality.py · validate</code></td><td>重写（不查 status）</td></tr><tr><td>字段血缘 T6</td><td><code>storage/lineage_tracer.py · record_step 等</code></td><td><code>clean/quality_stage.py · _step；clean/fields.py · traced</code></td><td>重写；存进分数行</td></tr><tr><td>PubMed 字段</td><td><code>ingestion/extractors/pubmed/pubmed_fetcher.py · _build_result</code></td><td><code>clean/quality_stage.py · _pubmed</code></td><td>重写：她的 15 个结构化字段和 PubmedExtra；全文状态看有没有全文附件版本</td></tr><tr><td>对齐结果入库</td><td><code>db/repository.py · upsert_authority_resolutions</code></td><td><code>derived_authority_resolutions（V044）· clean/quality_stage.py · _write</code></td><td>重写；按版本只追加</td></tr><tr><td>分数入库</td><td><code>（她没有：通过的资料分数没存）</code></td><td><code>derived_quality_scores（V043）</code></td><td>新；带 scorer_version</td></tr><tr><td>跑批</td><td><code>flows/crawl_flow.py · process_and_store</code></td><td><code>clean/quality_stage.py · process；run/clean.py --loop；main_etl.py quality</code></td><td>重写</td></tr><tr><td>隔离</td><td><code>pipeline/quality_checker.py · quarantine_data</code></td><td><code>level=&#x27;隔离&#x27;</code></td><td>有意不要拦截：只记等级，照常往下流</td></tr><tr><td>正文前 YAML 头、站点正文改写器</td><td><code>content_cleaner._build_frontmatter；cleaners/clinical_trial、fiercepharma</code></td><td><code>—</code></td><td>有意不要：雷达读的正文必须逐字不变</td></tr><tr><td>人工审核闭环（导出待审 CSV、专家分回灌）</td><td><code>storage/review_exporter.py；feedback_ingest.py</code></td><td><code>—</code></td><td>有意不要：待审状态和专家分只在她的本地信封里；要专家标注时，标注 CSV 直接交给她的门禁评估</td></tr><tr><td>DrugBank 抓取</td><td><code>config/sites/drugbank.py；drugbank_fetcher.py</code></td><td><code>fetch/catalog.py · SPECS 里的 drugbank（不抓）</code></td><td>有意不要：主持人 11-14 决定退出在线采集，以后下载 DrugBank 数据库文件离线导入</td></tr><tr><td>评估工具（污染、消融、基线、κ、门禁）</td><td><code>evaluation/、scripts/quality_gate_eval.py</code></td><td><code>ops/xu_eval_adapter.py</code></td><td>适配，不进主线流程：她的文件一字不改，对着 clean/quality.py 跑；11-14 在两份真实样本上实跑过</td></tr></tbody></table></div>
@@ -267,7 +267,7 @@ GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加�
 <!-- ============ 结论 ============ -->
 <section class="card" id="sum">
   <h2>结论</h2>
-  <div class="oneline"><b>方案一句话：</b>抓，用主线采集层，不动；洗，分两半：雷达要逐字核对的<b>正文</b>继续由主线清洗段产出，<b>字段清洗、L3 归一、药名对齐、五维评分、结构校验</b>原样调用徐的函数；存，进 History 库两张按版本号的新表；雷达读的 16 个 Fabric 接口一个不改。中间只新写三个薄文件（版本转成她的输入、她的结果写进新表、一个跑批函数），不加新的后台程序。11-13 版的评分要读血缘，适配层还要补记"解析"这一步的血缘。</div>
+  <div class="oneline"><b>方案一句话：</b>抓，用主线采集层，不动；洗，分两半：雷达要逐字核对的<b>正文</b>继续由主线清洗段产出，<b>字段清洗、L3 归一、药名对齐、五维评分、结构校验</b>原样调用徐的函数；存，进资料库两张按版本号的新表；雷达读的 16 个 Fabric 接口一个不改。中间只新写三个薄文件（版本转成她的输入、她的结果写进新表、一个跑批函数），不加新的后台程序。11-13 版的评分要读血缘，适配层还要补记"解析"这一步的血缘。</div>
   <ul class="tight">
     <li><b>两版差异：</b>和 10-27 的旧版比，主要是<b>目录重排</b>：一百多个文件从 <code>core_engine/</code>、<code>biz_rules/</code> 搬进 <code>ingestion/</code>（抓）、<code>pipeline/</code>（洗）、<code>storage/</code>（存）、<code>authority/</code>、<code>domain/</code>，内容大多只改了 import。她自己已经按"抓、洗、存"分好了目录。11-08 版改了准确性（6 个子信号）、来源权威分（官方站点内再分档）、评估脚本（分族统计和阈值迁移），新增评估工具包、过程快照和本地采集质量工作台，删掉了旧审核前端（约 1.2 万行）。<b>11-13 版又改了三处：</b>五维里的"一致性"换成"可追溯性"（看来源网址和字段血缘），权重改成完整性 0.30、准确性 0.20、时效性 0.15、权威性 0.25、可追溯性 0.10；清洗器的 YAML 头改用转义写法，列表字段也清洗；修了 cde、cde_zdyz、FDA 两站、港交所的站点配置，并在本地脚本里加了"同一浏览器会话翻页加读详情"。</li>
     <li><b>她有、我们没有：</b>药名归一和 PubChem/ChEMBL 对齐、五类编号格式校验（含 CAS 校验位）、多源裁定、五维评分、结构校验、字段血缘、评估工具。论文的两块核心（内容二"标识符解析"、内容三"质量评分及实证"）都在这里。<b>11-13 版核对：</b>多源裁定仍然只在单测里调用，没有接进流程；人工标注集仍然是空的，只有说明文件。</li>
@@ -399,7 +399,7 @@ GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加�
         <span><b>对象库（zk）表 documents</b>：一篇一行，<code>raw_content</code> 存清洗后带 YAML 头的 markdown，<code>lineage</code> 存血缘</span>
         <span><b>表 doc_authority_resolution</b>：每个药名、每个编号一行，唯一键 (uuid, id_type, resolution_key)</span>
         <span><b>文件</b> <code>data/lineage/</code>、<code>data/authority/</code></span>
-        <span><b>正文变了</b>：旧行不改，新正文进 <code>publication_outbox</code>，再由桥发成 History 的 legacy_documents 版本（现役 82 万个版本就是这样来的）</span>
+        <span><b>正文变了</b>：旧行不改，新正文进 <code>publication_outbox</code>，再由桥发成资料库的 legacy_documents 版本（现役 82 万个版本就是这样来的）</span>
       </div>
       <div class="box xu"><span class="t">隔离</span><code>quality_checker.py · quarantine_data</code><span class="s">只写 <code>data/quarantine/&lt;uuid&gt;/</code>，不入库</span></div>
       <div class="box xu"><span class="t">本地模式（新）</span><code>scripts/crawl_to_local.py</code><span class="s">只跑清洗和评分（不跑 L3 和对齐），写 <code>data/&lt;批次&gt;/&lt;站点&gt;/</code>，过程快照写 <code>data/quality_traces/</code>，工作台读这些文件</span></div>
@@ -453,9 +453,9 @@ GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加�
       <tr><td>续读</td><td>每次读取存续读位置，下一轮接着读；时间窗来源存窗口检查点；定时刷新连续读到 3 条已存且没变就停（reached_known）</td><td><code>fetch/source_refresh.py</code>、<code>fetch/windows.py</code></td><td>不存续读位置；增量模式遇到第一个重复就停</td></tr>
       <tr><td>补抓</td><td>一条命令把一个来源的存量读到底，中断后再跑同一条命令接着读；按网址重抓页面；按附件表重下附件原件</td><td><code>ops/backfill_source.py</code>、<code>fetch/site_crawler.py</code>（by_url、stored_attachments）</td><td>没有。重跑脚本只重算已存文档的质量链</td></tr>
       <tr><td>限速</td><td>同一限速组共用最小间隔（站点 1–2 秒、CT 和 EPMC 0.4 秒、WHO 30 秒、GDELT 5 秒）；WHO 每天 200 次、GDELT 每天 900 次的出站上限；每次读取的条数、页数、字节、期限预算；429 和超时有界重试。所有真实请求都过同一道闸</td><td><code>fetch/rate.py</code>、<code>fetch/transport.py</code></td><td>每站固定睡眠、Prefect 并发 3、任务重试 3 次；ChEMBL 自带 1 秒节流</td></tr>
-      <tr><td>失败原因</td><td>每次读取一份回执：停止原因（读完、读满条数、到期限、到出站上限、来源失败、有几条读不到）、读不到的网址和原因、列表一条没解析到记失败（list_empty）、连续 5 条读不出判站点故障</td><td><code>history_runs.coverage</code>；<code>site_crawler.py</code> 文件头</td><td>日志、crawl_log、过程快照的失败阶段；列表 0 条不算失败</td></tr>
-      <tr><td>版本与去重</td><td>原件只追加存成版本；版本号含原件 sha256，内容没变不另存；变了是新版本，旧的不改；附件各成版本</td><td><code>store/history.py</code>；V017</td><td>按 uuid 写一行；正文变了旧行保留、新正文进待发表，但血缘和对齐文件照样被覆盖</td></tr>
-      <tr><td>来源许可</td><td>环境许可清单加库里 read_enabled，每次读、发、检索前现查；退役来源不能新选</td><td><code>store/history.py</code>、<code>fetch/catalog.py</code></td><td>没有</td></tr>
+      <tr><td>失败原因</td><td>每次读取一份回执：停止原因（读完、读满条数、到期限、到出站上限、来源失败、有几条读不到）、读不到的网址和原因、列表一条没解析到记失败（list_empty）、连续 5 条读不出判站点故障</td><td><code>fabric_runs.coverage</code>；<code>site_crawler.py</code> 文件头</td><td>日志、crawl_log、过程快照的失败阶段；列表 0 条不算失败</td></tr>
+      <tr><td>版本与去重</td><td>原件只追加存成版本；版本号含原件 sha256，内容没变不另存；变了是新版本，旧的不改；附件各成版本</td><td><code>store/records.py</code>；V017</td><td>按 uuid 写一行；正文变了旧行保留、新正文进待发表，但血缘和对齐文件照样被覆盖</td></tr>
+      <tr><td>来源许可</td><td>环境许可清单加库里 read_enabled，每次读、发、检索前现查；退役来源不能新选</td><td><code>store/records.py</code>、<code>fetch/catalog.py</code></td><td>没有</td></tr>
       <tr><td>附件</td><td>附件是独立版本，MinerU 解析，偏移能回指</td><td><code>clean/attachment_parse.py</code></td><td>附件文字拼进父文档，或用 route_pdf 单独解析</td></tr>
     </tbody>
   </table>
@@ -480,7 +480,7 @@ GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加�
       <div class="box main"><span class="t">派活、续读、限速</span><code>run/scheduler.py</code><code>fetch/source_refresh.py</code><code>fetch/rate.py · transport.py</code></div>
       <div class="down">↓</div>
       <div class="box main"><span class="t">读来源</span><code>fetch/site_crawler.py</code><span class="s">网页站点内部调用团队的 <code>route_webpage</code> 和站点抽取器</span><code>fetch/sources.py</code><span class="s">CT、Europe PMC、WHO 等接口</span></div>
-      <div class="store"><span><b>history_runs</b>：每次读取一行，带回执</span><span><b>history_versions</b>：原件只追加；站点原件里的 <code>parsed</code> 就是抽取器的输出</span></div>
+      <div class="store"><span><b>fabric_runs</b>：每次读取一行，带回执</span><span><b>fabric_versions</b>：原件只追加；站点原件里的 <code>parsed</code> 就是抽取器的输出</span></div>
     </div>
     <div class="arrow" aria-hidden="true"></div>
     <div class="stage mixed">
@@ -494,7 +494,7 @@ GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加�
     </div>
     <div class="arrow" aria-hidden="true"></div>
     <div class="stage mixed">
-      <div class="stage-h"><span class="verb">存</span><span class="who">History 库</span></div>
+      <div class="stage-h"><span class="verb">存</span><span class="who">资料库</span></div>
       <div class="box main"><span class="t">① 的产物（不改）</span><code>derived_clean_text</code><code>derived_identifiers</code><code>derived_profiles</code><span class="s">同一事务登记建索引待办、核验任务</span></div>
       <div class="box glue"><span class="t">② 的写入</span><code>storage/history_writer.py · write_to_history</code><span class="s">内部调用她的 <code>build_envelope</code>、<code>validate_document</code>、<code>summarize</code>、<code>_collect_authority_rows</code></span></div>
       <div class="store">
@@ -529,7 +529,7 @@ GET /api/history/clean-text?quality=true   另带分数和对齐结果；不加�
       <p class="note">第一批只接 nmpa、cde 系列、chictr、fda 四个站点、CT、Europe PMC、库存；WHO、GDELT、SEC、附件先不评分。主线站点配置里去掉的 <code>content_cleaner</code> 键，在 chictr、fiercepharma 两个配置里各加回 1 行，她的 <code>clean_content</code> 才会调站点清洗器。</p>
     </div>
     <div class="panel">
-      <h3>输出：两张新表（History 库，只追加）</h3>
+      <h3>输出：两张新表（资料库，只追加）</h3>
 <pre><span class="c">-- V042  一个版本、一个评分器版本一行</span>
 derived_quality_scores(
   version_id, scorer_version,      <span class="c">-- 主键；改权重或阈值就升版本</span>
@@ -640,7 +640,7 @@ def score_one(conn, version):
     <li><b>代码留底</b>：11-13 包原样放进本地分支 <code>xu/thesis-20261113</code> 并打 tag，作为合并基线；11-08 包也留一个 tag，因为两版评分口径不同（一致性和可追溯性）。各记下压缩包的 sha256。之前的实验数字在各自的 tag 上复现。主线里她的文件保持同名同路径，论文引用不用改。</li>
     <li><b>旧数据快照</b>：按《徐-论文数据快照方案-20261110》做：对象库旧表 doc_authority_resolution、documents.lineage 列、服务器和她电脑上的 data/quarantine、data/lineage、data/authority、data/json_envelopes。先只统计，再复制；要读现役库，需要主持人批准。</li>
     <li><b>新数据可复现</b>：每行带 scorer_version、scored_at、input_sha256。改权重或阈值就升 scorer_version 写新行，旧行不动。11-08 口径和 11-13 口径是两个评分器版本。论文写明引用哪个版本。</li>
-    <li><b>评估工具不改</b>：加一个小导出 <code>scripts/export_envelopes.py</code>：读 History 版本，走她的链，按她 <code>_write_to_local_storage</code> 的格式写 <code>data/json_envelopes/&lt;站点&gt;/&lt;uuid&gt;.json</code>。她的 <code>quality_gate_eval.py</code>、消融、基线直接读。</li>
+    <li><b>评估工具不改</b>：加一个小导出 <code>scripts/export_envelopes.py</code>：读资料库版本，走她的链，按她 <code>_write_to_local_storage</code> 的格式写 <code>data/json_envelopes/&lt;站点&gt;/&lt;uuid&gt;.json</code>。她的 <code>quality_gate_eval.py</code>、消融、基线直接读。</li>
     <li><b>两批数字分开写</b>：tag 上的叫"前期原型"，主线上的叫"系统部署后"，不放在同一张表里比。</li>
   </ol>
 
@@ -683,7 +683,7 @@ def score_one(conn, version):
 <section class="card" id="q6">
   <h2><span class="no">6</span>怎么接上雷达</h2>
   <div class="prose">
-    <p>她的原始版本没有适配雷达：她的"存"写对象库的 documents 表，而雷达一行也不读这张表。雷达只通过 HTTP 读 Fabric 的 History 接口，不直连数据库，也不直连 WeKnora。planner 和 MechEvidence 不读 Fabric；BioCheck 自己不读 Fabric，由雷达和 Fabric 把正文发给它。</p>
+    <p>她的原始版本没有适配雷达：她的"存"写对象库的 documents 表，而雷达一行也不读这张表。雷达只通过 HTTP 读 Fabric 的资料库接口，不直连数据库，也不直连 WeKnora。planner 和 MechEvidence 不读 Fabric；BioCheck 自己不读 Fabric，由雷达和 Fabric 把正文发给它。</p>
     <p>所以合并后的做法是：<b>雷达要的东西全部由主线照旧提供，她的结果另存两张新表，和雷达的线路并排，不插进去。</b>她的代码上要补的有四件事：按版本存、不拦截、可复现，以及 11-13 版多出的一件：补记"解析"一步的血缘。都放在新写的薄适配里，她原有函数不改。</p>
   </div>
 
@@ -694,8 +694,8 @@ def score_one(conn, version):
     <div class="stage main">
       <div class="stage-h"><span class="verb">抓</span><span class="who">采集层</span></div>
       <div class="box main"><span class="t">25 个在采来源</span><span class="s">续读、补抓、限速、回执</span></div>
-      <div class="box main"><span class="t">history_versions</span><span class="s">原件 + 投影：title、source_published_at、facts、document_evidence、published_seq</span></div>
-      <div class="box main"><span class="t">history_runs</span><span class="s">每次读取的回执</span></div>
+      <div class="box main"><span class="t">fabric_versions</span><span class="s">原件 + 投影：title、source_published_at、facts、document_evidence、published_seq</span></div>
+      <div class="box main"><span class="t">fabric_runs</span><span class="s">每次读取的回执</span></div>
     </div>
     <div class="arrow" aria-hidden="true"></div>
     <div class="stage mixed">
@@ -730,8 +730,8 @@ def score_one(conn, version):
   <table class="wide">
     <thead><tr><th>雷达要的</th><th>接口</th><th>合并后谁提供</th><th>雷达真正读的字段</th><th>徐的代码要补什么</th></tr></thead>
     <tbody>
-      <tr><td>来源清单、许可、退役</td><td><code>GET /sources</code></td><td>主线 <code>store/source_listing.py</code> ← history_sources 和目录</td><td><code>capabilities_version</code>；每个来源的 <code>readable</code>、<code>select</code>、<code>fetch.modes</code>、<code>attachments</code>、<code>registry_diff</code>；<code>retired_sources</code></td><td>不补。她没有许可概念；评分段只处理主线允许的来源</td></tr>
-      <tr><td>资料原文、版本、时间</td><td><code>GET /records</code>、<code>/versions/{id}</code>、<code>/changes</code></td><td>主线采集 → history_versions</td><td><code>source_id</code>、<code>source_record_id</code>、<code>version_id</code>、<code>is_demo</code>、<code>raw_sha256</code>、<code>title</code>、<code>source_url</code>、<code>published_seq</code>、<code>source_published_at{value,meaning}</code>、<code>first_seen_at</code>、<code>availability_proof</code>、<code>facts.{status, role, parent_record_id, results_first_posted}</code>、<code>document_evidence</code>；正文缺时用投影 <code>clean_text</code> 兜底</td><td>不补。站点原件里的 <code>parsed</code> 就是团队抽取器的输出，她的站点知识已经在这条线上</td></tr>
+      <tr><td>来源清单、许可、退役</td><td><code>GET /sources</code></td><td>主线 <code>store/source_listing.py</code> ← fabric_sources 和目录</td><td><code>capabilities_version</code>；每个来源的 <code>readable</code>、<code>select</code>、<code>fetch.modes</code>、<code>attachments</code>、<code>registry_diff</code>；<code>retired_sources</code></td><td>不补。她没有许可概念；评分段只处理主线允许的来源</td></tr>
+      <tr><td>资料原文、版本、时间</td><td><code>GET /records</code>、<code>/versions/{id}</code>、<code>/changes</code></td><td>主线采集 → fabric_versions</td><td><code>source_id</code>、<code>source_record_id</code>、<code>version_id</code>、<code>is_demo</code>、<code>raw_sha256</code>、<code>title</code>、<code>source_url</code>、<code>published_seq</code>、<code>source_published_at{value,meaning}</code>、<code>first_seen_at</code>、<code>availability_proof</code>、<code>facts.{status, role, parent_record_id, results_first_posted}</code>、<code>document_evidence</code>；正文缺时用投影 <code>clean_text</code> 兜底</td><td>不补。站点原件里的 <code>parsed</code> 就是团队抽取器的输出，她的站点知识已经在这条线上</td></tr>
       <tr><td>清洗正文</td><td><code>GET /clean-text</code></td><td>主线 <code>clean/clean_text</code> → derived_clean_text</td><td><code>status</code> 必须是 "parsed"、<code>text</code>、<code>text_sha256</code>、<code>processor_version</code>、<code>segments[{start,end}]</code>、<code>basis</code>、<code>locator_kind</code>。返回里的 identifiers 和 profile 雷达丢掉不读</td><td><b>不用她的 clean_content 结果</b>：它在正文前加 YAML 头（11-13 版改成转义写法，仍然加）、改空白、不记偏移、没有处理器版本，雷达的短引核对会找不到原句，sha256 也会变</td></tr>
       <tr><td>附件正文</td><td><code>GET /derived-text</code></td><td>主线 <code>attachment_parse</code>（MinerU）</td><td><code>status</code>、<code>text</code>、<code>text_sha256</code>、<code>processor_version</code>、<code>segments</code>、<code>attachment_of</code>、<code>attempt</code></td><td>不补（她的 route_pdf 不用）</td></tr>
       <tr><td>登记变化、版本差异</td><td><code>/registry-changes</code>、<code>/version-differences</code></td><td>主线</td><td><code>changes[{field, json_pointer, change_kind, material, description}]</code>；<code>kind</code>、<code>body_changed</code> 等</td><td>不补</td></tr>
@@ -775,7 +775,7 @@ def score_one(conn, version):
       <p class="note">这些全由主线产物保证，本方案不碰它们。唯一要守的是第 1 步：换清洗工具时，抽取器输出必须逐字不变。</p>
     </div>
   </div>
-  <p class="note">雷达侧依据：<code>clean-radar/services/bioradar/adapters/fabric.py</code>（所有 Fabric 请求的唯一出口）、<code>run/read.py</code>、<code>material.py</code>、<code>triage.py</code>、<code>research/series_sync.py</code>；Fabric 侧：<code>api/routers/history.py</code>、<code>clean/clean_stage.py:515 for_versions</code>、<code>store/index_publication.py:85</code>、<code>store/retrieval.py:416</code>、<code>（Fabric 发 BioCheck 的核对 11-13 精简时已拆掉）</code>。在雷达代码里搜过 quarantine、weak_signal、authority、quality、profile、identifiers，没有任何读取 Fabric 质量、分流、对齐字段的地方。</p>
+  <p class="note">雷达侧依据：<code>clean-radar/services/bioradar/adapters/fabric.py</code>（所有 Fabric 请求的唯一出口）、<code>run/read.py</code>、<code>material.py</code>、<code>triage.py</code>、<code>research/series_sync.py</code>；Fabric 侧：<code>api/routers/fabric.py</code>、<code>clean/clean_stage.py:515 for_versions</code>、<code>store/index_publication.py:85</code>、<code>store/retrieval.py:416</code>、<code>（Fabric 发 BioCheck 的核对 11-13 精简时已拆掉）</code>。在雷达代码里搜过 quarantine、weak_signal、authority、quality、profile、identifiers，没有任何读取 Fabric 质量、分流、对齐字段的地方。</p>
 </section>
 
 <footer class="note" style="text-align:center">只读分析：未改主线代码，未提交；未查任何数据库；未运行徐包里的脚本。</footer>

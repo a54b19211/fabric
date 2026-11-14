@@ -1,8 +1,8 @@
-"""history-only 新材料进入唯一的抽取/待审链（T-28 ⑤，Codex 390/391）。真实两 schema PostgreSQL：
-documents 库（抽取/审核主体）+ history 库。LLM 和消歧用替身，其余是生产代码。"""
+"""只在资料库里的新材料进入唯一的抽取/待审链（T-28 ⑤，Codex 390/391）。真实两 schema PostgreSQL：
+documents 库（抽取/审核主体）+ 资料库。LLM 和消歧用替身，其余是生产代码。"""
 
-from integration_history import _fetch_study
 from integration_publication import databases  # noqa: F401  -- 两 schema 隔离库夹具
+from integration_records import _fetch_study
 from sqlalchemy import text
 
 from clean import clean_stage
@@ -37,7 +37,7 @@ def _setup(monkeypatch):
     return seen
 
 
-def test_a_history_only_version_reaches_pending_review_and_v1_stays_v1(databases, monkeypatch):
+def test_a_fabric_only_version_reaches_pending_review_and_v1_stays_v1(databases, monkeypatch):
     from graph.db.extraction_subjects import enqueue_version, subject_uuid
     from graph.extraction.extraction_rq_job import extraction_job
 
@@ -64,7 +64,7 @@ def test_a_history_only_version_reaches_pending_review_and_v1_stays_v1(databases
         ents = conn.execute(text("SELECT entity_name, review_status FROM extracted_entities "
                                  "WHERE source_doc_uuid=:u"), {"u": queued["uuid"]}).mappings().all()
         assert [(e["entity_name"], e["review_status"]) for e in ents] == [(NCT, "pending")]  # 待审候选
-        # 这类主体的原件本来就在 history：不会再被冻结成 legacy_documents 的新版本
+        # 这类主体的原件本来就在资料库：不会再被冻结成 legacy_documents 的新版本
         outbox = conn.execute(text("SELECT count(*) FROM publication_outbox WHERE kind='document' "
                                    "AND source_doc_uuid=:u"), {"u": queued["uuid"]}).scalar()
         assert outbox == 0
@@ -73,29 +73,29 @@ def test_a_history_only_version_reaches_pending_review_and_v1_stays_v1(databases
     import graph.api.documents as documents_api
 
     detail = documents_api.get_document(queued["uuid"])
-    assert detail.history_ref["version_id"] == v1 and "RECRUITING" in detail.raw_content
+    assert detail.fabric_ref["version_id"] == v1 and "RECRUITING" in detail.raw_content
 
 
 def test_enqueue_is_idempotent_and_refuses_uncleaned_or_mismatched_versions(databases, monkeypatch):
     import pytest
 
     from graph.db.extraction_subjects import enqueue_version
-    from store.history_models import HistoryError
+    from store.record_models import FabricError
 
     _setup(monkeypatch)
     v1 = _fetch_study("NCT09997002", "subj-idem").version_ids[0]
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         enqueue_version("clinicaltrials", "NCT09997002", v1)  # 还没清洗
     assert error.value.code == "subject_not_cleaned"
     clean_stage.process()
     first = enqueue_version("clinicaltrials", "NCT09997002", v1)
     again = enqueue_version("clinicaltrials", "NCT09997002", v1)
     assert first["created"] and not again["created"] and first["uuid"] == again["uuid"]
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         enqueue_version("clinicaltrials", "NCT00000000", v1)
 
 
-def test_reviewed_results_on_a_history_subject_publish_a_graph_pointing_at_that_version(databases, monkeypatch):
+def test_reviewed_results_on_a_fabric_subject_publish_a_graph_pointing_at_that_version(databases, monkeypatch):
     import json
 
     from sqlalchemy.orm import Session
@@ -104,7 +104,7 @@ def test_reviewed_results_on_a_history_subject_publish_a_graph_pointing_at_that_
     from graph.db.models import EntityDict
     from graph.extraction.extraction_rq_job import extraction_job
     from graph.publish import publication
-    from store import history
+    from store import records
 
     source, _target = databases
     _setup(monkeypatch)
@@ -121,7 +121,7 @@ def test_reviewed_results_on_a_history_subject_publish_a_graph_pointing_at_that_
     result = publication.publish_once()
     assert result["state"] == "published", result
     assert result["document_version_ids"] == [v1]
-    graph = json.loads(history.list_changes("reviewed_graph", False)["items"][-1]["raw_content"])
+    graph = json.loads(records.list_changes("reviewed_graph", False)["items"][-1]["raw_content"])
     assert graph["dependency_source_ids"] == ["clinicaltrials"]
     [ref] = graph["document_refs"]
     assert (ref["source_id"], ref["version_id"], ref["origin_doc_uuid"]) == ("clinicaltrials", v1, queued["uuid"])
@@ -131,7 +131,7 @@ def test_reviewed_results_on_a_history_subject_publish_a_graph_pointing_at_that_
     assert evidence["locator"]["basis"] == "derived_clean_text"
     assert evidence["locator"]["text_sha256"] == queued["text_sha256"]
     # 没有冻结出 legacy_documents 版本
-    assert not history.list_changes("legacy_documents", False)["items"]
+    assert not records.list_changes("legacy_documents", False)["items"]
 
 
 def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(databases, monkeypatch):
@@ -144,8 +144,8 @@ def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(
     import graph.api.documents as documents_api
     from graph.db.extraction_subjects import enqueue_version
     from graph.extraction.extraction_rq_job import extraction_job
-    from store import history
-    from store.history_models import HistoryError
+    from store import records
+    from store.record_models import FabricError
 
     source, target = databases
     seen = _setup(monkeypatch)
@@ -153,13 +153,13 @@ def test_codex_402_revoked_source_is_not_served_listed_or_sent_to_the_extractor(
     clean_stage.process()
     queued = enqueue_version("clinicaltrials", NCT, version)
     with target.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id=:s"), {"s": "clinicaltrials"})
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id=:s"), {"s": "clinicaltrials"})
     try:
-        history.read_version(version, "clinicaltrials", NCT, False, "current", datetime.now(timezone.utc))
-    except HistoryError as exc:
+        records.read_version(version, "clinicaltrials", NCT, False, "current", datetime.now(timezone.utc))
+    except FabricError as exc:
         assert exc.code == "source_not_available"
     else:
-        raise AssertionError("history 应拒绝撤权来源")
+        raise AssertionError("资料库应拒绝撤权来源")
     assert extraction_job(queued["uuid"]) is False and not seen  # 没调用模型
     with source.begin() as conn:
         status, error = conn.execute(text("SELECT extraction_status, extraction_error FROM documents WHERE uuid=:u"),

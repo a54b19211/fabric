@@ -15,7 +15,7 @@ from clean import jats_text
 from fetch import pubmed_fulltext as pf
 from fetch import rate, sources, transport
 from fetch import web_client as client
-from store.history_models import FetchRequest
+from store.record_models import FetchRequest
 
 EMAIL = "ops-mailbox@example.invalid"
 OA_PDF = "https://repo.example.org/b.pdf"
@@ -197,7 +197,7 @@ def test_unpaywall_cc_pdf_is_downloaded_through_the_shared_store(monkeypatch, tm
 
 def test_full_text_takes_a_version_slot_and_the_read_resumes_where_it_stopped(monkeypatch):
     """Codex 400 第 4 点：max_records 按本次产出的版本计，文献和全文都算；额度不足给续读位置，不越界、不丢。"""
-    from store.history_models import FetchContinuation
+    from store.record_models import FetchContinuation
 
     web = Web(monkeypatch, pmc=jats(CC_BY))
     ids = ["111", "222"]

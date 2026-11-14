@@ -11,7 +11,7 @@ from graph.publish.collected_document import (
     collected_document,
     project_collected,
 )
-from store.history_models import ArchiveRecord, sha256
+from store.record_models import ArchiveRecord, sha256
 
 NOW = datetime(2026, 10, 18, tzinfo=timezone.utc)
 
@@ -211,7 +211,7 @@ def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles
 @pytest.mark.parametrize("unit", ["characters", "bytes"])
 def test_input_size_diagnostics_have_only_safe_field_limit_and_unit(unit):
     from graph.publish.publication import _validation_error
-    from store.history_models import MAX_RECORD_BYTES
+    from store.record_models import MAX_RECORD_BYTES
 
     marker = "SYNTHETIC_VALUE_MUST_NOT_BE_RECORDED"
     raw = marker + (

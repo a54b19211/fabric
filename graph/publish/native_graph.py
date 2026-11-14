@@ -15,7 +15,7 @@ from graph.publish.reviewed_graph import (
     GraphNode,
     GraphReview,
 )
-from store.history_models import HistoryError, HistoryRecord, canonical, sha256
+from store.record_models import FabricError, VersionRecord, canonical, sha256
 
 METHOD = "clinicaltrials.fields.v2"
 LEGACY_METHOD = "clinicaltrials.fields.v1"
@@ -80,7 +80,7 @@ def _bound(documents, ref):
 
 
 def _is_legacy_contract(bundle, allow_legacy):
-    """Fixed History reads may validate the exact v1 contract; everything else must be v2."""
+    """Fixed fabric reads may validate the exact v1 contract; everything else must be v2."""
     methods = {edge.relation_props.get("method_version") for edge in bundle.edges if edge.field_evidence}
     legacy = (allow_legacy and bundle.origin == "source_field_projection"
               and (methods == {LEGACY_METHOD} or
@@ -189,7 +189,7 @@ def _check_edge_field(edge, ref, nodes, documents, legacy):
 
 
 def validate_field_bindings(bundle, documents, *, allow_legacy=False):
-    """New publications require v2; fixed History reads may validate the exact v1 contract."""
+    """New publications require v2; fixed fabric reads may validate the exact v1 contract."""
     nodes = {(node.namespace, node.id): node for node in bundle.nodes}
     try:
         legacy = _is_legacy_contract(bundle, allow_legacy)
@@ -204,16 +204,16 @@ def validate_field_bindings(bundle, documents, *, allow_legacy=False):
             if edge.review.status == "rule_confirmed" and not edge.field_evidence:
                 raise ValueError("规则关系缺少字段出处")
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
-        raise HistoryError("graph_field_mismatch", "图身份/关系字段与冻结原件规则不一致") from None
+        raise FabricError("graph_field_mismatch", "图身份/关系字段与冻结原件规则不一致") from None
 
 
 def build_native_graph(records, *, max_nodes=100, max_edges=200):
     """固定ClinicalTrials版本→登记对象及其条件/干预/申办方；不声称药物谱系。"""
-    records = [HistoryRecord.model_validate(record) for record in records]
+    records = [VersionRecord.model_validate(record) for record in records]
     if (not records or len(records) > 20 or len({record.is_demo for record in records}) != 1
             or not 1 <= max_nodes <= 100 or not 1 <= max_edges <= 200
             or len({(record.source_id, record.source_record_id) for record in records}) != len(records)):
-        raise HistoryError("native_graph_budget", "须给1至20个同空间、不重复的固定登记版本及有效预算")
+        raise FabricError("native_graph_budget", "须给1至20个同空间、不重复的固定登记版本及有效预算")
     records.sort(key=lambda record: (record.source_id, record.source_record_id))
     nodes, edges, refs, documents = {}, [], [], {}
     truncated = False
@@ -222,7 +222,7 @@ def build_native_graph(records, *, max_nodes=100, max_edges=200):
         try:
             data, identity = _native(raw)
         except (KeyError, IndexError, TypeError, ValueError):
-            raise HistoryError("native_graph_identity", "登记原件缺少可核对的原生编号") from None
+            raise FabricError("native_graph_identity", "登记原件缺少可核对的原生编号") from None
         ref = GraphDocumentRef(source_id=record.source_id, source_record_id=record.source_record_id,
                                version_id=record.version_id, raw_sha256=record.raw_sha256)
         refs.append(ref)
@@ -234,7 +234,7 @@ def build_native_graph(records, *, max_nodes=100, max_edges=200):
         try:
             properties = clinical_trial_attributes(data)
         except (ValueError, TypeError, AttributeError):
-            raise HistoryError("native_graph_fields", "试验属性不符合原始登记字段类型") from None
+            raise FabricError("native_graph_fields", "试验属性不符合原始登记字段类型") from None
         missing = object()
         fields = [GraphFieldEvidence(**ref.model_dump(), json_pointer=pointer, value=value)
                   for pointer in TRIAL_ATTRIBUTE_PATHS.values()

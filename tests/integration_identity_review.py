@@ -2,7 +2,7 @@
 
 Run explicitly with DATAFABRIC_PUBLICATION_DATABASE_URL pointing at the coordinator's
 18636 / bioradar_kdd_opus_fabric instance. Source rows remain in the named test schema.
-The fixed-document validator below is an explicit fixture; History's real reader is
+The fixed-document validator below is an explicit fixture; the fabric library's real reader is
 covered separately by the object-evidence integration suite.
 """
 import hashlib
@@ -275,38 +275,38 @@ def test_migration_runner_executes_v021_transactionally_and_tracks_it_once(engin
 
 
 @pytest.fixture(scope='module')
-def real_history_engine():
-    url = os.environ.get('DATAFABRIC_HISTORY_DATABASE_URL')
-    assert url, 'Explicit isolated History PostgreSQL is required'
+def real_fabric_engine():
+    url = os.environ.get('DATAFABRIC_DATABASE_URL')
+    assert url, 'Explicit isolated fabric PostgreSQL is required'
     parsed = make_url(url)
     assert parsed.host in ('127.0.0.1', 'localhost') and parsed.port == 18636
-    assert parsed.database == 'bioradar_kdd_opus_history'
-    schema = 'opus_identity_history_20261031'
+    assert parsed.database == 'zk_fabric_identity_test'
+    schema = 'opus_identity_fabric_20261031'
     admin = create_engine(url)
     with admin.begin() as conn:
         conn.exec_driver_sql('CREATE SCHEMA IF NOT EXISTS ' + schema)
     scoped = create_engine(url, connect_args={'options': '-csearch_path=' + schema})
     from store.migrations import runner
-    runner.apply('history', scoped)
+    runner.apply('fabric', scoped)
     yield scoped
     scoped.dispose()
     admin.dispose()
 
 
 @pytest.fixture
-def real_history(real_history_engine, monkeypatch):
-    from store import history
-    monkeypatch.setattr(history, 'history_engine', lambda: real_history_engine)
+def real_fabric(real_fabric_engine, monkeypatch):
+    from store import records
+    monkeypatch.setattr(records, 'fabric_engine', lambda: real_fabric_engine)
     monkeypatch.setenv('DATAFABRIC_PUBLICATION_IS_DEMO', 'true')
-    with real_history_engine.begin() as conn:  # the schema is kept between tests
-        conn.execute(text('UPDATE history_sources SET read_enabled=true'))
-    return real_history_engine
+    with real_fabric_engine.begin() as conn:  # the schema is kept between tests
+        conn.execute(text('UPDATE fabric_sources SET read_enabled=true'))
+    return real_fabric_engine
 
 
 def freeze_document(doc_uuid, raw, source_site='pubmed'):
     from graph.publish.collected_document import collected_document
     from graph.publish.reviewed_graph import document_native_id
-    from store.history_models import ArchiveImport, ArchiveRecord
+    from store.record_models import ArchiveImport, ArchiveRecord
     document = collected_document({'uuid': doc_uuid, 'source_site': source_site, 'title': 'Explicit synthetic source',
                                    'raw_content': raw}, datetime.now(timezone.utc), 'insert')
     request = ArchiveImport(source_id='legacy_documents', is_demo=True,
@@ -320,16 +320,16 @@ def freeze_document(doc_uuid, raw, source_site='pubmed'):
             'locator': {'field': 'raw_content', 'offset_unit': 'unicode_codepoint'}}
 
 
-def test_real_history_validator_binds_source_sha_unicode_and_permission(real_history, monkeypatch):
+def test_real_fabric_validator_binds_source_sha_unicode_and_permission(real_fabric, monkeypatch):
     from graph.db.object_evidence import validate_object_evidence
-    from store.history_models import HistoryError
+    from store.record_models import FabricError
     doc_uuid = 'identity-real-' + uuid4().hex
     evidence = freeze_document(doc_uuid, '甲公司🧪 has a registered sponsor relationship.')
     checked = validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
     assert checked['raw_sha256'] and checked['quote'] == evidence['quote']
     assert checked['locator']['field'] == 'raw_content'
-    from store import history
-    frozen = history.read_version(checked['version_id'], checked['source_id'], checked['source_record_id'],
+    from store import records
+    frozen = records.read_version(checked['version_id'], checked['source_id'], checked['source_record_id'],
                                   checked['is_demo'], 'current', datetime.now(timezone.utc))
     container = json.loads(frozen.raw_content)
     for token in checked['locator']['container_json_pointer'].split('/')[1:]:
@@ -350,13 +350,13 @@ def test_real_history_validator_binds_source_sha_unicode_and_permission(real_his
     with pytest.raises(ValueError, match='真实/演示'):
         validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
     monkeypatch.setenv('DATAFABRIC_PUBLICATION_IS_DEMO', 'true')
-    with real_history.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='pubmed'"))
-    with pytest.raises(HistoryError):
+    with real_fabric.begin() as conn:
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='pubmed'"))
+    with pytest.raises(FabricError):
         validate_object_evidence(evidence, source_doc_uuid=doc_uuid, source_site='pubmed')
 
 
-def test_real_history_entity_relation_and_mapping_confirmation_with_two_sources(session, principal, real_history):
+def test_real_fabric_entity_relation_and_mapping_confirmation_with_two_sources(session, principal, real_fabric):
     names = ['甲' + uuid4().hex, '乙' + uuid4().hex]
     raw = names[0] + ' sponsors ' + names[1] + '. 原始规则记录。'
     first_doc, second_doc = 'first-' + uuid4().hex, 'second-' + uuid4().hex
@@ -391,7 +391,7 @@ def test_real_history_entity_relation_and_mapping_confirmation_with_two_sources(
             evidence=[evidence_two], session=session, review_context=principal)
 
 
-def test_confirmation_rejects_identity_changes_during_real_history_read(session, principal, real_history, monkeypatch):
+def test_confirmation_rejects_identity_changes_during_real_fabric_read(session, principal, real_fabric, monkeypatch):
     import graph.db.object_evidence as validator
     raw = 'Explicit synthetic source for identity race check.'
     doc_uuid = 'race-' + uuid4().hex
@@ -411,7 +411,7 @@ def test_confirmation_rejects_identity_changes_during_real_history_read(session,
     assert not target.is_verified and observed.identity_confirmed_by is None
 
 
-def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, principal, real_history, monkeypatch):
+def test_committed_concurrent_source_change_cannot_pass_confirmation(engine, principal, real_fabric, monkeypatch):
     import graph.db.object_evidence as validator
     doc_uuid = 'committed-race-' + uuid4().hex
     evidence = freeze_document(doc_uuid, 'Synthetic frozen identity source before concurrent edit.')
@@ -520,7 +520,7 @@ def test_existing_native_duplicate_ids_are_candidates_without_rewriting_legacy_r
     assert all(not row.is_deleted and not row.is_verified for row in old)
 
 
-def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_context(engine, principal, real_history, monkeypatch):
+def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_context(engine, principal, real_fabric, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -568,7 +568,7 @@ def test_review_http_serializers_keep_audits_fixed_evidence_and_dictionary_conte
         assert graph.json()['edges'][0]['evidence'][0]['version_id'] == evidence['version_id']
 
 
-def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_history_refs(session, principal, real_history):
+def test_native_mapper_real_frozen_legacy_document_confirms_without_fabricated_fabric_refs(session, principal, real_fabric):
     from test_native_extraction import trial_raw
 
     from graph.db.object_evidence import validate_object_evidence
@@ -658,7 +658,7 @@ def test_pending_proposal_rejects_concurrently_changed_target(engine, session, p
         assert reviewer.query(EntityMergeLog).filter(EntityMergeLog.keeper_dict_id == target_id).count() == 0
 
 
-def test_current_review_evidence_cannot_borrow_appended_unreviewed_version(session, principal, real_history):
+def test_current_review_evidence_cannot_borrow_appended_unreviewed_version(session, principal, real_fabric):
     from graph.db.identity import get_current_review_evidence, record_evidence
     raw = 'Synthetic human reviewed identity and relation.'
     doc_uuid = 'review-binding-' + uuid4().hex

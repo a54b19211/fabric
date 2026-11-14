@@ -192,7 +192,7 @@ def _hkex_stub(monkeypatch, overrides=None, rows_of=None):
 def _hkex_read(monkeypatch, overrides=None, rows_of=None, start=0):
     """用替身接口读一遍 hkex 的拉取函数，返回 (读到的公告，不含每家公司开头的 GroupStart, 发出的请求参数)。"""
     from fetch.extractors import hkex_fetcher
-    from store.history_models import GroupStart
+    from store.record_models import GroupStart
 
     api, sent = _hkex_stub(monkeypatch, overrides, rows_of)
     items = list(hkex_fetcher.fetch_hkex_announcements(api, start))
@@ -246,7 +246,7 @@ def test_hkex_record_through_the_site_config_has_title_date_and_the_pdf_as_attac
 def test_hkex_company_that_cannot_be_read_is_given_as_unreadable_with_its_name_and_the_next_one_is_still_read(monkeypatch):
     """一家读不到（网络、状态码）：给一个 ItemUnreadable，写明是哪家、为什么，采集插件记下它、不存版本；
     接着读下一家，不是整个来源停在这里。"""
-    from store.history_models import ItemUnreadable
+    from store.record_models import ItemUnreadable
 
     def rows_of(stock_id):
         return TimeoutError("read timed out") if stock_id == 1000001102 else HKEX_ROWS[2:]
@@ -261,7 +261,7 @@ def test_hkex_a_company_is_a_group_and_a_read_can_start_at_any_company_without_a
     """每家公司开头给一个 GroupStart(第几家)，先于这家公司的请求（请求时间到了，续读位置就是这一家）；
     从第 start 家读起，前面的公司不发请求。"""
     from fetch.extractors import hkex_fetcher
-    from store.history_models import GroupStart
+    from store.record_models import GroupStart
 
     api, sent = _hkex_stub(monkeypatch)
     items = list(hkex_fetcher.fetch_hkex_announcements(api))
@@ -312,7 +312,7 @@ def test_nccn_a_guideline_is_a_group_and_a_read_starts_at_any_group_without_rend
     import scrapling.fetchers
 
     from fetch.extractors.nccn import nccn_fetcher
-    from store.history_models import GroupStart
+    from store.record_models import GroupStart
 
     by_category = {"1": ["a0", "a1", "a2"], "2": ["b0", "b1"]}
     rendered = []

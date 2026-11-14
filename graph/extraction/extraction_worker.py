@@ -96,7 +96,7 @@ class MemoryWorker:
             if subject is None:
                 update_extraction_status(task.uuid, "failed", error="文档不存在")
                 return
-            raw_content, source_site, doc_type, is_history = subject
+            raw_content, source_site, doc_type, is_fabric_version = subject
 
             if not raw_content.strip():
                 update_extraction_status(task.uuid, "failed", error="文档raw_content为空")
@@ -107,7 +107,7 @@ class MemoryWorker:
                 raw_content=raw_content,
                 source_site=source_site,
                 doc_type=doc_type,
-                native_allowed=not is_history,
+                native_allowed=not is_fabric_version,
             )
             if not success:
                 update_extraction_status(task.uuid, "failed", error="抽取返回失败")

@@ -14,7 +14,7 @@
 药名没查成（降级）的版本不存，下一轮再查（表只追加，一次断网不该永久记成“没对上”）。要是问的库全都没查成（断网，
 或不出网的实例），这一轮之后只做不用联网的版本（没有药名、或已经对齐过的）。一轮有时间上限（run/clean.py --quality-seconds）。
 process_versions() 只做指定的几个版本（main_etl.py 用）；scores_for() 把一页版本的分数读给
-/api/history/clean-text?quality=true。常驻：run/clean.py --loop 每轮清洗完顺带跑一次。
+/api/fabric/clean-text?quality=true。常驻：run/clean.py --loop 每轮清洗完顺带跑一次。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 from clean import align, attachment_parse, clean_text, drug_names, fields, profile, quality
-from store.history_models import make_uuid
+from store.record_models import make_uuid
 
 BATCH = 50  # 一次取几个版本的字段
 TODO_LIMIT = 2000  # 一页几个版本号
@@ -45,12 +45,12 @@ _FIELDS = """
            CASE WHEN v.source_id = 'pubmed' THEN (
              SELECT jsonb_agg(jsonb_build_object('from', a.payload->'facts'->>'discovered_from',
                                                  'url', a.payload->>'source_url'))
-             FROM history_versions a WHERE a.source_id = 'pubmed' AND a.is_demo = v.is_demo
+             FROM fabric_versions a WHERE a.source_id = 'pubmed' AND a.is_demo = v.is_demo
                AND a.source_record_id LIKE v.source_record_id || '#attachment%') END AS fulltext,
            p.text_processor_version AS text_pv,
            (SELECT d.text FROM derived_clean_text d WHERE d.version_id = v.version_id
               AND d.processor_version = p.text_processor_version ORDER BY d.attempt DESC LIMIT 1) AS text
-    FROM history_versions v
+    FROM fabric_versions v
     JOIN derived_profiles p ON p.version_id = v.version_id AND p.processor_version = :prof
                            AND p.text_processor_version = ANY(:texts)
 """
@@ -58,7 +58,7 @@ _SCORED = "EXISTS (SELECT 1 FROM derived_quality_scores q WHERE q.version_id = v
 # 领活分两步：先只挑版本号（不碰 payload，排序时不用把每个版本的原件都读一遍），再按版本号取字段。
 # 翻页按 (first_seen_at, version_id) 从新到旧：下一页从上一页最后一个版本往后接
 _TODO_SQL = """
-    SELECT v.version_id, v.first_seen_at FROM history_versions v
+    SELECT v.version_id, v.first_seen_at FROM fabric_versions v
     JOIN derived_profiles p ON p.version_id = v.version_id AND p.processor_version = :prof
                            AND p.text_processor_version = ANY(:texts)
     WHERE NOT """ + _SCORED + """
@@ -99,7 +99,7 @@ def document(row) -> dict:
     doc = {"uuid": row["source_record_id"], "source_url": row["url"] or "", "title": title,
            "source_site": (facts.get("source_site") or source) if source == "legacy_documents" else source,
            "publish_date": published, "markdown": row["text"] or "",
-           "parse_method": facts.get("parse_method") or row["parser"] or "history_projection",
+           "parse_method": facts.get("parse_method") or row["parser"] or "fabric_projection",
            "structured_data": {"title": title, "publish_date": published, "category": "", "summary": ""},
            "extra": dict(_dict(facts.get("extra"))), "sniffed_meta": {}}
     if role == "web_capture":
@@ -390,9 +390,9 @@ def _todo_batches(engine, batch):
 
 def process(*, batch=BATCH, time_budget_seconds=60, ask=None):
     """给还没有当前评分器版本分数的版本打分，直到没有活或到时间（到点做完手上那个版本才停）；返回计数。"""
-    from store.history import history_engine
+    from store.records import fabric_engine
 
-    engine = history_engine()
+    engine = fabric_engine()
     deadline = time.monotonic() + time_budget_seconds
     counts, offline = _counts(), False
     for ids in _todo_batches(engine, batch):
@@ -407,9 +407,9 @@ def process(*, batch=BATCH, time_budget_seconds=60, ask=None):
 
 def process_versions(version_ids, ask=None):
     """只给指定的这几个版本打分（main_etl.py 单次调试用）；已经有当前评分器版本分数的跳过。返回计数。"""
-    from store.history import history_engine
+    from store.records import fabric_engine
 
-    engine = history_engine()
+    engine = fabric_engine()
     counts = _counts()
     with engine.begin() as conn:
         rows = [dict(r) for r in conn.execute(text(_BY_IDS_SQL), _params(ids=list(version_ids))).mappings()]
@@ -419,11 +419,11 @@ def process_versions(version_ids, ask=None):
 
 
 def scores_for(version_ids):
-    """{version_id: 当前评分器版本的分数和对齐结果}；还没打分的版本不出现。给 /api/history/clean-text?quality=true。"""
-    from store.history import history_engine
+    """{version_id: 当前评分器版本的分数和对齐结果}；还没打分的版本不出现。给 /api/fabric/clean-text?quality=true。"""
+    from store.records import fabric_engine
 
     params = {"ids": list(version_ids), "sv": quality.SCORER_VERSION, "av": align.ALIGNER_VERSION}
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         scores = conn.execute(text(
             "SELECT version_id, scorer_version, text_processor_version, score, level, dimensions, issues, violations, "
             "confidence, scored_at FROM derived_quality_scores WHERE version_id = ANY(:ids) AND scorer_version = :sv"),

@@ -20,7 +20,7 @@ from loguru import logger
 
 from fetch import transport
 from fetch.sites.hkex_pharma_list_auto import PHARMA_COMPANIES
-from store.history_models import GroupStart, HistoryError, ItemUnreadable
+from store.record_models import FabricError, GroupStart, ItemUnreadable
 
 SITE = "https://www1.hkexnews.hk"
 ROW_RANGE = 10000  # 接口自己的上限
@@ -63,10 +63,10 @@ def _parse_row(row: Dict, company: Dict, skip_headlines, skip_titles) -> Dict | 
 
 
 def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
-    """这家公司从 from_date 到 to_date 的全部公告（新的在前）。读不到就抛 HistoryError("source_read_failed")，写明哪家、为什么。"""
+    """这家公司从 from_date 到 to_date 的全部公告（新的在前）。读不到就抛 FabricError("source_read_failed")，写明哪家、为什么。"""
     who = f"{company.get('name')}({company.get('code')})"
     if not company.get("stock_id"):
-        raise HistoryError("source_read_failed", f"港交所 {who} 缺少 stock_id，没有读")
+        raise FabricError("source_read_failed", f"港交所 {who} 缺少 stock_id，没有读")
     params = {
         "sortDir": 0,
         "sortByOptions": "DateTime",
@@ -93,9 +93,9 @@ def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
         body = response.json()
         rows = json.loads(body["result"])
     except Exception as exc:  # noqa: BLE001 -- 网络、状态码、不是 JSON，都按“这家没读到”报，带上原因
-        raise HistoryError("source_read_failed", f"港交所 {who} 读取失败：{type(exc).__name__} {exc}"[:300]) from exc
+        raise FabricError("source_read_failed", f"港交所 {who} 读取失败：{type(exc).__name__} {exc}"[:300]) from exc
     if body.get("hasNextRow"):  # 超过接口上限 10000 条：不能当读完（from_date 往后调即可）
-        raise HistoryError("source_read_failed", f"港交所 {who} 的公告超过 {ROW_RANGE} 条，请把 from_date 往后调")
+        raise FabricError("source_read_failed", f"港交所 {who} 的公告超过 {ROW_RANGE} 条，请把 from_date 往后调")
     logger.info(f"[HKEX] {who} 共 {len(rows)} 条（接口报 {body.get('recordCnt')} 条）")
     return rows
 
@@ -123,7 +123,7 @@ def fetch_hkex_announcements(api_config: Dict, start: int = 0) -> Iterator[Dict]
             continue
         try:
             rows = _read_company(api_config, company)
-        except HistoryError as exc:
+        except FabricError as exc:
             yield ItemUnreadable(f"{api_config['base_url']}?stockId={company.get('stock_id')}", exc.message)
             continue
         for row in rows:

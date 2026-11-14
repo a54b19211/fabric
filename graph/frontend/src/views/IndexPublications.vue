@@ -6,20 +6,20 @@
         发表循环里的 <code>index_tick</code> 自动扫描已提交原件、排队、发送并核对回执；失败会自动退避重试（状态“待重试”）。
         连续失败 6 次的作业变为“受阻”，不再自动重发；修好原因后在下表点“重试”，作业回到“待重试”，下一轮由 <code>index_tick</code>
         处理，处理时仍先向桥接服务核对已发请求，不会重复上传。对应接口：
-        <code>GET /api/history/index/status</code>、<code>GET /api/history/index/counts</code>、
-        <code>POST /api/history/index/{id}/retry</code>（均需 History 管理员凭据）。
+        <code>GET /api/fabric/index/status</code>、<code>GET /api/fabric/index/counts</code>、
+        <code>POST /api/fabric/index/{id}/retry</code>（均需资料库管理员凭据）。
       </div>
     </el-alert>
 
     <!-- 凭据 -->
     <el-card shadow="never" class="token-card">
       <div v-if="!hasToken" class="token-row">
-        <span class="token-label">History 管理员凭据</span>
+        <span class="token-label">资料库管理员凭据</span>
         <el-input
           v-model="tokenInput"
           type="password"
           show-password
-          placeholder="DATAFABRIC_HISTORY_ADMIN_TOKEN"
+          placeholder="DATAFABRIC_ADMIN_TOKEN"
           style="width: 360px"
           @keyup.enter="saveToken"
         />
@@ -175,18 +175,18 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   INDEX_STATES,
+  fabricError,
   getCollectionCatalog,
-  getHistoryToken,
+  getFabricToken,
   getIndexCounts,
   getIndexStatus,
-  historyError,
   retryIndexPublication,
-  setHistoryToken,
+  setFabricToken,
   type CatalogSource,
   type IndexPublication,
   type IndexRetryResult,
   type IndexState,
-} from '@/api/history'
+} from '@/api/fabric'
 import { relativeTime } from '@/utils/time'
 
 type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -204,7 +204,7 @@ const STATE_META: Record<IndexState, { label: string; tag: TagType }> = {
 
 const PAGE_SIZE = 50
 
-const hasToken = ref(!!getHistoryToken())
+const hasToken = ref(!!getFabricToken())
 const tokenInput = ref('')
 
 const counts = ref<Record<string, number>>({})
@@ -243,7 +243,7 @@ function fmt(iso: string | null | undefined) {
 function saveToken() {
   const token = tokenInput.value.trim()
   if (!token) return
-  setHistoryToken(token)
+  setFabricToken(token)
   tokenInput.value = ''
   hasToken.value = true
   loadCatalog()
@@ -251,7 +251,7 @@ function saveToken() {
 }
 
 function clearToken() {
-  setHistoryToken('')
+  setFabricToken('')
   hasToken.value = false
   rows.value = []
   counts.value = {}
@@ -264,7 +264,7 @@ function handleAuth(err: unknown) {
   const status = (err as { response?: { status?: number } })?.response?.status
   if (status === 401 || status === 403) {
     clearToken()
-    ElMessage.error('凭据无效或不是 History 管理员凭据，请重新填写')
+    ElMessage.error('凭据无效或不是资料库管理员凭据，请重新填写')
   }
 }
 
@@ -275,7 +275,7 @@ async function loadCatalog() {
     const catalog = await getCollectionCatalog()
     catalogSources.value = catalog.sources
   } catch (err) {
-    catalogError.value = historyError(err)
+    catalogError.value = fabricError(err)
   } finally {
     catalogLoading.value = false
   }
@@ -289,7 +289,7 @@ async function loadCounts() {
     counts.value = res.states
     total.value = res.total
   } catch (err) {
-    countsError.value = historyError(err)
+    countsError.value = fabricError(err)
     handleAuth(err)
   } finally {
     countsLoading.value = false
@@ -315,7 +315,7 @@ async function reload() {
   } catch (err) {
     rows.value = []
     nextCursor.value = null
-    listError.value = historyError(err)
+    listError.value = fabricError(err)
     handleAuth(err)
   } finally {
     loading.value = false
@@ -331,7 +331,7 @@ async function loadMore() {
     rows.value = rows.value.concat(page.items.filter((r) => !seen.has(r.id)))
     nextCursor.value = page.next_cursor
   } catch (err) {
-    listError.value = historyError(err)
+    listError.value = fabricError(err)
     handleAuth(err)
   } finally {
     loadingMore.value = false
@@ -362,7 +362,7 @@ async function retryOne(row: IndexPublication) {
     else ElMessage.warning(describe(result))
     refreshAll()
   } catch (err) {
-    ElMessage.error(`重试失败：${historyError(err)}`)
+    ElMessage.error(`重试失败：${fabricError(err)}`)
     handleAuth(err)
   } finally {
     retrying[row.id] = false
@@ -391,7 +391,7 @@ async function retryAllBlocked() {
         if (result.scheduled) scheduled += 1
         else skipped.push(`${short(row.id)}：${describe(result)}`)
       } catch (err) {
-        skipped.push(`${short(row.id)}：${historyError(err)}`)
+        skipped.push(`${short(row.id)}：${fabricError(err)}`)
         handleAuth(err)
         if (!hasToken.value) break
       }

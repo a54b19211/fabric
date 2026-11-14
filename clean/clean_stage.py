@@ -7,7 +7,7 @@
 给 main_etl.py 单次调试用；stage_status() 给出各来源的进度；for_versions() 把一页版本的产物读给 API。命令行入口是
 run/clean.py。
 
-读写的表：读 history_versions 和 history_sources；derived_stage_waiting 记附件还没解析完的版本；写 derived_clean_text
+读写的表：读 fabric_versions 和 fabric_sources；derived_stage_waiting 记附件还没解析完的版本；写 derived_clean_text
 （清洗正文）、derived_identifiers（编号）、derived_profiles（画像）、derived_registry_diff_runs / derived_registry_changes
 （临床登记差分）。写画像的同一个事务里还会给 index_publications（建索引待办）排活。
 
@@ -48,7 +48,7 @@ from sqlalchemy import text
 
 from clean import attachment_parse, clean_text, identifiers, profile, registry_changes
 from clean.processors import UNCLEANED_SOURCES
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 SKIP_SOURCES = UNCLEANED_SOURCES
 from fetch.catalog import SITE_SOURCES  # noqa: E402  站点插件采集的来源
@@ -155,7 +155,7 @@ _FIELDS = """
            CASE WHEN source_id='clinicaltrials'
                 THEN (payload->>'raw_content')::jsonb #>> '{protocolSection,descriptionModule,briefSummary}'
            END AS brief_summary
-    FROM history_versions v
+    FROM fabric_versions v
 """
 _PROFILED = """EXISTS (SELECT 1 FROM derived_profiles p WHERE p.version_id=v.version_id
                        AND p.processor_version=:prof AND p.text_processor_version=ANY(:texts))"""
@@ -338,10 +338,10 @@ def _process_waiting(engine, key, counts, limit=500):
 def process_versions(version_ids):
     """只处理指定的这几个版本（main_etl.py 单次调试用）：每个版本做的事和 process() 一样，同样可重跑，
     返回计数。"""
-    from store.history import history_engine
+    from store.records import fabric_engine
 
     counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0}
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         rows = conn.execute(text(_BY_VERSION_IDS_SQL), {"ids": list(version_ids)}).mappings().all()
         _process_rows(conn, stage_key(), [dict(r) for r in rows], counts)
     return counts
@@ -349,9 +349,9 @@ def process_versions(version_ids):
 
 def process(*, batch=BATCH, time_budget_seconds=600):
     """一批一批地领还没画像的版本处理，直到没有活或到时间；返回计数。"""
-    from store.history import history_engine
+    from store.records import fabric_engine
 
-    engine = history_engine()
+    engine = fabric_engine()
     key = stage_key()
     began = time.monotonic()
     counts = {"profiled": 0, "cleaned": 0, "reused": 0, "waiting_for_attachment_text": 0, "batches": 0,
@@ -375,7 +375,7 @@ def _process_batch(engine, key, batch, counts):
         if not rows:
             return 0
         # 锁到之后再看一眼：别的进程可能刚在放锁之前写完了其中几个
-        done = set(conn.execute(text("SELECT v.version_id FROM history_versions v WHERE v.version_id=ANY(:ids) AND "
+        done = set(conn.execute(text("SELECT v.version_id FROM fabric_versions v WHERE v.version_id=ANY(:ids) AND "
                                      + _PROFILED), {**params, "ids": [r["version_id"] for r in rows]}).scalars())
         work = [r for r in rows if r["version_id"] not in done]
         counts["batches"] += 1
@@ -402,18 +402,18 @@ def _in_savepoint(conn, key, rows, counts):
 
 def stage_status():
     """每个来源：已发布到哪、版本数、已有当前画像的、在等附件正文的、还没做的。"""
-    from store.history import history_engine
+    from store.records import fabric_engine
 
     params = {"k": stage_key(), "skip": list(SKIP_SOURCES), "prof": profile.PROCESSOR_VERSION,
               "texts": [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION]}
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         rows = conn.execute(text("""
             SELECT source_id, max(published_seq) AS published_seq, count(*) AS versions,
                    count(*) FILTER (WHERE profiled) AS profiled, count(*) FILTER (WHERE waiting) AS waiting
             FROM (SELECT v.source_id, v.published_seq, """ + _PROFILED + """ AS profiled,
                          EXISTS (SELECT 1 FROM derived_stage_waiting w WHERE w.stage_key=:k
                                  AND w.version_id=v.version_id) AS waiting
-                  FROM history_versions v WHERE v.record_kind<>'graph' AND NOT (v.source_id = ANY(:skip))) s
+                  FROM fabric_versions v WHERE v.record_kind<>'graph' AND NOT (v.source_id = ANY(:skip))) s
             GROUP BY source_id ORDER BY source_id
         """), params).mappings().all()
     return {"stage_key": params["k"], "sources": [
@@ -424,20 +424,20 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_versio
     """一页版本的清洗正文、编号和画像。版本须在本次模式和截止时间下可见。
     processor_version 不给：当前清洗/附件解析处理器的产物；给了：只取这个处理器版本留下的产物（v3 6.1：
     清洗器升级后，按引用里绑定的处理器版本回读模型当时读到的原文；那一版的产物不在就是没有，不拿新版冒充）。"""
-    from store import history
+    from store import records
 
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
-        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
+        raise FabricError("query_budget", "一次最多 100 个合法版本号", 422)
     if processor_version is not None and not re.fullmatch(r"datafabric\.[a-z_]+\.v[0-9]+", processor_version):
-        raise HistoryError("invalid_processor_version", "处理器版本格式不对", 422)
-    eligible = history._eligibility(mode).replace("first_seen_at", "v.first_seen_at").replace(
+        raise FabricError("invalid_processor_version", "处理器版本格式不对", 422)
+    eligible = records._eligibility(mode).replace("first_seen_at", "v.first_seen_at").replace(
         "proof_available_at", "v.proof_available_at")
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        history._source(conn, source_id)
-        cutoff = history._cutoff(cutoff)
-        if cutoff > history._now(conn):
-            raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        records._source(conn, source_id)
+        cutoff = records._cutoff(cutoff)
+        if cutoff > records._now(conn):
+            raise FabricError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
         params = {"source": source_id, "demo": is_demo, "ids": list(version_ids), "cutoff": cutoff,
                   "pvs": [processor_version] if processor_version else [clean_text.PROCESSOR_VERSION,
                                                                         attachment_parse.PROCESSOR_VERSION],
@@ -452,7 +452,7 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff, processor_versio
 def _read_products(conn, eligible, params):
     """(visible versions' metadata by id, clean texts, identifiers, profiles) of one page, in one transaction."""
     meta = {r["version_id"]: dict(r) for r in conn.execute(text(
-        "SELECT v.version_id,v.source_record_id,v.first_seen_at,v.proof_available_at FROM history_versions v "
+        "SELECT v.version_id,v.source_record_id,v.first_seen_at,v.proof_available_at FROM fabric_versions v "
         "WHERE v.source_id=:source AND v.is_demo=:demo AND v.version_id=ANY(:ids) AND " + eligible),
         params).mappings()}
     cleans = conn.execute(text(

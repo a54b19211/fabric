@@ -11,7 +11,7 @@ from pydantic import Field, model_validator
 
 from graph.extraction.clinical_research import ProtocolLocator, project_clinical_trial
 from graph.publish.reviewed_graph import DERIVED_SOURCES
-from store.history_models import HistoryError, Model, sha256, source_time, utc
+from store.record_models import FabricError, Model, sha256, source_time, utc
 
 
 class CollectedDocument(Model):
@@ -182,7 +182,7 @@ def project_collected(item, data):
     native = "legacy:" + document.source_site + ":" + document.source_doc_uuid
     kind = "trial" if document.source_projection is not None else "document"
     if item.source_record_id != native or item.record_kind != kind:
-        raise HistoryError(
+        raise FabricError(
             "collected_document_identity", "自动发布文档的来源ID/类型与冻结原件不一致"
         )
     fields = {

@@ -14,15 +14,15 @@ from pathlib import Path
 import llm_transport as lt
 import pytest
 from fastapi.testclient import TestClient
-from integration_history import pg, pg_engine  # noqa: F401  (fixtures)
+from integration_records import pg, pg_engine  # noqa: F401  (fixtures)
 from sqlalchemy import text
 
 from clean import clean_stage, measurement_reads
 from clean import measure_extract as mx
 from clean import measure_runs as runs
 from run import measure
-from store import history as store
-from store.history_models import ArchiveImport, ArchiveRecord
+from store import records as store
+from store.record_models import ArchiveImport, ArchiveRecord
 
 CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "measurement_feed_contract.json").read_text("utf-8"))
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731  (as the other suites)
@@ -248,24 +248,24 @@ def test_the_routes_serve_what_the_radar_accepts(db, fake):
     version = who_version()
     measure.run_round(model=fake.model(), with_rules=False)
     client, auth = TestClient(app), {"Authorization": "Bearer test-reader-only"}
-    page = client.get("/api/history/measurements/changes", params={"is_demo": "true", "limit": 2}, headers=auth).json()
+    page = client.get("/api/fabric/measurements/changes", params={"is_demo": "true", "limit": 2}, headers=auth).json()
     assert valid_page(page) and page["more"] is True and page["next_after"] == 2 and page["withheld"] == {}
-    feed = page["items"] + client.get("/api/history/measurements/changes", params={
+    feed = page["items"] + client.get("/api/fabric/measurements/changes", params={
         "is_demo": "true", "after_seq": 2}, headers=auth).json()["items"]
     expect = CONTRACT["linkage_expectation"]["who_marburg_fixture"]
     assert sum(i["kind"] == "created" for i in feed) == expect["created_events"]
     for item in feed:
         assert set(CONTRACT["feed"]["item_keys"]) <= set(item)
         assert set(item["versions"]) == set(CONTRACT["feed"]["version_keys"])
-    pulled = client.get("/api/history/measurements", params={
+    pulled = client.get("/api/fabric/measurements", params={
         "source_id": "who_don", "is_demo": "true", "mode": "current", "cutoff": NOW().isoformat(),
         "version_ids": [version], "include_history": "true"}, headers=auth).json()["measurements"]
     assert len(pulled) == expect["objects"] and all(map(valid_receipt, pulled))
     assert all(set(CONTRACT["pull"]["receipt_keys"]) <= set(r) for r in pulled)
     with db.begin() as conn:  # who_don revoked
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='who_don'"))
-    withheld = client.get("/api/history/measurements/changes", params={"is_demo": "true"}, headers=auth).json()
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='who_don'"))
+    withheld = client.get("/api/fabric/measurements/changes", params={"is_demo": "true"}, headers=auth).json()
     assert withheld["items"] == [] and withheld["withheld"] == {"who_don": 3} and withheld["next_after"] == 3
-    assert client.get("/api/history/measurements", params={
+    assert client.get("/api/fabric/measurements", params={
         "source_id": "who_don", "is_demo": "true", "mode": "current", "cutoff": NOW().isoformat(),
         "version_ids": [version]}, headers=auth).status_code == 403

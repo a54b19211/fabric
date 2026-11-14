@@ -1,4 +1,4 @@
-"""测量对象的两个读接口（GET /api/history/measurements 和 /measurements/changes，雷达 series_sync 读）。
+"""测量对象的两个读接口（GET /api/fabric/measurements 和 /measurements/changes，雷达 series_sync 读）。
 
 每次读都先查来源此刻的许可。对象的状态由它的事件在截止时间折叠出来：没有取代事件是 ok（current），
 被新运行取代是 superseded（不再 current，superseded_by 指向接替它的对象，没有就为空）。
@@ -15,8 +15,8 @@ import re
 from sqlalchemy import text
 
 from clean.measure_runs import SUPERSEDING, readable, versions_of
-from store import history
-from store.history_models import HistoryError
+from store import records
+from store.record_models import FabricError
 
 SCHEMA, CHANGES_SCHEMA = "datafabric.measurements.v1", "datafabric.measurement_changes.v1"
 MAX_OBJECTS, MAX_CHANGES = 2000, 200
@@ -61,19 +61,19 @@ def receipt(obj, events, mode, cutoff):
 def _open(conn, cutoff):
     conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
     if cutoff.tzinfo is None:
-        raise HistoryError("invalid_cutoff", "截止时间必须包含时区", 422)
+        raise FabricError("invalid_cutoff", "截止时间必须包含时区", 422)
     if cutoff > conn.execute(text("SELECT clock_timestamp()")).scalar_one():
-        raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        raise FabricError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
 
 
 def for_versions(source_id, is_demo, version_ids, mode, cutoff, *, include_history=False):
     """The objects of these versions of one source visible at the cutoff: the current ones, with include_history
     also those superseded."""
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
-        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
-    with history.history_engine().begin() as conn:
+        raise FabricError("query_budget", "一次最多 100 个合法版本号", 422)
+    with records.fabric_engine().begin() as conn:
         _open(conn, cutoff)
-        history._source(conn, source_id)  # 403 when the source may not be read now
+        records._source(conn, source_id)  # 403 when the source may not be read now
         objs = [dict(r) for r in conn.execute(text(
             "SELECT * FROM derived_measurements WHERE source_id=:s AND is_demo=:d AND version_id=ANY(:ids) "
             "ORDER BY version_id, measurement_id LIMIT :n"),
@@ -92,7 +92,7 @@ def changes(is_demo, *, after_seq=0, limit=50):
     """The events after a sequence number, in commit order. An event of a source not readable now is withheld
     (counted per source, never shown); next_after is the last sequence looked at."""
     limit = max(1, min(int(limit), MAX_CHANGES))
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         rows = conn.execute(text(
             "SELECT * FROM derived_measurement_events WHERE is_demo=:d AND published_seq>:a ORDER BY published_seq "

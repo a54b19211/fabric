@@ -5,7 +5,7 @@ from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import and_, false, func, or_
 
-from api.routers.history import require_admin
+from api.routers.fabric import require_admin
 from graph.api.schemas.request import ExtractionTriggerRequest, PendingExtractRequest
 from graph.api.schemas.response import (
     ExtractionStatsResponse,
@@ -73,10 +73,10 @@ def trigger_extraction(body: ExtractionTriggerRequest):
                 filters = [
                     Document.extraction_status == "pending",
                     Document.is_deleted == false(),
-                    # documents 库存要有正文；history 固定版本的正文在 history 里
+                    # documents 库存要有正文；资料库固定版本的正文在资料库里
                     or_(and_(Document.raw_content != "", Document.raw_content.isnot(None)),
                         Document.history_version_id.isnot(None)),
-                    listed(Document),  # 撤权来源的 history 主体不再排队
+                    listed(Document),  # 撤权来源的资料库主体不再排队
                 ]
                 if body.source_site:
                     filters.append(Document.source_site == body.source_site)
@@ -432,20 +432,20 @@ def get_extraction_status(uuid: str):
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
-class HistoryVersionSubject(BaseModel):
+class FabricVersionSubject(BaseModel):
     source_id: str
     record_id: str
     version_id: str
     is_demo: bool = False
 
 
-@router.post("/history-version", dependencies=[Depends(require_admin)])
-def trigger_history_version(body: HistoryVersionSubject):
-    """把 history 的一个固定版本交给抽取（只在 history 里、没有 documents 行的新材料也走这里）。"""
+@router.post("/fabric-version", dependencies=[Depends(require_admin)])
+def trigger_fabric_version(body: FabricVersionSubject):
+    """把资料库的一个固定版本交给抽取（只在资料库里、没有 documents 行的新材料也走这里）。"""
     from graph.db.extraction_subjects import enqueue_version
-    from store.history_models import HistoryError
+    from store.record_models import FabricError
 
     try:
         return enqueue_version(body.source_id, body.record_id, body.version_id, is_demo=body.is_demo)
-    except HistoryError as exc:
+    except FabricError as exc:
         raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message}) from None

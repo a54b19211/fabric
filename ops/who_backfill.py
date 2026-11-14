@@ -6,7 +6,7 @@ A recent window is another task:           python -m ops.who_backfill --since 20
 It reads the notices with LastModified from 2024-01-01 (or --since) up to the frozen --until, oldest first, each in its current
 version, and stops at the first bound it reaches: 400 records or 40 MiB. There is no bound on the number of requests of
 its own (they are at most 8 for 400 records, 30 s apart: the who.int interval in fetch/catalog.py). The plugin takes
-50 records from a response and a history run reads at most 100, so the backfill goes in legs of one run each.
+50 records from a response and a fetch run reads at most 100, so the backfill goes in legs of one run each.
 
 The coverage of every leg carries a receipt under "backfill": the bounds, what has been spent, why the backfill
 stopped (None while it goes on), the LastModified/Id cursor the next leg would start from, and the versions this run
@@ -29,13 +29,13 @@ from datetime import datetime, timezone
 
 from fetch import who_don
 from fetch.sources import read_public
-from store import history
-from store.history_models import FetchRequest, HistoryError
+from store import records
+from store.record_models import FabricError, FetchRequest
 
 LOG = logging.getLogger(__name__)
 SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 LEG_PAGES, LEG_DEADLINE = 2, 120
-LEG_RECORDS = LEG_PAGES * who_don.PAGE_SIZE  # a history run reads at most 100 records
+LEG_RECORDS = LEG_PAGES * who_don.PAGE_SIZE  # a fetch run reads at most 100 records
 # Stops that end the backfill; any other stop (a failure, a deadline) ends one call and a later call goes on.
 FINAL = frozenset({"reached_end", "records_bound", "bytes_bound"})
 
@@ -99,7 +99,7 @@ def _read_leg(store, run) -> dict:
     request = store.job_input(run.id, run.attempt)
     try:
         return read_public(request)
-    except HistoryError as exc:
+    except FabricError as exc:
         store.fail_job(run.id, run.attempt, exc.code, exc.message)
         raise
 
@@ -130,11 +130,11 @@ def _absorb(progress: Progress, run) -> dict | None:
     return receipt
 
 
-def backfill_who(until: datetime, *, since: datetime = SINCE, bounds: Counts = BOUNDS, store=history) -> dict:
+def backfill_who(until: datetime, *, since: datetime = SINCE, bounds: Counts = BOUNDS, store=records) -> dict:
     """Run, or carry on, the backfill of [since, until]; the receipt of the last leg it came to."""
     since, until = since.astimezone(timezone.utc), until.astimezone(timezone.utc)
     if until <= since:
-        raise HistoryError("backfill_window", "回填终点须晚于起点（默认 2024-01-01）")
+        raise FabricError("backfill_window", "回填终点须晚于起点（默认 2024-01-01）")
     progress = Progress()
     while True:
         run, _ = store.create_fetch(_leg_request(since, until, progress, bounds), _key(since, until, progress.legs + 1))
@@ -143,7 +143,7 @@ def backfill_who(until: datetime, *, since: datetime = SINCE, bounds: Counts = B
         elif run.state == "queued":
             receipt, fresh = _absorb(progress, _run_leg(store, run, since, until, bounds, progress)), True
         else:
-            raise HistoryError("backfill_leg_unresolved", "回填的上一段仍在运行或待恢复；先按任务编号处理它", 409)
+            raise FabricError("backfill_leg_unresolved", "回填的上一段仍在运行或待恢复；先按任务编号处理它", 409)
         if receipt is None:  # a leg that failed before it could leave a receipt: nothing was spent, go on
             continue
         if receipt["stopped_by"] in FINAL or (fresh and receipt["stopped_by"]):

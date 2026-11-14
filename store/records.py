@@ -1,4 +1,4 @@
-"""History 库：存版本、记采集任务、按模式和截止时间读版本。
+"""资料库：存版本、记采集任务、按模式和截止时间读版本。
 
 存（finish_fetch 抓取 / import_archive 导入 → _publish，一个事务）：
   每条原件先投影（fetch/projection.py · project_record：标题、正文、事实字段，纯函数），再算一个内容指纹
@@ -10,11 +10,11 @@
   current / operational_replay 模式看 first_seen_at <= cutoff；public_history_reconstruction 看 proof_available_at
   （档案导入时声明的公开可见时间）。一条记录在截止时间下可见的版本按 _LATEST 排第一的那个。
 
-表：history_sources（来源，read_enabled 关掉就不可读）、history_runs（采集/导入任务）、history_versions（版本）、
-history_version_rank（排序用的派生键）、history_attachment_links（附件属于哪个父页面版本）。
+表：fabric_sources（来源，read_enabled 关掉就不可读）、fabric_runs（采集/导入任务）、fabric_versions（版本）、
+fabric_version_rank（排序用的派生键）、fabric_attachment_links（附件属于哪个父页面版本）。
 
 依赖方向：抓（fetch/）、洗（clean/）调用这里；这里不调读取和清洗，只用不连库、不联网的来源目录（fetch/catalog.py）、
-投影（fetch/projection.py）和数据形状（store/history_models.py）。唯一的例外是按旧编号读 legacy 版本时查迁移别名
+投影（fetch/projection.py）和数据形状（store/record_models.py）。唯一的例外是按旧编号读 legacy 版本时查迁移别名
 （fetch/legacy_migration.py · alias，旧文档迁移，见那个文件）。
 """
 
@@ -31,15 +31,15 @@ from sqlalchemy import create_engine, text
 
 from fetch.catalog import GRAPH_SOURCES
 from fetch.projection import project_record
-from store.history_models import (
+from store.record_models import (
     MAX_RESPONSE_BYTES,
     ArchiveImport,
     AvailabilityProof,
+    FabricError,
     FetchRequest,
-    HistoryError,
-    HistoryRecord,
     RecordCollection,
     RunView,
+    VersionRecord,
     canonical,
     sha256,
     utc,
@@ -52,11 +52,11 @@ def _engine(url):
     return create_engine(url, pool_size=3, max_overflow=2, pool_pre_ping=True, connect_args={"connect_timeout": 5})
 
 
-def history_engine():
+def fabric_engine():
     # 不回退到别的数据库地址：没配就报错，免得工作树误连现役库
-    url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL", "")
+    url = os.environ.get("DATAFABRIC_DATABASE_URL", "")
     if not url:
-        raise HistoryError("history_not_configured", "历史资料数据库尚未配置", 503)
+        raise FabricError("fabric_not_configured", "资料库尚未配置", 503)
     return _engine(url)
 
 
@@ -71,7 +71,7 @@ def disk_status():
             raise ValueError()
         free = shutil.disk_usage(path).free
     except (ValueError, OSError):
-        raise HistoryError("disk_unknown", "看不到磁盘余量（DATAFABRIC_PUBLICATION_DISK_PATH）：暂停新的采集", 503) from None
+        raise FabricError("disk_unknown", "看不到磁盘余量（DATAFABRIC_PUBLICATION_DISK_PATH）：暂停新的采集", 503) from None
     return {"free_bytes": free, "minimum_free_bytes": minimum, "low": free < minimum}
 
 
@@ -83,21 +83,21 @@ def _source(conn, source_id, *, lock=False):
     """来源那一行；不存在或 read_enabled 关了就不可读（403）。lock：存版本时锁住来源行，同来源的存版本排队
     （FOR NO KEY UPDATE：只改 published_seq，不挡插版本时外键要的锁）。"""
     row = conn.execute(
-        text("SELECT * FROM history_sources WHERE source_id=:id" + (" FOR NO KEY UPDATE" if lock else "")),
+        text("SELECT * FROM fabric_sources WHERE source_id=:id" + (" FOR NO KEY UPDATE" if lock else "")),
         {"id": source_id},
     ).mappings().first()
     if row is None or row["read_enabled"] is not True:
-        raise HistoryError("source_not_available", "该来源当前不可读取", 403)
+        raise FabricError("source_not_available", "该来源当前不可读取", 403)
     return row
 
 
 def sources_receipt():
-    """GET /api/history/sources：可读的来源和已退役的来源，各带名称和雷达读的几项能力（store/source_listing.py）。"""
+    """GET /api/fabric/sources：可读的来源和已退役的来源，各带名称和雷达读的几项能力（store/source_listing.py）。"""
     from store import source_listing
 
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         rows = list(conn.execute(text(
-            "SELECT source_id, read_enabled, catalog FROM history_sources ORDER BY source_id")).mappings())
+            "SELECT source_id, read_enabled, catalog FROM fabric_sources ORDER BY source_id")).mappings())
     return source_listing.listing(rows)
 
 
@@ -149,7 +149,7 @@ def _current(conn, source_id, is_demo, record_id, role="source_record"):
     """这条记录现在的版本（没有被 replaced_by 指走的最新一个）：version_id、fingerprint；没有指纹的老版本另带原件。"""
     return conn.execute(text(
         "SELECT version_id, fingerprint, CASE WHEN fingerprint IS NULL THEN payload->>'raw_content' END AS raw_content "
-        "FROM history_versions "
+        "FROM fabric_versions "
         "WHERE source_id=:source AND is_demo=:demo AND source_record_id=:record AND replaced_by IS NULL "
         "AND COALESCE(payload->'facts'->>'publication_role','source_record')=:role "
         "ORDER BY published_seq DESC LIMIT 1"),
@@ -164,7 +164,7 @@ def _fingerprint_of(source_id, current) -> str:
 
 def stored_unchanged(source_id, item) -> bool:
     """增量读取用（fetch/transport.py 的 Budget.known）：这条原件库里已经有了、而且没变？"""
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         current = _current(conn, source_id, False, item.source_record_id)
     return current is not None and _fingerprint_of(source_id, current) == fingerprint(source_id, item.raw_content)
 
@@ -185,12 +185,12 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
         version_id = sha256(f"{source_id}|{item.source_record_id}|{fp}|{seq}")
         _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at)
         if current is not None:
-            conn.execute(text("UPDATE history_versions SET replaced_by=:new WHERE version_id=:old"),
+            conn.execute(text("UPDATE fabric_versions SET replaced_by=:new WHERE version_id=:old"),
                          {"new": version_id, "old": current["version_id"]})
         version_ids.append(version_id)
         new_ids.append(version_id)
     _link_attachments(conn, run, prepared, version_ids)
-    conn.execute(text("UPDATE history_sources SET published_seq=:seq WHERE source_id=:id"),
+    conn.execute(text("UPDATE fabric_sources SET published_seq=:seq WHERE source_id=:id"),
                  {"seq": seq, "id": source_id})
     _close_run(conn, run, version_ids, new_ids, coverage, error, now)
 
@@ -198,20 +198,20 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
 def _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at):
     proof = AvailabilityProof(kind="declared_archive", available_at=available_at) if available_at else \
         AvailabilityProof(kind="unverified")
-    payload = HistoryRecord(
+    payload = VersionRecord(
         source_id=run["source_id"], source_record_id=item.source_record_id, version_id=version_id,
         is_demo=run["is_demo"], raw_content=item.raw_content, raw_media_type=item.raw_media_type,
         raw_sha256=sha256(item.raw_content), first_seen_at=now, received_at=now, availability_proof=proof,
         published_seq=seq, **projected,
     )
     conn.execute(text("""
-        INSERT INTO history_versions (version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,
+        INSERT INTO fabric_versions (version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,
           received_at,proof_available_at,published_seq,fingerprint,payload)
         VALUES (:id,:source,:demo,:record,:kind,:now,:now,:proof,:seq,:fp,CAST(:payload AS jsonb))"""),
         {"id": version_id, "source": run["source_id"], "demo": run["is_demo"], "record": item.source_record_id,
          "kind": item.record_kind, "now": now, "proof": available_at.upper_bound() if available_at else None,
          "seq": seq, "fp": fp, "payload": payload.model_dump_json()})
-    conn.execute(text(_DERIVE + " FROM history_versions WHERE version_id=:id"), {"id": version_id})
+    conn.execute(text(_DERIVE + " FROM fabric_versions WHERE version_id=:id"), {"id": version_id})
 
 
 def _link_attachments(conn, run, prepared, version_ids):
@@ -224,8 +224,8 @@ def _link_attachments(conn, run, prepared, version_ids):
             continue
         parent_version = by_record.get(facts["parent_record_id"])
         conn.execute(text("""
-          INSERT INTO history_attachment_links (attachment_version_id,parent_record_id,parent_version_id,link_basis,run_id)
-          SELECT :a,:p,:pv,:basis,:run WHERE NOT EXISTS (SELECT 1 FROM history_attachment_links
+          INSERT INTO fabric_attachment_links (attachment_version_id,parent_record_id,parent_version_id,link_basis,run_id)
+          SELECT :a,:p,:pv,:basis,:run WHERE NOT EXISTS (SELECT 1 FROM fabric_attachment_links
             WHERE attachment_version_id=:a AND parent_record_id=:p AND COALESCE(parent_version_id,'')=COALESCE(:pv,''))"""),
             {"a": version, "p": facts["parent_record_id"], "pv": parent_version, "run": run["id"],
              "basis": "same_run_parent_version" if parent_version else "parent_version_unknown"})
@@ -244,7 +244,7 @@ def _close_run(conn, run, version_ids, new_ids, coverage, error, now):
     if "backfill" in coverage:  # 回填（ops/who_backfill.py）新存的版本是背景材料，不是新动态
         coverage["backfill"] = {**coverage["backfill"], "background_version_ids": new_ids}
     conn.execute(text("""
-        UPDATE history_runs SET state=:state, completed_at=:now, version_ids=CAST(:ids AS jsonb),
+        UPDATE fabric_runs SET state=:state, completed_at=:now, version_ids=CAST(:ids AS jsonb),
           coverage=CAST(:coverage AS jsonb), error=CAST(:error AS jsonb) WHERE id=:id AND attempt=:attempt"""),
         {"state": state, "now": now, "ids": canonical(version_ids), "coverage": canonical(coverage),
          "error": canonical(error), "id": run["id"], "attempt": run["attempt"]})
@@ -253,7 +253,7 @@ def _close_run(conn, run, version_ids, new_ids, coverage, error, now):
 def background_version_ids(conn) -> list[str]:
     """回填运行新存的版本（背景材料，clean/measure_runs.py 不测它们）。"""
     return [r[0] for r in conn.execute(text(
-        "SELECT DISTINCT jsonb_array_elements_text(coverage->'backfill'->'background_version_ids') FROM history_runs "
+        "SELECT DISTINCT jsonb_array_elements_text(coverage->'backfill'->'background_version_ids') FROM fabric_runs "
         "WHERE jsonb_typeof(coverage->'backfill'->'background_version_ids') = 'array'"))]
 
 
@@ -266,15 +266,15 @@ def _view(row):
 
 
 def _run(conn, run_id, *, lock=False):
-    row = conn.execute(text("SELECT * FROM history_runs WHERE id=:id" + (" FOR UPDATE" if lock else "")),
+    row = conn.execute(text("SELECT * FROM fabric_runs WHERE id=:id" + (" FOR UPDATE" if lock else "")),
                        {"id": run_id}).mappings().first()
     if row is None:
-        raise HistoryError("run_not_found", "任务不存在", 404)
+        raise FabricError("run_not_found", "任务不存在", 404)
     return row
 
 
 def read_run(run_id):
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         row = _run(conn, run_id)
         _source(conn, row["source_id"])
         return _view(row)
@@ -285,16 +285,16 @@ def _new_run(conn, source_id, is_demo, kind, body, key, scope):
     _source(conn, source_id)
     key = key or str(uuid.uuid4())
     row = conn.execute(text("""
-        INSERT INTO history_runs (id,source_id,is_demo,kind,state,idempotency_key,request_payload,scope_description)
+        INSERT INTO fabric_runs (id,source_id,is_demo,kind,state,idempotency_key,request_payload,scope_description)
         VALUES (:id,:source,:demo,:kind,'queued',:key,CAST(:body AS jsonb),:scope)
         ON CONFLICT (idempotency_key) DO NOTHING RETURNING *"""),
         {"id": str(uuid.uuid4()), "source": source_id, "demo": is_demo, "kind": kind, "key": key,
          "body": canonical(body), "scope": scope}).mappings().first()
     if row is not None:
         return row, True
-    row = conn.execute(text("SELECT * FROM history_runs WHERE idempotency_key=:key"), {"key": key}).mappings().one()
+    row = conn.execute(text("SELECT * FROM fabric_runs WHERE idempotency_key=:key"), {"key": key}).mappings().one()
     if (row["source_id"], row["kind"]) != (source_id, kind):
-        raise HistoryError("idempotency_conflict", "这个幂等键已用于别的来源或别的任务", 409)
+        raise FabricError("idempotency_conflict", "这个幂等键已用于别的来源或别的任务", 409)
     return row, False
 
 
@@ -303,16 +303,16 @@ LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥 legacy_documents 已退�
 
 def import_archive(request: ArchiveImport, key: str | None = None, *, graph_checked=False):
     """导入一包原件（场景回放、图谱发布、本地文件），和抓取一样存成版本。proof.available_at 给了的，这批新版本在
-    public_history_reconstruction 模式下从那个时间起可见。图包在导入前由 graph/publish/history_graph.py 核对。"""
+    public_history_reconstruction 模式下从那个时间起可见。图包在导入前由 graph/publish/fabric_graph.py 核对。"""
     if request.source_id == "legacy_documents":
-        raise HistoryError(*LEGACY_RETIRED, 410)
+        raise FabricError(*LEGACY_RETIRED, 410)
     if request.source_id in GRAPH_SOURCES and not graph_checked:
-        raise HistoryError("graph_import_unchecked", "图包要经 graph/publish/history_graph.py 的 import_graph 导入", 422)
+        raise FabricError("graph_import_unchecked", "图包要经 graph/publish/fabric_graph.py 的 import_graph 导入", 422)
     prepared = [(item, project_record(request.source_id, item)) for item in request.records]
     body = request.model_dump(mode="json")
     body["records"] = [{"source_record_id": r.source_record_id, "record_kind": r.record_kind}
                        for r in request.records]  # 原件已存在版本里，运行只记清单
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         run, fresh = _new_run(conn, request.source_id, request.is_demo, "archive", body, key,
                               request.scope_description)
         if fresh:
@@ -325,7 +325,7 @@ def import_archive(request: ArchiveImport, key: str | None = None, *, graph_chec
 
 def create_fetch(request: FetchRequest, key: str | None = None):
     """建一条采集任务（还没读）。返回 (运行, 是否新建)：幂等键用过就是原来那条。"""
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         row, fresh = _new_run(conn, request.source_id, False, "fetch", request.model_dump(mode="json", exclude_none=True),
                               key, "公开有界检索：" + request.query)
         return _view(row), fresh
@@ -333,12 +333,12 @@ def create_fetch(request: FetchRequest, key: str | None = None):
 
 def job_input(run_id, attempt) -> FetchRequest:
     """采集作业开始：任务从 queued 改成 running，返回要读的请求。"""
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         row = _run(conn, run_id, lock=True)
         if row["kind"] != "fetch" or row["state"] != "queued" or row["attempt"] != attempt:
-            raise HistoryError("stale_attempt", "该任务已经在跑或跑完了", 409)
+            raise FabricError("stale_attempt", "该任务已经在跑或跑完了", 409)
         _source(conn, row["source_id"])
-        conn.execute(text("UPDATE history_runs SET state='running' WHERE id=:id"), {"id": run_id})
+        conn.execute(text("UPDATE fabric_runs SET state='running' WHERE id=:id"), {"id": run_id})
         return FetchRequest.model_validate(row["request_payload"])
 
 
@@ -350,10 +350,10 @@ REPORTED = ("complete", "upstream_pagination_exhausted", "stop_reason", "request
 
 def finish_fetch(run_id, attempt, batch):
     """采集作业读完：把读到的原件存成版本，记下这次读取的情况（读到哪、为什么停、哪些没读到）。"""
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         run = _run(conn, run_id, lock=True)
         if run["attempt"] != attempt or run["state"] != "running":
-            raise HistoryError("stale_attempt", "旧任务尝试不得存版本", 409)
+            raise FabricError("stale_attempt", "旧任务尝试不得存版本", 409)
         prepared = [(item, project_record(run["source_id"], item)) for item in batch["records"]]
         coverage = {key: batch.get(key) for key in REPORTED[:6]}
         coverage.update({key: batch[key] for key in REPORTED[6:] if batch.get(key)})
@@ -365,9 +365,9 @@ def finish_fetch(run_id, attempt, batch):
 
 
 def fail_job(run_id, attempt, code, message):
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         conn.execute(text("""
-          UPDATE history_runs SET state='failed', completed_at=clock_timestamp(), error=CAST(:error AS jsonb)
+          UPDATE fabric_runs SET state='failed', completed_at=clock_timestamp(), error=CAST(:error AS jsonb)
           WHERE id=:id AND attempt=:attempt AND state IN ('queued','running')"""),
             {"id": run_id, "attempt": attempt, "error": canonical({"code": code, "message": message})})
 
@@ -379,7 +379,7 @@ def _cutoff(value):
     try:
         return utc(value)
     except (ValueError, AttributeError):
-        raise HistoryError("invalid_cutoff", "截止时间必须包含时区", 422) from None
+        raise FabricError("invalid_cutoff", "截止时间必须包含时区", 422) from None
 
 
 def _eligibility(mode):
@@ -388,13 +388,13 @@ def _eligibility(mode):
         return "first_seen_at <= :cutoff"
     if mode == "public_history_reconstruction":
         return "proof_available_at IS NOT NULL AND proof_available_at <= :cutoff"
-    raise HistoryError("unsupported_mode", "不支持该历史读取模式")
+    raise FabricError("unsupported_mode", "不支持该历史读取模式")
 
 
 def _derived_mode(source_id, mode):
     """图谱和旧文档桥没有公开历史可见时间，不能按 public_history_reconstruction 读。"""
     if source_id in {"primekg_graph", "reviewed_graph", "legacy_documents"} and mode == "public_history_reconstruction":
-        raise HistoryError("graph_history_unsupported", "图谱和旧文档桥没有公开历史可见时间，只能按首次看到的时间读")
+        raise FabricError("graph_history_unsupported", "图谱和旧文档桥没有公开历史可见时间，只能按首次看到的时间读")
 
 
 def _open_read(conn, source_id, mode, cutoff):
@@ -403,12 +403,12 @@ def _open_read(conn, source_id, mode, cutoff):
     source = _source(conn, source_id)
     cutoff = _cutoff(cutoff)
     if cutoff > _now(conn):
-        raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        raise FabricError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
     return source, cutoff
 
 
 # 一条记录"在截止时间下可见的版本"：先按模式和截止时间筛，再排第一。排序：来源自己的版本先于 legacy 迁入的；
-# 再看最晚的公开可见/首次看到时间，来源自己的更新时间，最后看发布序号。排序键在 history_version_rank
+# 再看最晚的公开可见/首次看到时间，来源自己的更新时间，最后看发布序号。排序键在 fabric_version_rank
 # （V021 以前的版本没有那一行，就从载荷里现算，结果一样）。
 _SOURCE_UPDATED_FROM_PAYLOAD = """CASE payload->'source_updated_at'->>'precision'
  WHEN 'instant' THEN (payload->'source_updated_at'->>'value')::timestamptz
@@ -417,7 +417,7 @@ _SOURCE_UPDATED_FROM_PAYLOAD = """CASE payload->'source_updated_at'->>'precision
  WHEN 'year' THEN ((((payload->'source_updated_at'->>'value') || '-01-01')::date + interval '1 year' - interval '1 microsecond') AT TIME ZONE 'UTC')
  ELSE NULL END"""
 _ROLE_FROM_PAYLOAD = "COALESCE(payload->'facts'->>'publication_role','source_record')"
-_VERSIONS = "history_versions LEFT JOIN history_version_rank USING (version_id)"
+_VERSIONS = "fabric_versions LEFT JOIN fabric_version_rank USING (version_id)"
 _ROLE = "COALESCE(publication_role," + _ROLE_FROM_PAYLOAD + ")"
 _SOURCE_UPDATED_ORDER = (
     "(CASE WHEN publication_role IS NULL THEN " + _SOURCE_UPDATED_FROM_PAYLOAD + " ELSE source_updated_rank END)"
@@ -427,7 +427,7 @@ _LATEST = (
     "COALESCE(proof_available_at,first_seen_at) DESC," + _SOURCE_UPDATED_ORDER + " DESC NULLS LAST,published_seq DESC"
 )
 _DERIVE = (
-    "INSERT INTO history_version_rank(version_id,publication_role,source_updated_rank) SELECT version_id,"
+    "INSERT INTO fabric_version_rank(version_id,publication_role,source_updated_rank) SELECT version_id,"
     + _ROLE_FROM_PAYLOAD + "," + _SOURCE_UPDATED_FROM_PAYLOAD
 )
 
@@ -442,36 +442,36 @@ def _ranked(where, mode):
 
 
 def backfill_rank(source_id, *, batch=500):
-    """给 V021 以前存的版本补排序键（ops/backfill_history_rank.py），一次最多 batch 个；返回补了几个。"""
-    with history_engine().begin() as conn:
+    """给 V021 以前存的版本补排序键（ops/backfill_version_rank.py），一次最多 batch 个；返回补了几个。"""
+    with fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '30000ms'"))
         return conn.execute(text(
-            _DERIVE + " FROM history_versions WHERE version_id IN (SELECT h.version_id FROM history_versions h "
-            "LEFT JOIN history_version_rank r ON r.version_id=h.version_id "
+            _DERIVE + " FROM fabric_versions WHERE version_id IN (SELECT h.version_id FROM fabric_versions h "
+            "LEFT JOIN fabric_version_rank r ON r.version_id=h.version_id "
             "WHERE h.source_id=:source AND r.version_id IS NULL LIMIT :batch)"),
             {"source": source_id, "batch": batch}).rowcount
 
 
-# 整源字面检索（ILIKE 扫正文）只在不大的来源上做；大来源请用 POST /api/history/search（WeKnora 检索）
+# 整源字面检索（ILIKE 扫正文）只在不大的来源上做；大来源请用 POST /api/fabric/search（WeKnora 检索）
 LITERAL_SEARCH_MAX_VERSIONS = 20000
 
 
 def _read_filters(conn, source, is_demo, cutoff, max_seq, run_id, ids, terms, kind):
     """list_records 的筛选条件 (where, 参数, 字面检索条件)。run_id：只读这次运行存下（或用到）的那些记录。"""
     if terms and not ids and not run_id and source["published_seq"] > LITERAL_SEARCH_MAX_VERSIONS:
-        raise HistoryError("query_budget", f"该来源有 {source['published_seq']} 个版本，整源字面检索太慢；"
-                           "请用 POST /api/history/search，或给出记录编号、运行编号", 422)
+        raise FabricError("query_budget", f"该来源有 {source['published_seq']} 个版本，整源字面检索太慢；"
+                           "请用 POST /api/fabric/search，或给出记录编号、运行编号", 422)
     if len(ids) > 5000 or len(terms) > 3 or any(not 2 <= len(term) <= 120 for term in terms):
-        raise HistoryError("query_budget", "记录编号最多 5000 个，检索词最多 3 个、每个 2–120 字")
+        raise FabricError("query_budget", "记录编号最多 5000 个，检索词最多 3 个、每个 2–120 字")
     where = ["source_id=:source", "is_demo=:demo", "published_seq<=:max_seq"]
     params = {"source": source["source_id"], "demo": is_demo, "cutoff": cutoff, "max_seq": max_seq}
     if run_id:
         run = _run(conn, run_id)
         if run["source_id"] != source["source_id"] or run["is_demo"] != is_demo:
-            raise HistoryError("manifest_mismatch", "运行与来源或 demo 类别不匹配")
+            raise FabricError("manifest_mismatch", "运行与来源或 demo 类别不匹配")
         if run["state"] not in ("completed", "partial", "failed"):
-            raise HistoryError("manifest_not_ready", "运行还没结束", 409)
-        where.append("source_record_id IN (SELECT source_record_id FROM history_versions "
+            raise FabricError("manifest_not_ready", "运行还没结束", 409)
+        where.append("source_record_id IN (SELECT source_record_id FROM fabric_versions "
                      "WHERE version_id=ANY(CAST(:run_versions AS text[])))")
         params["run_versions"] = list(run["version_ids"])
     if ids:
@@ -504,7 +504,7 @@ def _lead_window(source_id, window):
     except (ValueError, AttributeError, TypeError):
         bounds = None
     if source_id not in LEAD_WINDOW_SOURCES or bounds is None or bounds[0] >= bounds[1]:
-        raise HistoryError("invalid_window", "线索窗口须给出含时区的起止时间（起点早于终点），且只适用于 GDELT", 422)
+        raise FabricError("invalid_window", "线索窗口须给出含时区的起止时间（起点早于终点），且只适用于 GDELT", 422)
     return bounds
 
 
@@ -512,7 +512,7 @@ def _window_receipts(conn, source_id, is_demo, cutoff, window):
     """这个窗口里各次读取留下的回执：截止时间前结束、读取范围碰到这个窗口的运行；同一个检索词同一个区间，
     以最近一次为准（前一次没读到的，后一次读了）。返回 (回执, 可能没读全的区间)。"""
     rows = conn.execute(text(
-        "SELECT request_payload->>'query' AS query, coverage FROM history_runs "
+        "SELECT request_payload->>'query' AS query, coverage FROM fabric_runs "
         "WHERE source_id=:source AND is_demo=:demo AND kind='fetch' AND state IN ('completed','partial','failed') "
         "AND completed_at<=:cutoff AND jsonb_typeof(coverage->'window_coverage')='array' "
         "AND COALESCE((request_payload->>'updated_until')::timestamptz,completed_at)>:start "
@@ -521,7 +521,7 @@ def _window_receipts(conn, source_id, is_demo, cutoff, window):
         {"source": source_id, "demo": is_demo, "cutoff": cutoff, "start": window[0], "end": window[1],
          "limit": MAX_WINDOW_RUNS + 1}).mappings().all()
     if len(rows) > MAX_WINDOW_RUNS:
-        raise HistoryError("window_too_wide", f"窗口内的读取超过 {MAX_WINDOW_RUNS} 次，请缩小窗口", 422)
+        raise FabricError("window_too_wide", f"窗口内的读取超过 {MAX_WINDOW_RUNS} 次，请缩小窗口", 422)
     latest = {}
     for row in rows:
         for receipt in row["coverage"]["window_coverage"]:
@@ -536,26 +536,26 @@ def _page(rows, limit):
     """一页的版本（不超过响应字节上限）和后面还有没有。"""
     items, size = [], 0
     for row in rows[:limit]:
-        record = HistoryRecord.model_validate(row["payload"])
+        record = VersionRecord.model_validate(row["payload"])
         size += len(record.model_dump_json().encode())
         if size > MAX_RESPONSE_BYTES:
             break
         items.append(record)
     if rows[:limit] and not items:
-        raise HistoryError("response_budget", "单条来源记录超过响应上限", 413)
+        raise FabricError("response_budget", "单条来源记录超过响应上限", 413)
     return items, len(rows) > len(items)
 
 
 def list_records(source_id, is_demo, mode, cutoff, *, run_id=None, source_record_ids=(), terms=(), record_kind=None,
                  limit=25, cursor=None, window=(None, None)):
-    """GET /api/history/records：每条记录在截止时间下可见的版本，按记录号排序分页。cursor 是上一页给的
+    """GET /api/fabric/records：每条记录在截止时间下可见的版本，按记录号排序分页。cursor 是上一页给的
     "发布序号上界|最后一个记录号"，原样传回即可。"""
     if source_id == "legacy_documents" and not source_record_ids:
-        raise HistoryError(*LEGACY_RETIRED, 410)  # 按旧编号读不受影响
+        raise FabricError(*LEGACY_RETIRED, 410)  # 按旧编号读不受影响
     if not 1 <= limit <= 100:
-        raise HistoryError("query_budget", "每页条数须为1至100")
+        raise FabricError("query_budget", "每页条数须为1至100")
     window = _lead_window(source_id, window)
-    with history_engine().begin() as conn:
+    with fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         source, cutoff = _open_read(conn, source_id, mode, cutoff)
         max_seq, last = source["published_seq"], ""
@@ -563,7 +563,7 @@ def list_records(source_id, is_demo, mode, cutoff, *, run_id=None, source_record
             try:
                 max_seq, last = int(cursor.split("|", 1)[0]), cursor.split("|", 1)[1]
             except (ValueError, IndexError):
-                raise HistoryError("invalid_cursor", "分页游标无效", 422) from None
+                raise FabricError("invalid_cursor", "分页游标无效", 422) from None
         where, params, term_filter = _read_filters(conn, source, is_demo, cutoff, max_seq, run_id,
                                                    source_record_ids, terms, record_kind)
         if window:
@@ -583,19 +583,19 @@ def list_records(source_id, is_demo, mode, cutoff, *, run_id=None, source_record
 
 
 def read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff):
-    """GET /api/history/versions/{version_id}：这个固定版本，只要它在这个模式和截止时间下可见。"""
+    """GET /api/fabric/versions/{version_id}：这个固定版本，只要它在这个模式和截止时间下可见。"""
     if not re.fullmatch(r"[0-9a-f]{64}", version_id):
-        raise HistoryError("version_not_found", "版本不存在", 404)
-    with history_engine().begin() as conn:
+        raise FabricError("version_not_found", "版本不存在", 404)
+    with fabric_engine().begin() as conn:
         _, cutoff = _open_read(conn, source_id, mode, cutoff)
         row = conn.execute(text(
-            "SELECT payload FROM history_versions WHERE version_id=:id AND source_id=:source "
+            "SELECT payload FROM fabric_versions WHERE version_id=:id AND source_id=:source "
             "AND source_record_id=:record AND is_demo=:demo AND " + _eligibility(mode)),
             {"id": version_id, "source": source_id, "record": source_record_id, "demo": is_demo, "cutoff": cutoff},
         ).mappings().first()
         if row is None:
-            raise HistoryError("version_not_found", "该版本在当前来源、范围或截止时间下不可见", 404)
-        record = HistoryRecord.model_validate(row["payload"])
+            raise FabricError("version_not_found", "该版本在当前来源、范围或截止时间下不可见", 404)
+        record = VersionRecord.model_validate(row["payload"])
         if source_id == "legacy_documents":
             record = _with_legacy_alias(conn, record, mode, cutoff)
         return record
@@ -616,8 +616,8 @@ def visible_versions(source_id, is_demo, mode, cutoff, source_record_ids):
     """{记录号: 在这个模式和截止时间下可见的版本号}（store/retrieval.py 核对检索命中用）；不可见的不在结果里。"""
     ids = sorted(set(source_record_ids))
     if not 1 <= len(ids) <= 200:
-        raise HistoryError("query_budget", "一次最多核对 200 条记录")
-    with history_engine().begin() as conn:
+        raise FabricError("query_budget", "一次最多核对 200 条记录")
+    with fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         source, cutoff = _open_read(conn, source_id, mode, cutoff)
         where, params, _ = _read_filters(conn, source, is_demo, cutoff, source["published_seq"], None, ids, (), None)
@@ -627,14 +627,14 @@ def visible_versions(source_id, is_demo, mode, cutoff, source_record_ids):
 
 
 def list_changes(source_id, is_demo, *, after=0, limit=25):
-    """GET /api/history/changes：发布序号 after 之后新存的版本，按序号。雷达用它跟新增：下次从 next_after 接着读。"""
+    """GET /api/fabric/changes：发布序号 after 之后新存的版本，按序号。雷达用它跟新增：下次从 next_after 接着读。"""
     if after < 0 or not 1 <= limit <= 100:
-        raise HistoryError("query_budget", "变更读取参数不合法")
-    with history_engine().begin() as conn:
+        raise FabricError("query_budget", "变更读取参数不合法")
+    with fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         max_seq = _source(conn, source_id)["published_seq"]
         rows = conn.execute(text(
-            "SELECT payload FROM history_versions WHERE source_id=:source AND is_demo=:demo AND published_seq>:after "
+            "SELECT payload FROM fabric_versions WHERE source_id=:source AND is_demo=:demo AND published_seq>:after "
             "AND published_seq<=:max_seq ORDER BY published_seq LIMIT :limit"),
             {"source": source_id, "demo": is_demo, "after": after, "max_seq": max_seq, "limit": limit + 1},
         ).mappings().all()
@@ -645,19 +645,19 @@ def list_changes(source_id, is_demo, *, after=0, limit=25):
 
 
 def version_differences(source_id, is_demo, version_ids, mode, cutoff):
-    """GET /api/history/version-differences：每个版本的上一版。版本只在原件指纹变了时才新存，所以有上一版就是
+    """GET /api/fabric/version-differences：每个版本的上一版。版本只在原件指纹变了时才新存，所以有上一版就是
     原件变了（kind=raw_changed）；没有上一版是这条记录第一次存（first_adoption）；看不到的是 not_visible。"""
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
-        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
-    with history_engine().begin() as conn:
+        raise FabricError("query_budget", "一次最多 100 个合法版本号", 422)
+    with fabric_engine().begin() as conn:
         _, cutoff = _open_read(conn, source_id, mode, cutoff)
         visible = _eligibility(mode).replace("proof_available_at", "v.proof_available_at").replace(
             "first_seen_at", "v.first_seen_at")
         previous = _eligibility(mode).replace("proof_available_at", "p.proof_available_at").replace(
             "first_seen_at", "p.first_seen_at")
         rows = conn.execute(text(
-            "SELECT v.version_id, v.source_record_id, p.version_id AS previous FROM history_versions v "
-            "LEFT JOIN history_versions p ON p.replaced_by=v.version_id AND " + previous + " "
+            "SELECT v.version_id, v.source_record_id, p.version_id AS previous FROM fabric_versions v "
+            "LEFT JOIN fabric_versions p ON p.replaced_by=v.version_id AND " + previous + " "
             "WHERE v.version_id=ANY(:ids) AND v.source_id=:source AND v.is_demo=:demo AND " + visible),
             {"ids": list(version_ids), "source": source_id, "demo": is_demo, "cutoff": cutoff}).mappings().all()
     found = {row["version_id"]: row for row in rows}

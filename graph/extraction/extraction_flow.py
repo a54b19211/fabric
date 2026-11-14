@@ -319,7 +319,7 @@ def extract_single_document(
     对单篇文档执行完整抽取流程（支持长文档多块带记忆）。
     返回 True 表示成功，False 表示失败。
 
-    native_allowed=False：正文不是来源接口原件（history 固定版本的主体给的是清洗正文），规则映射找不到原字段，
+    native_allowed=False：正文不是来源接口原件（资料库固定版本的主体给的是清洗正文），规则映射找不到原字段，
     走模型抽取。
     """
     logger.info(f"[Extraction] 开始抽取: {doc_uuid} site={source_site}")

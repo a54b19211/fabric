@@ -12,19 +12,19 @@ from graph.publish.reviewed_graph import (
     GraphRef,
     identity_key,
 )
-from store.history_models import HistoryError, Model
+from store.record_models import FabricError, Model
 
 ReviewScope = Literal["reviewed", "with_candidates"]
 
 
 def graph_identity(value):
     if not isinstance(value, str) or value.count("|") != 1:
-        raise HistoryError("invalid_graph_identity", "身份格式须为namespace|id")
+        raise FabricError("invalid_graph_identity", "身份格式须为namespace|id")
     namespace, identity = value.split("|")
     try:
         return GraphIdentity(namespace=namespace, id=identity)
     except ValueError:
-        raise HistoryError("invalid_graph_identity", "图身份无效") from None
+        raise FabricError("invalid_graph_identity", "图身份无效") from None
 
 
 def audited_review(review):
@@ -42,7 +42,7 @@ def confirmed_identity(node):
 
 def _selection(bundle, scope):
     if scope not in {"reviewed", "with_candidates"}:
-        raise HistoryError("graph_review_scope", "请选择审核事实或显式包含候选")
+        raise FabricError("graph_review_scope", "请选择审核事实或显式包含候选")
     statuses = {"approved", "rule_confirmed", "auto_approved", "pending", "background"}
     nodes = {}
     for node in bundle.nodes:
@@ -101,7 +101,7 @@ def paths(bundle, graph_ref, start, target, *, relation_types=(), direction="out
     if (direction not in {"out", "in", "both"} or not 1 <= max_depth <= 4
             or not 1 <= max_paths <= 20 or not 1 <= max_expansions <= 5000
             or len(relation_types) > 16):
-        raise HistoryError("graph_query_budget", "路径方向/深度/数量/搜索预算无效")
+        raise FabricError("graph_query_budget", "路径方向/深度/数量/搜索预算无效")
     nodes, edges = _selection(bundle, review_scope)
     source, destination = identity_key(start), identity_key(target)
     missing = [node for node in (start, target) if identity_key(node) not in nodes]
@@ -163,7 +163,7 @@ def subgraph(bundle, graph_ref, node_ids, *, relation_types=(), review_scope="re
     if (not node_ids or len(node_ids) > 100 or len(relation_types) > 16
             or not 1 <= max_nodes <= 100 or not 1 <= max_edges <= 200
             or len({identity_key(node) for node in node_ids}) != len(node_ids)):
-        raise HistoryError("graph_query_budget", "子图须给1至100个不重复身份及有效预算")
+        raise FabricError("graph_query_budget", "子图须给1至100个不重复身份及有效预算")
     nodes, edges = _selection(bundle, review_scope)
     found = [node for node in node_ids if identity_key(node) in nodes]
     missing = [node for node in node_ids if identity_key(node) not in nodes]

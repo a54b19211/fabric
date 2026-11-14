@@ -9,8 +9,8 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, field_validator, model_validator
 
 from clean.identifiers import NCT_ID
-from store.history_models import (
-    HistoryError,
+from store.record_models import (
+    FabricError,
     Model,
     TimeValue,
     canonical,
@@ -341,11 +341,11 @@ def _check_neighborhood_request(seeds, relation_types, direction, max_depth, max
         or not 1 <= max_nodes <= 100
         or not 1 <= max_edges <= 200
     ):
-        raise HistoryError("graph_query_budget", "图查询超过方向、深度或数量预算")
+        raise FabricError("graph_query_budget", "图查询超过方向、深度或数量预算")
     if not seeds or len(seeds) > 20 or len(relation_types) > 16:
-        raise HistoryError("graph_query_budget", "须给1至20个明确身份及至多16种关系")
+        raise FabricError("graph_query_budget", "须给1至20个明确身份及至多16种关系")
     if len({identity_key(seed) for seed in seeds}) != len(seeds):
-        raise HistoryError("duplicate_graph_seed", "查询身份重复")
+        raise FabricError("duplicate_graph_seed", "查询身份重复")
 
 
 def _adjacency(bundle, relation_types, direction):
@@ -481,7 +481,7 @@ def primekg_bundle(observation):
         observation.get("source") != "primekg_current_projection"
         or observation.get("is_demo") is not False
     ):
-        raise HistoryError(
+        raise FabricError(
             "invalid_primekg_capture", "真实PrimeKG捕获须标明当前来源及非demo"
         )
     utc(datetime.fromisoformat(observation["observed_at"].replace("Z", "+00:00")))
@@ -491,7 +491,7 @@ def primekg_bundle(observation):
         or len(rows) > 200
         or (not rows and not isinstance(observation.get("seed_found"), bool))
     ):
-        raise HistoryError(
+        raise FabricError(
             "invalid_primekg_capture",
             "PrimeKG捕获须有明确空/非空结果及至多200条有界关系",
         )
@@ -528,7 +528,7 @@ def primekg_bundle(observation):
             )
             old = nodes.get(identity_key(node))
             if old is not None and old != node:
-                raise HistoryError(
+                raise FabricError(
                     "ambiguous_primekg_identity", "同一PrimeKG身份在捕获中有冲突"
                 )
             nodes[identity_key(node)] = node
@@ -593,7 +593,7 @@ def project_graph_record(source_id, item, data):
             item.record_kind != "document"
             or item.source_record_id != document_native_id(document)
         ):
-            raise HistoryError(
+            raise FabricError(
                 "legacy_document_identity", "旧文档UUID/原站点与采用ID不一致"
             )
         fields = {
@@ -619,7 +619,7 @@ def project_graph_record(source_id, item, data):
     bundle = GraphBundle.model_validate(data)
     expected_kind = "background" if source_id == "primekg_graph" else "reviewed"
     if item.record_kind != "graph" or bundle.graph_kind != expected_kind:
-        raise HistoryError("graph_kind_mismatch", "来源、图类型和原件类型不一致")
+        raise FabricError("graph_kind_mismatch", "来源、图类型和原件类型不一致")
     fields = (
         "graph_kind",
         "namespace",
@@ -674,13 +674,13 @@ def resolve(
     review_scope=None,
 ):
     if not 1 <= limit <= 20:
-        raise HistoryError("graph_query_budget", "身份查询最多返回20个候选")
+        raise FabricError("graph_query_budget", "身份查询最多返回20个候选")
     try:
         query = GraphResolutionQuery(
             name=name, external_namespace=external_namespace, external_id=external_id
         )
     except ValueError:
-        raise HistoryError(
+        raise FabricError(
             "invalid_graph_resolution", "须给精确名称或完整外部命名空间/ID"
         ) from None
     if review_scope is not None:

@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 # a model, with rules, or both); each reading is written at once as a measurement object (derived_measurements,
 # marked unchecked) with its event (derived_measurement_events).
 # Read run/measure.py.
-# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL (the history database). Model route:
+# Environment (runtime.env): DATAFABRIC_DATABASE_URL (the fabric database). Model route:
 # DATAFABRIC_MEASURE_LLM_BASE_URL and DATAFABRIC_MEASURE_LLM_MODEL (and _KEY, _KIND, _TIMEOUT, _MAX_TOKENS if needed).
 # Rules route (no model, no request): on unless DATAFABRIC_MEASURE_RULES_ROUTE=false. With neither route the worker
 # prints "disabled" and exits 0.

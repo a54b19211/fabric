@@ -1,4 +1,4 @@
-"""History 库在真实 PostgreSQL 上（隔离 schema，不用 SQLite，不碰现役表）：版本只在内容指纹变了时新存（V042 前存的
+"""资料库在真实 PostgreSQL 上（隔离 schema，不用 SQLite，不碰现役表）：版本只在内容指纹变了时新存（V042 前存的
 版本也一样），按模式和截止时间读、分页、变更、上一版，图包，登记差分，附件，GDELT 窗口。"""
 
 import hashlib
@@ -17,14 +17,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
-from api.routers.history import router
-from graph.api.history_graph import router as history_graph_router
-from graph.publish import history_graph
+from api.routers.fabric import router
+from graph.api.fabric_graph import router as fabric_graph_router
+from graph.publish import fabric_graph
 from graph.publish.graph_publish import bind_document_text, build_document_bundle
 from graph.publish.reviewed_graph import GraphDocumentRef, StoredDocument, document_native_id
-from store import history as store
-from store.history_models import ArchiveImport, ArchiveRecord, FetchRequest, HistoryError, canonical, sha256
+from store import records as store
 from store.migrations import runner
+from store.record_models import ArchiveImport, ArchiveRecord, FabricError, FetchRequest, canonical, sha256
 
 READ = {"Authorization": "Bearer test-reader-only"}
 NMPA_PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/3.html"
@@ -51,7 +51,7 @@ def archive(records, available="2016-06-01"):
 def _client():
     app = FastAPI()
     app.include_router(router)
-    app.include_router(history_graph_router)
+    app.include_router(fabric_graph_router)
     return TestClient(app)
 
 
@@ -59,24 +59,24 @@ def _chain(pg, source_id, record_id):
     """一条记录的版本按发布序号：[(version_id, replaced_by)]。"""
     with pg.begin() as conn:
         return [tuple(row) for row in conn.execute(text(
-            "SELECT version_id, replaced_by FROM history_versions WHERE source_id=:s AND source_record_id=:r "
+            "SELECT version_id, replaced_by FROM fabric_versions WHERE source_id=:s AND source_record_id=:r "
             "ORDER BY published_seq"), {"s": source_id, "r": record_id})]
 
 
 @pytest.fixture(scope="module")
 def pg_engine():
-    url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL")
+    url = os.environ.get("DATAFABRIC_DATABASE_URL")
     if not url:
         pytest.skip("Explicit isolated PostgreSQL URL required")
     parsed = make_url(url)
     assert (
         parsed.host == "127.0.0.1"
         and (parsed.port, parsed.database) in {
-            (18436, "fabric_history"), (18636, "bioradar_kdd_opus_history"),
+            (18436, "zk_fabric_test"), (18636, "zk_fabric_identity_test"),
         }
     )
     engine = create_engine(url)
-    schema = "test_history_" + uuid.uuid4().hex
+    schema = "test_records_" + uuid.uuid4().hex
     with engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA " + schema))
     scoped = create_engine(url, connect_args={"options": "-csearch_path=" + schema})
@@ -89,19 +89,19 @@ def pg_engine():
 
 @pytest.fixture
 def pg(pg_engine, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_READ_TOKEN", "test-reader-only")
-    monkeypatch.setenv("DATAFABRIC_HISTORY_ADMIN_TOKEN", "test-admin-only")
+    monkeypatch.setenv("DATAFABRIC_READ_TOKEN", "test-reader-only")
+    monkeypatch.setenv("DATAFABRIC_ADMIN_TOKEN", "test-admin-only")
     legacy_bridge.open_old_writer(monkeypatch)  # the graph packages here cite legacy versions, as before the retirement
-    monkeypatch.setattr(store, "history_engine", lambda: pg_engine)
-    runner.apply("history", store.history_engine())
+    monkeypatch.setattr(store, "fabric_engine", lambda: pg_engine)
+    runner.apply("fabric", store.fabric_engine())
     with pg_engine.begin() as conn:
         conn.execute(text(
-            "TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,"
-            "derived_registry_diff_runs,history_versions,history_runs,"
-            "history_version_rank CASCADE"  # the index tables belong to the History role and reference the versions
+            "TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,fabric_attachment_links,derived_clean_text,derived_registry_changes,"
+            "derived_registry_diff_runs,fabric_versions,fabric_runs,"
+            "fabric_version_rank CASCADE"  # the index tables belong to the fabric role and reference the versions
         ))
         conn.execute(
-            text("UPDATE history_sources SET published_seq=0,read_enabled=true")
+            text("UPDATE fabric_sources SET published_seq=0,read_enabled=true")
         )
     return pg_engine
 
@@ -201,7 +201,7 @@ def test_a_new_data_date_or_new_html_alone_is_not_a_new_version(pg):
     assert _fetch("nmpa", NMPA_PAGE, _web_page("<a id='aria2'>"), "html-2").version_ids == page.version_ids
     with pg.begin() as conn:  # the originals kept are the first ones seen
         kept = conn.execute(text(
-            "SELECT payload->>'raw_content' FROM history_versions ORDER BY source_id")).scalars().all()
+            "SELECT payload->>'raw_content' FROM fabric_versions ORDER BY source_id")).scalars().all()
     assert len(kept) == 2 and '"2026-11-02"' in kept[0] and "aria1" in kept[1]
     status = _fetch("clinicaltrials", "NCT00000123", _trial("2026-11-04", "COMPLETED"), "holder-3", "trial")
     corrected = _fetch("nmpa", NMPA_PAGE, _web_page("<a id='aria3'>", "# 公告（更正）"), "html-3")
@@ -226,14 +226,14 @@ def test_stored_unchanged_answers_what_storing_would_do(pg):
 
 
 def _old_version(conn, native, abstract, seq):
-    """V042 以前存下的一个 Europe PMC 版本：没有 fingerprint、replaced_by。"""
+    """V042 以前存下的一个 Europe PMC 版本：没有 fingerprint、replaced_by，表还是旧名 history_versions。"""
     from fetch.projection import project_record
-    from store.history_models import AvailabilityProof, HistoryRecord
+    from store.record_models import AvailabilityProof, VersionRecord
 
     record_id, raw = "MED:" + native, _epmc(abstract, native)
     now = store._now(conn)
     version_id = sha256(f"before-v042|{record_id}|{seq}")
-    payload = HistoryRecord(
+    payload = VersionRecord(
         source_id="europe_pmc", source_record_id=record_id, version_id=version_id, is_demo=False, raw_content=raw,
         raw_sha256=sha256(raw), first_seen_at=now, received_at=now, availability_proof=AvailabilityProof(),
         published_seq=seq, **project_record("europe_pmc", ArchiveRecord(
@@ -248,34 +248,41 @@ def _old_version(conn, native, abstract, seq):
 def test_v042_on_versions_stored_before_it(pg_engine, tmp_path, monkeypatch):
     """V042 on a database that has versions: replaced_by links each record's versions by published_seq; afterwards a
     version row takes only fingerprint and replaced_by; an old current version without a fingerprint is compared on
-    the spot; ops/backfill_fingerprint.py fills every fingerprint in."""
+    the spot; ops/backfill_fingerprint.py fills every fingerprint in. The database is built as it was before V042,
+    with the old table names (history_*): V046 renames them with the data in place."""
     from ops import backfill_fingerprint
 
     schema = "test_v042_" + uuid.uuid4().hex
     with pg_engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA " + schema))
     engine = create_engine(pg_engine.url, connect_args={"options": "-csearch_path=" + schema})
-    v042 = runner.VERSIONS / "V042__version_fingerprint.sql"
+    later = sorted(p for p in runner.VERSIONS.glob("V*.sql") if runner.version(p) >= "V042")
     monkeypatch.setattr(runner, "VERSIONS", shutil.copytree(runner.VERSIONS, tmp_path / "versions"))
-    (runner.VERSIONS / v042.name).unlink()
-    monkeypatch.setattr(store, "history_engine", lambda: engine)
+    for path in later:
+        (runner.VERSIONS / path.name).unlink()
+    monkeypatch.setattr(store, "fabric_engine", lambda: engine)
+    seed = runner.seed_sources
+    monkeypatch.setattr(runner, "seed_sources", lambda engine: None)  # it fills fabric_sources, named by V046
     try:
-        runner.apply("history", engine)
+        runner.apply("fabric", engine)
         with engine.begin() as conn:
+            conn.execute(text("INSERT INTO history_sources (source_id, catalog) VALUES ('europe_pmc', '{}')"))
             for seq, (native, abstract) in enumerate([("1", "A"), ("1", "B"), ("2", "A"), ("1", "C")], 1):
                 _old_version(conn, native, abstract, seq)
             conn.execute(text("UPDATE history_sources SET published_seq=4 WHERE source_id='europe_pmc'"))
-        shutil.copy(v042, runner.VERSIONS)
-        assert runner.apply("history", engine) == [v042.name]
+        for path in later:
+            shutil.copy(path, runner.VERSIONS)
+        monkeypatch.setattr(runner, "seed_sources", seed)
+        assert runner.apply("fabric", engine) == [p.name for p in later]
         one, two = _chain(engine, "europe_pmc", "MED:1"), _chain(engine, "europe_pmc", "MED:2")
         assert [replaced for _, replaced in one] == [one[1][0], one[2][0], None] and two[0][1] is None
         with pytest.raises(DBAPIError, match="append-only"), engine.begin() as conn:
-            conn.execute(text("UPDATE history_versions SET payload=jsonb_set(payload,'{title}','\"changed\"')"))
+            conn.execute(text("UPDATE fabric_versions SET payload=jsonb_set(payload,'{title}','\"changed\"')"))
         assert _fetch("europe_pmc", "MED:1", _epmc("C", "1"), "after-v042").coverage["new_version_count"] == 0
         assert backfill_fingerprint.backfill(3) == 4
         with engine.begin() as conn:
             stored = conn.execute(text(
-                "SELECT fingerprint, source_id, payload->>'raw_content' FROM history_versions")).all()
+                "SELECT fingerprint, source_id, payload->>'raw_content' FROM fabric_versions")).all()
         assert len(stored) == 4 and all(fp == store.fingerprint(source, raw) for fp, source, raw in stored)
     finally:
         engine.dispose()
@@ -288,11 +295,11 @@ def test_version_differences_name_the_previous_version(pg):
     v2 = _fetch_study("NCT09990003", "vd-2", n=200).version_ids[0]
     with pg.begin() as conn:
         first_seen = conn.execute(
-            text("SELECT first_seen_at FROM history_versions WHERE version_id=:v"), {"v": v1}).scalar_one()
+            text("SELECT first_seen_at FROM fabric_versions WHERE version_id=:v"), {"v": v1}).scalar_one()
     client = _client()
 
     def differences(cutoff, *version_ids):
-        response = client.get("/api/history/version-differences", headers=READ, params={
+        response = client.get("/api/fabric/version-differences", headers=READ, params={
             "source_id": "clinicaltrials", "is_demo": "false", "mode": "operational_replay",
             "cutoff": cutoff.isoformat(), "version_ids": list(version_ids)})
         assert response.status_code == 200, response.text
@@ -345,7 +352,7 @@ def test_an_import_key_returns_its_run_and_reads_follow_mode_and_cutoff(pg):
     old = store.read_version(first.version_ids[0], "external_archive", "T1", True, "public_history_reconstruction",
                              date("2016-12-31T23:59:59Z"))
     assert old.first_seen_at.year >= 2026  # visible from the declared time, first seen now
-    with pytest.raises(HistoryError, match="不可见"):
+    with pytest.raises(FabricError, match="不可见"):
         store.read_version(old.version_id, "external_archive", "T1", True, "operational_replay",
                            date("2016-12-31T23:59:59Z"))
     fetch, fresh = store.create_fetch(FetchRequest(source_id="clinicaltrials", query="synthetic"), "fetch-key")
@@ -384,14 +391,14 @@ def test_a_page_cursor_keeps_its_published_bound_and_a_disabled_source_is_not_re
     second = store.list_records("external_archive", True, "public_history_reconstruction", cutoff,
                                 run_id=initial.id, limit=1, cursor=first.next_cursor)
     assert second.items[0].facts["phase"] == ["PHASE1"]  # B's new version came after the first page
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         store.list_records("external_archive", True, "current", cutoff, cursor="not-a-cursor")
     assert error.value.code == "invalid_cursor"
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     for read in (lambda: store.read_run(initial.id), lambda: store.read_version(
             first.items[0].version_id, "external_archive", "A", True, "public_history_reconstruction", cutoff)):
-        with pytest.raises(HistoryError) as error:
+        with pytest.raises(FabricError) as error:
             read()
         assert (error.value.code, error.value.status) == ("source_not_available", 403)
 
@@ -441,7 +448,7 @@ def test_two_imports_of_one_source_that_both_registered_their_run_publish_one_af
     assert [r.state for r in runs] == ["completed", "completed"]
     with pg.begin() as conn:
         seqs = sorted(conn.execute(text(
-            "SELECT published_seq FROM history_versions WHERE source_id='external_archive'")).scalars())
+            "SELECT published_seq FROM fabric_versions WHERE source_id='external_archive'")).scalars())
     assert seqs == [1, 2]
 
 
@@ -449,27 +456,27 @@ def test_a_finished_or_other_attempt_cannot_store_versions(pg):
     run, _ = store.create_fetch(FetchRequest(source_id="europe_pmc", query="obesity"), "fetch-cas")
     batch = {"records": [], "complete": False, "upstream_pagination_exhausted": True, "stop_reason": "upstream_no_match",
              "requests": 1, "bytes": 10, "source_total": 0, "error": None}
-    with pytest.raises(HistoryError, match="旧任务"):
+    with pytest.raises(FabricError, match="旧任务"):
         store.finish_fetch(run.id, 1, batch)  # not started
     store.job_input(run.id, 1)
-    with pytest.raises(HistoryError, match="旧任务"):
+    with pytest.raises(FabricError, match="旧任务"):
         store.finish_fetch(run.id, 2, batch)
     assert store.finish_fetch(run.id, 1, batch).state == "completed"
-    with pytest.raises(HistoryError, match="旧任务"):
+    with pytest.raises(FabricError, match="旧任务"):
         store.finish_fetch(run.id, 1, batch)
 
 
 def test_http_auth_and_the_raw_original(pg):
     client = _client()
-    assert client.get("/api/history/sources").status_code == 401
+    assert client.get("/api/fabric/sources").status_code == 401
     admin = {"Authorization": "Bearer test-admin-only", "Idempotency-Key": "http-archive"}
     body = archive([raw_record("A")]).model_dump(mode="json")
-    assert client.post("/api/history/archives", json=body, headers=READ).status_code == 403
-    result = client.post("/api/history/archives", json=body, headers=admin)
+    assert client.post("/api/fabric/archives", json=body, headers=READ).status_code == 403
+    result = client.post("/api/fabric/archives", json=body, headers=admin)
     assert result.status_code == 200, result.text
     params = {"source_id": "external_archive", "source_record_id": "A", "is_demo": "true",
               "mode": "public_history_reconstruction", "cutoff": "2017-01-01T00:00:00Z"}
-    uri = "/api/history/versions/" + result.json()["version_ids"][0]
+    uri = "/api/fabric/versions/" + result.json()["version_ids"][0]
     record = client.get(uri, params=params, headers=READ)
     assert record.status_code == 200
     raw = client.get(uri + "/raw", params=params, headers=READ)
@@ -478,19 +485,19 @@ def test_http_auth_and_the_raw_original(pg):
     assert client.get(uri, params={**params, "is_demo": "false"}, headers=READ).status_code == 404
     assert client.get(uri, params={**params, "cutoff": "2035-01-01T00:00:00Z"}, headers=READ).status_code == 422
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     assert client.get(uri + "/raw", params=params, headers=READ).status_code == 403
 
 
 def test_ranking_keys_are_derived_with_each_version_and_a_partial_backfill_changes_nothing(pg):
     """Live 2026-11-03: listing Europe PMC decompressed every payload (2s a pass) and timed out. V021 keeps
-    each version's ranking keys in history_version_rank; a version without them is ranked from its payload,
-    same result. history_versions itself takes no UPDATE."""
+    each version's ranking keys in fabric_version_rank; a version without them is ranked from its payload,
+    same result. fabric_versions itself takes no UPDATE."""
     def ranks():
         with pg.begin() as conn:
             return conn.execute(text(
-                "SELECT h.source_record_id, r.publication_role FROM history_versions h "
-                "LEFT JOIN history_version_rank r ON r.version_id=h.version_id ORDER BY h.published_seq")).all()
+                "SELECT h.source_record_id, r.publication_role FROM fabric_versions h "
+                "LEFT JOIN fabric_version_rank r ON r.version_id=h.version_id ORDER BY h.published_seq")).all()
 
     for abstract, key in (("A", "rank-1"), ("B", "rank-2")):
         _fetch_europe_pmc_raw(_epmc(abstract), key)
@@ -498,7 +505,7 @@ def test_ranking_keys_are_derived_with_each_version_and_a_partial_backfill_chang
     now = datetime.now().astimezone()
     derived = store.list_records("europe_pmc", False, "current", now)
     with pg.begin() as conn:  # as before V021 was installed
-        conn.execute(text("TRUNCATE history_version_rank"))
+        conn.execute(text("TRUNCATE fabric_version_rank"))
     raw = store.list_records("europe_pmc", False, "current", now)
     assert [i.version_id for i in raw.items] == [i.version_id for i in derived.items]
     assert store.backfill_rank("europe_pmc", batch=1) == 1  # one derived, one still ranked from its payload
@@ -507,7 +514,7 @@ def test_ranking_keys_are_derived_with_each_version_and_a_partial_backfill_chang
     assert store.backfill_rank("europe_pmc", batch=10) == 1 and store.backfill_rank("europe_pmc") == 0
     assert [r[1] for r in ranks()] == ["source_record", "source_record"]
     with pg.begin() as conn:  # derived keys are as immutable as the versions they come from
-        conn.execute(text("UPDATE history_version_rank SET publication_role='context_reference'"))
+        conn.execute(text("UPDATE fabric_version_rank SET publication_role='context_reference'"))
     assert [r[1] for r in ranks()] == ["source_record", "source_record"]
 
 
@@ -515,11 +522,11 @@ def test_migration_leaves_a_seeded_row_alone_and_the_list_shows_the_declared_nam
     from fetch.sources import SOURCE_CATALOG
 
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET catalog=catalog || CAST(:m AS jsonb) WHERE source_id='nmpa'"),
+        conn.execute(text("UPDATE fabric_sources SET catalog=catalog || CAST(:m AS jsonb) WHERE source_id='nmpa'"),
                      {"m": json.dumps({"name": "旧说明"})})
-    runner.apply("history", store.history_engine())
+    runner.apply("fabric", store.fabric_engine())
     with pg.begin() as conn:
-        catalog = conn.execute(text("SELECT catalog FROM history_sources WHERE source_id='nmpa'")).scalar_one()
+        catalog = conn.execute(text("SELECT catalog FROM fabric_sources WHERE source_id='nmpa'")).scalar_one()
     assert catalog["name"] == "旧说明"  # the row is the snapshot taken when it was seeded
     listed = {row["source_id"]: row for row in store.sources_receipt()["sources"]}["nmpa"]
     assert listed["name"] == SOURCE_CATALOG["nmpa"]["name"]
@@ -558,7 +565,7 @@ def test_document_full_text_correction_survives_real_storage_and_old_version_rea
     assert again.clean_text.endswith("40套、8000万元。")
 
 
-# ——图包：发布前核对引用的原件和引文（history_graph.import_graph），读图时核对引用的原件——
+# ——图包：发布前核对引用的原件和引文（fabric_graph.import_graph），读图时核对引用的原件——
 
 
 def _synthetic_graph_observation():
@@ -637,7 +644,7 @@ def _publish_fixture_graph(observation, key):
     """把一批明确的旧文档原件冻结成 legacy 版本，再发布引用它们的审核图（生产上由 graph.publish.publication 发表）。"""
     documents = [_fixture_document(value) for value in observation["documents"]]
     if not documents or len(documents) > 6:
-        raise HistoryError("legacy_batch_budget", "每批须有1至6篇明确旧文档")
+        raise FabricError("legacy_batch_budget", "每批须有1至6篇明确旧文档")
     request = ArchiveImport(
         source_id="legacy_documents", is_demo=observation.get("is_demo") is True,
         scope_description="明确旧UUID本批原文冻结，不赋历史资格", declared_count=len(documents),
@@ -646,7 +653,7 @@ def _publish_fixture_graph(observation, key):
                                raw_content=doc.model_dump_json()) for doc in documents],
     )
     run = legacy_bridge.write(request, key + ":documents")
-    with store.history_engine().begin() as conn:
+    with store.fabric_engine().begin() as conn:
         now = store._now(conn)
     refs, versions = [], {}
     for version_id, doc in zip(run.version_ids, documents, strict=True):
@@ -660,7 +667,7 @@ def _publish_fixture_graph(observation, key):
     native = "legacy-graph:" + sha256(canonical({
         "namespace": bundle.namespace, "scope": bundle.scope_manifest_sha256 or bundle.scope_record_ids,
         "offset": bundle.batch_offset, "selected": bundle.selected_document_uuids}))
-    return history_graph.import_graph(ArchiveImport(
+    return fabric_graph.import_graph(ArchiveImport(
         source_id="reviewed_graph", is_demo=bundle.is_demo, scope_description=bundle.scope_description,
         declared_count=1, declared_complete=False,
         records=[ArchiveRecord(source_record_id=native, record_kind="graph", raw_content=bundle.model_dump_json())],
@@ -694,7 +701,7 @@ def _published_graph(pg, key="graph-fixture"):
     run = _publish_fixture_graph(observation, key)
     with pg.begin() as conn:
         payload = conn.execute(
-            text("SELECT payload FROM history_versions WHERE version_id=:id"),
+            text("SELECT payload FROM fabric_versions WHERE version_id=:id"),
             {"id": run.version_ids[0]},
         ).scalar_one()
         now = store._now(conn)
@@ -720,14 +727,14 @@ def test_graph_roundtrip_unicode_quote_and_idempotency(pg):
     assert graph.edges[0].evidence[0].quote == "药物甲靶向蛋白乙。"
     assert graph.nodes[0].identity_status == "confirmed"
     assert _publish_fixture_graph(observation, "graph-fixture").version_ids == run.version_ids
-    result = history_graph.read_graph_neighborhood(
+    result = fabric_graph.read_graph_neighborhood(
         run.version_ids[0], "reviewed_graph", payload["source_record_id"], True, "current", now,
         seed_ids=["fixture.tang.entity_dict|10"], direction="out",
     )
     assert len(result.edges) == 1 and result.edges[0].target.id == "20"
     assert result.graph_ref.version_id == run.version_ids[0]
     assert result.coverage.scope == "selected_published_subgraph"
-    resolved = history_graph.read_graph_resolution(
+    resolved = fabric_graph.read_graph_resolution(
         run.version_ids[0], "reviewed_graph", payload["source_record_id"], True, "current", now, name="药物甲",
     )
     assert resolved.status == "resolved" and resolved.candidates[0].id == "10"
@@ -740,14 +747,14 @@ def test_graph_quote_tamper_is_rejected_and_previous_versions_remain(pg):
     graph = GraphBundle.model_validate_json(payload["raw_content"])
     graph.edges[0].evidence[0].quote = "伪造证据"
     invalid = {**payload, "raw_content": graph.model_dump_json()}
-    with pytest.raises(HistoryError) as error:
-        history_graph.import_graph(_graph_archive(invalid), "bad-quote")
+    with pytest.raises(FabricError) as error:
+        fabric_graph.import_graph(_graph_archive(invalid), "bad-quote")
     assert error.value.code == "graph_quote_mismatch"
     unchanged = store.read_version(payload["version_id"], "reviewed_graph", payload["source_record_id"], True,
                                    "current", now)
     assert unchanged.raw_sha256 == payload["raw_sha256"]
     with pg.begin() as conn:
-        assert conn.execute(text("SELECT count(*) FROM history_versions WHERE record_kind='graph'")).scalar_one() == 1
+        assert conn.execute(text("SELECT count(*) FROM fabric_versions WHERE record_kind='graph'")).scalar_one() == 1
 
 
 def test_current_graph_cannot_gain_old_archive_proof_or_future_merge(pg):
@@ -755,8 +762,8 @@ def test_current_graph_cannot_gain_old_archive_proof_or_future_merge(pg):
 
     _, _, payload, now = _published_graph(pg)
     request = _graph_archive(payload, proof={"available_at": {"value": "2016-01-01", "precision": "day"}})
-    with pytest.raises(HistoryError) as error:
-        history_graph.import_graph(request, "bad-old-graph-proof")
+    with pytest.raises(FabricError) as error:
+        fabric_graph.import_graph(request, "bad-old-graph-proof")
     assert error.value.code == "graph_history_unsupported"
     graph = GraphBundle.model_validate_json(payload["raw_content"])
     graph.redirects = [
@@ -770,8 +777,8 @@ def test_current_graph_cannot_gain_old_archive_proof_or_future_merge(pg):
     # 外部模型重新校验，避免绕开入口验证。
     graph = GraphBundle.model_validate(graph.model_dump())
     changed = {**payload, "raw_content": graph.model_dump_json()}
-    with pytest.raises(HistoryError) as error:
-        history_graph.import_graph(_graph_archive(changed), "bad-future-merge")
+    with pytest.raises(FabricError) as error:
+        fabric_graph.import_graph(_graph_archive(changed), "bad-future-merge")
     assert error.value.code == "future_graph_merge"
 
 
@@ -788,14 +795,14 @@ def test_graph_reads_reject_a_bound_document_not_visible_at_same_cutoff(pg):
     with pg.begin() as conn:
         conn.execute(
             text("""
-            INSERT INTO history_versions(version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,proof_available_at,published_seq,payload)
+            INSERT INTO fabric_versions(version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,proof_available_at,published_seq,payload)
             VALUES(:id,'reviewed_graph',true,:native,'graph',:first,:first,NULL,999,CAST(:payload AS jsonb))
         """),
             {"id": corrupted["version_id"], "native": corrupted["source_record_id"], "first": old_time,
              "payload": canonical(corrupted)},
         )
-    with pytest.raises(HistoryError) as error:
-        history_graph.read_graph_resolution(corrupted["version_id"], "reviewed_graph", corrupted["source_record_id"],
+    with pytest.raises(FabricError) as error:
+        fabric_graph.read_graph_resolution(corrupted["version_id"], "reviewed_graph", corrupted["source_record_id"],
                                             True, "operational_replay", old_time + timedelta(hours=1), name="药物甲")
     assert error.value.code == "graph_evidence_not_visible"
 
@@ -821,10 +828,10 @@ def test_primekg_only_replays_background_after_local_first_seen(pg):
     run = publish_primekg(capture, "synthetic-primekg-shape")
     with pg.begin() as conn:
         row = conn.execute(
-            text("SELECT payload FROM history_versions WHERE version_id=:id"), {"id": run.version_ids[0]},
+            text("SELECT payload FROM fabric_versions WHERE version_id=:id"), {"id": run.version_ids[0]},
         ).scalar_one()
         now = store._now(conn)
-    result = history_graph.read_graph_resolution(
+    result = fabric_graph.read_graph_resolution(
         run.version_ids[0], "primekg_graph", row["source_record_id"], False, "current", now,
         external_namespace="NCBI", external_id="1956",
     )
@@ -832,11 +839,11 @@ def test_primekg_only_replays_background_after_local_first_seen(pg):
     replayed = store.read_version(run.version_ids[0], "primekg_graph", row["source_record_id"], False,
                                   "operational_replay", now)
     assert replayed.version_id == run.version_ids[0] and replayed.facts["graph_kind"] == "background"
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         store.read_version(run.version_ids[0], "primekg_graph", row["source_record_id"], False,
                            "operational_replay", date("2018-01-01T00:00:00Z"))
     assert error.value.code == "version_not_found"
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         store.read_version(run.version_ids[0], "primekg_graph", row["source_record_id"], False,
                            "public_history_reconstruction", now)
     assert error.value.code == "graph_history_unsupported"
@@ -846,8 +853,8 @@ def test_graph_manifest_cannot_bind_demo_document_into_real_package(pg):
     _, _, payload, _ = _published_graph(pg)
     request = _graph_archive(payload)
     request.is_demo = False
-    with pytest.raises(HistoryError) as error:
-        history_graph.import_graph(request, "demo-to-real-graph")
+    with pytest.raises(FabricError) as error:
+        fabric_graph.import_graph(request, "demo-to-real-graph")
     assert error.value.code == "graph_demo_mismatch"
 
 
@@ -891,7 +898,7 @@ def test_registry_diff_written_when_cleaned_and_read_with_visibility(pg):
     # 公开历史重建模式：观察版本没有档案证明，不可见
     hidden = for_versions("clinicaltrials", False, [v2], "public_history_reconstruction", now)
     assert hidden["versions"][v2] == {"state": "not_processed"}
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         for_versions("clinicaltrials", False, [v2], "current", now + timedelta(days=1))
 
 
@@ -1068,7 +1075,7 @@ def test_attachment_links_to_the_fixed_parent_version_of_the_same_run(pg, tmp_pa
 
 
 def test_gdelt_leads_are_listed_by_window_with_the_receipts_of_the_windows(pg, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
+    monkeypatch.setenv("DATAFABRIC_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
     import httpx
 
     from fetch import rate
@@ -1112,10 +1119,10 @@ def test_gdelt_leads_are_listed_by_window_with_the_receipts_of_the_windows(pg, m
     assert len(second.items) == 4 and not {i.version_id for i in first.items} & {i.version_id for i in second.items}
     unwindowed = store.list_records("gdelt_doc", False, "operational_replay", now)  # no window: all leads, no receipts
     assert len(unwindowed.items) == 9 and "window_coverage" not in unwindowed.coverage
-    with pytest.raises(HistoryError) as refused:
+    with pytest.raises(FabricError) as refused:
         store.list_records("gdelt_doc", False, "operational_replay", now, window=(date("2026-10-30T00:00:00Z"), None))
     assert refused.value.code == "invalid_window"
-    over_http = _client().get("/api/history/records", headers=READ, params={
+    over_http = _client().get("/api/fabric/records", headers=READ, params={
         "source_id": "gdelt_doc", "is_demo": "false", "mode": "operational_replay", "cutoff": now.isoformat(),
         "window_start": "2026-10-30T00:00:00Z", "window_end": "2026-10-30T00:30:00Z"})
     body = over_http.json()
@@ -1125,7 +1132,7 @@ def test_gdelt_leads_are_listed_by_window_with_the_receipts_of_the_windows(pg, m
 
 
 def test_gdelt_index_changes_keep_old_original_and_public_material_type(pg, monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
+    monkeypatch.setenv("DATAFABRIC_FETCH_ENABLED", "true")  # HTTP below is a local test transport.
     import httpx
 
     from fetch.gdelt_news import article_id

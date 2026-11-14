@@ -60,9 +60,9 @@ class Budget:
         item=None 是这一条没读到：不算已存，连续数清零。"""
         if not self.known_stop:
             return False
-        from store import history  # 在这里才导入：store.history 导入了读取插件
+        from store import records  # 在这里才导入：store.records 导入了读取插件
 
-        known = item is not None and history.stored_unchanged(self.source_id, item)
+        known = item is not None and records.stored_unchanged(self.source_id, item)
         self.known_run = self.known_run + 1 if known else 0
         if self.known_run >= self.known_stop:
             raise Stop(KNOWN)

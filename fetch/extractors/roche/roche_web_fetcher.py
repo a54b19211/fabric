@@ -20,7 +20,7 @@ from scrapling.fetchers import StealthyFetcher
 
 from fetch import transport
 from fetch.extractors.dates import normalize_date
-from store.history_models import HistoryError, ItemUnreadable, make_uuid
+from store.record_models import FabricError, ItemUnreadable, make_uuid
 
 RETRY_DELAY = 10.0  # 详情页第一次没读到，隔多久重读一次（秒）
 # 列表页等到新闻标题（每条新闻一个）出现，内容就齐了。一年的最后一页之后没有标题，等不到就是等满 LIST_TIMEOUT（毫秒，
@@ -246,7 +246,7 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
                 raise
 
             if not page.status or not (200 <= page.status < 300):
-                raise HistoryError("source_read_failed",
+                raise FabricError("source_read_failed",
                                    f"Roche 列表页读取失败：{year} 年第 {page_num} 页返回 HTTP {page.status}（不当作读到底）")
 
             page_articles = _parse_list_page(page, collected_urls, year, page_num)

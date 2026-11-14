@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 
-from store.history_models import ArchiveRecord, HistoryError
+from store.record_models import ArchiveRecord, FabricError
 
 ATT_SCHEMA = "datafabric.attachment.v1"
 PARSER_VERSION = "datafabric.attachment.access.v1"
@@ -72,12 +72,12 @@ def project_attachment(source_id: str, item: ArchiveRecord) -> dict:
     try:
         data = json.loads(item.raw_content)
     except ValueError:
-        raise HistoryError("invalid_source_fields", "附件原件不是合法 JSON") from None
+        raise FabricError("invalid_source_fields", "附件原件不是合法 JSON") from None
     if not isinstance(data, dict) or data.get("role") != "attachment" or data.get("schema_version") != ATT_SCHEMA:
-        raise HistoryError("invalid_source_fields", "原件不符合 attachment 契约")
+        raise FabricError("invalid_source_fields", "原件不符合 attachment 契约")
     access = data.get("access")
     if not isinstance(access, dict) or not access.get("tier"):
-        raise HistoryError("invalid_source_fields", "附件原件缺少许可与可取得层级（access）")
+        raise FabricError("invalid_source_fields", "附件原件缺少许可与可取得层级（access）")
     if data.get("parent_record_id"):
         from fetch.site_crawler import project_capture
 
@@ -87,11 +87,11 @@ def project_attachment(source_id: str, item: ArchiveRecord) -> dict:
         return projected
     collection, name = data.get("collection"), data.get("collection_name")
     if not isinstance(collection, str) or not isinstance(name, str) or data.get("site") != source_id:
-        raise HistoryError("invalid_source_fields", "本地原件缺少集合或文件名")
+        raise FabricError("invalid_source_fields", "本地原件缺少集合或文件名")
     if local_record_id(collection, name) != item.source_record_id:
-        raise HistoryError("native_id_mismatch", "本地原件的集合/文件名与记录不一致")
+        raise FabricError("native_id_mismatch", "本地原件的集合/文件名与记录不一致")
     if not re.fullmatch(r"[0-9a-f]{64}", str(data.get("sha256") or "")) or not isinstance(data.get("size"), int):
-        raise HistoryError("invalid_source_fields", "本地原件缺少 sha256 或大小")
+        raise FabricError("invalid_source_fields", "本地原件缺少 sha256 或大小")
     facts = {
         k: data.get(k)
         for k in ("parent_record_id", "file_name", "file_ext", "sha256", "size", "store_path", "discovered_from")

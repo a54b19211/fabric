@@ -306,7 +306,7 @@ def get_objects_evidence(object_type, object_ids, session=None):
             result[row.object_id].append({**(row.details or {}), **{key: getattr(row, key) for key in (
                 'id', 'source_doc_uuid', 'source_site', 'version_id', 'quote', 'char_start', 'char_end',
                 'match_step', 'first_seen_at', 'valid_from', 'valid_to', 'evidence_key')}})
-        # Preserve immutable observations. Canonical History locators discovered
+        # Preserve immutable observations. Canonical fabric locators discovered
         # during explicit validation live in the append-only review audit.
         audit_rows = active.query(ReviewLog).filter(
             ReviewLog.object_type == object_type, ReviewLog.object_id.in_(identities),
@@ -419,7 +419,7 @@ def get_current_review_evidence(object_type, object_ids, session=None):
     return result
 
 def validate_evidence(items, source_doc_uuid, source_site, allowed_sources=None):
-    """Resolve each fixed History version before starting a source write transaction."""
+    """Resolve each fixed fabric version before starting a source write transaction."""
     if not items:
         raise ValueError('Fixed version source evidence is required')
     from graph.db.object_evidence import validate_object_evidence
@@ -430,7 +430,7 @@ def validate_evidence(items, source_doc_uuid, source_site, allowed_sources=None)
         if origin not in allowed:
             raise ValueError('Evidence belongs to a source not recorded for this object')
         normalized = {**item, **evidence_values(item, source_doc_uuid, source_site)}
-        # Keep the original History locator fields rather than only the compatibility columns.
+        # Keep the original fabric locator fields rather than only the compatibility columns.
         if not usable_evidence(normalized):
             raise ValueError('Evidence requires a fixed version, exact quote and Unicode character offsets')
         checked = validate_object_evidence(normalized, source_doc_uuid=origin[0], source_site=origin[1])

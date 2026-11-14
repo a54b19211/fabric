@@ -12,8 +12,8 @@ from fetch.source_refresh import SourceWatch, _segment_done
 from fetch.sources import read_public
 from fetch.windows import cycle_request
 from settings import APP
-from store.history import _lead_window
-from store.history_models import ArchiveRecord, FetchRequest, HistoryError
+from store.record_models import ArchiveRecord, FabricError, FetchRequest
+from store.records import _lead_window
 
 HOUR = {"updated_since": "2026-10-30T00:00:00Z", "updated_until": "2026-10-30T01:00:00Z"}
 CYCLE_NOW = datetime(2026, 11, 4, 12, 30, tzinfo=timezone.utc)  # a watch cycle reads the whole hours before 12:00
@@ -25,7 +25,7 @@ def article(**kw):
 
 
 def client(monkeypatch, handler):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "true")  # Only this mocked transport may fetch.
+    monkeypatch.setenv("DATAFABRIC_FETCH_ENABLED", "true")  # Only this mocked transport may fetch.
     original = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
 
@@ -302,6 +302,6 @@ def test_a_lead_window_needs_both_bounds_with_a_time_zone_and_a_source_that_has_
     for source, window in (("gdelt_doc", (utc("00:00"), None)), ("gdelt_doc", (utc("01:00"), utc("00:00"))),
                            ("gdelt_doc", (datetime(2026, 10, 30), utc("01:00"))),
                            ("clinicaltrials", (utc("00:00"), utc("01:00")))):
-        with pytest.raises(HistoryError) as refused:
+        with pytest.raises(FabricError) as refused:
             _lead_window(source, window)
         assert refused.value.code == "invalid_window"

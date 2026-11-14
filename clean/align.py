@@ -18,7 +18,7 @@ ops/align_offline.py，拿存下的结果离线重算，不用再联网。
 一个结果（她叫“五元组”）是 dict：found、std_id（PUBCHEM:2244 这样带前缀）、authority（哪个库，她原来叫 source_id）、
 raw_value、resolved_value（库里的规范名）、confidence、candidates、degraded。
 出网只走 fetch/transport.py · get（按主机限速、超时、429 重试）；ChEMBL 另外每秒最多一个请求（EBI 的要求）。
-DATAFABRIC_HISTORY_FETCH_ENABLED=false 的实例不出网，只查本地白名单，查不到的记降级。
+DATAFABRIC_FETCH_ENABLED=false 的实例不出网，只查本地白名单，查不到的记降级。
 和她原版不同：本地白名单查到了，她记命中且 degraded=True，这里记命中、不降级（命中率口径两边一样）。
 """
 

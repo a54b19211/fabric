@@ -130,7 +130,7 @@ def batch_approve_relations(source_doc_uuid='', source_site='', reviewer='', not
     """Apply the same fixed-evidence and endpoint checks to every selected relation."""
     from graph.api.review_auth import require_trusted_review_context
     from graph.db.identity import use_session
-    from store.history_models import HistoryError
+    from store.record_models import FabricError
     reviewer = require_trusted_review_context(review_context)
     with use_session() as session:
         query = session.query(EntityRelation).filter(EntityRelation.review_status == 'pending',
@@ -145,7 +145,7 @@ def batch_approve_relations(source_doc_uuid='', source_site='', reviewer='', not
         try:
             approve_relation(relation_id, reviewer, note, review_context=review_context)
             approved.append(relation_id)
-        except (ValueError, HistoryError) as exc:
+        except (ValueError, FabricError) as exc:
             blocked.append({'id': relation_id, 'reason': str(exc)})
     return {'success': True, 'count': len(approved), 'blocked': blocked,
             'message': f'Approved {len(approved)} relations; {len(blocked)} require evidence or identity review'}

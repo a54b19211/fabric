@@ -7,7 +7,7 @@ import pytest
 
 from clean import align, drug_names, fields, quality, quality_stage
 from ops import align_offline
-from store.history_models import make_uuid
+from store.record_models import make_uuid
 
 TODAY = date(2026, 11, 14)
 

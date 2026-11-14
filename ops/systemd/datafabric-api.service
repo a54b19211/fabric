@@ -1,5 +1,5 @@
 [Unit]
-Description=Data-Fabric local history API
+Description=Data-Fabric API (the fabric library's HTTP interface)
 After=network.target
 StartLimitIntervalSec=0
 

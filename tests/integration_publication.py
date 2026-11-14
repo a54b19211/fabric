@@ -13,19 +13,19 @@ from test_publication import snapshot
 from graph.db.models import Base, Document
 from graph.db.schemas import ConfidenceInfo, MetadataEnvelope, ProvenanceInfo
 from graph.publish import publication
-from store import history
+from store import records
 from store.migrations import runner
 
 
 @pytest.fixture
 def databases(monkeypatch):
-    url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL")
+    url = os.environ.get("DATAFABRIC_DATABASE_URL")
     if not url:
         pytest.skip("Explicit isolated PostgreSQL required")
     parsed = make_url(url)
     assert (
         parsed.host == "127.0.0.1"
-        and (parsed.port, parsed.database) in {(18436, "fabric_history"), (18636, "bioradar_kdd_opus_history")}
+        and (parsed.port, parsed.database) in {(18436, "zk_fabric_test"), (18636, "zk_fabric_identity_test")}
     )
     admin = create_engine(url)
     names = ["test_publication_" + uuid4().hex, "test_destination_" + uuid4().hex]
@@ -41,12 +41,12 @@ def databases(monkeypatch):
     source, target = engines
     Base.metadata.create_all(source)
     monkeypatch.setattr(publication, "publication_engine", lambda: source)
-    monkeypatch.setattr(history, "history_engine", lambda: target)
+    monkeypatch.setattr(records, "fabric_engine", lambda: target)
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_SOURCES", '["clinicaltrials"]')
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_IS_DEMO", "true")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_MIN_FREE_BYTES", "0")
     monkeypatch.setenv("DATAFABRIC_PUBLICATION_NAMESPACE", "synthetic.publication")
-    runner.apply("history", history.history_engine())
+    runner.apply("fabric", records.fabric_engine())
     assert runner.main(["--db", "publication", "--apply"]) == 0
     import graph.db.session
 
@@ -81,7 +81,7 @@ def rows(engine, sql):
 
 
 def version_count(target):
-    return rows(target, "SELECT count(*) n FROM history_versions")[0]["n"]
+    return rows(target, "SELECT count(*) n FROM fabric_versions")[0]["n"]
 
 
 def test_source_transaction_rollback_and_a_committed_document_blocked_by_the_retired_bridge(databases):
@@ -128,24 +128,24 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from api.routers.history import router
-    from graph.api.history_graph import router as history_graph_router
+    from api.routers.fabric import router
+    from graph.api.fabric_graph import router as fabric_graph_router
 
     source, target = databases
     app = FastAPI()
     app.include_router(router)
-    app.include_router(history_graph_router)
+    app.include_router(fabric_graph_router)
     from unittest.mock import patch
 
     # Endpoint uses the same actual source/target engines, not a fake successful read.
     with (
         patch.dict(
-            os.environ, {"DATAFABRIC_HISTORY_READ_TOKEN": "SYNTHETIC-read-only"}
+            os.environ, {"DATAFABRIC_READ_TOKEN": "SYNTHETIC-read-only"}
         ),
         TestClient(app) as client,
     ):
         response = client.get(
-            "/api/history/publication/status",
+            "/api/fabric/publication/status",
             params={"source_id": "legacy_documents"},
             headers={"Authorization": "Bearer SYNTHETIC-read-only"},
         )
@@ -154,12 +154,12 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
             and response.json()["publisher_state"] == "not_started"
         )
         assert response.json()["retired"] is True  # an audit reading of the old bridge, not a source to use
-        no_default = client.get("/api/history/publication/status",
+        no_default = client.get("/api/fabric/publication/status",
                                 headers={"Authorization": "Bearer SYNTHETIC-read-only"})
         assert no_default.status_code == 422  # the source is chosen, never defaulted to legacy_documents
         publication.publisher_heartbeat("idle")
         result = client.get(
-            "/api/history/publication/status",
+            "/api/fabric/publication/status",
             params={"source_id": "legacy_documents"},
             headers={"Authorization": "Bearer SYNTHETIC-read-only"},
         )
@@ -177,11 +177,11 @@ def test_status_heartbeat_is_not_fabricated_and_revocation_is_not_idle(databases
         with target.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE history_sources SET read_enabled=false WHERE source_id='legacy_documents'"
+                    "UPDATE fabric_sources SET read_enabled=false WHERE source_id='legacy_documents'"
                 )
             )
         denied = client.get(
-            "/api/history/publication/status",
+            "/api/fabric/publication/status",
             params={"source_id": "legacy_documents"},
             headers={"Authorization": "Bearer SYNTHETIC-read-only"},
         )

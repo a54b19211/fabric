@@ -12,7 +12,7 @@
 import json
 
 from fetch.extractors.dates import normalize_date
-from store.history_models import make_uuid
+from store.record_models import make_uuid
 
 
 def _get_nested(record: dict, dotted_key) -> str:

@@ -1,12 +1,12 @@
 """Database migrations: run the versions/V*.sql files a database has not run yet, in order.
 
-    python -m store.migrations.runner --db {app|history|publication} --plan    # list the files still to run
-    python -m store.migrations.runner --db {app|history|publication} --apply   # run them
+    python -m store.migrations.runner --db {app|fabric|publication} --plan    # list the files still to run
+    python -m store.migrations.runner --db {app|fabric|publication} --apply   # run them
 
-app is the object library, history the History library, publication the original collection library with the
+app is the object library, fabric the fabric library (资料库), publication the original collection library with the
 publication outbox; files_for() says which file is whose. Each file runs in one transaction with its ledger row. The
 ledgers are the tables the earlier runners wrote, so nothing they ran is run again:
-- history, publication: fabric_schema_ledger_events; a version has run when its latest event is applied,
+- fabric, publication: fabric_schema_ledger_events; a version has run when its latest event is applied,
   observed_baseline or compat_mapped (the last two: taken over by the former --adopt-baseline);
 - app: schema_migrations (+ schema_migrations_shared_slot); a file has run when a row has its description (the team
   line ran today's V020 and V033-V035 under other numbers, with the same descriptions).
@@ -27,11 +27,15 @@ from sqlalchemy import text
 VERSIONS = Path(__file__).parent / "versions"
 EVENTS = "fabric_schema_ledger_events"
 LOCK_KEY = 0x4661627269634D67  # the advisory lock the former runner took too: two runs never overlap
-ENGINES = {"app": ("graph.db.session", "get_engine"), "history": ("store.history", "history_engine"),
+ENGINES = {"app": ("graph.db.session", "get_engine"), "fabric": ("store.records", "fabric_engine"),
            "publication": ("graph.publish.publication", "publication_engine")}
 # there while the role's ledger is empty: the database was built without this ledger (before it, or by the app role,
 # which runs V019 and V026 too); its files are not run again
-FIRST_TABLE = {"history": "history_sources", "publication": "publication_outbox"}
+FIRST_TABLE = {"fabric": "fabric_sources", "publication": "publication_outbox"}
+# Until V046 the fabric library was called "history": its ledger rows were written under db_role 'history' and its
+# first table was history_sources. A database that has not run V046 yet still has both; done() reads them as the
+# fabric role's, and V046 renames the tables and relabels the rows.
+BEFORE_V046 = {"fabric": ("history", "history_sources")}
 EVENT_LEDGER = (f"CREATE TABLE IF NOT EXISTS {EVENTS} (event_id bigserial PRIMARY KEY, db_role text NOT NULL, "
                 "version text NOT NULL, file text NOT NULL, event text NOT NULL, checksum_md5 text NOT NULL, "
                 "sha256 text NOT NULL, evidence jsonb NOT NULL DEFAULT '{}'::jsonb, actor text NOT NULL, "
@@ -58,7 +62,7 @@ def description(path: Path) -> str:
 
 
 def files_for(role: str) -> list[Path]:
-    """app: V001-V035. publication: V019, V026. history: V017-V032 without those two, and every file after V035."""
+    """app: V001-V035. publication: V019, V026. fabric: V017-V032 without those two, and every file after V035."""
     def belongs(n: int) -> bool:
         if role == "app":
             return n <= 35
@@ -83,14 +87,17 @@ def done(conn, role: str) -> set[str]:
         if unknown:
             raise MigrationError(f"schema_migrations has rows that no file today stands for: {sorted(unknown)}")
         return {p.name for p in files if description(p) in recorded}
+    old_role, old_first = BEFORE_V046.get(role, (role, FIRST_TABLE[role]))
     latest = {}  # version -> its latest event
     if has_table(conn, EVENTS):
         latest = dict(conn.execute(text(f"SELECT DISTINCT ON (version) version, event FROM {EVENTS} "
-                                        "WHERE db_role = :r ORDER BY version, event_id DESC"), {"r": role}).all())
+                                        "WHERE db_role IN (:r, :old) ORDER BY version, event_id DESC"),
+                                   {"r": role, "old": old_role}).all())
     if "baseline_revoked" in latest.values():
         raise MigrationError(f"a baseline in the {role} ledger was revoked: a person decides what the database has")
-    if not latest and has_table(conn, FIRST_TABLE[role]):
-        raise MigrationError(f"{FIRST_TABLE[role]} exists but the {role} ledger is empty: the database was built "
+    built = next((t for t in (FIRST_TABLE[role], old_first) if has_table(conn, t)), None)
+    if not latest and built:
+        raise MigrationError(f"{built} exists but the {role} ledger is empty: the database was built "
                              "without this ledger; record what it has by hand, its files are not run again")
     return {p.name for p in files if version(p) in latest}
 
@@ -136,20 +143,20 @@ def apply(role: str, engine) -> list[str]:
             logger.info(f"[Migration] 执行: {path.name}")
             run_file(conn, role, path)
         ran.append(path.name)
-    if role == "history":
-        seed_history_sources(engine)
+    if role == "fabric":
+        seed_sources(engine)
     return ran
 
 
-def seed_history_sources(engine) -> None:
-    """A history_sources row for each catalog source (fetch.catalog.source_catalog) that has none; an existing row is
+def seed_sources(engine) -> None:
+    """A fabric_sources row for each catalog source (fetch.catalog.source_catalog) that has none; an existing row is
     the administrator's decision (read_enabled) and stays as it is."""
     from fetch.sources import SOURCE_CATALOG
-    from store.history_models import canonical
+    from store.record_models import canonical
 
     with engine.begin() as conn:
         for source_id, catalog in SOURCE_CATALOG.items():
-            conn.execute(text("INSERT INTO history_sources (source_id, catalog) VALUES (:id, CAST(:catalog AS jsonb)) "
+            conn.execute(text("INSERT INTO fabric_sources (source_id, catalog) VALUES (:id, CAST(:catalog AS jsonb)) "
                               "ON CONFLICT (source_id) DO NOTHING"), {"id": source_id, "catalog": canonical(catalog)})
 
 

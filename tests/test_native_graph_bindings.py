@@ -7,7 +7,7 @@ import pytest
 from test_graph_tools import context, record
 
 from graph.publish.native_graph import LEGACY_METHOD, build_native_graph, validate_field_bindings
-from store.history_models import HistoryError, TimeValue, sha256
+from store.record_models import FabricError, TimeValue, sha256
 
 
 def _graph():
@@ -113,7 +113,7 @@ def test_every_forged_change_to_a_native_graph_is_rejected(name):
     if name in ACCEPTED:
         validate_field_bindings(graph, documents)
         return
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         validate_field_bindings(graph, documents)
     assert error.value.code == "graph_field_mismatch"
 
@@ -136,7 +136,7 @@ def test_v1_graph_is_valid_only_for_fixed_reads():
     rec, graph, trial, _children = _graph()
     _v1(graph, trial)
     validate_field_bindings(graph, _documents(rec), allow_legacy=True)
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         validate_field_bindings(graph, _documents(rec))
 
 
@@ -144,10 +144,10 @@ def test_v1_graph_cannot_carry_v2_attributes_or_collaborator_edges():
     rec, graph, trial, _children = _graph()
     _v1(graph, trial)
     trial.properties = {"x": 1}
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         validate_field_bindings(graph, _documents(rec), allow_legacy=True)
     rec, graph, trial, _children = _graph()
     _v1(graph, trial)
     trial.field_evidence = _graph()[2].field_evidence
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         validate_field_bindings(graph, _documents(rec), allow_legacy=True)

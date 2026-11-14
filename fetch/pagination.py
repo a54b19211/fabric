@@ -23,7 +23,7 @@ from clean.excel_parser import _rows_to_markdown
 from fetch import transport
 from fetch.site_profiles import DEFAULT_HEADERS, SITE_PROFILES
 from fetch.web_client import fetch_page
-from store.history_models import make_uuid
+from store.record_models import make_uuid
 
 # ===================================================================
 #  基类

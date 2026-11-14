@@ -1,17 +1,17 @@
-"""真实隔离History库：登记字段绑定、固定版本与有界图查询。"""
+"""真实隔离资料库：登记字段绑定、固定版本与有界图查询。"""
 
 import json
 from datetime import datetime, timezone
 
 import pytest
-from integration_history import pg, pg_engine  # noqa: F401
+from integration_records import pg, pg_engine  # noqa: F401
 from sqlalchemy import text
 
-from graph.publish import history_graph
+from graph.publish import fabric_graph
 from graph.publish.graph_publish import publish_native_graph
 from graph.publish.reviewed_graph import GraphBundle, GraphRef
-from store import history as store
-from store.history_models import ArchiveImport, ArchiveRecord, HistoryError
+from store import records as store
+from store.record_models import ArchiveImport, ArchiveRecord, FabricError
 
 
 def source_record(condition="SYNTHETIC condition A"):
@@ -37,7 +37,7 @@ def prepared(pg):
     record = adopt(source_record(), "synthetic-native-source-a")
     run = publish_native_graph([record], "synthetic-native-graph-a")
     with pg.begin() as conn:
-        payload = conn.execute(text("SELECT payload FROM history_versions WHERE version_id=:id"),
+        payload = conn.execute(text("SELECT payload FROM fabric_versions WHERE version_id=:id"),
                                {"id": run.version_ids[0]}).scalar_one()
     return record, run, payload
 
@@ -58,12 +58,12 @@ def test_native_graph_real_publication_replay_and_old_fixed_field_version(pg):
                   ref.is_demo, "current", datetime.now(timezone.utc))
     seed_id = "clinicaltrials.NCT|NCT00000001"
     target_ids = [edge.target.namespace + "|" + edge.target.id for edge in graph.edges]
-    assert history_graph.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0]).status == "not_found"
-    assert history_graph.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0], review_scope="with_candidates").status == "found"
-    linked = history_graph.read_graph_paths(*fixed_args, start=target_ids[0], target=target_ids[2], direction="both", review_scope="with_candidates")
+    assert fabric_graph.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0]).status == "not_found"
+    assert fabric_graph.read_graph_paths(*fixed_args, start=seed_id, target=target_ids[0], review_scope="with_candidates").status == "found"
+    linked = fabric_graph.read_graph_paths(*fixed_args, start=target_ids[0], target=target_ids[2], direction="both", review_scope="with_candidates")
     assert len(linked.paths[0].edge_ids) == 2
     assert all(edge.field_evidence[0].version_id == source.version_id for edge in linked.edges)
-    assert len(history_graph.read_graph_subgraph(*fixed_args, node_ids=[seed_id, target_ids[0]], review_scope="with_candidates").edges) == 1
+    assert len(fabric_graph.read_graph_subgraph(*fixed_args, node_ids=[seed_id, target_ids[0]], review_scope="with_candidates").edges) == 1
 
     revised = adopt(source_record("SYNTHETIC condition B"), "synthetic-native-source-b")
     new = publish_native_graph([revised], "synthetic-native-graph-b")
@@ -72,7 +72,7 @@ def test_native_graph_real_publication_replay_and_old_fixed_field_version(pg):
                                True, "current", datetime.now(timezone.utc))
     assert fixed.raw_sha256 == old["raw_sha256"] and "SYNTHETIC condition A" in fixed.raw_content
     assert "SYNTHETIC condition B" not in fixed.raw_content
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         store.read_version(new.version_ids[0], "reviewed_graph", old["source_record_id"],
                            True, "operational_replay", source.first_seen_at)
     assert error.value.code == "version_not_found"
@@ -105,12 +105,12 @@ def test_invalid_native_field_or_predicate_never_changes_real_published_graph(pg
                                     namespace="clinicaltrials.source_fields", is_demo=True,
                                     title="SYNTHETIC invalid", scope_description="SYNTHETIC invalid",
                                     nodes=[unsupported], edges=[])
-        with pytest.raises(HistoryError) as error:
-            history_graph.import_graph(ArchiveImport(source_id="reviewed_graph", is_demo=True,
+        with pytest.raises(FabricError) as error:
+            fabric_graph.import_graph(ArchiveImport(source_id="reviewed_graph", is_demo=True,
                 scope_description="invalid synthetic field binding", declared_count=1,
                 declared_complete=False, records=[ArchiveRecord(
                     source_record_id=payload["source_record_id"], record_kind="graph", raw_content=graph.model_dump_json(),
                 )]), "synthetic-invalid-" + change)
         assert error.value.code == "graph_field_mismatch"
         with pg.begin() as conn:
-            assert conn.execute(text("SELECT count(*) FROM history_versions WHERE source_id='reviewed_graph'")).scalar_one() == 1
+            assert conn.execute(text("SELECT count(*) FROM fabric_versions WHERE source_id='reviewed_graph'")).scalar_one() == 1

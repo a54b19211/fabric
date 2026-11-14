@@ -7,7 +7,7 @@ import pytest
 
 from fetch.source_refresh import SourceWatch, watches
 from run import scheduler
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 
 def sec_watch(**overrides):
@@ -27,7 +27,7 @@ def test_sec_watch_rejects_scope_that_cannot_finish(change):
 
 def test_sec_watch_explicit_scope_survives_config_round_trip(monkeypatch):
     value = sec_watch()
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps([value]))
+    monkeypatch.setenv("DATAFABRIC_WATCHES", json.dumps([value]))
     watch = watches()[0]
     assert watch.request.source_record_ids == value["request"]["source_record_ids"]
     assert watch.request.query == "*" and watch.request.max_pages == 2
@@ -42,7 +42,7 @@ def test_source_failure_exits_nonzero(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["scheduler", "--once"])
 
     def unavailable():
-        raise HistoryError("synthetic_source_failure", "explicit fault", 503)
+        raise FabricError("synthetic_source_failure", "explicit fault", 503)
 
     monkeypatch.setattr(scheduler, "refresh_once", unavailable)
     with pytest.raises(SystemExit) as exc:

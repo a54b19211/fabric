@@ -4,7 +4,7 @@
 从哪读起：main()，它按参数做两件事之一：清洗加打分（调用 clean/clean_stage.py 的 process，再调 clean/quality_stage.py 的
 process，真正的工作都在那两个文件里），或看清洗进度（stage_status）。
 
-读写的表：本文件自己不碰表。清洗经 clean/clean_stage.py：读 history_versions 和 history_sources；derived_stage_waiting 记
+读写的表：本文件自己不碰表。清洗经 clean/clean_stage.py：读 fabric_versions 和 fabric_sources；derived_stage_waiting 记
 等附件正文的版本；写 derived_clean_text、derived_identifiers、derived_profiles、临床登记差分，并在同一事务里给
 index_publications 排活。打分经 clean/quality_stage.py：写 derived_quality_scores、derived_authority_resolutions（药名对齐要
 联网，每轮限时 --quality-seconds，0 就不打分；权威库连不上时有药名的版本留到下一轮）。

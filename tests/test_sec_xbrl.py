@@ -9,7 +9,7 @@ import pytest
 from fetch import sec_xbrl as sec
 from fetch.projection import _pointer, project_record
 from fetch.sources import read_public
-from store.history_models import ArchiveRecord, FetchRequest, HistoryError
+from store.record_models import ArchiveRecord, FabricError, FetchRequest
 
 NATIVE = "CIK0001682852:us-gaap:NetIncomeLoss"
 
@@ -82,7 +82,7 @@ def test_missing_and_explicit_null_optional_financial_fields_are_distinct():
 def test_invalid_financial_numbers_dates_and_accessions_are_not_success(change):
     data = value()
     data["units"]["USD"][0].update(change)
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         project_record("sec_companyfacts", record(data))
 
 
@@ -92,7 +92,7 @@ def test_invalid_financial_numbers_dates_and_accessions_are_not_success(change):
     "CIK0001682852:custom:NetIncomeLoss",
 ])
 def test_source_scope_rejects_guessed_or_external_endpoints(native):
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         sec.split_native(native)
 
 
@@ -165,5 +165,5 @@ def test_page_budget_is_explicit_and_retains_success_before_later_error(monkeypa
 
 def test_reader_requires_explicit_native_scope_before_network(monkeypatch):
     mocked_http(monkeypatch, lambda _: pytest.fail("No HTTP without exact scope"))
-    with pytest.raises(HistoryError, match="清单"):
+    with pytest.raises(FabricError, match="清单"):
         read_public(FetchRequest(source_id="sec_companyfacts", query="company name"))

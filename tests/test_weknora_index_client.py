@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from store import weknora_index_client as module
-from store.history_models import canonical, sha256
+from store.record_models import canonical, sha256
 
 PID = "a" * 64
 TOKEN = "synthetic-private-token"

@@ -1,6 +1,6 @@
-"""雷达读的 History 接口（/api/history/*）：来源、版本、变更、清洗正文、附件正文、登记差分、上一版、检索、
-采集任务。读接口要读凭据（DATAFABRIC_HISTORY_READ_TOKEN 或管理员凭据），写接口要管理员凭据。
-图谱的 /api/history/graph/* 在 graph/api/history_graph.py，测量在 api/routers/measurements.py。"""
+"""雷达读的资料库接口（/api/fabric/*）：来源、版本、变更、清洗正文、附件正文、登记差分、上一版、检索、
+采集任务。读接口要读凭据（DATAFABRIC_READ_TOKEN 或管理员凭据），写接口要管理员凭据。
+图谱的 /api/fabric/graph/* 在 graph/api/fabric_graph.py，测量在 api/routers/measurements.py。"""
 
 import hmac
 import os
@@ -12,20 +12,20 @@ from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from store import history as store
-from store.history_models import (
+from store import records as store
+from store.record_models import (
     ArchiveImport,
+    FabricError,
     FetchRequest,
-    HistoryError,
-    HistoryRecord,
     Mode,
     RecordCollection,
     RecordKind,
     RunView,
+    VersionRecord,
 )
 
-router = APIRouter(prefix="/api/history", tags=["历史资料"])
-bearer = HTTPBearer(auto_error=False, scheme_name="HistoryBearer")
+router = APIRouter(prefix="/api/fabric", tags=["资料库"])
+bearer = HTTPBearer(auto_error=False, scheme_name="FabricBearer")
 
 
 def _credential(credentials):
@@ -34,7 +34,7 @@ def _credential(credentials):
             status_code=401,
             detail={
                 "code": "authentication_required",
-                "message": "需要本地历史服务凭据",
+                "message": "需要本地资料库服务凭据",
             },
         )
     return credentials.credentials
@@ -45,39 +45,39 @@ def require_read(
 ):
     token = _credential(credentials)
     expected = [
-        os.environ.get("DATAFABRIC_HISTORY_READ_TOKEN", ""),
-        os.environ.get("DATAFABRIC_HISTORY_ADMIN_TOKEN", ""),
+        os.environ.get("DATAFABRIC_READ_TOKEN", ""),
+        os.environ.get("DATAFABRIC_ADMIN_TOKEN", ""),
     ]
     if not any(expected):
         raise HTTPException(
             status_code=503,
-            detail={"code": "history_not_configured", "message": "历史服务尚未配置"},
+            detail={"code": "fabric_not_configured", "message": "资料库服务尚未配置"},
         )
     if not any(value and hmac.compare_digest(token, value) for value in expected):
         raise HTTPException(
             status_code=401,
             detail={"code": "invalid_credential", "message": "凭据无效"},
         )
-    return "history-reader"
+    return "fabric-reader"
 
 
 def require_admin(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ):
     token = _credential(credentials)
-    expected = os.environ.get("DATAFABRIC_HISTORY_ADMIN_TOKEN", "")
+    expected = os.environ.get("DATAFABRIC_ADMIN_TOKEN", "")
     if not expected or not hmac.compare_digest(token, expected):
         raise HTTPException(
             status_code=403,
-            detail={"code": "admin_required", "message": "需要历史资料管理员凭据"},
+            detail={"code": "admin_required", "message": "需要资料库管理员凭据"},
         )
-    return "history-admin"
+    return "fabric-admin"
 
 
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
-    except HistoryError as exc:
+    except FabricError as exc:
         raise HTTPException(
             status_code=exc.status, detail={"code": exc.code, "message": exc.message}
         ) from None
@@ -86,17 +86,17 @@ def _call(function, *args, **kwargs):
         raise HTTPException(
             status_code=503,
             detail={
-                "code": "history_service_failed",
-                "message": "历史资料服务暂不可用；未确认写入请先按任务ID或幂等键核对",
+                "code": "fabric_service_failed",
+                "message": "资料库服务暂不可用；未确认写入请先按任务ID或幂等键核对",
             },
         ) from None
 
 
 def _read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff):
-    """一个固定版本；图版本另要核对它引用的原件此刻也看得到（graph/publish/history_graph.py）。"""
+    """一个固定版本；图版本另要核对它引用的原件此刻也看得到（graph/publish/fabric_graph.py）。"""
     record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
     if record.record_kind == "graph":
-        from graph.publish.history_graph import check_cited
+        from graph.publish.fabric_graph import check_cited
 
         check_cited(record, mode, cutoff)
     return record
@@ -115,9 +115,9 @@ def sources():
 
 @router.post("/archives", response_model=RunView, dependencies=[Depends(require_admin)])
 def archive(body: ArchiveImport, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
-    """导入一包原件。图包（reviewed_graph、primekg_graph）先核对引文再存（graph/publish/history_graph.py）。"""
+    """导入一包原件。图包（reviewed_graph、primekg_graph）先核对引文再存（graph/publish/fabric_graph.py）。"""
     from fetch.catalog import GRAPH_SOURCES
-    from graph.publish.history_graph import import_graph
+    from graph.publish.fabric_graph import import_graph
 
     return _call(import_graph if body.source_id in GRAPH_SOURCES else store.import_archive, body, idempotency_key)
 
@@ -195,7 +195,7 @@ def records(
 
 @router.get(
     "/versions/{version_id}",
-    response_model=HistoryRecord,
+    response_model=VersionRecord,
     dependencies=[Depends(require_read)],
 )
 def version(
@@ -248,7 +248,7 @@ def version_differences(
     cutoff: datetime,
     version_ids: Annotated[list[str], Query(min_length=1, max_length=100)],
 ):
-    """一页版本各自的上一版（store.history.version_differences）。"""
+    """一页版本各自的上一版（store.records.version_differences）。"""
     return _call(store.version_differences, source_id, is_demo, version_ids, mode, cutoff)
 
 

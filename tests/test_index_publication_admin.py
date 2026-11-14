@@ -7,10 +7,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.routers import history as history_router
-from store import history
+from api.routers import fabric as fabric_router
 from store import index_publication as index
-from store.history_models import HistoryError
+from store import records
+from store.record_models import FabricError
 
 ADMIN = "synthetic-admin-token"
 JOB = "a" * 64
@@ -52,8 +52,8 @@ def db(monkeypatch):
         def begin(self):
             yield holder["conn"]
 
-    monkeypatch.setattr(history, "history_engine", lambda: Engine())
-    monkeypatch.setattr(history, "_source", lambda conn, source_id: None)
+    monkeypatch.setattr(records, "fabric_engine", lambda: Engine())
+    monkeypatch.setattr(records, "_source", lambda conn, source_id: None)
 
     def script(*results):
         holder["conn"] = Conn(results)
@@ -97,9 +97,9 @@ def test_status_last_page_has_no_cursor_and_flags_revoked_sources(db, monkeypatc
     conn = db(Result([job_row(1)]))
 
     def revoked(conn, source_id):
-        raise HistoryError("source_forbidden", "来源未授权", 403)
+        raise FabricError("source_forbidden", "来源未授权", 403)
 
-    monkeypatch.setattr(history, "_source", revoked)
+    monkeypatch.setattr(records, "_source", revoked)
     page = index.status()
     assert page["next_cursor"] is None and page["items"][0]["read_permitted"] is False
     sql, params = conn.queries[0]
@@ -114,7 +114,7 @@ def test_status_last_page_has_no_cursor_and_flags_revoked_sources(db, monkeypatc
 ])
 def test_invalid_status_requests_stop_before_database(db, kwargs, code):
     conn = db()
-    with pytest.raises(HistoryError) as caught:
+    with pytest.raises(FabricError) as caught:
         index.status(**kwargs)
     assert caught.value.code == code and conn.queries == []
 
@@ -134,28 +134,28 @@ def test_retry_reports_why_nothing_was_scheduled(db):
 
 def test_retry_unknown_or_malformed_id(db):
     db(Result(rowcount=0), Result([]))
-    with pytest.raises(HistoryError) as caught:
+    with pytest.raises(FabricError) as caught:
         index.retry(JOB)
     assert caught.value.status == 404
     conn = db()
-    with pytest.raises(HistoryError) as caught:
+    with pytest.raises(FabricError) as caught:
         index.retry("../" + JOB)
     assert caught.value.status == 422 and conn.queries == []
 
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setenv("DATAFABRIC_HISTORY_ADMIN_TOKEN", ADMIN)
-    monkeypatch.setenv("DATAFABRIC_HISTORY_READ_TOKEN", "synthetic-read-token")
+    monkeypatch.setenv("DATAFABRIC_ADMIN_TOKEN", ADMIN)
+    monkeypatch.setenv("DATAFABRIC_READ_TOKEN", "synthetic-read-token")
     app = FastAPI()
-    app.include_router(history_router.router)
+    app.include_router(fabric_router.router)
     with TestClient(app) as test_client:
         yield test_client
 
 
 def test_index_routes_require_admin(client):
-    for method, path in [("get", "/api/history/index/status"), ("get", "/api/history/index/counts"),
-                         ("post", "/api/history/index/" + JOB + "/retry")]:
+    for method, path in [("get", "/api/fabric/index/status"), ("get", "/api/fabric/index/counts"),
+                         ("post", "/api/fabric/index/" + JOB + "/retry")]:
         assert getattr(client, method)(path).status_code == 401
         denied = getattr(client, method)(path, headers={"Authorization": "Bearer synthetic-read-token"})
         assert denied.status_code == 403 and denied.json()["detail"]["code"] == "admin_required"
@@ -166,18 +166,18 @@ def test_index_routes_pass_filters_fill_counts_and_map_errors(client, monkeypatc
     monkeypatch.setattr(index, "status", lambda **kw: seen.update(kw) or {"items": [], "next_cursor": None})
     monkeypatch.setattr(index, "state_counts", lambda: {"blocked": 2, "ready": 5})
     headers = {"Authorization": "Bearer " + ADMIN}
-    listed = client.get("/api/history/index/status", headers=headers,
+    listed = client.get("/api/fabric/index/status", headers=headers,
                         params={"state": "blocked", "source_id": "who_don", "limit": 10})
     assert listed.status_code == 200 and listed.json() == {"items": [], "next_cursor": None}
     assert seen == {"limit": 10, "state": "blocked", "source_id": "who_don", "cursor": None}
-    assert client.get("/api/history/index/status", headers=headers, params={"limit": 101}).status_code == 422
-    counts = client.get("/api/history/index/counts", headers=headers).json()
+    assert client.get("/api/fabric/index/status", headers=headers, params={"limit": 101}).status_code == 422
+    counts = client.get("/api/fabric/index/counts", headers=headers).json()
     assert counts["total"] == 7 and list(counts["states"]) == list(index.STATES)
     assert counts["states"]["blocked"] == 2 and counts["states"]["queued"] == 0
 
     def missing(key):
-        raise HistoryError("index_publication_not_found", "没有这条索引作业", 404)
+        raise FabricError("index_publication_not_found", "没有这条索引作业", 404)
 
     monkeypatch.setattr(index, "retry", missing)
-    retried = client.post("/api/history/index/" + JOB + "/retry", headers=headers)
+    retried = client.post("/api/fabric/index/" + JOB + "/retry", headers=headers)
     assert retried.status_code == 404 and retried.json()["detail"]["code"] == "index_publication_not_found"

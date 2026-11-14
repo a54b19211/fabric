@@ -15,9 +15,9 @@ from clean.identifiers import NCT_ID
 from fetch import transport
 from fetch.catalog import source_catalog
 from fetch.projection import DECODER, TRIAL_PATHS, _pointer, _project_pubmed, crl_id, parse_json, project_record
-from store.history_models import ArchiveRecord, FetchRequest, HistoryError, sha256
+from store.record_models import ArchiveRecord, FabricError, FetchRequest, sha256
 
-# every source with a history_sources row and its name (fetch.catalog)
+# every source with a fabric_sources row and its name (fetch.catalog)
 SOURCE_CATALOG = source_catalog()
 
 
@@ -67,17 +67,17 @@ def _raw_array_items(text: str, path: list[str]):
 
 def public_fetch_enabled() -> bool:
     """Keep the legacy default; every configured value must explicitly mean true."""
-    return os.environ.get("DATAFABRIC_HISTORY_FETCH_ENABLED", "true").strip().lower() == "true"
+    return os.environ.get("DATAFABRIC_FETCH_ENABLED", "true").strip().lower() == "true"
 
 
 def require_public_fetch_enabled():
     if not public_fetch_enabled():
-        raise HistoryError("public_fetch_disabled", "当前环境已关闭公开来源采集；归档与固定版本读取不受影响", 403)
+        raise FabricError("public_fetch_disabled", "当前环境已关闭公开来源采集；归档与固定版本读取不受影响", 403)
 
 
 def read_public(request: FetchRequest) -> dict:
     """读一个来源：按来源目录（fetch/catalog.py）里写的读法调对应的读取函数。返回读到的原件、为什么停、续读位置，
-    以及这次经 fetch.transport 发出的请求数和字节数。DATAFABRIC_HISTORY_FETCH_ENABLED=false 时不出网。"""
+    以及这次经 fetch.transport 发出的请求数和字节数。DATAFABRIC_FETCH_ENABLED=false 时不出网。"""
     from fetch.catalog import spec
 
     require_public_fetch_enabled()
@@ -106,7 +106,7 @@ def read_public(request: FetchRequest) -> dict:
 
         result = read_local(request)
     else:
-        raise HistoryError("source_not_connected", "该来源在目录中尚未接通", 503)
+        raise FabricError("source_not_connected", "该来源在目录中尚未接通", 503)
     return {**result, "requests": transport.SENT["requests"], "bytes": transport.SENT["bytes"]}
 
 
@@ -135,7 +135,7 @@ def _api_page(request, cursor, size, offset):
         return "https://clinicaltrials.gov/api/v2/studies", params, ["studies"]
     if source == "fda_crl":
         if request.source_record_ids:
-            raise HistoryError("by_id_unsupported", "FDA复合记录尚不支持精确by-ID重采")
+            raise FabricError("by_id_unsupported", "FDA复合记录尚不支持精确by-ID重采")
         # 指定一个顺序：不指定时 openFDA 的顺序是乱的（第一条是 2018 年的），skip 翻页要一个稳定的顺序
         params = {"limit": size, "skip": offset, "sort": "letter_date:desc"}
         if request.query.strip() != "*":
@@ -167,7 +167,7 @@ def _api_total(source, data):
     if source == "clinicaltrials":
         total = data.get("totalCount")
         if "totalCount" in data and (not isinstance(total, int) or isinstance(total, bool) or total < 0):
-            raise HistoryError("invalid_source_pagination", "临床登记显式命中总数无效，不能确认EOF")
+            raise FabricError("invalid_source_pagination", "临床登记显式命中总数无效，不能确认EOF")
         return total
     if source == "fda_crl":
         return ((data.get("meta") or {}).get("results") or {}).get("total")
@@ -214,7 +214,7 @@ class _PublicApiRead:
         self._absorb(page_items)
         next_cursor = self._next_cursor(data, page_items)
         if not page_items and not self.exhausted:
-            raise HistoryError("unexpected_empty_page", "来源仍有后续标记但返回空页")
+            raise FabricError("unexpected_empty_page", "来源仍有后续标记但返回空页")
         if source in {"clinicaltrials", "europe_pmc", "fda_crl"}:
             self.next_continuation = None if self.exhausted else {
                 "cursor": next_cursor, "read_count": self.consumed}
@@ -226,7 +226,7 @@ class _PublicApiRead:
             return True
         if source != "fda_crl":
             if next_cursor in self.previous_cursors:
-                raise HistoryError("repeated_page_cursor", "来源分页标记重复")
+                raise FabricError("repeated_page_cursor", "来源分页标记重复")
             self.previous_cursors.add(next_cursor)
             self.cursor = next_cursor
         return False
@@ -235,7 +235,7 @@ class _PublicApiRead:
         for data_item, raw in page_items:
             try:
                 native, kind = _api_native(self.source, data_item)
-            except HistoryError as exc:
+            except FabricError as exc:
                 # openFDA CRL 里认不出身份的行，一条不卡住整次读取：没有正文的是还没发布的信函（file_name
                 # "Under Review for Release"，没有类型、申请号），没有内容可存，记在 skipped_items；有正文却缺类型或申请号的
                 # 是老信函，不猜编号，记为读不到（unread_items，和站点插件一样）。别的来源仍然报错
@@ -252,7 +252,7 @@ class _PublicApiRead:
             if native in self.seen:
                 if self.seen[native] != sha256(raw):
                     self.records = [value for value in self.records if value.source_record_id != native]
-                    raise HistoryError("ambiguous_native_id", "同批同来源ID对应不同原件，拒绝猜测修订顺序")
+                    raise FabricError("ambiguous_native_id", "同批同来源ID对应不同原件，拒绝猜测修订顺序")
                 continue
             self.seen[native] = sha256(raw)
             self.records.append(item)
@@ -275,10 +275,10 @@ class _PublicApiRead:
         next_cursor = data.get("nextPageToken")
         self.consumed += len(page_items)
         if not next_cursor and self.source_total is not None and self.consumed < self.source_total:
-            raise HistoryError("invalid_source_pagination", "临床登记仍有未读命中但缺少续页标记，不能视为EOF")
+            raise FabricError("invalid_source_pagination", "临床登记仍有未读命中但缺少续页标记，不能视为EOF")
         if next_cursor and (not isinstance(next_cursor, str) or not page_items
                             or next_cursor in self.previous_cursors):
-            raise HistoryError("invalid_source_pagination", "临床登记分页中断，不能视为EOF")
+            raise FabricError("invalid_source_pagination", "临床登记分页中断，不能视为EOF")
         self.exhausted = not bool(next_cursor)
         return next_cursor
 
@@ -286,7 +286,7 @@ class _PublicApiRead:
         next_cursor = data.get("nextCursorMark")
         source_total = self.source_total
         if not isinstance(source_total, int) or isinstance(source_total, bool) or source_total < 0:
-            raise HistoryError("invalid_source_pagination", "Europe PMC缺可信命中总数，不能确认EOF")
+            raise FabricError("invalid_source_pagination", "Europe PMC缺可信命中总数，不能确认EOF")
         # Europe PMC recounts hitCount: a record updated again inside the fixed UPDATE_DATE window leaves it, so the
         # count can fall mid-paging. An empty page without a new marker after reads is its documented end; treat
         # it as read to the end and record the drifted count next to the read count in the coverage statement.
@@ -296,7 +296,7 @@ class _PublicApiRead:
         if drifted and self.consumed < source_total:
             self.count_drift = {"source_total": source_total, "read_count": self.consumed}
         if not self.exhausted and (not page_items or not next_cursor or next_cursor == self.cursor):
-            raise HistoryError("invalid_source_pagination", "Europe PMC仍有未读命中但分页中断，不能视为EOF")
+            raise FabricError("invalid_source_pagination", "Europe PMC仍有未读命中但分页中断，不能视为EOF")
         return next_cursor
 
     def result(self) -> dict:
@@ -334,7 +334,7 @@ def _read_public_api(request: FetchRequest) -> dict:
             read.stop = stopped.reason  # 停在最后读完的一页，续读位置不变
             if read.stop == transport.KNOWN:  # 读到旧的了，没有“下一页”：第二页起读到已存的，上一页留下的位置不能再给出去
                 read.next_continuation = None
-        except HistoryError as exc:
+        except FabricError as exc:
             read.error = {"code": exc.code, "message": exc.message}
             read.stop = "source_failed"
         except (httpx.HTTPError, UnicodeError, ValueError, TypeError, KeyError, IndexError):
@@ -356,7 +356,7 @@ def _pubmed_cursor(request):
         value = json.loads(request.continuation.cursor)
         return int(value["i"]), bool(value.get("a"))
     except (ValueError, KeyError, TypeError):
-        raise HistoryError("invalid_cursor", "续读位置无效") from None
+        raise FabricError("invalid_cursor", "续读位置无效") from None
 
 
 def _pubmed_articles(raw_xml, ids):
@@ -437,7 +437,7 @@ def _read_pubmed(request):
             stop = stopped.reason
             if stop == transport.KNOWN:  # 读到旧的了，没有“下一页”
                 resume = None
-        except (httpx.HTTPError, ValueError, ET.ParseError, HistoryError):
+        except (httpx.HTTPError, ValueError, ET.ParseError, FabricError):
             error = {"code": "source_read_failed", "message": "PubMed读取或EFetch原件校验失败"}
             stop = "source_failed"
     return {

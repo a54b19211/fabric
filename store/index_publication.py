@@ -22,8 +22,8 @@ from datetime import datetime
 from pydantic import Field
 from sqlalchemy import text
 
-from store import history, index_pieces
-from store.history_models import HistoryError, HistoryRecord, Model, canonical, sha256
+from store import index_pieces, records
+from store.record_models import FabricError, Model, VersionRecord, canonical, sha256
 from store.timestamps import parse_timestamp
 from store.weknora_index_client import WeKnoraIndexClient, publication_id
 
@@ -61,14 +61,14 @@ def targets():
         if len({item.key() for item in result}) != len(result):
             raise ValueError()
     except (ValueError, TypeError):
-        raise HistoryError("index_target_configuration", "来源到知识库的索引配置无效", 503) from None
+        raise FabricError("index_target_configuration", "来源到知识库的索引配置无效", 503) from None
     from fetch.catalog import RETIRED
 
     retired = sorted({item.source_id for item in result if item.source_id in RETIRED})
     if retired:
         # a configuration error, not something to filter at search time: it is refused when the service or the worker
         # starts (api.main, run_worker) and by every caller of targets()
-        raise HistoryError("index_target_retired_source",
+        raise FabricError("index_target_retired_source",
                            "索引目标配置了已退役来源 " + ",".join(retired) + "；退役来源不能再作索引目标", 503)
     return result
 
@@ -251,10 +251,10 @@ def enqueue_versions(conn, version_ids, *, configured=None):
     # 图谱和观测投影不进正文索引（观测另有依据可见性检查）；按版本先后入队：同一记录正文相同的几个版本，
     # 代表版本是最早的那个
     for row in conn.execute(text(
-        "SELECT payload,proof_available_at FROM history_versions WHERE version_id=ANY(:ids) "
+        "SELECT payload,proof_available_at FROM fabric_versions WHERE version_id=ANY(:ids) "
         "AND record_kind<>'graph' AND payload->>'parser_version' IS DISTINCT FROM :observation ORDER BY published_seq"
     ), {"ids": list(artifacts), "observation": OBSERVATION_PARSER}).mappings():
-        record = HistoryRecord.model_validate(row["payload"])
+        record = VersionRecord.model_validate(row["payload"])
         if (record.facts or {}).get("publication_state") in TOMBSTONES:
             continue  # 撤回/删除的墓碑版本没有可检索的内容；检索时按模式和截止时间判 withdrawn
         artifact = artifacts[record.version_id]
@@ -269,8 +269,8 @@ def enqueue_versions(conn, version_ids, *, configured=None):
 def _readable(conn, source_id):
     """来源此刻可读（许可与开关）；撤权的返回 False，其他错误照常抛出。"""
     try:
-        history._source(conn, source_id)
-    except HistoryError as exc:
+        records._source(conn, source_id)
+    except FabricError as exc:
         if exc.status == 403:
             return False
         raise
@@ -293,10 +293,10 @@ def scan_committed(*, batch_size=100):
     """回填扫描：按 published_seq 水位，把已画像而还没有待办的版本放进待办；落待办和推进水位在同一事务。
     还没画像的版本跳过——它们画像时由清洗段同一事务入队。"""
     if not 1 <= batch_size <= 1000:
-        raise HistoryError("index_budget", "索引扫描批次须为1至1000")
+        raise FabricError("index_budget", "索引扫描批次须为1至1000")
     configured = targets()
     count = 0
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         _sync_targets(conn, configured)
         for target in configured:
             row = conn.execute(
@@ -306,7 +306,7 @@ def scan_committed(*, batch_size=100):
             if row is None or not _readable(conn, target.source_id):
                 continue
             versions = conn.execute(text("""
-                SELECT version_id,published_seq FROM history_versions
+                SELECT version_id,published_seq FROM fabric_versions
                 WHERE source_id=:source AND is_demo=:demo AND published_seq>:seq
                 ORDER BY published_seq LIMIT :limit
             """), {"source": target.source_id, "demo": target.is_demo,
@@ -335,7 +335,7 @@ _CLAIM_ORDER = ("p.first_send_at IS NOT NULL", "p.first_send_at IS NULL AND p.la
 def _claim(batch):
     """领一批到期待办（FOR UPDATE SKIP LOCKED：别的进程正在领的跳过），领到的下次检查推后 CLAIM_SECONDS。"""
     rows = []
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         for which in _CLAIM_ORDER:
             if len(rows) < batch:
                 rows += conn.execute(text(_CLAIM.format(which=which)), {"n": batch - len(rows)}).mappings().all()
@@ -388,12 +388,12 @@ def _wanted(row):
     """这条待办现在该不该在 WeKnora 里：active 该在；revoked 来源撤权或目标停用；superseded 这份正文（或这一片）
     已被替代；retiring 将被替代，但替代它的正文还没整份 ready（先上后下，不撤掉最后的入口）。"""
     target = row["config"]
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         if not row["enabled"] or not _readable(conn, target["source_id"]):
             return "revoked"
         versions = [v for (v,) in conn.execute(text(
-            "SELECT version_id FROM " + history._VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
-            "AND source_record_id=:native AND " + history._ROLE + "!='context_reference'"
+            "SELECT version_id FROM " + records._VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
+            "AND source_record_id=:native AND " + records._ROLE + "!='context_reference'"
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
         mine = current.get(row["artifact_key"])
@@ -422,11 +422,11 @@ def _withdraw(row, client, reason):
 
 def _publish(row, client):
     """该在的一条：先向桥接查回执（发过而没收到回执的不重复裸传），还没绑定就上传，再按回执定状态。"""
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         full = _artifact_text(conn, row["version_id"], row["artifact_key"]) or ""
     content = index_pieces.content(full, row["piece"]) if row["piece"] else full
     if not content.strip():
-        raise HistoryError("index_content_empty", "清洗产物为空，原件仍保留", 422)
+        raise FabricError("index_content_empty", "清洗产物为空，原件仍保留", 422)
     if not index_pieces.fits(content):
         return _stopped("index_content_budget", "超过单条上传预算（%d 字、%d 字节），原件与清洗产物保留，记为覆盖缺口"
                         % (len(content), len(content.encode())))
@@ -444,7 +444,7 @@ def _settled(receipt):
     if receipt.get("source_status") != "active":
         if receipt.get("source_change_type") == "disabled_upstream" and receipt.get("parse_status") in PARSING:
             return {"state": "indexing", "delay": POLL_SECONDS}
-        raise HistoryError("index_upstream_disabled", "索引已停用，须明确恢复授权后再启用", 409)
+        raise FabricError("index_upstream_disabled", "索引已停用，须明确恢复授权后再启用", 409)
     ready = (bool(receipt.get("knowledge_id")) and receipt.get("upload_status") == "uploaded"
              and receipt.get("parse_status") in {"completed", "finalizing"}
              and receipt.get("vector_status") == receipt.get("index_status") == "ready"
@@ -462,7 +462,7 @@ def _stopped(code, message):
 def _failed(row, exc):
     """出错：记下原因，退避重试（20 秒起翻倍，最多 1 小时），连续 MAX_ATTEMPTS 次后停在 blocked。"""
     attempts = row["attempts"] + 1
-    if isinstance(exc, HistoryError):
+    if isinstance(exc, FabricError):
         error = {"code": exc.code, "message": exc.message}
     else:
         error = {"code": "index_unavailable", "message": "索引处理暂不可用，稍后重试"}
@@ -472,7 +472,7 @@ def _failed(row, exc):
 
 def _mark_sent(job_id):
     """上传之前先记下“发出过”：万一请求发出后进程退出，下次先向桥接对账，不当作没发过。"""
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         conn.execute(text(
             "UPDATE index_publications SET first_send_at=COALESCE(first_send_at,clock_timestamp()),state='sending',"
             "updated_at=clock_timestamp() WHERE id=:id"), {"id": job_id})
@@ -480,7 +480,7 @@ def _mark_sent(job_id):
 
 def _save(row, result):
     """写回一条的结果；刚变 ready 时，同一记录里等着交接的其他正文的条目马上复查。"""
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         conn.execute(text("""
             UPDATE index_publications SET state=:state,desired_state=:desired,error=CAST(:error AS jsonb),
               attempts=:attempts,knowledge_id=COALESCE(:knowledge,knowledge_id),
@@ -502,9 +502,9 @@ def configured():
     """有索引目标配置，或库里还有目标（配置移除＝停止使用，旧条目仍要撤下）。"""
     if os.environ.get("DATAFABRIC_INDEX_TARGETS"):
         return True
-    if not os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL"):
+    if not os.environ.get("DATAFABRIC_DATABASE_URL"):
         return False
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         if conn.execute(text("SELECT to_regclass('index_targets')")).scalar_one() is None:
             return False
         return conn.execute(text("SELECT EXISTS(SELECT 1 FROM index_targets)")).scalar_one()
@@ -545,7 +545,7 @@ _JOB_ID = re.compile(r"[0-9a-f]{64}")
 
 def _job_id(key):
     if not isinstance(key, str) or not _JOB_ID.fullmatch(key):
-        raise HistoryError("index_publication_id", "索引作业编号须为64位小写十六进制", 422)
+        raise FabricError("index_publication_id", "索引作业编号须为64位小写十六进制", 422)
     return key
 
 
@@ -557,8 +557,8 @@ def _cursor(value):
         if moment.tzinfo is None:
             raise ValueError()
         return moment, _job_id(key)
-    except (ValueError, AttributeError, HistoryError):
-        raise HistoryError("index_cursor", "索引列表续页标记无效", 422) from None
+    except (ValueError, AttributeError, FabricError):
+        raise FabricError("index_cursor", "索引列表续页标记无效", 422) from None
 
 
 _LISTED = ("id", "target_id", "version_id", "source_record_id", "remote_id", "state", "desired_state", "knowledge_id",
@@ -569,11 +569,11 @@ _LISTED = ("id", "target_id", "version_id", "source_record_id", "remote_id", "st
 def status(*, limit=100, state=None, source_id=None, cursor=None):
     """索引作业列表：按更新时间倒序，可按状态、来源过滤；next_cursor 不为空时还有下一页。"""
     if not 1 <= limit <= 100:
-        raise HistoryError("index_budget", "索引状态最多读取100项")
+        raise FabricError("index_budget", "索引状态最多读取100项")
     if state is not None and state not in STATES:
-        raise HistoryError("index_filter", "索引状态过滤值无效", 422)
+        raise FabricError("index_filter", "索引状态过滤值无效", 422)
     if source_id is not None and not 1 <= len(source_id) <= 80:
-        raise HistoryError("index_filter", "来源编号过滤值无效", 422)
+        raise FabricError("index_filter", "来源编号过滤值无效", 422)
     where, params = [], {"limit": limit + 1}
     if state is not None:
         where.append("p.state=:state")
@@ -584,7 +584,7 @@ def status(*, limit=100, state=None, source_id=None, cursor=None):
     if cursor is not None:
         params["before_at"], params["before_id"] = _cursor(cursor)
         where.append("(p.updated_at,p.id)<(:before_at,:before_id)")
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         rows = conn.execute(text(
             "SELECT p.*,t.config FROM index_publications p JOIN index_targets t ON t.id=p.target_id"
             + (" WHERE " + " AND ".join(where) if where else "")
@@ -600,7 +600,7 @@ def status(*, limit=100, state=None, source_id=None, cursor=None):
 
 def state_counts():
     """各索引发布状态的条数（流水线总览用）。"""
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         return {r[0]: r[1] for r in conn.execute(text(
             "SELECT state, count(*) FROM index_publications GROUP BY state"))}
 
@@ -609,7 +609,7 @@ def retry(key):
     """把停住（blocked）的作业放回待重试：尝试次数清零、立即到期，由索引 worker 处理（处理时仍先向桥接查回执，
     不会二次裸上传）。其余状态不动，如实返回当前状态。"""
     key = _job_id(key)
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         if conn.execute(text(
             "UPDATE index_publications SET state='waiting',attempts=0,next_check_at=clock_timestamp(),"
             "updated_at=clock_timestamp() WHERE id=:id AND state='blocked'"
@@ -617,5 +617,5 @@ def retry(key):
             return {"id": key, "scheduled": True, "state": "waiting"}
         found = conn.execute(text("SELECT state FROM index_publications WHERE id=:id"), {"id": key}).mappings().first()
     if found is None:
-        raise HistoryError("index_publication_not_found", "没有这条索引作业", 404)
+        raise FabricError("index_publication_not_found", "没有这条索引作业", 404)
     return {"id": key, "scheduled": False, "state": found["state"], "reason": "not_blocked"}

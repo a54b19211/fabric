@@ -2,8 +2,8 @@
 
 - 召回：经桥接服务在各索引目标的知识库里整库检索（关键词 + 向量，RRF 合并），不重排、不扩上下文。
 - 校验（逐条，全部用 Fabric 自己的记录，命中里的 metadata 只当指针）：
-  1. 来源当前可读（history 的许可与开关；不可读的只计数，不回任何内容）；
-  2. 该记录在本次模式和截止时间下可见的版本（history.visible_versions，与 list_records 同一规则）；
+  1. 来源当前可读（资料库的许可与开关；不可读的只计数，不回任何内容）；
+  2. 该记录在本次模式和截止时间下可见的版本（records.visible_versions，与 list_records 同一规则）；
   3. 那个可见版本的当前清洗产物就是被索引的这份正文（处理器版本 + 正文摘要一致）；
   4. 命中块确实是这份固定正文里的一段（定位到偏移，再经段落定位回到原件）。
   返回的时间、原件摘要、画像、定位都取实际可见的版本；被索引的代表版本另外写明（indexed_as）。
@@ -20,9 +20,9 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import text
 
 from fetch.catalog import RETIRED
-from store import history, index_pieces
+from store import index_pieces, records
 from store import index_publication as index
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 SCHEMA = "datafabric.retrieval.v1"
 MODES = ("current", "operational_replay", "public_history_reconstruction")
@@ -71,7 +71,7 @@ def _versions(conn, version_ids):
         SELECT version_id,payload->>'raw_sha256' AS raw_sha256,first_seen_at,proof_available_at,
                payload->>'title' AS title,payload->'source_published_at' AS published_at,
                payload->'availability_proof' AS proof,payload->'facts'->>'publication_state' AS publication_state
-        FROM history_versions WHERE version_id=ANY(:ids)
+        FROM fabric_versions WHERE version_id=ANY(:ids)
     """), {"ids": list(version_ids)}).mappings()
     return {row["version_id"]: dict(row) for row in rows}
 
@@ -126,12 +126,12 @@ def _by_source(candidates):
 def _visible_records(source_id, is_demo, mode, cutoff, hits, excluded):
     """record -> its version visible in this mode at the cutoff; None when the whole group is excluded (the source
     is not readable now, or the mode is not supported for it; excluded counts them by reason)."""
-    records = sorted({h["identity"]["source_record_id"] for h in hits})
+    record_ids = sorted({h["identity"]["source_record_id"] for h in hits})
     try:
         visible = {}
-        for i in range(0, len(records), 200):
-            visible.update(history.visible_versions(source_id, is_demo, mode, cutoff, records[i:i + 200]))
-    except HistoryError as exc:
+        for i in range(0, len(record_ids), 200):
+            visible.update(records.visible_versions(source_id, is_demo, mode, cutoff, record_ids[i:i + 200]))
+    except FabricError as exc:
         if exc.status == 403:  # 来源当前不可读：只计数，不回标题、正文、定位
             excluded["not_readable"] += len(hits)
             return None
@@ -165,7 +165,7 @@ def _needed_artifacts(conn, source_id, is_demo, hits, visible, current, target_i
 
 def _group_state(source_id, is_demo, hits, visible, target_ids):
     """One transaction: the visible versions' facts, their current artifacts, and the artifacts the hits name."""
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         facts = _versions(conn, set(visible.values()))
         current = index.current_artifacts(conn, set(visible.values()))
         needed, serving = _needed_artifacts(conn, source_id, is_demo, hits, visible, current, target_ids)
@@ -252,7 +252,7 @@ def _without_retired(sources):
     wanted = set(sources)
     excluded = [{"source_id": s, "reason": "retired"} for s in sorted(wanted & set(RETIRED))]
     if wanted and len(excluded) == len(wanted):
-        raise HistoryError(*history.LEGACY_RETIRED, 410)
+        raise FabricError(*records.LEGACY_RETIRED, 410)
     return tuple(s for s in sources if s not in RETIRED), excluded
 
 
@@ -261,7 +261,7 @@ def _configured_targets(sources, scopes, is_demo):
     configured = [t for t in index.targets() if (not sources or t.source_id in sources)
                   and (not scopes or t.source_scope in scopes) and (is_demo is None or t.is_demo == is_demo)]
     if not configured:
-        raise HistoryError("search_scope_empty", "所选来源没有配置索引目标", 422)
+        raise FabricError("search_scope_empty", "所选来源没有配置索引目标", 422)
     return configured
 
 
@@ -326,7 +326,7 @@ def _rerank(client, query, configured, verified):
             calls[-1].update(rerank_model=answer.get("rerank_model"), usage=answer.get("usage"))
         verified.sort(key=lambda i: (-i["rerank_score"], i["version_id"], i["start"]))
         return {"state": "succeeded", "calls": calls}
-    except HistoryError as exc:
+    except FabricError as exc:
         verified.sort(key=lambda i: (-(i["recall_score"] or 0), i["version_id"], i["start"]))
         return {"state": "failed", "code": exc.code, "fallback": "reciprocal_rank_fusion", "calls": calls}
 
@@ -335,9 +335,9 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
            top_k=10, client=None):
     """sources / scopes / is_demo 选择检索哪些索引目标（来源、业务范围、演示与否）；其余见模块说明。"""
     if mode not in MODES:
-        raise HistoryError("unsupported_mode", "不支持该检索模式", 422)
+        raise FabricError("unsupported_mode", "不支持该检索模式", 422)
     if not 1 <= top_k <= 20 or not 1 <= len(query) <= 2000:
-        raise HistoryError("query_budget", "检索词须为1至2000字符，top_k须为1至20", 422)
+        raise FabricError("query_budget", "检索词须为1至2000字符，top_k须为1至20", 422)
     sources, excluded = _without_retired(sources)
     configured = _configured_targets(sources, scopes, is_demo)
     # 一个知识库一次召回，覆盖它在本次检索里的所有业务范围（同库的范围不互相挤占候选）
@@ -356,13 +356,13 @@ def search(query, mode, cutoff, *, sources=(), scopes=(), is_demo=None, doc_cate
         if owned:
             client.close()
     return {
-        "schema_version": SCHEMA, "query": query, "mode": mode, "cutoff": history._cutoff(cutoff).isoformat(),
+        "schema_version": SCHEMA, "query": query, "mode": mode, "cutoff": records._cutoff(cutoff).isoformat(),
         "top_k": top_k, "results": results, "excluded_sources": excluded,
         "excluded": {"counts": dict(counts)},
         "execution": {"candidates": len(candidates), "verified": len(verified), "returned": len(results),
                       "insufficient": len(results) < top_k, "candidate_budget_per_knowledge_base": CANDIDATES,
                       "recall": recall, "rerank": rerank},
-        "coverage": {},  # 索引覆盖不在这里算；各状态的条数见 GET /api/history/index/counts
+        "coverage": {},  # 索引覆盖不在这里算；各状态的条数见 GET /api/fabric/index/counts
         "limitations": [
             "命中只是指针：每条都按本次模式和截止时间回 Fabric 校验了来源许可、可见版本和固定正文",
             "候选有上限；过滤后不足 top_k 是这次召回的结果，不代表库里没有更多相关材料",

@@ -1,4 +1,4 @@
-"""原采集事务发表待办与有界补发；跨库只用冻结输入和history既有幂等键。"""
+"""原采集事务发表待办与有界补发；跨库只用冻结输入和资料库既有幂等键。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from graph.publish import history_graph
+from graph.publish import fabric_graph
 from graph.publish.collected_document import CollectedDocument, collected_document
 from graph.publish.reviewed_graph import (
     GraphBundle,
@@ -19,25 +19,25 @@ from graph.publish.reviewed_graph import (
     StoredDocument,
     document_native_id,
 )
-from store import history
-from store.history import disk_status
-from store.history_models import (
+from store import records
+from store.record_models import (
     MAX_RECORD_BYTES,
     ArchiveImport,
     ArchiveRecord,
-    HistoryError,
+    FabricError,
     canonical,
     sha256,
 )
+from store.records import disk_status
 
 
 def publication_engine():
     url = os.environ.get("DATAFABRIC_PUBLICATION_DATABASE_URL", "")
     if not url:
-        raise HistoryError(
+        raise FabricError(
             "publication_not_configured", "原采集发表数据库须显式配置", 503
         )
-    return history._engine(url)
+    return records._engine(url)
 
 
 def source_sites():
@@ -51,7 +51,7 @@ def source_sites():
             raise ValueError()
         return sorted(set(sites))
     except ValueError:
-        raise HistoryError(
+        raise FabricError(
             "publication_sources_not_configured", "须明确原站点发表许可清单", 503
         ) from None
 
@@ -59,7 +59,7 @@ def source_sites():
 def is_demo():
     value = os.environ.get("DATAFABRIC_PUBLICATION_IS_DEMO", "false")
     if value not in {"true", "false"}:
-        raise HistoryError(
+        raise FabricError(
             "publication_demo_config", "测试标志须由服务配置为true或false", 503
         )
     return value == "true"
@@ -154,7 +154,7 @@ def _save_prepared(engine, row, prepared):
     with engine.begin() as conn:
         updated = _owned_update(conn, row, "prepared=CAST(:prepared AS jsonb)", {"prepared": canonical(prepared)})
         if updated != 1:
-            raise HistoryError(
+            raise FabricError(
                 "publication_lease_lost", "发表资格已变化，请由当前处理者继续", 409
             )
     row["prepared"] = prepared
@@ -166,7 +166,7 @@ def _graph_input(conn, uuid, fallback=None):
     ).scalar_one_or_none()
     value = value or fallback
     if value is None:
-        raise HistoryError(
+        raise FabricError(
             "graph_source_deleted",
             "原文已硬删除；文本撤回已单独记录，图当前不可再导出",
             410,
@@ -251,7 +251,7 @@ def _graph_input(conn, uuid, fallback=None):
 def _legacy_write():
     """Every path that would write a new legacy_documents version passes here (v3 6.3): retired, the event stays
     blocked with its reason (410), kept, not retried; nothing is deleted."""
-    raise HistoryError(*history.LEGACY_RETIRED, 410)
+    raise FabricError(*records.LEGACY_RETIRED, 410)
 
 
 def _prepare(engine, row):
@@ -261,14 +261,14 @@ def _prepare(engine, row):
             return prepared
         _legacy_write()
         if prepared["document_request"]["is_demo"] is not is_demo():
-            raise HistoryError(
+            raise FabricError(
                 "publication_demo_scope_changed",
                 "冻结待办与当前真实/教学服务配置不符，未重新标记",
                 403,
             )
         original = json.loads(prepared["document_request"]["records"][0]["raw_content"])
         if original["source_site"] not in source_sites():
-            raise HistoryError(
+            raise FabricError(
                 "publication_source_blocked", "该原站点已停用发表，冻结待办保留", 403
             )
         return prepared
@@ -286,13 +286,13 @@ def _prepare(engine, row):
             )
         frozen, reason = inputs["document"], "graph_reference"
         if frozen.get("history_version_id"):
-            # 主体是 history 固定版本：原件就在 history，不冻结；许可按该来源核对
+            # 主体是资料库固定版本：原件就在资料库，不冻结；许可按该来源核对（history_* 是已存待办里的键名）
             subject = {k: frozen.get(k) for k in ("uuid", "title", "source_url", "history_source_id",
                                                   "history_record_id", "history_version_id",
                                                   "history_text_version", "history_text_sha256",
                                                   "history_is_demo")}
-            with history.history_engine().begin() as conn:
-                history._source(conn, subject["history_source_id"])
+            with records.fabric_engine().begin() as conn:
+                records._source(conn, subject["history_source_id"])
             prepared = {"history_subject": subject, "graph_input": inputs, "document_request": None,
                         "existing_document_version": None,
                         "idempotency_prefix": "auto-publication:" + sha256(
@@ -302,7 +302,7 @@ def _prepare(engine, row):
             return prepared
     _legacy_write()
     if frozen.get("source_site") not in source_sites():
-        raise HistoryError(
+        raise FabricError(
             "publication_source_blocked",
             "原站点尚未列入发表许可；待办和旧版已保留",
             403,
@@ -327,11 +327,11 @@ def _prepare(engine, row):
     )
     existing = None
     if inputs is not None:
-        with history.history_engine().begin() as conn:
-            history._source(conn, "legacy_documents")
+        with records.fabric_engine().begin() as conn:
+            records._source(conn, "legacy_documents")
             existing = conn.execute(
                 text("""
-              SELECT payload FROM history_versions WHERE source_id='legacy_documents'
+              SELECT payload FROM fabric_versions WHERE source_id='legacy_documents'
                AND source_record_id=:native AND is_demo=:demo
                AND payload->'facts'->>'original_raw_sha256'=:sha
                AND payload->'facts'->>'publication_state'=:state
@@ -363,7 +363,7 @@ def _publish_graph(engine, row, prepared, document_run):
     from graph.publish.graph_publish import bind_document_text, build_document_bundle
 
     if prepared.get("graph_request") is not None:
-        return history_graph.import_graph(
+        return fabric_graph.import_graph(
             ArchiveImport.model_validate(prepared["graph_request"]),
             prepared["idempotency_prefix"] + ":graph",
         )
@@ -376,7 +376,7 @@ def _publish_graph(engine, row, prepared, document_run):
         if document_run is not None
         else [prepared["existing_document_version"]["version_id"]]
     )
-    version = history.read_version(
+    version = records.read_version(
         version_ids[0],
         "legacy_documents",
         request.records[0].source_record_id,
@@ -440,7 +440,7 @@ def _publish_graph(engine, row, prepared, document_run):
     )
     prepared = {**prepared, "graph_request": graph_request.model_dump(mode="json")}
     _save_prepared(engine, row, prepared)
-    return history_graph.import_graph(
+    return fabric_graph.import_graph(
         graph_request, prepared["idempotency_prefix"] + ":graph"
     )
 
@@ -457,9 +457,9 @@ def _known_commits(row):
         if not prepared.get("graph_request"):
             return False
         required.append("graph")
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         for kind in required:
-            state = conn.execute(text("SELECT state FROM history_runs WHERE idempotency_key=:key"),
+            state = conn.execute(text("SELECT state FROM fabric_runs WHERE idempotency_key=:key"),
                                  {"key": prepared["idempotency_prefix"] + ":" + kind}).scalar()
             if state not in {"completed", "partial"}:
                 return False
@@ -505,7 +505,7 @@ def publish_once(engine=None):
         )
     try:
         if disk["low"] and not _known_commits(row):
-            raise HistoryError(
+            raise FabricError(
                 "publication_resource_blocked",
                 "磁盘低水位，暂停新原件发表并保留待办",
                 503,
@@ -524,7 +524,7 @@ def publish_once(engine=None):
                 ],
             }
         else:
-            result = history.import_archive(
+            result = records.import_archive(
                 ArchiveImport.model_validate(prepared["document_request"]),
                 prepared["idempotency_prefix"] + ":document",
             )
@@ -545,27 +545,27 @@ def publish_once(engine=None):
                   'snapshot_sha256',encode(sha256(convert_to(snapshot::text,'UTF8')),'hex'))""",
                 {"receipt": canonical(receipt)})
             if updated != 1:
-                raise HistoryError(
+                raise FabricError(
                     "publication_lease_lost",
                     "已发表但确认资格变化；相同固定输入将安全核对",
                     409,
                 )
         return {"state": "published", "id": row["id"], **receipt}
-    except (HistoryError, SQLAlchemyError, ValueError, RuntimeError) as exc:
+    except (FabricError, SQLAlchemyError, ValueError, RuntimeError) as exc:
         # 已冻结输入和同key允许跨库提交未知后核对；绝不重新抓取变更内容。
         invalid_input = isinstance(exc, ValidationError)
         blocked = invalid_input or (
-            isinstance(exc, HistoryError) and exc.status in {403, 410}
+            isinstance(exc, FabricError) and exc.status in {403, 410}
         )
         error = (
             _validation_error(exc)
             if invalid_input
             else {
                 "code": exc.code
-                if isinstance(exc, HistoryError)
+                if isinstance(exc, FabricError)
                 else "publication_failed",
                 "message": exc.message
-                if isinstance(exc, HistoryError)
+                if isinstance(exc, FabricError)
                 else "发表未完成；待办及旧版本保留，将按固定输入核对",
             }
         )
@@ -610,9 +610,9 @@ def publisher_heartbeat(state, *, engine=None):
 
 def publication_status(source_id, engine=None):
     if source_id not in {"legacy_documents", "reviewed_graph"}:
-        raise HistoryError("publication_status_scope", "仅查询自动文档或审核图发表组")
-    with history.history_engine().begin() as permit:
-        history._source(permit, source_id)
+        raise FabricError("publication_status_scope", "仅查询自动文档或审核图发表组")
+    with records.fabric_engine().begin() as permit:
+        records._source(permit, source_id)
     kind = "document" if source_id == "legacy_documents" else "graph"
     with (engine or publication_engine()).begin() as conn:
         counts = {
@@ -681,7 +681,7 @@ def publication_status(source_id, engine=None):
 
 
 def _publish_subject_graph(engine, row, prepared):
-    """history 固定版本主体上的审核结果 → 审核图：文档引用就是那个版本，证据按抽取时读的那份派生清洗正文
+    """资料库固定版本主体上的审核结果 → 审核图：文档引用就是那个版本，证据按抽取时读的那份派生清洗正文
     精确唯一匹配定位（basis=derived_clean_text，带处理器版本和哈希）；匹配不上的关系如实标未绑定。"""
     from graph.db.extraction_subjects import _clean_text
     from graph.publish.graph_publish import build_document_bundle
@@ -690,10 +690,10 @@ def _publish_subject_graph(engine, row, prepared):
     subject = prepared["history_subject"]
     clean = _clean_text(subject["history_version_id"], subject["history_text_version"])
     if clean is None or clean["text_sha256"] != subject["history_text_sha256"]:
-        raise HistoryError("subject_text_changed", "主体引用的清洗正文不存在或已不一致", 409)
+        raise FabricError("subject_text_changed", "主体引用的清洗正文不存在或已不一致", 409)
     body = clean["text"] or ""
     demo = bool(subject.get("history_is_demo"))  # 主体自己的 demo 标记，不取发表服务的配置
-    version = history.read_version(subject["history_version_id"], subject["history_source_id"],
+    version = records.read_version(subject["history_version_id"], subject["history_source_id"],
                                    subject["history_record_id"], demo, "current", datetime.now(timezone.utc))
     ref = GraphDocumentRef(source_id=version.source_id, source_record_id=version.source_record_id,
                            version_id=version.version_id, raw_sha256=version.raw_sha256,
@@ -730,15 +730,15 @@ def _publish_subject_graph(engine, row, prepared):
     )
     prepared = {**prepared, "graph_request": graph_request.model_dump(mode="json")}
     _save_prepared(engine, row, prepared)
-    return history_graph.import_graph(graph_request, prepared["idempotency_prefix"] + ":graph")
+    return fabric_graph.import_graph(graph_request, prepared["idempotency_prefix"] + ":graph")
 
 
 def reconcile(high_watermark: int, *, batch: int = 5000, engine=None) -> dict:
-    """documents 里 id ≤ 高水位、属于发表站点、不是 history 固定版本主体的每一行：当前内容的指纹必须等于
+    """documents 里 id ≤ 高水位、属于发表站点、不是资料库固定版本主体的每一行：当前内容的指纹必须等于
     这篇文档最后一次成功发表的指纹。只读、按 id 分批；返回逐类计数和前 20 个问题样例（只给 uuid/id）。
     状态：matched 已对上 / unpublished 从未成功发表 / stale 发表过但当前内容又变了 / in_flight 有待办在处理。"""
     if high_watermark < 0 or not 1 <= batch <= 20000:
-        raise HistoryError("reconcile_budget", "高水位或批量不合法")
+        raise FabricError("reconcile_budget", "高水位或批量不合法")
     sites = sorted(source_sites())
     counts = {"matched": 0, "unpublished": 0, "stale": 0, "in_flight": 0}
     samples = []

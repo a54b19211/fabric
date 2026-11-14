@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from graph.publish.reviewed_graph import GraphEdge, GraphReview, PrimeKGQuery, neighborhood
-from store.history_models import HistoryError
+from store.record_models import FabricError
 from tests.test_reviewed_graph import bundle, node, ref
 
 
@@ -45,7 +45,7 @@ def test_capture_scope_and_timeout_are_explicit(monkeypatch):
         yield object()
     class Engine:
         begin = staticmethod(connection)
-    monkeypatch.setattr(publish.store, "history_engine", lambda: Engine())
+    monkeypatch.setattr(publish.store, "fabric_engine", lambda: Engine())
     monkeypatch.setattr(publish.store, "_source", lambda *args: None)
     for key, value in {"URL": "http://127.0.0.1:7474", "USER": "fixture", "PASSWORD": "fixture"}.items():
         monkeypatch.setenv("DATAFABRIC_GRAPH_NEO4J_" + key, value)
@@ -64,7 +64,7 @@ def test_capture_scope_and_timeout_are_explicit(monkeypatch):
     def timeout(request):
         raise httpx.ReadTimeout("fixture timeout", request=request)
     with httpx.Client(base_url="http://127.0.0.1:7474", transport=httpx.MockTransport(timeout)) as client:
-        with pytest.raises(HistoryError) as error:
+        with pytest.raises(FabricError) as error:
             publish.capture_primekg(**query.model_dump(), client=client)
     assert error.value.code == "primekg_timeout" and error.value.status == 504
 
@@ -77,6 +77,6 @@ def test_malformed_capture_count_stays_a_protocol_error(monkeypatch, bad_count):
         publish, "_read_primekg",
         lambda *args, **kwargs: [[bad_count, None, None, None, None, None]],
     )
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         publish.capture_primekg(node_type="gene/protein", node_source="NCBI", seed_id="1956")
     assert error.value.code == "primekg_invalid_response" and error.value.status == 503

@@ -1,14 +1,14 @@
 import axios from 'axios'
 
-// ── History 服务（/api/history）：正文索引发布管理、来源目录 ─────────────────
-// 这些接口用 Bearer 凭据（DATAFABRIC_HISTORY_ADMIN_TOKEN / READ_TOKEN），不走 /api 的无凭据封装。
+// ── 资料库服务（/api/fabric）：正文索引发布管理、来源目录 ─────────────────
+// 这些接口用 Bearer 凭据（DATAFABRIC_ADMIN_TOKEN / READ_TOKEN），不走 /api 的无凭据封装。
 // 凭据只放在本标签页的 sessionStorage，关闭标签页即失效；不写进 URL、不写进 localStorage。
 
-const TOKEN_KEY = 'datafabric.history.token'
+const TOKEN_KEY = 'datafabric.fabric.token'
 // 存储不可用（隐私窗口等）时退回内存，刷新后需重新填写
 let memoryToken = ''
 
-export function getHistoryToken(): string {
+export function getFabricToken(): string {
   try {
     return sessionStorage.getItem(TOKEN_KEY) || memoryToken
   } catch {
@@ -16,7 +16,7 @@ export function getHistoryToken(): string {
   }
 }
 
-export function setHistoryToken(token: string) {
+export function setFabricToken(token: string) {
   memoryToken = token
   try {
     if (token) sessionStorage.setItem(TOKEN_KEY, token)
@@ -26,19 +26,19 @@ export function setHistoryToken(token: string) {
   }
 }
 
-const historyHttp = axios.create({ baseURL: '/api/history', timeout: 30000 })
+const fabricHttp = axios.create({ baseURL: '/api/fabric', timeout: 30000 })
 
-historyHttp.interceptors.request.use((config) => {
-  const token = getHistoryToken()
-  if (!token) return Promise.reject(new Error('需要历史服务凭据'))
+fabricHttp.interceptors.request.use((config) => {
+  const token = getFabricToken()
+  if (!token) return Promise.reject(new Error('需要资料库服务凭据'))
   config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
-historyHttp.interceptors.response.use((res) => res.data)
+fabricHttp.interceptors.response.use((res) => res.data)
 
-/** 把 History 接口的错误（detail: {code, message}）转成一行可读文字。 */
-export function historyError(err: unknown): string {
+/** 把资料库接口的错误（detail: {code, message}）转成一行可读文字。 */
+export function fabricError(err: unknown): string {
   const e = err as { response?: { status?: number; data?: { detail?: unknown } }; message?: string }
   const detail = e?.response?.data?.detail
   if (Array.isArray(detail)) return '请求参数无效'
@@ -69,7 +69,7 @@ export interface CollectionCatalog {
 }
 
 export const getCollectionCatalog = () =>
-  historyHttp.get<any, CollectionCatalog>('/collection/catalog')
+  fabricHttp.get<any, CollectionCatalog>('/collection/catalog')
 
 // ── 正文索引发布（index_publications，正文进 WeKnora 的唯一路径）────────────
 export const INDEX_STATES = [
@@ -117,10 +117,10 @@ export interface IndexStatusParams {
 }
 
 export const getIndexStatus = (params: IndexStatusParams) =>
-  historyHttp.get<any, IndexStatusPage>('/index/status', { params })
+  fabricHttp.get<any, IndexStatusPage>('/index/status', { params })
 
 export const getIndexCounts = () =>
-  historyHttp.get<any, { states: Record<string, number>; total: number }>('/index/counts')
+  fabricHttp.get<any, { states: Record<string, number>; total: number }>('/index/counts')
 
 export interface IndexRetryResult {
   id: string
@@ -130,4 +130,4 @@ export interface IndexRetryResult {
 }
 
 export const retryIndexPublication = (id: string) =>
-  historyHttp.post<any, IndexRetryResult>(`/index/${encodeURIComponent(id)}/retry`)
+  fabricHttp.post<any, IndexRetryResult>(`/index/${encodeURIComponent(id)}/retry`)

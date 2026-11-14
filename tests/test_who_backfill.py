@@ -1,5 +1,5 @@
 """The bounded WHO backfill (ops.who_backfill): every bound, the receipt. The WHO endpoint and the
-history store are stand-ins; nothing goes to the network or a database."""
+fabric library are stand-ins; nothing goes to the network or a database."""
 
 import json
 import re
@@ -12,7 +12,7 @@ from test_source_refresh import who_value
 
 from fetch import rate, who_don
 from ops.who_backfill import SINCE, Counts, backfill_who
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 UNTIL = datetime(2026, 11, 9, tzinfo=timezone.utc)
 FIRST_NEW = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -58,15 +58,15 @@ class WhoStandIn:
 
 
 class RunStore:
-    """The calls of store.history that the backfill makes, over a dict of runs; finish_fetch keeps the coverage the way
-    store.history does (the real one is checked in tests/integration_who_backfill.py)."""
+    """The calls of store.records that the backfill makes, over a dict of runs; finish_fetch keeps the coverage the way
+    store.records does (the real one is checked in tests/integration_who_backfill.py)."""
 
     def __init__(self):
         self.runs = {}
 
     def create_fetch(self, request, key):
         if key in self.runs:
-            assert self.runs[key].request == request  # store.history: the same key with another request is a conflict
+            assert self.runs[key].request == request  # store.records: the same key with another request is a conflict
             return self.runs[key], False
         self.runs[key] = SimpleNamespace(id=key, attempt=1, state="queued", coverage={}, request=request)
         return self.runs[key], True
@@ -120,7 +120,7 @@ def test_backfill_with_a_since_is_another_task_that_reads_only_its_window_and_le
     assert len(store.runs) == 2 and first["since"] == SINCE.isoformat()  # its own run; the first task's run is as it was
     assert all(f"LastModified ge {since.isoformat()}" in r.url.params["$filter"] for r in who.requests[sent:])
     assert adopted(store)[-len(inside):] == inside  # only the window's notices, oldest first
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         backfill_who(since, since=since, store=store)  # an end that is not after the start
 
 

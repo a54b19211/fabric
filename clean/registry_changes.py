@@ -1,5 +1,5 @@
 """临床登记差分的存取。清洗段（clean/clean_stage.py）给新版本写差分（record_versions：和它取代的上一版比，与清洗结果
-同一事务），存量用 backfill 补；for_versions 读给 /api/history/registry-changes。"""
+同一事务），存量用 backfill 补；for_versions 读给 /api/fabric/registry-changes。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from clean import registry_diff
 from clean.processors import REGISTRY_DIFF_SOURCES
-from store.history_models import HistoryError, canonical
+from store.record_models import FabricError, canonical
 
 DIFF_SOURCES = REGISTRY_DIFF_SOURCES
 
@@ -23,7 +23,7 @@ def record(conn, *, source_id, is_demo, record_id, previous, to_version_id, fact
     version = registry_diff.PROCESSOR_VERSION
     changes = []
     if previous is not None:
-        from store.history import normalized_raw
+        from store.records import normalized_raw
 
         prior = previous["payload"] or {}
         changes = registry_diff.diff(
@@ -97,7 +97,7 @@ def record_versions(conn, rows):
     found = {r["to_version_id"]: r for r in conn.execute(text(
         "SELECT n.version_id AS to_version_id, n.payload->>'raw_content' AS raw, p.version_id AS from_version_id, "
         "p.payload->'facts' AS facts, p.payload->>'clean_text' AS clean_text, p.payload->>'raw_content' AS raw_content "
-        "FROM history_versions n LEFT JOIN history_versions p ON p.replaced_by = n.version_id "
+        "FROM fabric_versions n LEFT JOIN fabric_versions p ON p.replaced_by = n.version_id "
         "WHERE n.version_id = ANY(:ids)"), {"ids": [r["version_id"] for r in todo]}).mappings()}
     for r in todo:
         mine = found[r["version_id"]]
@@ -109,9 +109,9 @@ def record_versions(conn, rows):
                pairing="current_at_adoption", summary=r["clean_text"], raw=mine["raw"])
 
 
-def _eligible(history, mode, alias):
+def _eligible(records, mode, alias):
     """The mode's visibility condition on the versions joined as `alias`."""
-    return history._eligibility(mode).replace("first_seen_at", alias + ".first_seen_at").replace(
+    return records._eligibility(mode).replace("first_seen_at", alias + ".first_seen_at").replace(
         "proof_available_at", alias + ".proof_available_at"
     )
 
@@ -123,8 +123,8 @@ def _diff_rows(conn, params, eligible_from, eligible_to):
             "SELECT r.to_version_id,r.from_version_id,r.pairing,r.change_count,r.material_count,"
             "r.source_record_id,"
             "(r.from_version_id IS NULL OR (" + eligible_from + ")) AS from_visible "
-            "FROM derived_registry_diff_runs r JOIN history_versions t ON t.version_id=r.to_version_id "
-            "LEFT JOIN history_versions f ON f.version_id=r.from_version_id "
+            "FROM derived_registry_diff_runs r JOIN fabric_versions t ON t.version_id=r.to_version_id "
+            "LEFT JOIN fabric_versions f ON f.version_id=r.from_version_id "
             "WHERE r.processor_version=:pv AND r.source_id=:source AND r.is_demo=:demo "
             "AND r.to_version_id=ANY(:ids) AND " + eligible_to
         ),
@@ -178,18 +178,18 @@ def _version_states(version_ids, runs, by_version) -> dict:
 
 def for_versions(source_id, is_demo, version_ids, mode, cutoff):
     """一页版本各自的差分。两版都须在本次模式和截止时间下可见，否则不给值（不借后来的版本泄露信息）。"""
-    from store import history
+    from store import records
 
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
-        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
-    eligible_to = _eligible(history, mode, "t")
-    eligible_from = _eligible(history, mode, "f")
-    with history.history_engine().begin() as conn:
+        raise FabricError("query_budget", "一次最多 100 个合法版本号", 422)
+    eligible_to = _eligible(records, mode, "t")
+    eligible_from = _eligible(records, mode, "f")
+    with records.fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        history._source(conn, source_id)
-        cutoff = history._cutoff(cutoff)
-        if cutoff > history._now(conn):
-            raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        records._source(conn, source_id)
+        cutoff = records._cutoff(cutoff)
+        if cutoff > records._now(conn):
+            raise FabricError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
         params = {
             "source": source_id,
             "demo": is_demo,
@@ -217,20 +217,20 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
 def backfill(source_id="clinicaltrials", *, batch=500):
     """给已采用但还没差分的观察版本补差分。按每个登记号的采用顺序配对，只用公开观察版本
     （没有档案证明的 fetch 版本）；混有档案导入版本的登记号跳过并计数，不猜修订先后。"""
-    from store import history
+    from store import records
 
     if source_id not in DIFF_SOURCES:
-        raise HistoryError("unsupported_source", "该来源没有登记差分")
+        raise FabricError("unsupported_source", "该来源没有登记差分")
     done = skipped = 0
     while True:
-        with history.history_engine().begin() as conn:
+        with records.fabric_engine().begin() as conn:
             conn.execute(text("SET LOCAL statement_timeout = '60000ms'"))
             todo = conn.execute(
                 text("""
                   SELECT v.version_id,v.source_record_id,v.is_demo,v.published_seq,v.payload->'facts' AS facts,
                          v.payload->'field_locators' AS locators, v.payload->>'clean_text' AS summary,
                          v.payload->>'raw_content' AS raw
-                  FROM history_versions v
+                  FROM fabric_versions v
                   WHERE v.source_id=:source AND v.proof_available_at IS NULL
                     AND NOT EXISTS (SELECT 1 FROM derived_registry_diff_runs r
                                     WHERE r.to_version_id=v.version_id AND r.processor_version=:pv)
@@ -243,14 +243,14 @@ def backfill(source_id="clinicaltrials", *, batch=500):
             for row in todo:
                 mixed = conn.execute(
                     text(
-                        "SELECT 1 FROM history_versions WHERE source_id=:source AND is_demo=:demo "
+                        "SELECT 1 FROM fabric_versions WHERE source_id=:source AND is_demo=:demo "
                         "AND source_record_id=:native AND proof_available_at IS NOT NULL LIMIT 1"
                     ),
                     {"source": source_id, "demo": row["is_demo"], "native": row["source_record_id"]},
                 ).first()
                 previous = conn.execute(
                     text(
-                        "SELECT version_id,payload FROM history_versions WHERE source_id=:source "
+                        "SELECT version_id,payload FROM fabric_versions WHERE source_id=:source "
                         "AND is_demo=:demo AND source_record_id=:native AND proof_available_at IS NULL "
                         "AND published_seq<:seq ORDER BY published_seq DESC LIMIT 1"
                     ),

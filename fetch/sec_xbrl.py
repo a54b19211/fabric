@@ -1,7 +1,7 @@
 """SEC官方CompanyConcept原件：只解析原生披露，不选择可比期或估算财务数。
 
 CompanyConcept和CompanyFacts属于SEC同一XBRL API族。本入口使用单概念完整JSON，
-避免把多MiB整公司响应伪装成可装入单条History的原件。实际访问地址在来源目录和回执中明示。
+避免把多MiB整公司响应伪装成可装入资料库单个版本的原件。实际访问地址在来源目录和回执中明示。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 import httpx
 
 from fetch import transport
-from store.history_models import ArchiveRecord, HistoryError
+from store.record_models import ArchiveRecord, FabricError
 
 SEC_PARSER = "datafabric.sec.companyconcept.v0.1"
 ENDPOINT = "https://data.sec.gov/api/xbrl/companyconcept/"
@@ -26,7 +26,7 @@ ROW_FIELDS = ("val", "start", "end", "filed", "fy", "fp", "form", "accn", "frame
 def split_native(native):
     match = NATIVE_ID.fullmatch(native) if isinstance(native, str) else None
     if match is None or int(match.group(1)) == 0:
-        raise HistoryError("sec_native_id", "SEC原生ID须为CIK十位数:taxonomy:tag")
+        raise FabricError("sec_native_id", "SEC原生ID须为CIK十位数:taxonomy:tag")
     return match.groups()
 
 
@@ -37,51 +37,51 @@ def source_url(native):
 
 def _day(value, field):
     if not isinstance(value, str):
-        raise HistoryError("sec_fact_date", "SEC事实日期须为原生YYYY-MM-DD: " + field)
+        raise FabricError("sec_fact_date", "SEC事实日期须为原生YYYY-MM-DD: " + field)
     try:
         if date.fromisoformat(value).isoformat() != value:
             raise ValueError()
     except ValueError:
-        raise HistoryError("sec_fact_date", "SEC事实日期格式无效: " + field) from None
+        raise FabricError("sec_fact_date", "SEC事实日期格式无效: " + field) from None
 
 
 def financial_rows(data):
     """原生units逐行展开；保留重复披露、原单位、期间和字段位置，不做latest选择。"""
     units = data.get("units")
     if not isinstance(units, dict) or not units:
-        raise HistoryError("sec_fact_units", "SEC概念缺少原生单位数组")
+        raise FabricError("sec_fact_units", "SEC概念缺少原生单位数组")
     observations = []
     for unit, rows in units.items():
         if not isinstance(unit, str) or not unit or len(unit) > 120 or not isinstance(rows, list):
-            raise HistoryError("sec_fact_units", "SEC原生单位/事实数组无效")
+            raise FabricError("sec_fact_units", "SEC原生单位/事实数组无效")
         escaped_unit = unit.replace("~", "~0").replace("/", "~1")
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
-                raise HistoryError("sec_fact_shape", "SEC事实须为对象")
+                raise FabricError("sec_fact_shape", "SEC事实须为对象")
             value = row.get("val")
             if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise HistoryError("sec_fact_value", "SEC val须为来源数值；缺失不补零")
+                raise FabricError("sec_fact_value", "SEC val须为来源数值；缺失不补零")
             try:
                 finite = Decimal(str(value)).is_finite()
             except InvalidOperation:
                 finite = False
             if not finite:
-                raise HistoryError("sec_fact_value", "SEC val须为有限数值")
+                raise FabricError("sec_fact_value", "SEC val须为有限数值")
             for field in ("end", "filed"):
                 _day(row.get(field), field)
             if "start" in row:
                 _day(row["start"], "start")
                 if row["start"] > row["end"]:
-                    raise HistoryError("sec_fact_date", "SEC事实起止日期颠倒")
+                    raise FabricError("sec_fact_date", "SEC事实起止日期颠倒")
             if not isinstance(row.get("accn"), str) or not re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", row["accn"]):
-                raise HistoryError("sec_fact_accession", "SEC事实缺少原生accession")
+                raise FabricError("sec_fact_accession", "SEC事实缺少原生accession")
             if not isinstance(row.get("form"), str) or not row["form"]:
-                raise HistoryError("sec_fact_form", "SEC事实缺少披露表格类型")
+                raise FabricError("sec_fact_form", "SEC事实缺少披露表格类型")
             if row.get("fy") is not None and (not isinstance(row["fy"], int) or isinstance(row["fy"], bool)):
-                raise HistoryError("sec_fact_year", "SEC fy须为来源财政年，不能替代期间")
+                raise FabricError("sec_fact_year", "SEC fy须为来源财政年，不能替代期间")
             for field in ("fp", "frame"):
                 if row.get(field) is not None and not isinstance(row[field], str):
-                    raise HistoryError("sec_fact_shape", "SEC期间/框架字段类型无效")
+                    raise FabricError("sec_fact_shape", "SEC期间/框架字段类型无效")
             pointer = "/units/" + escaped_unit + "/" + str(index)
             observations.append({
                 "unit": unit,
@@ -104,10 +104,10 @@ def project_sec(item, data):
     if (item.record_kind != "document" or not isinstance(data.get("cik"), int)
             or isinstance(data["cik"], bool) or data["cik"] != int(cik)
             or data.get("taxonomy") != taxonomy or data.get("tag") != tag):
-        raise HistoryError("native_id_mismatch", "SEC原生CIK/概念/类型与完整原件不一致")
+        raise FabricError("native_id_mismatch", "SEC原生CIK/概念/类型与完整原件不一致")
     if any(not isinstance(data.get(field), str) or not data[field].strip()
            for field in ("entityName", "label", "description")):
-        raise HistoryError("sec_concept_metadata", "SEC概念缺少原生企业、标签或定义")
+        raise FabricError("sec_concept_metadata", "SEC概念缺少原生企业、标签或定义")
     facts, locators = _facts(data, {
         "cik": "/cik", "entity_name": "/entityName", "taxonomy": "/taxonomy",
         "concept": "/tag", "concept_label": "/label", "concept_description": "/description",
@@ -133,9 +133,9 @@ def read_sec(request):
     from fetch.projection import parse_json
 
     if request.query.strip() != "*" or not request.source_record_ids:
-        raise HistoryError("sec_explicit_scope", "SEC读取须query='*'并给明确CIK:taxonomy:tag原生ID清单")
+        raise FabricError("sec_explicit_scope", "SEC读取须query='*'并给明确CIK:taxonomy:tag原生ID清单")
     if request.continuation is not None or request.updated_since or request.updated_until:
-        raise HistoryError("sec_explicit_scope", "SEC单概念原件按固定清单重查，不接外部游标或日期过滤")
+        raise FabricError("sec_explicit_scope", "SEC单概念原件按固定清单重查，不接外部游标或日期过滤")
     selected = list(dict.fromkeys(request.source_record_ids))
     for native in selected:
         split_native(native)
@@ -143,7 +143,7 @@ def read_sec(request):
     exhausted = False
     user_agent = os.environ.get("DATAFABRIC_SEC_USER_AGENT", "BioRadar-DataFabric/1.0 (bounded academic research)")
     if not user_agent.strip() or any(ord(c) < 32 for c in user_agent):
-        raise HistoryError("sec_user_agent", "SEC读取须有明确有效的工具User-Agent")
+        raise FabricError("sec_user_agent", "SEC读取须有明确有效的工具User-Agent")
     deadline = time.monotonic() + request.deadline_seconds
     with httpx.Client(timeout=20, follow_redirects=False, headers={"User-Agent": user_agent, "Accept": "application/json"}) as client:
         try:
@@ -162,7 +162,7 @@ def read_sec(request):
                 stop = "upstream_exhausted" if exhausted else "page_budget" if budget_count == request.max_pages else "record_budget"
         except transport.Stop as stopped:
             stop = stopped.reason
-        except HistoryError as exc:
+        except FabricError as exc:
             error = {"code": exc.code, "message": exc.message}
             stop = "source_failed"
         except (httpx.HTTPError, ValueError, TypeError, KeyError, UnicodeError):

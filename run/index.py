@@ -1,14 +1,14 @@
 """索引 worker 的启动入口：把清洗好的正文送进知识库（WeKnora），供语义检索。
-它是独立的进程，不挂在派活程序（run/scheduler.py）的循环上，用自己的 History 数据库连接。
+它是独立的进程，不挂在派活程序（run/scheduler.py）的循环上，用自己的资料库连接。
 没有配置任何索引目标时，只打印 disabled 就退出。
 
 从哪读起：这个文件只有 main()；真正的工作在 store/index_publication.py 的 run_worker：一个循环，每轮先按间隔补扫
 （scan_committed：已有画像却还没有待办的版本），再领一批到期待办（work_once）发给桥接服务、记下结果；没活就睡几秒。
 新待办平时由清洗段写画像时登记（enqueue_versions）。
 
-读写的表：读 derived_clean_text、derived_profiles、derived_identifiers、history_versions（取正文和检索元数据）；
-读写 index_publications（索引待办和状态）、index_targets（索引目标）。表由 History 角色安装：
-python -m store.migrations.runner --db history --apply。
+读写的表：读 derived_clean_text、derived_profiles、derived_identifiers、fabric_versions（取正文和检索元数据）；
+读写 index_publications（索引待办和状态）、index_targets（索引目标）。表由 fabric 角色安装：
+python -m store.migrations.runner --db fabric --apply。
 
 用法：python -m run.index      # 跑 worker，Ctrl-C 停
 """

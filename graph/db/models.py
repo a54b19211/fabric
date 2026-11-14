@@ -48,7 +48,8 @@ class Document(Base):
     lineage: Mapped[str] = mapped_column(Text, default="")       # 字段级血缘（JSON 字符串）
     weknora_sync_status: Mapped[str] = mapped_column(Text, default="pending")   # pending/synced/failed
     extraction_status: Mapped[str] = mapped_column(Text, default="pending")     # pending/queued/processing/done/failed/no_entity
-    # 主体是 history 固定版本时：版本引用 + 所用清洗正文的身份（正文不复制，抽取时从 history 读）
+    # 主体是资料库固定版本时：版本引用 + 所用清洗正文的身份（正文不复制，抽取时从资料库读）。列名 history_* 是
+    # 本库（图谱对象库）的旧列名，资料库改名（V046）没有动这些列
     history_source_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     history_record_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     history_version_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

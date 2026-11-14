@@ -1,6 +1,6 @@
-"""GET /api/history/sources: every history_sources row with its name, and the few capabilities the radar reads.
+"""GET /api/fabric/sources: every fabric_sources row with its name, and the few capabilities the radar reads.
 
-Readable = read_enabled in history_sources. Readable sources go to `sources`; retired sources (readable or not) go to `retired_sources`; any other
+Readable = read_enabled in fabric_sources. Readable sources go to `sources`; retired sources (readable or not) go to `retired_sources`; any other
 source that is not readable is left out (the radar treats a source it does not see as not readable).
 """
 
@@ -30,7 +30,7 @@ def capabilities(source_id: str, readable: bool, fetch_enabled: bool) -> dict:
 
 
 def listing(rows) -> dict:
-    """The /sources body from the history_sources rows."""
+    """The /sources body from the fabric_sources rows."""
     from fetch.sources import SOURCE_CATALOG, public_fetch_enabled
 
     fetch_enabled = public_fetch_enabled()

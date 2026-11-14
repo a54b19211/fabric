@@ -6,8 +6,8 @@ import httpx
 import pytest
 
 from fetch import sources
-from store.history_models import ArchiveRecord, FetchRequest
-from tests.test_history import trial_raw
+from store.record_models import ArchiveRecord, FetchRequest
+from tests.test_records import trial_raw
 from tests.test_source_refresh import who_value
 
 
@@ -183,7 +183,7 @@ def test_clinical_native_ids_do_not_send_literal_wildcard(monkeypatch, query):
     import httpx
 
     from fetch.sources import read_public
-    from store.history_models import FetchRequest
+    from store.record_models import FetchRequest
 
     real = httpx.Client
 

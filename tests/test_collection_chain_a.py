@@ -10,7 +10,7 @@ from clean import registry_diff as rd
 from fetch import catalog, rate, source_refresh
 from fetch.source_refresh import GIVE_UP_AFTER, SourceWatch, _key, _segment_done, _step, watches
 from fetch.windows import KNOWN_STOP, SEGMENTS_PER_CYCLE, cycle_request
-from store.history_models import FetchRequest, HistoryError, canonical, sha256
+from store.record_models import FabricError, FetchRequest, canonical, sha256
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -87,8 +87,8 @@ def test_a_watch_config_is_checked_against_the_catalog(monkeypatch):
                 watch("pubmed", known_stop=3)):  # filled by each cycle, not written in the config
         with pytest.raises(ValueError):
             SourceWatch.model_validate(bad)
-    monkeypatch.setenv("DATAFABRIC_HISTORY_WATCHES", json.dumps([watch("who_don"), watch("pubmed")]))
-    with pytest.raises(HistoryError):  # the same id twice
+    monkeypatch.setenv("DATAFABRIC_WATCHES", json.dumps([watch("who_don"), watch("pubmed")]))
+    with pytest.raises(FabricError):  # the same id twice
         watches()
 
 
@@ -177,7 +177,7 @@ def test_a_segment_that_did_not_move_or_stopped_short_without_a_cursor_is_a_fail
     cut_short = ({"request": {}}, {"upstream_pagination_exhausted": False, "stop_reason": "page_budget"},
                  "source_watch_no_cursor")
     for state, coverage, code in (stalled, cut_short):
-        with pytest.raises(HistoryError) as exc:
+        with pytest.raises(FabricError) as exc:
             _segment_done(ct_watch(), state, coverage, NOW)
         assert exc.value.code == code
 
@@ -210,18 +210,18 @@ def test_a_cycle_with_unread_items_is_followed_by_one_full_read():
 
 
 def stub_runs(monkeypatch, runs):
-    """store.history 和队列的桩：create_fetch 记下请求，依次给出 runs 里的任务；read_run 给出最近建的那个。"""
+    """store.records 和队列的桩：create_fetch 记下请求，依次给出 runs 里的任务；read_run 给出最近建的那个。"""
     calls = {"created": [], "enqueued": [], "failed": []}
 
     def create_fetch(request):
         calls["created"].append(request)
         return runs[len(calls["created"]) - 1], True
 
-    monkeypatch.setattr(source_refresh.history, "create_fetch", create_fetch)
-    monkeypatch.setattr(source_refresh.history, "read_run", lambda run_id: runs[len(calls["created"]) - 1])
-    monkeypatch.setattr(source_refresh.history, "fail_job", lambda *args: calls["failed"].append(args))
+    monkeypatch.setattr(source_refresh.records, "create_fetch", create_fetch)
+    monkeypatch.setattr(source_refresh.records, "read_run", lambda run_id: runs[len(calls["created"]) - 1])
+    monkeypatch.setattr(source_refresh.records, "fail_job", lambda *args: calls["failed"].append(args))
     monkeypatch.setattr(source_refresh.fetch_job, "enqueue_fetch", lambda run: calls["enqueued"].append(run))
-    monkeypatch.setattr(source_refresh.history, "disk_status", lambda: {"low": False})
+    monkeypatch.setattr(source_refresh.records, "disk_status", lambda: {"low": False})
     return calls
 
 

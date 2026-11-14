@@ -1,10 +1,10 @@
 [Unit]
-Description=Data-Fabric graph publisher (Tang's group): publication_outbox events of the collection database into History
+Description=Data-Fabric graph publisher (Tang's group): publication_outbox events of the collection database into the fabric library
 After=network.target
 StartLimitIntervalSec=0
 
 # What it does: publishes the pending outbox events and writes the publisher heartbeat (read graph/publish/publisher.py).
-# Environment (runtime.env): DATAFABRIC_HISTORY_DATABASE_URL, DATAFABRIC_PUBLICATION_DATABASE_URL (the collection
+# Environment (runtime.env): DATAFABRIC_DATABASE_URL, DATAFABRIC_PUBLICATION_DATABASE_URL (the collection
 # database) and the other DATAFABRIC_PUBLICATION_* settings. Fetching, cleaning and storing do not need it.
 # Paths: WorkingDirectory and the python below are this host's checkout and venv; change both for another deployment.
 

@@ -1,8 +1,8 @@
-"""The content fingerprint that decides whether an original is a new version (store.history.fingerprint)."""
+"""The content fingerprint that decides whether an original is a new version (store.records.fingerprint)."""
 
 import json
 
-from store.history import fingerprint
+from store.records import fingerprint
 
 
 def test_key_order_and_spacing_are_not_a_change_but_values_and_array_order_are():

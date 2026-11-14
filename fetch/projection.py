@@ -2,8 +2,8 @@
 （fetch/document_evidence.py）。按来源分到各自的投影函数：ClinicalTrials、Europe PMC、FDA CRL、PubMed、场景回放
 在这里，网站、附件、GDELT、SEC、WHO 和图包在各自的模块里。纯函数：不联网、不连库。
 
-谁用：存版本时 store/history.py 给每条原件算投影存进版本；读取插件读到原件时也先投影一遍，格式不对当场报错。
-投影只是给人和下游读的；一个原件是不是新版本，看的是它的内容指纹（store/history.py · fingerprint）。
+谁用：存版本时 store/records.py 给每条原件算投影存进版本；读取插件读到原件时也先投影一遍，格式不对当场报错。
+投影只是给人和下游读的；一个原件是不是新版本，看的是它的内容指纹（store/records.py · fingerprint）。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from clean.identifiers import NCT_ID
-from store.history_models import ArchiveRecord, HistoryError, canonical, sha256, source_time
+from store.record_models import ArchiveRecord, FabricError, canonical, sha256, source_time
 
 
 def _unique(pairs):
@@ -37,11 +37,11 @@ def parse_json(raw: str) -> dict:
     try:
         value = DECODER.decode(raw)
     except (ValueError, TypeError):
-        raise HistoryError(
+        raise FabricError(
             "invalid_source_json", "来源JSON损坏或存在重复成员"
         ) from None
     if not isinstance(value, dict):
-        raise HistoryError("invalid_source_json", "来源原件须为JSON对象")
+        raise FabricError("invalid_source_json", "来源原件须为JSON对象")
     return value
 
 
@@ -146,14 +146,14 @@ EXTERNAL_FIELDS = {
 def crl_id(data: dict) -> str:
     name = data.get("file_name")
     if not isinstance(name, str) or not name.strip():
-        raise HistoryError("missing_native_id", "FDA信函缺file_name，不生成猜测ID")
+        raise FabricError("missing_native_id", "FDA信函缺file_name，不生成猜测ID")
     components = [
         data.get("letter_date"),
         data.get("letter_type"),
         data.get("application_number"),
     ]
     if not all(value not in (None, "", []) for value in components):
-        raise HistoryError(
+        raise FabricError(
             "ambiguous_native_id", "FDA信函复合身份字段不足，须按原件核对后采用"
         )
     return name + "#" + sha256(canonical(components))[:24]
@@ -161,7 +161,7 @@ def crl_id(data: dict) -> str:
 
 def project_record(source_id: str, item: ArchiveRecord) -> dict:
     """原件 → 投影：标题、正文、facts（带原件里的位置）、几个时间，外加材料性质（fetch/document_evidence.py）。
-    投影只是给人和下游读的；一个原件是不是新版本，看的是它的内容指纹（store.history.fingerprint）。
+    投影只是给人和下游读的；一个原件是不是新版本，看的是它的内容指纹（store.records.fingerprint）。
     legacy 迁入的原件（{"legacy_migration": {...}, 正文}）只把正文交给来源自己的投影，迁入块记进 facts。"""
     from fetch.document_evidence import attach_document_evidence
 
@@ -170,7 +170,7 @@ def project_record(source_id: str, item: ArchiveRecord) -> dict:
     try:
         projected = attach_document_evidence(source_id, item, projected)
     except (ValueError, TypeError, AttributeError):
-        raise HistoryError("invalid_document_evidence", "材料类型、全文或文档关联不符合格式") from None
+        raise FabricError("invalid_document_evidence", "材料类型、全文或文档关联不符合格式") from None
     if migration is None:
         return projected
     return dict(projected, facts={**projected["facts"], "legacy_migration": migration,
@@ -189,7 +189,7 @@ def _migration_envelope(source_id, item):
     block = data.pop("legacy_migration")
     if (not isinstance(block, dict) or block.get("converter") != CONVERTER or source_id == "legacy_documents"
             or not re.fullmatch(r"[0-9a-f]{64}", str(block.get("legacy_version_id") or ""))):
-        raise HistoryError("invalid_migration_envelope", "迁入封装不符合固定格式", 422)
+        raise FabricError("invalid_migration_envelope", "迁入封装不符合固定格式", 422)
     return block, item.model_copy(update={"raw_content": json.dumps(data, ensure_ascii=False, sort_keys=True)})
 
 
@@ -200,7 +200,7 @@ def _project(source_id: str, item: ArchiveRecord) -> dict:
     if source_id == "pubmed" and item.raw_media_type == "application/xml":
         return _project_pubmed(item)
     if item.raw_media_type != "application/json":
-        raise HistoryError("unsupported_media", "该来源只支持 JSON 原件")
+        raise FabricError("unsupported_media", "该来源只支持 JSON 原件")
     if source_id in SITE_SOURCES:
         from fetch.site_crawler import project_capture
 
@@ -228,14 +228,14 @@ def _project(source_id: str, item: ArchiveRecord) -> dict:
         try:
             return project_graph_record(source_id, item, data)
         except ValueError:
-            raise HistoryError("invalid_graph_fields", "图包或旧文档桥字段不符合固定格式") from None
+            raise FabricError("invalid_graph_fields", "图包或旧文档桥字段不符合固定格式") from None
     projector = {"clinicaltrials": _project_clinicaltrials, "fda_crl": _project_fda_crl,
                  "europe_pmc": _project_europe_pmc, "external_archive": _project_external_archive}.get(source_id)
     if projector is None:
-        raise HistoryError("unsupported_source", "该来源没有投影函数")
+        raise FabricError("unsupported_source", "该来源没有投影函数")
     projected = projector(item, data)
     if projected["record_kind"] != item.record_kind:
-        raise HistoryError("record_kind_mismatch", "原件类型与导入声明不一致")
+        raise FabricError("record_kind_mismatch", "原件类型与导入声明不一致")
     return projected
 
 
@@ -243,7 +243,7 @@ def _record(kind, title, clean_text, facts, locators, *, url=None, published=Non
             parser_version=None) -> dict:
     """一个投影（几个 JSON 来源共用的写法）。"""
     if not isinstance(title, str) or len(title) > 10000:
-        raise HistoryError("invalid_source_fields", "来源标题格式错误")
+        raise FabricError("invalid_source_fields", "来源标题格式错误")
     projected = {
         "record_kind": kind, "title": title, "source_url": url, "clean_text": clean_text, "facts": facts,
         "field_locators": locators,
@@ -262,15 +262,15 @@ def _project_clinicaltrials(item, data) -> dict:
         if facts.get(key) is not None and (
             not isinstance(facts[key], list) or any(not isinstance(value, str) for value in facts[key])
         ):
-            raise HistoryError("invalid_source_fields", "临床登记数组字段类型不合法")
+            raise FabricError("invalid_source_fields", "临床登记数组字段类型不合法")
     if facts.get("status") is not None and not isinstance(facts["status"], str):
-        raise HistoryError("invalid_source_fields", "临床登记状态须为来源字符串")
+        raise FabricError("invalid_source_fields", "临床登记状态须为来源字符串")
     number = facts.get("enrollment")
     if number is not None and (not isinstance(number, int) or isinstance(number, bool) or number < 0):
-        raise HistoryError("invalid_source_fields", "临床登记人数类型不合法；未知不补零")
+        raise FabricError("invalid_source_fields", "临床登记人数类型不合法；未知不补零")
     native = facts.get("trial_id")
     if not isinstance(native, str) or not re.fullmatch(NCT_ID, native) or native != item.source_record_id:
-        raise HistoryError("native_id_mismatch", "临床登记ID与原件不一致")
+        raise FabricError("native_id_mismatch", "临床登记ID与原件不一致")
     title = _pointer(data, "/protocolSection/identificationModule/briefTitle") or native
     status = "/protocolSection/statusModule/"
     return _record(
@@ -298,7 +298,7 @@ FDA_CRL_FIELDS = {
 
 def _project_fda_crl(item, data) -> dict:
     if item.source_record_id != crl_id(data):
-        raise HistoryError("native_id_mismatch", "FDA复合来源ID与原件不一致")
+        raise FabricError("native_id_mismatch", "FDA复合来源ID与原件不一致")
     facts, locators = _facts(data, FDA_CRL_FIELDS)
     # 标题：谁收到的、什么信、哪个申请、信上的日期；没有公司名才退到文件名
     applications = data.get("application_number")
@@ -307,7 +307,7 @@ def _project_fda_crl(item, data) -> dict:
              f"({applications}, {data.get('letter_date')})")
     clean_text = data.get("text") or ""
     if not isinstance(clean_text, str):
-        raise HistoryError("invalid_source_fields", "FDA信函text字段不是文本")
+        raise FabricError("invalid_source_fields", "FDA信函text字段不是文本")
     date = data.get("letter_date")
     try:
         event_time = source_time(datetime.strptime(date, "%m/%d/%Y").date().isoformat(), "letter_signed")
@@ -354,7 +354,7 @@ EUROPE_PMC_FIELDS = {
 def _project_europe_pmc(item, data) -> dict:
     native = str(data.get("source", "")) + ":" + str(data.get("id", ""))
     if not data.get("source") or not data.get("id") or native != item.source_record_id:
-        raise HistoryError("native_id_mismatch", "Europe PMC source:id与原件不一致")
+        raise FabricError("native_id_mismatch", "Europe PMC source:id与原件不一致")
     facts, locators = _facts(data, EUROPE_PMC_FIELDS)
     title = data.get("title") or native
     return _record(
@@ -373,17 +373,17 @@ def _project_external_archive(item, data) -> dict:
     """导入的历史原件（场景回放）：记录类型、标题、摘要和 EXTERNAL_FIELDS 里列的字段，照原件写的取。"""
     kind = data.get("record_kind")
     if kind not in ("trial", "program", "outcome", "document"):
-        raise HistoryError("unsupported_record_kind", "历史原件须明确trial/program/outcome/document")
+        raise FabricError("unsupported_record_kind", "历史原件须明确trial/program/outcome/document")
     facts, locators = _facts(data, {key: "/" + key for key in sorted(EXTERNAL_FIELDS)})
     title = data.get("title")
     if not isinstance(title, str) or not title.strip():
-        raise HistoryError("invalid_source_fields", "历史原件须有明确标题")
+        raise FabricError("invalid_source_fields", "历史原件须有明确标题")
     for key in _ARCHIVE_TIMES:
         if facts.get(key) is not None and source_time(facts[key]) is None:
-            raise HistoryError("invalid_source_time", "历史原件时间格式/时区不合法")
+            raise FabricError("invalid_source_time", "历史原件时间格式/时区不合法")
     source_url = data.get("source_reference")
     if source_url is not None and (not isinstance(source_url, str) or len(source_url) > 2000):
-        raise HistoryError("invalid_source_fields", "来源引用格式错误")
+        raise FabricError("invalid_source_fields", "来源引用格式错误")
     return _record(
         kind, title, str(title) + "\n\n" + str(facts.get("summary") or ""), facts, locators, url=source_url,
         published=source_time(data.get("source_published_at"), "archive_source_published"),
@@ -397,15 +397,15 @@ def _project_pubmed(item):
     try:
         root = ET.fromstring(item.raw_content)
     except ET.ParseError:
-        raise HistoryError("invalid_source_xml", "PubMed XML原件损坏") from None
+        raise FabricError("invalid_source_xml", "PubMed XML原件损坏") from None
     if root.tag != "PubmedArticle":
-        raise HistoryError("invalid_source_xml", "PubMed原件须为单条PubmedArticle")
+        raise FabricError("invalid_source_xml", "PubMed原件须为单条PubmedArticle")
     pmid = root.findtext("./MedlineCitation/PMID")
     if not pmid or pmid != item.source_record_id or item.record_kind != "document":
-        raise HistoryError("native_id_mismatch", "PubMed PMID与原件不一致")
+        raise FabricError("native_id_mismatch", "PubMed PMID与原件不一致")
     article = root.find("./MedlineCitation/Article")
     if article is None:
-        raise HistoryError("invalid_source_xml", "PubMed缺Article")
+        raise FabricError("invalid_source_xml", "PubMed缺Article")
     title = (
         "".join(article.find("ArticleTitle").itertext())
         if article.find("ArticleTitle") is not None

@@ -1,6 +1,6 @@
-"""T-28 ④ 整链：本地 PDF 上传 / PubMed PMC 全文 → history 版本 → 附件关系 → derived_text 解析。
+"""T-28 ④ 整链：本地 PDF 上传 / PubMed PMC 全文 → 资料库版本 → 附件关系 → derived_text 解析。
 
-真实 PostgreSQL 隔离 schema（沿用 integration_history 的 pg 夹具：127.0.0.1:18436/fabric_history，
+真实 PostgreSQL 隔离 schema（沿用 integration_records 的 pg 夹具：127.0.0.1:18436/zk_fabric_test，
 每次建临时 schema 跑完删除）；MinerU 换成替身，对外 HTTP 用 MockTransport，不联网。
 运行：bash ops/run_integration_tests.sh tests/integration_local_files.py（临时 PostgreSQL 容器，固定端口只在私有
 网络命名空间里；依赖来自 make venv 的 .venv，见 README「怎么跑」）
@@ -12,16 +12,16 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from integration_history import pg, pg_engine  # noqa: F401  同一隔离 schema 夹具
+from integration_records import pg, pg_engine  # noqa: F401  同一隔离 schema 夹具
 from pdf_fixture import make_pdf
 from sqlalchemy import text
 from test_pubmed_fulltext import CC_BY, Web, jats
 
-from api.routers.history import router
+from api.routers.fabric import router
 from fetch import sources
 from fetch import web_client as client
-from store import history as store
-from store.history_models import FetchRequest
+from store import records as store
+from store.record_models import FetchRequest
 
 ADMIN = "test-admin-only"
 
@@ -39,7 +39,7 @@ def chain(pg, monkeypatch, tmp_path):  # noqa: F811
 
 def upload(test_client, content, key, name="报告.pdf"):
     return test_client.post(
-        "/api/history/local-files",
+        "/api/fabric/local-files",
         headers={"Authorization": "Bearer " + ADMIN, "Idempotency-Key": key},
         files={"file": (name, content, "application/pdf")},
         data={"collection": "t28-evidence", "is_demo": "true"},
@@ -88,7 +88,7 @@ def test_pubmed_pmc_fulltext_links_to_its_same_run_article_and_parses_as_jats(ch
     article, attachment = done.version_ids[0], done.version_ids[1]  # 全文紧跟它的文献
     with pg.begin() as conn:
         link = conn.execute(text(
-            "SELECT parent_record_id,parent_version_id,link_basis FROM history_attachment_links "
+            "SELECT parent_record_id,parent_version_id,link_basis FROM fabric_attachment_links "
             "WHERE attachment_version_id=:a"), {"a": attachment}).mappings().one()
     assert dict(link) == {"parent_record_id": "111", "parent_version_id": article,
                           "link_basis": "same_run_parent_version"}

@@ -2,7 +2,7 @@
 
 每个站点的知识只有一份：站点配置 fetch/sites/*（列表页、选择器、翻页、详情提取器、接口拉取函数）和
 fetch/extractors/*。抓取、翻页、下载用 fetch/web_client.py、pagination.py、page_parser.py。
-落库只有一种：写只追加的 history 版本，不写 documents 表、不把附件文字合并进父文档。
+落库只有一种：写只追加的资料库版本，不写 documents 表、不把附件文字合并进父文档。
 - 详情页 → web_capture 版本（原始 HTML + 提取结果 + 附件清单）；
 - 接口记录、表格页的一张表 → site_record 版本（提取结果 + 接口原始字段）；
 - 每个附件 → attachment 版本（链接、父记录、sha256、大小、类型、原件路径），正文由加工层
@@ -51,7 +51,7 @@ from fetch.page_parser import route_webpage
 from fetch.pagination import make_driver
 from fetch.web_client import download_pdf, fetch_page
 from fetch.windows import GROUP_LIMIT
-from store.history_models import ArchiveRecord, GroupStart, HistoryError, ItemUnreadable, make_uuid, source_time
+from store.record_models import ArchiveRecord, FabricError, GroupStart, ItemUnreadable, make_uuid, source_time
 
 WEB_SCHEMA = "datafabric.web_capture.v1"
 RECORD_SCHEMA = "datafabric.site_record.v1"
@@ -213,7 +213,7 @@ class _Reader:
         logger.warning("站点 {} 有一条读不到：{} | {}", self.site, unread.reason, unread.url)
         self.unread_in_a_row += 1
         if self.unread_in_a_row >= SITE_DOWN_AFTER:
-            raise HistoryError("site_down", f"连续 {SITE_DOWN_AFTER} 条读不出来，站点可能出了故障；最近一条 {unread.url}：{unread.reason}")
+            raise FabricError("site_down", f"连续 {SITE_DOWN_AFTER} 条读不出来，站点可能出了故障；最近一条 {unread.url}：{unread.reason}")
 
     def attachment(self, link, parent_id, cookies, discovered):
         """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。额度用完抛 transport.Stop。"""
@@ -283,7 +283,7 @@ class _Reader:
         记录身份是站点给的稳定编号（接口：uuid5(站点:记录键)，与 documents 库的文档 uuid 同一算法）。"""
         record_id = parsed.get("uuid") or ""
         if not record_id:
-            raise HistoryError("native_id_missing", "站点记录缺少稳定编号")
+            raise FabricError("native_id_missing", "站点记录缺少稳定编号")
         if record_page:
             self.budget.need_record()
         links = _links(parsed)
@@ -362,7 +362,7 @@ def _site_results(reader, query):
     profile = reader.profile
     if profile.get("source_type") == "api":
         if query != "records":
-            raise HistoryError("unknown_query", "接口站点只支持 query=records")
+            raise FabricError("unknown_query", "接口站点只支持 query=records")
         from fetch.api_fields import to_result
 
         fetch = profile["api_fetcher"]
@@ -375,7 +375,7 @@ def _site_results(reader, query):
             yield parsed, kept
         return
     if query not in profile.get("start_urls", []):
-        raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
+        raise FabricError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
     with closing(make_driver(reader.site, profile, query).iter_table_data()) as pages:  # 读满不再要，浏览器就收工
         for batch in pages:
             for parsed in batch:
@@ -390,7 +390,7 @@ def _cursor(request):
         value = json.loads(request.continuation.cursor)
         return int(value["i"]), int(value["a"]), bool(value.get("p")), int(value.get("g", 0))
     except (ValueError, KeyError, TypeError):
-        raise HistoryError("invalid_cursor", "续读位置无效") from None
+        raise FabricError("invalid_cursor", "续读位置无效") from None
 
 
 def _read_named(request, reader, start):
@@ -398,7 +398,7 @@ def _read_named(request, reader, start):
     start_i, start_a, start_recorded = start[:3]
     for url in request.source_record_ids:
         if not _on_site(reader.site, url):
-            raise HistoryError("url_outside_site", "链接不属于该来源站点")
+            raise FabricError("url_outside_site", "链接不属于该来源站点")
     for position in range(start_i, len(request.source_record_ids)):
         reader.position = position
         url = request.source_record_ids[position]
@@ -449,14 +449,14 @@ def _read_site_records(request, reader, start):
             reader.position = position + 1
             skipping = skipping or bool(by_group and request.known_stop and position + 1 >= GROUP_LIMIT)
     if not (yielded or start_i or group):
-        raise HistoryError("list_empty", LIST_EMPTY)
+        raise FabricError("list_empty", LIST_EMPTY)
 
 
 def _read_detail_pages(request, reader, start):
     """列表网页站点：父项是列表入口通向的各个详情页。"""
     start_i, start_a, start_recorded = start[:3]
     if request.query not in reader.profile.get("start_urls", []):
-        raise HistoryError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
+        raise FabricError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
     seen = -1
     with closing(make_driver(reader.site, reader.profile, request.query).iter_detail_urls()) as urls:
         for url in urls:  # 读满不再要，浏览器就收工，不再翻下一页
@@ -472,7 +472,7 @@ def _read_detail_pages(request, reader, start):
                 reader.skip(ItemUnreadable(url, _why(exc)))
             reader.position = seen + 1  # 这一项读完了：下一页列表要在这之后才取，停在那里就从下一项接
     if seen < 0:
-        raise HistoryError("list_empty", LIST_EMPTY)
+        raise FabricError("list_empty", LIST_EMPTY)
 
 
 def _why(exc) -> str:
@@ -512,14 +512,14 @@ def read_site(request) -> dict:
     except transport.Stop as stopped:
         # 读到旧的了（增量读取）：没有下一页要接
         stop, resume = stopped.reason, None if stopped.reason == transport.KNOWN else _stopped_at(reader, start)
-    except HistoryError as exc:
+    except FabricError as exc:
         error, stop = {"code": exc.code, "message": exc.message}, "source_failed"
     except Exception as exc:  # noqa: BLE001 -- 页面抓取失败如实记录，已读原件单独保留
         error = {"code": "source_read_failed", "message": "站点读取失败：" + _why(exc)}
         stop = "source_failed"
         logger.error("站点 {} 读取失败：{}", reader.site, error["message"])
     if reader.unread and stop in ("upstream_exhausted", transport.KNOWN) and error is None:
-        # 读到底（或读到旧的）了，但有几条没读到：不能说读完。有版本的是“部分完成”，一个版本也没有的是“失败”（history._close_run）
+        # 读到底（或读到旧的）了，但有几条没读到：不能说读完。有版本的是“部分完成”，一个版本也没有的是“失败”（records._close_run）
         first = reader.unread[0]
         error = {"code": "items_unread",
                  "message": f"有 {len(reader.unread)} 条读不到，如 {first['url']}：{first['reason']}"}
@@ -616,15 +616,15 @@ def project_capture(source_id: str, item: ArchiveRecord) -> dict:
     try:
         data = json.loads(item.raw_content)
     except ValueError:
-        raise HistoryError("invalid_source_fields", "站点原件不是合法 JSON") from None
+        raise FabricError("invalid_source_fields", "站点原件不是合法 JSON") from None
     role = data.get("role") if isinstance(data, dict) else None
     kind = _CAPTURE_ROLES.get(role) if isinstance(role, str) else None
     if kind is None or data.get("schema_version") != kind[0]:
-        raise HistoryError("invalid_source_fields",
+        raise FabricError("invalid_source_fields",
                            "站点原件不符合 web_capture / site_record / attachment / legacy_capture 契约")
     facts, title, clean_text, published = kind[1](data)
     if _expected_capture_id(role, data) != item.source_record_id or data.get("site") != source_id:
-        raise HistoryError("native_id_mismatch", "站点原件的链接或来源与记录不一致")
+        raise FabricError("native_id_mismatch", "站点原件的链接或来源与记录不一致")
     return {
         "record_kind": "document",
         "title": title,

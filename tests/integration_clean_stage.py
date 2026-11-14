@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from integration_history import (  # noqa: F401  -- 复用隔离库夹具和发布入口
+from integration_records import (  # noqa: F401  -- 复用隔离库夹具和发布入口
     _fetch_attachment,
     _fetch_europe_pmc_raw,
     _fetch_study,
@@ -16,8 +16,8 @@ from integration_history import (  # noqa: F401  -- 复用隔离库夹具和发�
 from sqlalchemy import text
 
 from clean import clean_text
-from store import history as store
-from store.history_models import ArchiveRecord, FetchRequest, HistoryError
+from store import records as store
+from store.record_models import ArchiveRecord, FabricError, FetchRequest
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 
@@ -66,7 +66,7 @@ def test_every_source_type_gets_clean_text_identifiers_and_a_profile(pg, tmp_pat
     older = clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW(),
                                      processor_version="datafabric.clean_text.v1")["versions"][ct]
     assert older["state"] == "not_processed" and "clean" not in older
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         clean_stage.for_versions("clinicaltrials", False, [ct], "current", NOW(), processor_version="x;drop")
     lit = clean_stage.for_versions("europe_pmc", False, [paper], "current", NOW())["versions"][paper]
     # v3 6.2: stored and returned with the profile (experiment type candidates, obtainable reading level)
@@ -185,7 +185,7 @@ def test_a_version_locked_by_another_worker_is_skipped_until_it_lets_go(pg):
     _fetch_study("NCT09998881", "lock-1")
     with pg.connect() as other:  # another worker holds the version
         other.begin()
-        other.execute(text("SELECT 1 FROM history_versions FOR NO KEY UPDATE"))
+        other.execute(text("SELECT 1 FROM fabric_versions FOR NO KEY UPDATE"))
         assert clean_stage.process()["profiled"] == 0
         other.rollback()  # it stopped without writing anything: the lock goes with its transaction
     assert clean_stage.process()["profiled"] == 1

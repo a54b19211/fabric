@@ -10,7 +10,7 @@ import pytest
 from fetch import catalog, rate, site_crawler, transport
 from fetch.projection import project_record
 from fetch.sources import read_public
-from store.history_models import ArchiveRecord, FetchRequest, HistoryError
+from store.record_models import ArchiveRecord, FabricError, FetchRequest
 
 PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/20261101120000123.html"
 ATT1 = "https://www.nmpa.gov.cn/directory/web/nmpa/images/a1.doc"
@@ -318,7 +318,7 @@ def test_projection_of_capture_and_attachment(fake_web):
     assert a["facts"]["role"] == "attachment" and a["facts"]["parent_record_id"] == PAGE
     assert a["source_url"] == ATT1
     assert a["clean_text"] == "" and a["facts"]["sha256"]  # 正文由加工层 attachment_parse 产出
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         project_record(
             "nmpa", ArchiveRecord(source_record_id=PAGE, record_kind="document", raw_content=json.dumps({"x": 1}))
         )
@@ -354,7 +354,7 @@ def test_api_site_records_become_site_record_versions_with_their_attachments(fak
     [record] = batch["records"]
     data = json.loads(record.raw_content)
     assert data["role"] == "site_record" and data["raw"]["id"] == "R1" and data["parsed"]["title"] == "召回一"
-    from store.history_models import make_uuid as _make_uuid
+    from store.record_models import make_uuid as _make_uuid
     assert record.source_record_id == _make_uuid("fda_api_enforcement:R1")
     assert batch["stop_reason"] == "record_budget" and batch["next_continuation"]
     projected = site_crawler.project_capture("fda_api_enforcement", record)
@@ -771,12 +771,12 @@ def test_roche_detail_page_that_stays_unread_is_not_stored_with_an_empty_body(mo
 
 @pytest.fixture
 def stored(monkeypatch):
-    """库里已有且没变的原件（记录身份的集合）。真正的判断是 store.history.stored_unchanged，和存版本共用 _adopted_version，
-    要真库，见 tests/integration_history.py；这里换成查集合。"""
-    from store import history
+    """库里已有且没变的原件（记录身份的集合）。真正的判断是 store.records.stored_unchanged，和存版本共用 _adopted_version，
+    要真库，见 tests/integration_records.py；这里换成查集合。"""
+    from store import records
 
     known = set()
-    monkeypatch.setattr(history, "stored_unchanged", lambda source, item: item.source_record_id in known)
+    monkeypatch.setattr(records, "stored_unchanged", lambda source, item: item.source_record_id in known)
     return known
 
 
@@ -843,7 +843,7 @@ def test_a_read_that_stored_nothing_new_is_not_a_failure_but_an_empty_list_is(fa
 
 
 def test_api_site_stops_at_known_records_and_an_empty_result_is_an_alarm_too(fake_web, monkeypatch, stored):
-    from store.history_models import make_uuid as _make_uuid
+    from store.record_models import make_uuid as _make_uuid
 
     items = [{"id": f"R{i}", "t": f"召回{i}", "d": "2026-01-0" + str(i + 1), "u": f"https://x.invalid/{i}"} for i in range(6)]
     profile = {"source_type": "api", "api": {}, "uid_field": "id",
@@ -922,9 +922,9 @@ def test_five_detail_pages_in_a_row_that_cannot_be_read_are_a_site_fault_not_fiv
 
 
 def test_budget_known_counts_consecutive_known_only(monkeypatch):
-    from store import history
+    from store import records
 
-    monkeypatch.setattr(history, "stored_unchanged", lambda source, item: item != "new")
+    monkeypatch.setattr(records, "stored_unchanged", lambda source, item: item != "new")
     budget = transport.Budget(FetchRequest(source_id="nmpa", query="by_url", known_stop=3))
     assert [budget.known(item) for item in ("a", "b", "new", "c", "d")] == [True, True, False, True, True]
     assert budget.known(None) is False and budget.known_run == 0  # 没读到的：连续数清零
@@ -942,7 +942,7 @@ def test_budget_known_counts_consecutive_known_only(monkeypatch):
 def _grouped(monkeypatch, groups, fetched=None):
     """一个接口站点，条目分成几组（groups[g] 是这一组的条目数）。拉取函数和真的一样：从第 start 组读起，每组开头给 GroupStart。
     fetched 记下每次从第几组读起。"""
-    from store.history_models import GroupStart
+    from store.record_models import GroupStart
 
     def fetcher(cfg, start):
         if fetched is not None:
@@ -976,7 +976,7 @@ def test_a_grouped_site_goes_on_from_its_group_and_item_without_the_groups_befor
 
 
 def test_a_grouped_site_stops_at_known_records_in_each_group_and_goes_on_with_the_next_group(fake_web, monkeypatch, stored):
-    from store.history_models import make_uuid as _make_uuid
+    from store.record_models import make_uuid as _make_uuid
 
     _grouped(monkeypatch, [6, 6, 6])
     for g in (0, 1):  # 第 0、1 组：前两条是新的，其余已存；第 2 组全是新的
@@ -998,7 +998,7 @@ def test_a_grouped_incremental_read_takes_at_most_group_limit_items_per_group(fa
 
 def test_a_group_that_cannot_be_read_does_not_stop_the_next_group_and_a_stop_while_asking_for_a_group_keeps_that_group(
         fake_web, monkeypatch):
-    from store.history_models import GroupStart, ItemUnreadable
+    from store.record_models import GroupStart, ItemUnreadable
 
     def fetcher(cfg, start):
         yield GroupStart(0)

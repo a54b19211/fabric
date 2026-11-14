@@ -8,7 +8,7 @@ import pytest
 from graph.publish.graph_tools import graph_identity, paths, subgraph
 from graph.publish.native_graph import build_native_graph, validate_field_bindings
 from graph.publish.reviewed_graph import GraphIdentity, GraphRef, resolve
-from store.history_models import AvailabilityProof, HistoryError, HistoryRecord, sha256
+from store.record_models import AvailabilityProof, FabricError, VersionRecord, sha256
 
 
 def record(nct="NCT00000001", *, condition="Condition A"):
@@ -19,7 +19,7 @@ def record(nct="NCT00000001", *, condition="Condition A"):
         "sponsorCollaboratorsModule": {"leadSponsor": {"name": "SYNTHETIC University"}},
     }})
     now = datetime(2026, 10, 30, tzinfo=timezone.utc)
-    return HistoryRecord(source_id="clinicaltrials", source_record_id=nct,
+    return VersionRecord(source_id="clinicaltrials", source_record_id=nct,
                          version_id=sha256("version:" + raw), record_kind="trial", is_demo=True,
                          title=nct, raw_content=raw, raw_sha256=sha256(raw), clean_text=nct,
                          facts={"trial_id": nct}, field_locators={}, first_seen_at=now,
@@ -71,16 +71,16 @@ def test_source_binding_rejects_forged_fields_meaning_and_identity(change):
     elif change == "alias":
         trial.aliases.append("Unproven synonym")
     else:
-        from store.history_models import TimeValue
+        from store.record_models import TimeValue
         edge.valid_from = TimeValue(value="2016", precision="year", meaning="guessed_from_document")
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         validate_field_bindings(graph, context(rec))
     assert error.value.code == "graph_field_mismatch"
 
 
 def test_same_trial_two_versions_cannot_silently_mix_and_budget_is_visible():
     old, new = record(), record(condition="Condition B")
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         build_native_graph([old, new])
     bounded = build_native_graph([old], max_nodes=2, max_edges=1)
     assert len(bounded.nodes) == 2 and len(bounded.edges) == 1
@@ -130,13 +130,13 @@ def test_induced_subgraph_returns_only_requested_endpoints_and_exposes_caps():
     assert len(subgraph(graph, frozen_ref(), [trial]).edges) == 0
     limited = subgraph(graph, frozen_ref(), [trial, graph.edges[0].target], max_nodes=1, review_scope="with_candidates")
     assert limited.coverage.truncated and not limited.edges
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         subgraph(graph, frozen_ref(), [trial, trial])
 
 
 @pytest.mark.parametrize("value", ["NCBI1956", "x|y|z", "x| "])
 def test_identity_is_never_guessed_from_malformed_input(value):
-    with pytest.raises(HistoryError):
+    with pytest.raises(FabricError):
         graph_identity(value)
 
 
@@ -164,6 +164,6 @@ def test_native_origin_cannot_smuggle_approved_objects_or_edges_without_native_r
     else:
         graph.redirects.append(GraphRedirect(source=GraphIdentity(namespace="synthetic", id="alias"),
                                              target=graph.edges[0].source, merge_log_id="synthetic"))
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         validate_field_bindings(graph, context(rec))
     assert error.value.code == "graph_field_mismatch"

@@ -9,7 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from fetch import transport
-from store.history_models import MAX_RESPONSE_BYTES, ArchiveRecord, HistoryError, canonical, source_time
+from store.record_models import MAX_RESPONSE_BYTES, ArchiveRecord, FabricError, canonical, source_time
 
 ENDPOINT = "https://www.who.int/api/emergencies/diseaseoutbreaknews"
 WHO_PARSER = "datafabric.who.don.projection.v0.2"
@@ -37,14 +37,14 @@ def project_who(item, data):
     try:
         native = str(UUID(data["Id"]))
     except (KeyError, ValueError, TypeError, AttributeError):
-        raise HistoryError("who_notice_id", "WHO公告缺少合法原生Id") from None
+        raise FabricError("who_notice_id", "WHO公告缺少合法原生Id") from None
     if item.source_record_id != native or item.record_kind != "document":
-        raise HistoryError("native_id_mismatch", "WHO公告ID/类型与原件不一致")
+        raise FabricError("native_id_mismatch", "WHO公告ID/类型与原件不一致")
     if not isinstance(data.get("Title"), str) or not data["Title"].strip():
-        raise HistoryError("who_notice_title", "WHO公告缺少标题")
+        raise FabricError("who_notice_title", "WHO公告缺少标题")
     for key in ("PublicationDate", "PublicationDateAndTime", "LastModified"):
         if data.get(key) is not None and source_time(data[key]) is None:
-            raise HistoryError("who_notice_time", "WHO公告原生时间无效")
+            raise FabricError("who_notice_time", "WHO公告原生时间无效")
     facts, locators = _facts(data, PATHS)
     parts = [data["Title"]]
     sections = {}
@@ -58,7 +58,7 @@ def project_who(item, data):
     ):
         value = data.get(key)
         if value is not None and not isinstance(value, str):
-            raise HistoryError("who_notice_text", "WHO公告正文不是原生文本")
+            raise FabricError("who_notice_text", "WHO公告正文不是原生文本")
         if value:
             soup = BeautifulSoup(value, "html.parser")
             text = soup.get_text(" ", strip=True)
@@ -126,11 +126,11 @@ def read_who(request):
             if modified is None or modified.precision != "instant":
                 raise ValueError()
         except (ValueError, TypeError, KeyError):
-            raise HistoryError(
+            raise FabricError(
                 "who_cursor_mismatch", "WHO续页须为原生LastModified/Id定位"
             ) from None
     if request.source_record_ids:
-        raise HistoryError(
+        raise FabricError(
             "by_id_unsupported", "WHO公开读取暂按明确时间窗/标题范围，不猜by-ID接口"
         )
     filters = []
@@ -166,7 +166,7 @@ def read_who(request):
                 raw = response.content.decode("utf-8")
                 data = parse_json(raw)
                 if not isinstance(data.get("value"), list):
-                    raise HistoryError(
+                    raise FabricError(
                         "who_response_shape", "WHO未返回公告数组，不能视为空结果"
                     )
                 items = list(_raw_array_items(raw, ["value"]))
@@ -184,7 +184,7 @@ def read_who(request):
                     last = selected[-1][0]
                     modified = source_time(last.get("LastModified"))
                     if modified is None or modified.precision != "instant":
-                        raise HistoryError(
+                        raise FabricError(
                             "who_cursor_mismatch", "WHO分页缺精确LastModified，不能推进"
                         )
                     next_position = {
@@ -192,7 +192,7 @@ def read_who(request):
                         "id": str(UUID(last["Id"])),
                     }
                     if position == next_position:
-                        raise HistoryError(
+                        raise FabricError(
                             "who_repeated_cursor", "WHO分页重复，不能视为EOF"
                         )
                     position = next_position
@@ -212,7 +212,7 @@ def read_who(request):
                 stop = "page_budget"
         except transport.Stop as stopped:
             stop = stopped.reason  # 停在最后读完的一页，续读位置不变
-        except HistoryError as exc:
+        except FabricError as exc:
             error = {"code": exc.code, "message": exc.message}
         except (httpx.HTTPError, ValueError, KeyError, TypeError, UnicodeError):
             error = {

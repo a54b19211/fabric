@@ -15,7 +15,7 @@ import httpx
 from loguru import logger
 
 from fetch import transport
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 OPENFDA_BASE = "https://api.fda.gov"
 PAGE_SIZE = 100
@@ -24,7 +24,7 @@ NEXT_LINK_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
 def _get_page(url, endpoint, fetched, *, params=None, end_on_404=False):
-    """读一页。HTTP 错误和网络异常都抛 HistoryError（写明原因），运行记为失败；以前是记一行日志、当作读到底。
+    """读一页。HTTP 错误和网络异常都抛 FabricError（写明原因），运行记为失败；以前是记一行日志、当作读到底。
     end_on_404：skip 翻页时 openFDA 翻过最后一页回 404，这时返回 None 表示读完了。"""
     try:
         resp = transport.get(url, params, timeout=30, cap=32 * 1024 * 1024)
@@ -36,7 +36,7 @@ def _get_page(url, endpoint, fetched, *, params=None, end_on_404=False):
         reason = f"HTTP {e.response.status_code}"
     except httpx.HTTPError as e:  # 超时、连接失败等
         reason = type(e).__name__
-    raise HistoryError("source_read_failed", f"openFDA 读取失败：{endpoint} {reason}（已读 {fetched} 条，不当作读到底）")
+    raise FabricError("source_read_failed", f"openFDA 读取失败：{endpoint} {reason}（已读 {fetched} 条，不当作读到底）")
 
 
 def iter_openfda(api_cfg: dict) -> Iterator[dict]:

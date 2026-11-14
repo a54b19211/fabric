@@ -1,4 +1,4 @@
-"""明确范围、可续批次的只读图导出和history发布；不触发旧审核、同步或采集。"""
+"""明确范围、可续批次的只读图导出和资料库发布；不触发旧审核、同步或采集。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from graph.publish import history_graph
+from graph.publish import fabric_graph
 from graph.publish.reviewed_graph import (
     GraphBundle,
     GraphEdge,
@@ -25,11 +25,11 @@ from graph.publish.reviewed_graph import (
     identity_key,
     primekg_bundle,
 )
-from store import history as store
-from store.history_models import (
+from store import records as store
+from store.record_models import (
     ArchiveImport,
     ArchiveRecord,
-    HistoryError,
+    FabricError,
     canonical,
     sha256,
     source_time,
@@ -54,7 +54,7 @@ def _loopback_url(value):
         or parts.query
         or parts.fragment
     ):
-        raise HistoryError(
+        raise FabricError(
             "invalid_legacy_origin", "旧图只读入口必须为明确的本机HTTP根地址"
         )
     return value.rstrip("/")
@@ -69,14 +69,14 @@ def _read_primekg(statement, parameters, columns, max_rows, *, client=None):
     password = os.environ.get("DATAFABRIC_GRAPH_NEO4J_PASSWORD", "")
     database = os.environ.get("DATAFABRIC_GRAPH_NEO4J_DATABASE", "neo4j")
     if not url or not user or not password:
-        raise HistoryError(
+        raise FabricError(
             "primekg_not_configured", "须明确配置图只读地址及独立私有凭据", 503
         )
     url = _loopback_url(url)
-    with store.history_engine().begin() as conn:
+    with store.fabric_engine().begin() as conn:
         store._source(conn, "primekg_graph")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", database):
-        raise HistoryError("invalid_neo4j_database", "图数据库名无效")
+        raise FabricError("invalid_neo4j_database", "图数据库名无效")
     body = {"statements": [{
         "statement": statement, "parameters": parameters, "resultDataContents": ["row"]
     }]}
@@ -103,7 +103,7 @@ def _read_primekg(statement, parameters, columns, max_rows, *, client=None):
             for chunk in response.iter_bytes():
                 size += len(chunk)
                 if size > 2 * 1024 * 1024 or time.monotonic() - started > 20:
-                    raise HistoryError("primekg_read_budget", "图读取超过2MiB/20秒预算")
+                    raise FabricError("primekg_read_budget", "图读取超过2MiB/20秒预算")
                 chunks.append(chunk)
         data = json.loads(b"".join(chunks))
         if (
@@ -112,7 +112,7 @@ def _read_primekg(statement, parameters, columns, max_rows, *, client=None):
             or not isinstance(data.get("results"), list)
             or len(data["results"]) != 1
         ):
-            raise HistoryError(
+            raise FabricError(
                 "primekg_query_failed",
                 "图服务返回失败或协议不完整，不能当作空邻域",
                 503,
@@ -125,18 +125,18 @@ def _read_primekg(statement, parameters, columns, max_rows, *, client=None):
             or len(rows) > max_rows
             or any(not isinstance(row, list) or len(row) != len(columns) for row in rows)
         ):
-            raise HistoryError("primekg_invalid_response", "图服务响应不符合固定读取契约", 503)
+            raise FabricError("primekg_invalid_response", "图服务响应不符合固定读取契约", 503)
         return rows
     except httpx.TimeoutException:
-        raise HistoryError(
+        raise FabricError(
             "primekg_timeout", "当前图读取超时，未发布；可重试本次请求", 504
         ) from None
     except httpx.HTTPError:
-        raise HistoryError(
+        raise FabricError(
             "primekg_read_failed", "当前图HTTP读取失败，未发布，不当作空结果", 503
         ) from None
     except (KeyError, TypeError, ValueError):
-        raise HistoryError(
+        raise FabricError(
             "primekg_invalid_response", "当前图返回无法核对的结构，未发布", 503
         ) from None
     finally:
@@ -173,7 +173,7 @@ def capture_primekg(
         or any(not value or len(value) > 120 for value in relation_types)
         or len(neighbor_term) > 120
     ):
-        raise HistoryError("primekg_capture_budget", "PrimeKG身份、类型或读取预算无效")
+        raise FabricError("primekg_capture_budget", "PrimeKG身份、类型或读取预算无效")
     query = PrimeKGQuery(
         node_type=node_type, node_source=node_source, seed_id=seed_id,
         relation_types=list(relation_types), neighbor_term=neighbor_term, limit=limit,
@@ -213,9 +213,9 @@ def capture_primekg(
     )
     try:
         if not rows:
-            raise HistoryError("primekg_invalid_response", "图服务缺少明确身份查询结果", 503)
+            raise FabricError("primekg_invalid_response", "图服务缺少明确身份查询结果", 503)
         if any(row[0] != rows[0][0] for row in rows) or rows[0][0] not in {0, 1}:
-            raise HistoryError(
+            raise FabricError(
                 "ambiguous_primekg_seed", "源命名空间/ID命中多个物理节点，请唐先核对身份"
             )
         seed_found = rows[0][0] == 1
@@ -225,7 +225,7 @@ def capture_primekg(
                 not isinstance(value.get(key), str) or not value[key]
                 for key in ("name", "node_source", "primekg_id", "primekg_type")
             ):
-                raise HistoryError(
+                raise FabricError(
                     "primekg_invalid_node", "图节点缺少原生命名空间/ID/类型", 503
                 )
             return {
@@ -240,7 +240,7 @@ def capture_primekg(
         for row in rows:
             if row[4] is None:
                 if row[2] is not None or row[3] is not None or row[5] is not None:
-                    raise HistoryError(
+                    raise FabricError(
                         "primekg_invalid_response", "图服务空关系状态矛盾", 503
                     )
                 continue
@@ -250,7 +250,7 @@ def capture_primekg(
                 or not isinstance(row[4], str)
                 or not isinstance(row[5], dict)
             ):
-                raise HistoryError(
+                raise FabricError(
                     "primekg_invalid_response", "图服务身份/关系状态矛盾", 503
                 )
             projected.append(
@@ -278,7 +278,7 @@ def capture_primekg(
             "evidence_status": "background_no_document_binding",
         }
     except (KeyError, TypeError, ValueError):
-        raise HistoryError(
+        raise FabricError(
             "primekg_invalid_response", "当前图返回无法核对的结构，未发布", 503
         ) from None
 
@@ -323,7 +323,7 @@ def _item_evidence(item, original, ref):
 def _bundle_scope(observation, documents, document_refs):
     """The observation's namespace and the selected originals and adoption refs, keyed by document UUID."""
     if observation.get("schema_version") != "datafabric.legacy.graph.observation.v1":
-        raise HistoryError("legacy_observation_schema", "不支持的旧图观测格式")
+        raise FabricError("legacy_observation_schema", "不支持的旧图观测格式")
     namespace = observation["namespace"]
     GraphIdentity(namespace=namespace, id="namespace-check")
     doc_map = {doc.source_doc_uuid: doc for doc in documents}
@@ -334,7 +334,7 @@ def _bundle_scope(observation, documents, document_refs):
         or set(doc_map) != set(selected)
         or set(ref_map) != set(selected)
     ):
-        raise HistoryError(
+        raise FabricError(
             "legacy_document_scope_mismatch", "本批所选UUID与原件/采用清单不一致"
         )
     return namespace, doc_map, ref_map, selected
@@ -344,7 +344,7 @@ def _item_scope(item, doc_map, message):
     """The document UUID and review status of an observed entity or relation inside the selected scope."""
     uuid, status = item.get("observation_source_doc_uuid") or item["source_doc_uuid"], item["review_status"]
     if uuid not in doc_map or status not in {"approved", "auto_approved", "pending"}:
-        raise HistoryError("legacy_review_scope_mismatch", message)
+        raise FabricError("legacy_review_scope_mismatch", message)
     return uuid, status
 
 
@@ -385,7 +385,7 @@ def _new_entity_node(identity, item, confirmed, dict_id, review):
 def _merge_entity_mention(node, item, namespace, confirmed, review, evidence):
     """Fold one more mention into its node: the confirmation, the alias, the mention ID and the evidence."""
     if node.entity_type != item["entity_type"]:
-        raise HistoryError(
+        raise FabricError(
             "ambiguous_legacy_type", "同一字典身份的实体类型矛盾，不能按名称合并"
         )
     if confirmed:
@@ -406,7 +406,7 @@ def _add_entity(item, namespace, doc_map, ref_map, dictionary_context, mentions,
     uuid, status = _item_scope(item, doc_map, "实体不在所选文档或审核范围")
     mention_key = (uuid, item["id"])
     if mention_key in mentions:
-        raise HistoryError(
+        raise FabricError(
             "duplicate_legacy_mention",
             "源实体ID重复或读取期间状态漂移，请重新捕获本批",
         )
@@ -600,7 +600,7 @@ def publish_native_graph(records, key, *, max_nodes=100, max_edges=200):
         "namespace": bundle.namespace, "scope": sorted(bundle.scope_record_ids),
         "max_nodes": max_nodes, "max_edges": max_edges,
     }))
-    return history_graph.import_graph(ArchiveImport(
+    return fabric_graph.import_graph(ArchiveImport(
         source_id="reviewed_graph", is_demo=bundle.is_demo,
         scope_description=bundle.scope_description, declared_count=1, declared_complete=False,
         records=[ArchiveRecord(source_record_id=native, record_kind="graph", raw_content=bundle.model_dump_json())],
@@ -613,7 +613,7 @@ def publish_primekg(observation, key):
     if observation.get("query_parameters") is not None:
         identity["query"] = observation["query_parameters"]
     native = "primekg-capture:" + sha256(canonical(identity))
-    return history_graph.import_graph(
+    return fabric_graph.import_graph(
         ArchiveImport(
             source_id="primekg_graph",
             is_demo=False,
@@ -666,7 +666,7 @@ def main():
                 neighbor_term=args.neighbor_term,
                 limit=args.limit,
             )
-        except HistoryError as exc:
+        except FabricError as exc:
             Path(args.output).write_text(
                 canonical({"state": "failed", "code": exc.code, "message": exc.message})
             )
@@ -699,7 +699,7 @@ def main():
 
     try:
         run = publish_primekg(observation, args.idempotency_key)
-    except HistoryError as exc:
+    except FabricError as exc:
         receipt.update(state="failed", code=exc.code, message=exc.message)
         Path(args.receipt).write_text(canonical(receipt))
         raise SystemExit(exc.message) from None

@@ -17,7 +17,7 @@ from loguru import logger
 
 from fetch import transport
 from fetch.extractors.nccn.nccn import extract_nccn_detail
-from store.history_models import GroupStart, ItemUnreadable, make_uuid
+from store.record_models import GroupStart, ItemUnreadable, make_uuid
 
 BASE_URL = "https://www.nccn.org"
 GROUP_SPAN = 1000  # 组号 = 分类编号 × GROUP_SPAN + 序号：续读只渲染它所在的那一个分类列表页（以前四页都渲染，一段 120 秒里占了一半）

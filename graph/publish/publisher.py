@@ -1,9 +1,9 @@
 """图发布的常驻程序（唐组）：每隔几秒一轮，把原采集库（DATAFABRIC_PUBLICATION_DATABASE_URL）publication_outbox 里的
-待办发表进 History 库（现在实际发表的是审核图；旧文档库存的事件因旧文档冻结桥已退役而标为阻塞），并写一次心跳。
+待办发表进资料库（现在实际发表的是审核图；旧文档库存的事件因旧文档冻结桥已退役而标为阻塞），并写一次心跳。
 抓、洗、存不依赖它：没配原采集库时只是这个程序不工作。
 
 从哪读起：main() 里的 while 循环：一轮最多发表 --batch-size 项（graph/publish/publication.py · publish_once），
-再写心跳 publisher_heartbeat（/api/history/publication/status 读它）。--once 只跑一轮，发表失败或被阻塞时以非零状态退出；
+再写心跳 publisher_heartbeat（/api/fabric/publication/status 读它）。--once 只跑一轮，发表失败或被阻塞时以非零状态退出；
 --reconcile <高水位> 只读对账后退出。服务文件 ops/systemd/datafabric-graph-publisher.service。
 
     python -m graph.publish.publisher --once
@@ -17,7 +17,7 @@ import time
 from sqlalchemy.exc import SQLAlchemyError
 
 from graph.publish.publication import publish_once, publisher_heartbeat, reconcile
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 
 def _round(batch_size, stopping):
@@ -60,11 +60,11 @@ def main():
         try:
             states, failed = _round(args.batch_size, lambda: stopping)
             print(json.dumps({"processed": states}, ensure_ascii=False), flush=True)
-        except (HistoryError, SQLAlchemyError, OSError):
+        except (FabricError, SQLAlchemyError, OSError):
             failed = True
             try:
                 publisher_heartbeat("unavailable")
-            except (HistoryError, SQLAlchemyError, OSError):
+            except (FabricError, SQLAlchemyError, OSError):
                 pass  # 心跳也写不进：旧心跳自然过期
             print(json.dumps({"state": "unavailable", "message": "发表数据库或配置暂不可用；待办保留"},
                              ensure_ascii=False), flush=True)

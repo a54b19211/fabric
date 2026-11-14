@@ -19,7 +19,7 @@ from graph.publish.reviewed_graph import (
     primekg_bundle,
     resolve,
 )
-from store.history_models import HistoryError, sha256
+from store.record_models import FabricError, sha256
 
 
 def node(identity, name="same name", **extra):
@@ -275,14 +275,14 @@ def test_auto_mention_cannot_become_a_confirmed_alias_of_shared_dict_id():
     stale = build_document_bundle(observation, [document], [reference])
     assert all(node.identity_status == "unresolved" for node in stale.nodes)
     observation["entities"].append(observation["entities"][1])
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         build_document_bundle(observation, [document], [reference])
     assert error.value.code == "duplicate_legacy_mention"
 
 
-def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract():
+def test_derived_fact_locators_follow_the_existing_fabric_json_pointer_contract():
     from fetch.projection import _pointer, parse_json, project_record
-    from store.history_models import ArchiveRecord
+    from store.record_models import ArchiveRecord
 
     graph = bundle()
     raw = graph.model_dump_json()
@@ -322,7 +322,7 @@ def test_derived_fact_locators_follow_the_existing_history_json_pointer_contract
 
 def test_missing_optional_graph_fact_has_no_invented_null_locator():
     from fetch.projection import project_record
-    from store.history_models import ArchiveRecord
+    from store.record_models import ArchiveRecord
 
     raw = bundle().model_dump_json(exclude={"selection_truncated"})
     projected = project_record(
@@ -348,7 +348,7 @@ def test_primekg_capture_is_parameterized_read_only_bounded_and_directional(
     class Engine:
         begin = staticmethod(connection)
 
-    monkeypatch.setattr(publish.store, "history_engine", lambda: Engine())
+    monkeypatch.setattr(publish.store, "fabric_engine", lambda: Engine())
     monkeypatch.setattr(publish.store, "_source", lambda conn, source: None)
     for key, value in {
         "URL": "http://127.0.0.1:7474",
@@ -441,7 +441,7 @@ def test_primekg_capture_separates_empty_error_and_ambiguous_identity(monkeypatc
     class Engine:
         begin = staticmethod(connection)
 
-    monkeypatch.setattr(publish.store, "history_engine", lambda: Engine())
+    monkeypatch.setattr(publish.store, "fabric_engine", lambda: Engine())
     monkeypatch.setattr(publish.store, "_source", lambda conn, source: None)
     for key, value in {
         "URL": "http://127.0.0.1:7474",
@@ -499,7 +499,7 @@ def test_primekg_capture_separates_empty_error_and_ambiguous_identity(monkeypatc
         and not observation["has_more"]
     )
     assert len(primekg_bundle(observation).nodes) == 1
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         capture_primekg(
             node_type="gene/protein", node_source="NCBI", seed_id="1956", client=client
         )
@@ -507,7 +507,7 @@ def test_primekg_capture_separates_empty_error_and_ambiguous_identity(monkeypatc
         error.value.code == "primekg_query_failed"
         and "do not echo" not in error.value.message
     )
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         capture_primekg(
             node_type="gene/protein", node_source="NCBI", seed_id="1956", client=client
         )

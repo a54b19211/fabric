@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from clean import attachment_parse
 from fetch.catalog import ATTACHMENT_SOURCES  # noqa: E402  有附件版本的来源：站点、PubMed 全文、本地导入
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 MAX_ATTEMPTS = 3
 
@@ -31,7 +31,7 @@ def _claim(conn, sources, retry_after_seconds, seen):
     return conn.execute(
         text("""
           SELECT v.version_id, v.source_id, v.is_demo, v.source_record_id, v.payload->'facts' AS facts
-          FROM history_versions v
+          FROM fabric_versions v
           WHERE v.source_id = ANY(:sources) AND v.payload->'facts'->>'role' = 'attachment'
             AND NOT (v.version_id = ANY(:seen))
             AND NOT EXISTS (SELECT 1 FROM derived_clean_text d WHERE d.version_id=v.version_id AND d.processor_version=:pv
@@ -56,7 +56,7 @@ def _parse(conn, facts):
     reused = conn.execute(
         text("""
           SELECT d.text, d.parse_method, d.file_ext, d.locator_kind, d.segments FROM derived_clean_text d
-          JOIN history_versions v ON v.version_id=d.version_id
+          JOIN fabric_versions v ON v.version_id=d.version_id
           WHERE d.processor_version=:pv AND d.status='parsed' AND v.payload->'facts'->>'sha256'=:sha
           ORDER BY d.created_at LIMIT 1
         """),
@@ -110,9 +110,9 @@ def _write(conn, row, result):
 
 def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, time_budget_seconds=1800):
     """解析最多 batch 个待处理附件（或到时间为止）；返回本批各状态计数。解析期间那一行一直锁着（见模块说明）。"""
-    from store.history import history_engine
+    from store.records import fabric_engine
 
-    engine = history_engine()
+    engine = fabric_engine()
     began = time.monotonic()
     counts, seen = {"parsed": 0, "failed": 0, "unsupported": 0}, []
     while len(seen) < batch and time.monotonic() - began < time_budget_seconds:
@@ -130,19 +130,19 @@ def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, t
 
 def for_versions(source_id, is_demo, version_ids, mode, cutoff):
     """一页版本的派生正文（当前处理器版本下最新一次尝试），含定位和父版本关系。版本须在本次模式和截止时间下可见。"""
-    from store import history
+    from store import records
 
     if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
-        raise HistoryError("query_budget", "一次最多 100 个合法版本号", 422)
-    eligible = history._eligibility(mode).replace("first_seen_at", "v.first_seen_at").replace(
+        raise FabricError("query_budget", "一次最多 100 个合法版本号", 422)
+    eligible = records._eligibility(mode).replace("first_seen_at", "v.first_seen_at").replace(
         "proof_available_at", "v.proof_available_at"
     )
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        history._source(conn, source_id)
-        cutoff = history._cutoff(cutoff)
-        if cutoff > history._now(conn):
-            raise HistoryError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
+        records._source(conn, source_id)
+        cutoff = records._cutoff(cutoff)
+        if cutoff > records._now(conn):
+            raise FabricError("future_cutoff", "证据截止时间不能晚于服务器当前时间")
         params = {
             "pv": attachment_parse.PROCESSOR_VERSION,
             "source": source_id,
@@ -154,7 +154,7 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
             text(
                 "SELECT DISTINCT ON (d.version_id) d.version_id,d.attempt,d.status,d.parse_method,d.parse_attempts,"
                 "d.error,d.file_ext,d.text,d.chars,d.text_sha256,d.processor_version,d.locator_kind,d.segments "
-                "FROM derived_clean_text d JOIN history_versions v ON v.version_id=d.version_id "
+                "FROM derived_clean_text d JOIN fabric_versions v ON v.version_id=d.version_id "
                 "WHERE d.processor_version=:pv AND d.source_id=:source AND d.is_demo=:demo "
                 "AND d.version_id=ANY(:ids) AND " + eligible + " ORDER BY d.version_id, d.attempt DESC"
             ),
@@ -163,8 +163,8 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
         links = conn.execute(
             text(
                 "SELECT l.attachment_version_id, l.parent_record_id, l.parent_version_id, l.link_basis "
-                "FROM history_attachment_links l "
-                "LEFT JOIN history_versions p ON p.version_id=l.parent_version_id "
+                "FROM fabric_attachment_links l "
+                "LEFT JOIN fabric_versions p ON p.version_id=l.parent_version_id "
                 "WHERE l.attachment_version_id=ANY(:ids) AND (l.parent_version_id IS NULL OR ("
                 + eligible.replace("v.", "p.")
                 + ")) ORDER BY l.created_at"

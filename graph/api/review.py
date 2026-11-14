@@ -71,7 +71,7 @@ from graph.db.repository import (
     search_entity_dicts,
 )
 from graph.db.session import get_session
-from store.history_models import HistoryError
+from store.record_models import FabricError
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -288,7 +288,7 @@ def approve_entity_api(entity_id: int, body: ReviewActionRequest, principal=Depe
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
-    except HistoryError as exc:
+    except FabricError as exc:
         raise HTTPException(status_code=exc.status, detail={'code': exc.code, 'message': exc.message})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -525,7 +525,7 @@ def approve_relation_api(relation_id: int, body: ReviewActionRequest, principal=
         return ReviewActionResponse(success=True)
     except HTTPException:
         raise
-    except HistoryError as exc:
+    except FabricError as exc:
         raise HTTPException(status_code=exc.status, detail={'code': exc.code, 'message': exc.message})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1221,7 +1221,7 @@ def decide_primekg_mapping(proposal_id: int, decision: str, body: IdentityPropos
     try:
         resolve_primekg_mapping_proposal(proposal_id, status, principal.subject, body.note, review_context=principal)
         return ReviewActionResponse(success=True)
-    except HistoryError as exc:
+    except FabricError as exc:
         raise HTTPException(status_code=exc.status, detail={'code': exc.code, 'message': exc.message})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

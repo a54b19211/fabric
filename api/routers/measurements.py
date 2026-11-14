@@ -6,11 +6,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
-from api.routers.history import _call, require_read
+from api.routers.fabric import _call, require_read
 from clean.measurement_reads import changes, for_versions
-from store.history_models import Mode
+from store.record_models import Mode
 
-router = APIRouter(prefix="/api/history", tags=["历史资料"])
+router = APIRouter(prefix="/api/fabric", tags=["资料库"])
 
 
 @router.get("/measurements", dependencies=[Depends(require_read)])

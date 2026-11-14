@@ -39,7 +39,7 @@ def extraction_job(uuid: str) -> bool:
         if subject is None:
             update_extraction_status(uuid, "failed", error="文档不存在")
             return False
-        raw_content, source_site, doc_type, is_history = subject
+        raw_content, source_site, doc_type, is_fabric_version = subject
 
         if not raw_content.strip():
             update_extraction_status(uuid, "failed", error="文档raw_content为空")
@@ -50,7 +50,7 @@ def extraction_job(uuid: str) -> bool:
             raw_content=raw_content,
             source_site=source_site,
             doc_type=doc_type,
-            native_allowed=not is_history,
+            native_allowed=not is_fabric_version,
         )
         logger.info(f"[RQ-Job] 完成: {uuid} success={success}")
         return success

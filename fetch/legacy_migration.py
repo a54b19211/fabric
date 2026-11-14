@@ -21,7 +21,7 @@ of some real source's record. Here it is mapped to that real source and record a
   (site_crawler.project_capture), never presented as a native API response or a web capture.
 - Time: the migrated version's first_seen is the actual import time; no availability proof is made (the
   import carries none); the old claims stay claims, in facts.legacy_migration.
-- A migrated version never takes the head from a native version of the same record (store.history._LATEST:
+- A migrated version never takes the head from a native version of the same record (store.records._LATEST:
   native first, after the mode/cutoff filter); a record with only migrated versions says so in its facts.
 - Same content is not merged: every legacy version keeps its own migrated version; a CT version whose sections
   equal those of a native version gets that version as content_equivalent, a relation, nothing more.
@@ -38,7 +38,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
-from store.history_models import ArchiveImport, ArchiveRecord, canonical
+from store.record_models import ArchiveImport, ArchiveRecord, canonical
 
 CONVERTER = "datafabric.legacy_migration.v1"
 CAPTURE_SCHEMA = "datafabric.site.legacy_capture.v1"
@@ -220,7 +220,7 @@ def _equivalent_ct(conn, record_id, is_demo, sections):
     """A native CT version of the record whose embedded sections are the same JSON (content_equivalent only)."""
     want = canonical(sections)
     rows = conn.execute(text("""
-        SELECT version_id, payload->>'raw_content' AS raw FROM history_versions
+        SELECT version_id, payload->>'raw_content' AS raw FROM fabric_versions
         WHERE source_id='clinicaltrials' AND source_record_id=:r AND is_demo=:d
           AND COALESCE(payload->'facts'->>'publication_role','source_record') <> 'migrated_record'
         ORDER BY published_seq LIMIT 50"""), {"r": record_id, "d": is_demo}).mappings()
@@ -238,12 +238,12 @@ def migrate(*, is_demo: bool, after_seq: int = 0, limit: int = 200, apply: bool 
     """One page of legacy versions (by published_seq) -> plans; with apply=True each ready one is imported
     into its real source (idempotent: the same envelope is the same version) and legacy_aliases is written.
     Returns counts by outcome and reason, and the last seq read (to continue)."""
-    from store import history
+    from store import records
 
     counts, last = {}, after_seq
-    with history.history_engine().begin() as conn:
+    with records.fabric_engine().begin() as conn:
         rows = conn.execute(text("""
-            SELECT published_seq, payload FROM history_versions WHERE source_id='legacy_documents'
+            SELECT published_seq, payload FROM fabric_versions WHERE source_id='legacy_documents'
               AND is_demo=:d AND published_seq>:after
               AND COALESCE(payload->'facts'->>'publication_role','source_record')='source_record'
             ORDER BY published_seq LIMIT :n"""), {"d": is_demo, "after": after_seq, "n": limit}).mappings().all()
@@ -269,14 +269,14 @@ def migrate(*, is_demo: bool, after_seq: int = 0, limit: int = 200, apply: bool 
                 records=[ArchiveRecord(source_record_id=p["real_record_id"], record_kind=p["record_kind"],
                                        raw_content=json.dumps(p["envelope"], ensure_ascii=False, sort_keys=True))],
             )
-            run = history.import_archive(request, "legacy-migration:" + p["block"]["legacy_version_id"])
+            run = records.import_archive(request, "legacy-migration:" + p["block"]["legacy_version_id"])
             real_version = run.version_ids[0]
             imported += 1
             if p["real_source_id"] == "clinicaltrials":
-                with history.history_engine().begin() as conn:
+                with records.fabric_engine().begin() as conn:
                     sections = {k: v for k, v in p["envelope"].items() if k != "legacy_migration"}
                     equivalent = _equivalent_ct(conn, p["real_record_id"], is_demo, sections)
-        with history.history_engine().begin() as conn:
+        with records.fabric_engine().begin() as conn:
             conn.execute(text("""
                 INSERT INTO legacy_aliases(legacy_version_id,legacy_record_id,is_demo,source_site,status,reason,
                   basis,real_source_id,real_record_id,real_version_id,equivalent_version_id,claimed,converter)
@@ -295,11 +295,11 @@ def migrate(*, is_demo: bool, after_seq: int = 0, limit: int = 200, apply: bool 
 
 
 def alias(conn, version_id: str, mode: str, cutoff) -> dict | None:
-    """What a legacy version became, checked now (store.history.read_version adds it to the legacy read):
+    """What a legacy version became, checked now (store.records.read_version adds it to the legacy read):
     pending (with its reason; no access is widened), or imported: the real version, whether that version is
     visible at this mode and cutoff, the real record's current version there and whether it is withdrawn.
     The real source's permission is checked by the caller first (a revoked real source blocks the old id)."""
-    from store import history
+    from store import records
 
     row = conn.execute(text("SELECT * FROM legacy_aliases WHERE legacy_version_id=:v"), {"v": version_id}).mappings()
     row = row.first()
@@ -312,12 +312,12 @@ def alias(conn, version_id: str, mode: str, cutoff) -> dict | None:
               "version_id": row["real_version_id"], "basis": row["basis"],
               "content_equivalent_version_id": row["equivalent_version_id"]}
     visible = conn.execute(text(
-        "SELECT 1 FROM history_versions WHERE version_id=:v AND " + history._eligibility(mode)),
+        "SELECT 1 FROM fabric_versions WHERE version_id=:v AND " + records._eligibility(mode)),
         {"v": row["real_version_id"], "cutoff": cutoff}).first() is not None
     head = conn.execute(text(
-        history._ranked("source_id=:s AND is_demo=:d AND source_record_id=:r", mode)
+        records._ranked("source_id=:s AND is_demo=:d AND source_record_id=:r", mode)
         + "SELECT version_id, payload->'facts'->>'publication_state' AS state, "
-        + history._ROLE + " AS role FROM ranked WHERE n=1"),
+        + records._ROLE + " AS role FROM ranked WHERE n=1"),
         {"s": row["real_source_id"], "d": row["is_demo"], "r": row["real_record_id"], "cutoff": cutoff}).mappings().first()
     return dict(out, target=target, target_visible=visible,
                 record_current_version_id=head["version_id"] if head else None,

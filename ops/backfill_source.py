@@ -1,8 +1,8 @@
 """把一个来源的历史存量一次读到底：不设条数上限，按页往后读，可中断后接着读。
 
-和固定刷新（DATAFABRIC_HISTORY_WATCHES）是两回事：固定刷新每轮只读最新的、遇到已存的就停；这个命令是手动补老的，
+和固定刷新（DATAFABRIC_WATCHES）是两回事：固定刷新每轮只读最新的、遇到已存的就停；这个命令是手动补老的，
 不停在已存的上，一直读到来源读完。读的方式、存版本的规则都和 main_etl.py fetch 一样（create_fetch 建任务、
-history_fetch_job 抓），只是一段接一段：每段最多 100 条（一次读取的上限），上一段给的续读位置交给下一段。
+run_fetch_job 抓），只是一段接一段：每段最多 100 条（一次读取的上限），上一段给的续读位置交给下一段。
 怎么跑（仓库根目录，用本仓的 .venv；一个接一个地读，不并发）：
   python ops/backfill_source.py roche                      # 接口站点：查询词是 records，不用给
   python ops/backfill_source.py chictr                     # 网页站点：默认读站点配置里的第一个列表入口
@@ -15,7 +15,7 @@ history_fetch_job 抓），只是一段接一段：每段最多 100 条（一次
 下面几种情况命令也会停下并说明，不会原地打转：续读位置没前进、又一个版本都没读到（常见：接口站点重放前面的条目就用完了
 --deadline，调大它再试）。
 --deadline 每段的秒数，5 到 120；它和读取入口、--pages 一起进每一段的任务键（换了值就是另一次回填，不会和旧的任务键冲突）。
-要设的环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（要补哪个库就指向哪个库，这个命令会写库）；
+要设的环境变量：DATAFABRIC_DATABASE_URL 必设（要补哪个库就指向哪个库，这个命令会写库）；
 限速照常生效。
 限制：接口站点 Roche、FiercePharma 每一段都要把前面的重新走一遍才接得上（它们的拉取函数没有可恢复的游标），条目多时越往后越慢；
 港交所（续读位置是第几家公司、这家的第几条）、NCCN（第几份指南）从续读位置接着读，不重走前面的；列表站点只重翻列表页，不重读详情页。
@@ -31,10 +31,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fetch import catalog  # noqa: E402
-from fetch.fetch_job import history_fetch_job  # noqa: E402
+from fetch.fetch_job import run_fetch_job  # noqa: E402
 from fetch.site_profiles import SITE_PROFILES  # noqa: E402
-from store import history  # noqa: E402
-from store.history_models import FetchRequest  # noqa: E402
+from store import records  # noqa: E402
+from store.record_models import FetchRequest  # noqa: E402
 
 LEG_RECORDS = 100  # 一次读取最多 100 条（FetchRequest.max_records 的上限）
 
@@ -45,20 +45,20 @@ def read_leg(source, query, continuation, leg, deadline, tag):
     request = FetchRequest(source_id=source, query=query, max_records=LEG_RECORDS, deadline_seconds=deadline,
                            continuation=continuation)
     for attempt in range(1, 1000):
-        run, _ = history.create_fetch(request, key=f"backfill:{source}:{tag}:{leg}:{attempt}")
+        run, _ = records.create_fetch(request, key=f"backfill:{source}:{tag}:{leg}:{attempt}")
         if run.state == "running":  # 上一次的进程被硬杀，没来得及标中断（一次只跑一个这个命令）：当作中断，换键重读
-            history.fail_job(run.id, run.attempt, "interrupted", "回填被中断，这一段重读")
+            records.fail_job(run.id, run.attempt, "interrupted", "回填被中断，这一段重读")
         elif run.state == "queued":
             try:
-                history_fetch_job(run.id, run.attempt)
+                run_fetch_job(run.id, run.attempt)
             except BaseException:
-                history.fail_job(run.id, run.attempt, "interrupted", "回填被中断，这一段重读")
+                records.fail_job(run.id, run.attempt, "interrupted", "回填被中断，这一段重读")
                 raise
-            return history.read_run(run.id)
+            return records.read_run(run.id)
         elif run.state in ("completed", "partial") and not run.error:
             return run  # 上一次已经读完的段
         # 其余（失败的段，带着错误的“部分完成”）：换个新任务键，这一段重读
-    raise SystemExit("这一段已失败太多次，请先看原因（history_runs 里键以 backfill:%s 开头的运行）" % source)
+    raise SystemExit("这一段已失败太多次，请先看原因（fabric_runs 里键以 backfill:%s 开头的运行）" % source)
 
 
 def why_stop(run, cover, message, before, read_nothing):
@@ -92,8 +92,8 @@ def main():
     known = sorted(catalog.FETCHABLE - {"local_files"})
     if args.source not in known:
         parser.error("不认识的来源：%s；能读的有：%s" % (args.source, ", ".join(known)))
-    if not os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL"):
-        parser.error("要先设 DATAFABRIC_HISTORY_DATABASE_URL：这个命令会写库（用法见文件开头）")
+    if not os.environ.get("DATAFABRIC_DATABASE_URL"):
+        parser.error("要先设 DATAFABRIC_DATABASE_URL：这个命令会写库（用法见文件开头）")
     query = args.query or catalog.sample_query(args.source)[0]
     profile = SITE_PROFILES.get(args.source, {})
     list_site = "max_pages" in profile and profile.get("source_type") != "api"  # 按列表页翻页的网页站点：读到的页数受 max_pages 限制

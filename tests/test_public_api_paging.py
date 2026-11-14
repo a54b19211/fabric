@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from fetch import sources
-from store.history_models import FetchRequest
+from store.record_models import FetchRequest
 
 
 def study(nct):
@@ -178,7 +178,7 @@ def test_crl_is_read_newest_first_and_goes_on_at_the_count_it_has_read(monkeypat
 
 
 def test_crl_title_names_the_company_the_letter_and_the_application_not_the_pdf_file():
-    from store.history_models import ArchiveRecord
+    from store.record_models import ArchiveRecord
 
     letter = {**crl("210649_2019_Orig1s000OtherActionLtrs.pdf"), "company_name": "AB Pharmaceuticals, LLC",
               "letter_date": "09/12/2018", "application_number": ["NDA 210649"]}
@@ -213,10 +213,10 @@ def test_crl_old_letter_with_a_text_but_no_identity_is_unread_and_the_read_is_pa
 def test_a_read_that_came_to_a_known_record_on_a_later_page_gives_no_continuation(monkeypatch):
     """增量读取在第二页读到已存的：读到旧的了，上一页留下的“下一页位置”不能再给出去（固定刷新会接着读那一页）。"""
     from fetch import rate
-    from store import history
+    from store import records
 
     monkeypatch.setattr(rate, "wait", lambda *args, **kwargs: None)
-    monkeypatch.setattr(history, "stored_unchanged", lambda source, item: item.source_record_id == "NCT00000002")
+    monkeypatch.setattr(records, "stored_unchanged", lambda source, item: item.source_record_id == "NCT00000002")
     serve(monkeypatch, [(200, {"studies": [study("NCT00000001")], "nextPageToken": "p2", "totalCount": 5}),
                         (200, {"studies": [study("NCT00000002")], "nextPageToken": "p3", "totalCount": 5})])
     result = sources.read_public(FetchRequest(**CT, max_pages=3, known_stop=1))

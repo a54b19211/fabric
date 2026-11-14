@@ -8,14 +8,14 @@ from datetime import datetime, timedelta, timezone
 
 import legacy_bridge
 import pytest
-from integration_history import _fetch_study, pg, pg_engine  # noqa: F401  -- 隔离库夹具
+from integration_records import _fetch_study, pg, pg_engine  # noqa: F401  -- 隔离库夹具
 from sqlalchemy import text
 
 from fetch.legacy_migration import CONVERTER, migrate, plan
 from graph.publish.collected_document import CollectedDocument
 from graph.publish.reviewed_graph import document_native_id
-from store import history as store
-from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, sha256
+from store import records as store
+from store.record_models import ArchiveImport, ArchiveRecord, FabricError, sha256
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 
@@ -88,7 +88,7 @@ def test_legacy_versions_go_to_their_real_sources_proven_or_pending(lpg):
     assert aliases[ct_v]["equivalent_version_id"] == native_ct and aliases[ct_v]["real_version_id"] != native_ct
 
     migrated = {r["version_id"]: r for r in rows(lpg, """
-        SELECT version_id, first_seen_at, proof_available_at, payload FROM history_versions
+        SELECT version_id, first_seen_at, proof_available_at, payload FROM fabric_versions
         WHERE payload->'facts'->>'publication_role'='migrated_record'""")}
     assert set(migrated) == {aliases[v]["real_version_id"] for v in (ct_v, page_v, label_v)}
     for version in migrated.values():
@@ -101,7 +101,7 @@ def test_legacy_versions_go_to_their_real_sources_proven_or_pending(lpg):
         raw = json.loads(version["payload"]["raw_content"])
         assert raw["legacy_migration"]["legacy_raw_sha256"]  # the envelope names the immutable legacy raw
     # the legacy versions themselves are untouched
-    assert len(rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")) == 5
+    assert len(rows(lpg, "SELECT 1 FROM fabric_versions WHERE source_id='legacy_documents'")) == 5
 
     # native first: the late migrated CT does not take the head; a record with only a migrated version has it
     with lpg.begin() as conn:
@@ -114,7 +114,7 @@ def test_legacy_versions_go_to_their_real_sources_proven_or_pending(lpg):
     # the old id reads the same legacy version, with what it became
     read = store.read_version(ct_v, "legacy_documents", ct, False, "current", now)
     assert read.version_id == ct_v and read.raw_sha256 == rows(
-        lpg, "SELECT payload->>'raw_sha256' AS h FROM history_versions WHERE version_id=:v", v=ct_v)[0]["h"]
+        lpg, "SELECT payload->>'raw_sha256' AS h FROM fabric_versions WHERE version_id=:v", v=ct_v)[0]["h"]
     m = read.migration
     assert m["status"] == "imported" and m["target"]["version_id"] == aliases[ct_v]["real_version_id"]
     assert m["target_visible"] and m["record_current_version_id"] == native_ct
@@ -128,9 +128,9 @@ def test_legacy_versions_go_to_their_real_sources_proven_or_pending(lpg):
                        "reason": "detail_url_not_proven"}
 
     # idempotent: a second run changes nothing
-    count = len(rows(lpg, "SELECT 1 FROM history_versions"))
+    count = len(rows(lpg, "SELECT 1 FROM fabric_versions"))
     again = migrate(is_demo=False, apply=True)
-    assert again["counts"] == report["counts"] and len(rows(lpg, "SELECT 1 FROM history_versions")) == count
+    assert again["counts"] == report["counts"] and len(rows(lpg, "SELECT 1 FROM fabric_versions")) == count
     assert {r["legacy_version_id"]: r["real_version_id"] for r in rows(lpg, "SELECT * FROM legacy_aliases")} == {
         v: a["real_version_id"] for v, a in aliases.items()}
 
@@ -149,23 +149,23 @@ def test_an_alias_follows_the_real_records_state_and_the_real_sources_permission
                                            source_record_id=NMPA_URL, record_kind="document",
                                            raw_content=withdrawn_raw)]), "native-withdrawn")
     with lpg.begin() as conn:  # simulated: the native version becomes the record's withdrawal notice
-        conn.execute(text("ALTER TABLE history_versions DISABLE TRIGGER history_versions_append_only"))
+        conn.execute(text("ALTER TABLE fabric_versions DISABLE TRIGGER fabric_versions_append_only"))
         changed = conn.execute(text("""
-            UPDATE history_versions SET payload=jsonb_set(payload,'{facts,publication_state}','"withdrawn"')
+            UPDATE fabric_versions SET payload=jsonb_set(payload,'{facts,publication_state}','"withdrawn"')
             WHERE source_id='nmpa' AND payload->'facts'->>'role'='web_capture'""")).rowcount
-        conn.execute(text("ALTER TABLE history_versions ENABLE TRIGGER history_versions_append_only"))
+        conn.execute(text("ALTER TABLE fabric_versions ENABLE TRIGGER fabric_versions_append_only"))
         now = store._now(conn)
-    assert changed == 1, rows(lpg, "SELECT source_id, payload->'facts'->>'role' AS r FROM history_versions")
+    assert changed == 1, rows(lpg, "SELECT source_id, payload->'facts'->>'role' AS r FROM fabric_versions")
     m = store.read_version(page_v, "legacy_documents", page, False, "current", now).migration
     assert m["target"]["version_id"] == real["real_version_id"] and m["target_visible"]
     state = rows(lpg, "SELECT payload->'facts'->>'publication_state' AS s, pg_typeof(payload)::text AS t "
-                      "FROM history_versions WHERE version_id=:v", v=m["record_current_version_id"])
+                      "FROM fabric_versions WHERE version_id=:v", v=m["record_current_version_id"])
     assert m["record_withdrawn"] and not m["record_current_is_migrated"], state  # the withdrawal is not revived
     assert m["record_current_version_id"] != real["real_version_id"]
     # the real source revoked: the old id does not get round it
     with lpg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='nmpa'"))
-    with pytest.raises(HistoryError) as error:
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='nmpa'"))
+    with pytest.raises(FabricError) as error:
         store.read_version(page_v, "legacy_documents", page, False, "current", now)
     assert error.value.status == 403
 
@@ -214,18 +214,18 @@ def test_legacy_documents_is_retired_for_new_writes_and_new_queries_but_old_ids_
     migrate(is_demo=False, apply=True)
     with lpg.begin() as conn:
         now = store._now(conn)
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         store.import_archive(ArchiveImport(source_id="legacy_documents", is_demo=False, scope_description="new",
                                            declared_count=0, records=[]))
     assert (error.value.code, error.value.status) == ("legacy_retired", 410)
-    with pytest.raises(HistoryError) as error:  # a new query does not choose legacy
+    with pytest.raises(FabricError) as error:  # a new query does not choose legacy
         store.list_records("legacy_documents", False, "current", now, terms=["公告"])
     assert error.value.code == "legacy_retired"
     by_id = store.list_records("legacy_documents", False, "current", now, source_record_ids=[page])
     assert [item.version_id for item in by_id.items] == [page_v]  # an old reference still resolves
     read = store.read_version(page_v, "legacy_documents", page, False, "current", now)
     assert read.migration["status"] == "imported"
-    assert len(rows(lpg, "SELECT 1 FROM history_versions WHERE source_id='legacy_documents'")) == 1  # kept
+    assert len(rows(lpg, "SELECT 1 FROM fabric_versions WHERE source_id='legacy_documents'")) == 1  # kept
 
 
 def test_a_pending_legacy_version_is_blocked_when_its_original_site_is_revoked(lpg):
@@ -238,12 +238,12 @@ def test_a_pending_legacy_version_is_blocked_when_its_original_site_is_revoked(l
         now = store._now(conn)
     assert store.read_version(listed_v, "legacy_documents", listed, False, "current", now).migration["status"] == "pending"
     with lpg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='cde_xxgk'"))
-    with pytest.raises(HistoryError) as error:
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='cde_xxgk'"))
+    with pytest.raises(FabricError) as error:
         store.read_version(listed_v, "legacy_documents", listed, False, "current", now)
     assert (error.value.code, error.value.status) == ("source_not_available", 403)
     with lpg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=true WHERE source_id='cde_xxgk'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=true WHERE source_id='cde_xxgk'"))
     assert store.read_version(listed_v, "legacy_documents", listed, False, "current", now).version_id == listed_v
 
 
@@ -252,14 +252,14 @@ def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time
     adopted, never from the crawl or creation time the old system claimed."""
     page, page_v = legacy("nmpa", u5(NMPA_URL), NMPA_URL, PAGE, "page", created="2019-03-01 08:00:00")
     columns = "version_id, first_seen_at, proof_available_at, published_seq, payload"
-    before = rows(lpg, f"SELECT {columns} FROM history_versions WHERE source_id='legacy_documents' ORDER BY version_id")
+    before = rows(lpg, f"SELECT {columns} FROM fabric_versions WHERE source_id='legacy_documents' ORDER BY version_id")
     adopted_after = NOW()
     migrate(is_demo=False, apply=True)
     migrate(is_demo=False, apply=True)
-    assert rows(lpg, f"SELECT {columns} FROM history_versions WHERE source_id='legacy_documents' "
+    assert rows(lpg, f"SELECT {columns} FROM fabric_versions WHERE source_id='legacy_documents' "
                      "ORDER BY version_id") == before
     (alias_row,) = rows(lpg, "SELECT real_version_id, claimed FROM legacy_aliases")
-    (real,) = rows(lpg, "SELECT first_seen_at, proof_available_at FROM history_versions WHERE version_id=:v",
+    (real,) = rows(lpg, "SELECT first_seen_at, proof_available_at FROM fabric_versions WHERE version_id=:v",
                    v=alias_row["real_version_id"].strip())
     assert real["first_seen_at"] >= adopted_after - timedelta(seconds=5)  # adopted now, not in 2019
     assert real["first_seen_at"].year >= 2026 and real["proof_available_at"] is None
@@ -269,18 +269,18 @@ def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time
 def test_a_new_graph_package_may_not_cite_a_retired_source_and_an_old_one_still_reads(lpg, monkeypatch):
     """N12: a package published now cites the real version a legacy one became; a package published before keeps
     validating and reading."""
-    from integration_history import _publish_fixture_graph, _synthetic_graph_observation
+    from integration_records import _publish_fixture_graph, _synthetic_graph_observation
 
     observation = _synthetic_graph_observation()
     old = _publish_fixture_graph(observation, "before-retirement")  # the bridge and its refusal are open (fixture)
     assert old.version_ids
     # the refusal is back in force; the writer stays open so the same documents are adopted again (idempotently)
-    from graph.publish import history_graph
+    from graph.publish import fabric_graph
 
-    monkeypatch.setattr(history_graph, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
-    with pytest.raises(HistoryError) as error:
+    monkeypatch.setattr(fabric_graph, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
+    with pytest.raises(FabricError) as error:
         _publish_fixture_graph(observation, "after-retirement")
     assert error.value.code == "graph_evidence_retired_source" and "legacy_documents" in error.value.message
-    with store.history_engine().begin() as conn:
-        stored = conn.execute(text("SELECT count(*) FROM history_versions WHERE source_id='reviewed_graph'")).scalar_one()
+    with store.fabric_engine().begin() as conn:
+        stored = conn.execute(text("SELECT count(*) FROM fabric_versions WHERE source_id='reviewed_graph'")).scalar_one()
     assert stored == 1  # the old package is still there, the new one was not written

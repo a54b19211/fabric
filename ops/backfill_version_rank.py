@@ -1,13 +1,13 @@
 """Derive the V021 ranking keys of versions written before it, a small batch at a time, one source after
-another. Idempotent and resumable; history_versions is only read. Prints counts only. Run with the history
+another. Idempotent and resumable; fabric_versions is only read. Prints counts only. Run with the fabric API
 service's environment:
 
-  python -m ops.backfill_history_rank europe_pmc clinicaltrials who_don fda_crl [--batch 500]
+  python -m ops.backfill_version_rank europe_pmc clinicaltrials who_don fda_crl [--batch 500]
 """
 import argparse
 import time
 
-from store.history import backfill_rank
+from store.records import backfill_rank
 
 
 def main():

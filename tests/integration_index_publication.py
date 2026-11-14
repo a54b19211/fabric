@@ -10,28 +10,28 @@ from uuid import uuid4
 
 import legacy_bridge
 import pytest
-from integration_history import archive, raw_record
+from integration_records import archive, raw_record
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 
 from clean import clean_stage
 from graph.publish.collected_document import collected_document
-from store import history, retrieval
 from store import index_publication as index
-from store.history_models import ArchiveImport, ArchiveRecord, HistoryError, canonical
+from store import records, retrieval
 from store.migrations import runner
+from store.record_models import ArchiveImport, ArchiveRecord, FabricError, canonical
 from store.weknora_index_client import IndexServiceError, publication_id
 
 
 @pytest.fixture(scope="module")
 def pg_engine():
-    url = os.environ.get("DATAFABRIC_HISTORY_DATABASE_URL")
+    url = os.environ.get("DATAFABRIC_DATABASE_URL")
     if not url:
         pytest.skip("Explicit isolated PostgreSQL URL required")
     parsed = make_url(url)
     assert parsed.host == "127.0.0.1"
     assert (parsed.port, parsed.database) in {
-        (18436, "fabric_history"), (18636, "bioradar_kdd_opus_history"),
+        (18436, "zk_fabric_test"), (18636, "zk_fabric_identity_test"),
     }
     admin = create_engine(url)
     schema = "test_index_" + uuid4().hex
@@ -49,12 +49,12 @@ def pg_engine():
 
 @pytest.fixture
 def pg(pg_engine, monkeypatch):
-    monkeypatch.setattr(history, "history_engine", lambda: pg_engine)
-    runner.apply("history", history.history_engine())
+    monkeypatch.setattr(records, "fabric_engine", lambda: pg_engine)
+    runner.apply("fabric", records.fabric_engine())
     with pg_engine.begin() as conn:
         assert conn.execute(text("SELECT current_schema()")).scalar_one().startswith("test_index_")
-        conn.execute(text("TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,history_attachment_links,derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,index_claim_cursor,index_send_bucket,index_gate_stats,derived_extraction_check_tasks,derived_extraction_checks,history_versions,history_runs,history_version_rank"))
-        conn.execute(text("UPDATE history_sources SET published_seq=0,read_enabled=true"))
+        conn.execute(text("TRUNCATE derived_stage_chunks,derived_stage_waiting,derived_identifiers,derived_profiles,derived_text_claims,fabric_attachment_links,derived_clean_text,derived_registry_changes,derived_registry_diff_runs,index_publications,index_targets,index_claim_cursor,index_send_bucket,index_gate_stats,derived_extraction_check_tasks,derived_extraction_checks,fabric_versions,fabric_runs,fabric_version_rank"))
+        conn.execute(text("UPDATE fabric_sources SET published_seq=0,read_enabled=true"))
     set_targets(monkeypatch)
     return pg_engine
 
@@ -96,7 +96,7 @@ def due(pg, version=None):
 
 
 def add_document(native="SYNTHETIC-index", *, available="2019-01-01", phase="PHASE1", **extra):
-    return history.import_archive(archive([raw_record(native, phase, **extra)], available),
+    return records.import_archive(archive([raw_record(native, phase, **extra)], available),
                                   "index-" + uuid4().hex).version_ids[0]
 
 
@@ -307,7 +307,7 @@ def test_a_worker_that_dies_after_sending_is_reconciled_when_the_entry_comes_due
 def test_revocation_withdraws_and_waits_for_the_bridge_to_finish(pg):
     version, client = ready_job(pg)
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     client.disable_parse = "processing"
     due(pg)
     assert process_one(client) == "disabling" and job_state(pg, job(pg)["id"]) == ("disabling", "revoked")
@@ -327,7 +327,7 @@ def test_revocation_during_an_upload_is_withdrawn_at_the_next_check(pg):
     def publish_then_revoke(body):
         receipt = original_publish(body)
         with pg.begin() as conn:
-            conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+            conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
         return receipt
 
     client.publish = publish_then_revoke
@@ -346,7 +346,7 @@ def test_blocked_job_does_no_http_until_revocation_requires_cleanup(pg):
     assert process_one(client) == "blocked"
     assert len(client.events) == before
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     due(pg)
     assert process_one(client) == "disabled" and job_state(pg, job(pg)["id"]) == ("disabled", "revoked")
     assert client.disable_count == 1
@@ -355,7 +355,7 @@ def test_blocked_job_does_no_http_until_revocation_requires_cleanup(pg):
 def test_cleanup_remains_due_after_retry_limit_and_recovers_when_service_returns(pg):
     version, client = ready_job(pg)
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     original_disable = client.disable
 
     def unavailable_disable(pid, reason):
@@ -402,7 +402,7 @@ def test_corrections_keep_history_indexed_and_each_text_is_indexed_once(pg):
     assert states == {newer: "ready", older: "ready", corrected: "ready"}
     assert client.disable_count == 0 and client.upload_count == 3
     # 同一记录：正文相同的版本只建一条，代表版本是最早产出这份正文的版本
-    versions = [r["version_id"] for r in rows(pg, "SELECT version_id FROM history_versions ORDER BY published_seq")]
+    versions = [r["version_id"] for r in rows(pg, "SELECT version_id FROM fabric_versions ORDER BY published_seq")]
     with pg.begin() as conn:
         keys = {v: index.artifact_key(a) for v, a in index.current_artifacts(conn, versions).items()}
     assert len(rows(pg, "SELECT * FROM index_publications")) == len(set(keys.values()))
@@ -442,7 +442,7 @@ def test_sent_then_revoked_missing_remote_is_not_confirmed_disabled(pg):
     scan()
     index._mark_sent(job(pg)["id"])  # sent, but the bridge never got it
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     client = JournalClient()
     due(pg)
     assert process_one(client) == "waiting" and job_state(pg, job(pg)["id"]) == ("waiting", "revoked")
@@ -555,7 +555,7 @@ def test_never_sent_entry_is_disabled_locally_without_network(pg):
     scan()
     saved = job(pg)
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='external_archive'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='external_archive'"))
     client = JournalClient()
     assert process_one(client) == "disabled" and job_state(pg, saved["id"]) == ("disabled", "revoked")
     assert client.events == []
@@ -578,7 +578,7 @@ def test_the_worker_loop_sends_every_due_entry_until_ready(pg, monkeypatch):
 
 def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg, monkeypatch, tmp_path):
     """v3 3.3a/3.6：附件正文在加工层；解析成功、清洗段画像后才进索引，发布的是派生正文，回指附件版本。"""
-    from integration_history import _fetch_attachment
+    from integration_records import _fetch_attachment
 
     from clean import attachment_parse as ap
     from clean import derived_text
@@ -603,7 +603,7 @@ def test_attachment_enters_index_only_after_parse_and_publishes_derived_text(pg,
 
 
 def test_failed_attachment_parse_is_not_indexed(pg, monkeypatch, tmp_path):
-    from integration_history import _fetch_attachment
+    from integration_records import _fetch_attachment
 
     from clean import attachment_parse as ap
     from clean import derived_text
@@ -689,7 +689,7 @@ def test_returned_evidence_uses_the_visible_version_not_the_representative(pg):
     client.hit(entries[0], fixed_text(pg, second)[:30])
     result = search(client)
     item = result["results"][0]
-    raw = {r["version_id"]: r["raw"] for r in rows(pg, "SELECT version_id,payload->>'raw_sha256' AS raw FROM history_versions")}
+    raw = {r["version_id"]: r["raw"] for r in rows(pg, "SELECT version_id,payload->>'raw_sha256' AS raw FROM fabric_versions")}
     assert item["version_id"] == second and item["raw_sha256"] == raw[second]
     assert item["indexed_as"]["version_id"] == first
     assert item["artifact"]["artifact_key"] == entries[0]["artifact_key"]
@@ -709,7 +709,7 @@ def test_retrieval_masks_withdrawal_revocation_and_unproven_history_immediately(
     past = search(client, "public_history_reconstruction")
     assert past["excluded"]["counts"] == {"mode_unsupported_for_source": 1}
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET read_enabled=false WHERE source_id='legacy_documents'"))
+        conn.execute(text("UPDATE fabric_sources SET read_enabled=false WHERE source_id='legacy_documents'"))
     revoked = search(client)
     assert revoked["excluded"] == {"counts": {"not_readable": 1}}  # 无权材料只给计数
     assert "Synthetic" not in json.dumps(revoked)
@@ -734,12 +734,12 @@ def test_crowded_candidates_report_insufficient_results_and_unlocatable_chunks(p
 def test_literal_search_over_a_huge_source_returns_query_budget(pg):
     add_document("SYNTHETIC-literal")
     with pg.begin() as conn:
-        conn.execute(text("UPDATE history_sources SET published_seq=published_seq+30000 WHERE source_id='external_archive'"))
-    with pytest.raises(HistoryError) as error:
-        history.list_records("external_archive", True, "current", datetime.now(timezone.utc), terms=["SYNTHETIC"])
-    assert error.value.code == "query_budget" and "/api/history/search" in error.value.message
+        conn.execute(text("UPDATE fabric_sources SET published_seq=published_seq+30000 WHERE source_id='external_archive'"))
+    with pytest.raises(FabricError) as error:
+        records.list_records("external_archive", True, "current", datetime.now(timezone.utc), terms=["SYNTHETIC"])
+    assert error.value.code == "query_budget" and "/api/fabric/search" in error.value.message
     # 给了记录编号的精确读取不受影响
-    history.list_records("external_archive", True, "current", datetime.now(timezone.utc),
+    records.list_records("external_archive", True, "current", datetime.now(timezone.utc),
                          source_record_ids=["SYNTHETIC-literal"], terms=["SYNTHETIC"])
 
 
@@ -1066,7 +1066,7 @@ def test_a_retired_source_is_not_recalled_is_named_in_the_receipt_and_a_mixed_qu
     mixed = search(client, sources=("external_archive", "legacy_documents"))
     assert mixed["excluded_sources"] == [{"source_id": "legacy_documents", "reason": "retired"}]
     assert set(asked) == {"synthetic-isolated-kb"}
-    with pytest.raises(HistoryError) as error:
+    with pytest.raises(FabricError) as error:
         search(client, sources=("legacy_documents",))
     assert (error.value.code, error.value.status) == ("legacy_retired", 410)
 
@@ -1082,7 +1082,7 @@ def test_an_index_target_naming_a_retired_source_is_a_configuration_error_found_
 
     for call in (index.targets, lambda: search(SearchClient(pg)), lambda: index.run_worker(rounds=0),
                  main._validate_source_configuration):
-        with pytest.raises(HistoryError) as error:
+        with pytest.raises(FabricError) as error:
             call()
         assert (error.value.code, error.value.status) == ("index_target_retired_source", 503)
         assert "legacy_documents" in error.value.message

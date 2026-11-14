@@ -5,12 +5,12 @@ import json
 from datetime import datetime, timezone
 
 from integration_clean_stage import rows
-from integration_history import pg, pg_engine  # noqa: F401  -- 隔离库夹具
+from integration_records import pg, pg_engine  # noqa: F401  -- 隔离库夹具
 from sqlalchemy import text
 
 from clean import align, clean_stage, quality, quality_stage
-from store import history as store
-from store.history_models import ArchiveRecord, FetchRequest
+from store import records as store
+from store.record_models import ArchiveRecord, FetchRequest
 
 NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
 TEXT = "# 关于暂停销售的公告\n\n" + "阿司匹林肠溶片（国药准字H20234567）暂停销售，原因见附件。" * 5
@@ -35,7 +35,7 @@ def nmpa_page(key, drug_name):
 
 
 def test_a_profiled_version_is_scored_once_with_its_alignments_and_its_clean_text_is_untouched(pg):
-    from api.routers.history import clean_text_route
+    from api.routers.fabric import clean_text_route
 
     version = nmpa_page("qs-one", "Placebo; Aspirin Tablets 100 mg")
     clean_stage.process(batch=50)
@@ -103,7 +103,7 @@ def test_an_instance_without_network_pages_past_a_full_page_of_versions_it_canno
     names = [nmpa_page("qs-page-" + str(i), "Nivolumab") for i in range(3)]
     clean_stage.process(batch=50)
     monkeypatch.setattr(quality_stage, "TODO_LIMIT", 2)
-    monkeypatch.setenv("DATAFABRIC_HISTORY_FETCH_ENABLED", "false")
+    monkeypatch.setenv("DATAFABRIC_FETCH_ENABLED", "false")
     counts = quality_stage.process(batch=1)
     assert counts["offline"] and counts["scored"] == 1 and counts["deferred"] == 2
     assert rows(pg, "SELECT version_id FROM derived_quality_scores WHERE version_id = ANY(:ids)",

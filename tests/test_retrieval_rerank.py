@@ -1,8 +1,8 @@
 """Rerank: verified passages go to the bridge once per knowledge base and scope, cut to RERANK_PASSAGE_CHARS, and are
 sorted by score; a failed rerank falls back to the recall order."""
 from store import retrieval
-from store.history_models import HistoryError
 from store.index_publication import IndexTarget
+from store.record_models import FabricError
 
 TARGET = IndexTarget(source_instance="synthetic", source_id="who_don", is_demo=False, knowledge_base_id="kb-1",
                      source_scope="public_health")
@@ -22,7 +22,7 @@ class Provider:
     def rerank(self, body):
         self.sent.append(body)
         if self.fail:
-            raise HistoryError("index_http_503", "the rerank service did not answer", 503)
+            raise FabricError("index_http_503", "the rerank service did not answer", 503)
         return {"scores": [{"index": n, "relevance_score": n / 10} for n in range(len(body["documents"]))],
                 "rerank_model": {"model_id": "synthetic"}, "usage": None}
 

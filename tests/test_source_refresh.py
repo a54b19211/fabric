@@ -8,7 +8,7 @@ import pytest
 from fetch import rate
 from fetch.sources import read_public
 from fetch.who_don import project_who
-from store.history_models import ArchiveRecord, FetchRequest
+from store.record_models import ArchiveRecord, FetchRequest
 
 
 def who_value(number=1):

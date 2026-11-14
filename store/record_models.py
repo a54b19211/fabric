@@ -1,5 +1,5 @@
-"""History 库的数据形状：存进去的原件（ArchiveRecord）、一次采集的请求（FetchRequest）、一次导入（ArchiveImport），
-读出来的版本（HistoryRecord）、版本列表（RecordCollection）和运行（RunView）。只写形状，不写规则。"""
+"""资料库的数据形状：存进去的原件（ArchiveRecord）、一次采集的请求（FetchRequest）、一次导入（ArchiveImport），
+读出来的版本（VersionRecord）、版本列表（RecordCollection）和运行（RunView）。只写形状，不写规则。"""
 
 from __future__ import annotations
 
@@ -21,13 +21,13 @@ MAX_IMPORT_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
-class HistoryError(Exception):
+class FabricError(Exception):
     def __init__(self, code: str, message: str, status: int = 422):
         super().__init__(message)
         self.code, self.message, self.status = code, message, status
 
 
-class ItemUnreadable(HistoryError):
+class ItemUnreadable(FabricError):
     """一次读取里有一条（例如一篇详情页）读不到。逐条读的抓取函数 yield 它而不是 raise，读取接着下一条；
     fetch/site_crawler.py 把网址和原因记进这次读取的 coverage，不为它存版本。"""
 
@@ -120,7 +120,7 @@ class AvailabilityProof(BaseModel):
     available_at: TimeValue | None = None
 
 
-class HistoryRecord(Model):
+class VersionRecord(Model):
     """读出来的一个版本（雷达读的就是它）。"""
 
     schema_version: Literal["datafabric.history.record.v1"] = "datafabric.history.record.v1"
@@ -181,7 +181,7 @@ class ArchiveProof(BaseModel):
 
 
 class ArchiveImport(BaseModel):
-    """POST /api/history/archives：一包原件（场景回放、图谱发布、本地文件）。"""
+    """POST /api/fabric/archives：一包原件（场景回放、图谱发布、本地文件）。"""
 
     model_config = ConfigDict(extra="ignore")
     source_id: str = Field(min_length=1, max_length=80)
@@ -243,11 +243,11 @@ class FetchRequest(BaseModel):
 
 
 class RecordCollection(Model):
-    """GET /api/history/records 的一页。coverage：max_seq（这次读到的发布序号上界）、has_more，GDELT 线索窗口另有
+    """GET /api/fabric/records 的一页。coverage：max_seq（这次读到的发布序号上界）、has_more，GDELT 线索窗口另有
     window_coverage（每个窗口这次读回了什么）和 truncated_intervals（可能没读全的区间）。"""
 
     schema_version: Literal["datafabric.history.collection.v1"] = "datafabric.history.collection.v1"
-    items: list[HistoryRecord]
+    items: list[VersionRecord]
     next_cursor: str | None = None
     coverage: dict[str, Any]
 

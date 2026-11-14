@@ -250,10 +250,10 @@ import {
   type AgentRunRecord, type DocumentRunSummary,
 } from '@/api/agent'
 import ReasoningTimeline from '@/components/ReasoningTimeline.vue'
-import { getCollectionCatalog } from '@/api/history'
+import { getCollectionCatalog } from '@/api/fabric'
 import { getSourceSites } from '@/api/documents'
 
-// 来源选项：优先读来源目录（GET /api/history/collection/catalog，需 History 凭据）；
+// 来源选项：优先读来源目录（GET /api/fabric/collection/catalog，需资料库凭据）；
 // 本标签页没有凭据时退回文档库里实际出现的 source_site（/api/documents/sites）。不再硬编码。
 const siteOptions = ref<{ value: string; label: string }[]>([])
 

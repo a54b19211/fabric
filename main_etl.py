@@ -6,7 +6,7 @@
   这个文件给人读、给单个来源试跑：从上往下，一步一个函数，main() 按顺序调用。
   每个函数只调用常驻程序里已有的函数，不另写第二套逻辑。
 
-    抓  fetch()    按来源目录读一个来源，原件原样存成版本     → history_runs（这次抓取）、history_versions（原件，只追加）
+    抓  fetch()    按来源目录读一个来源，原件原样存成版本     → fabric_runs（这次抓取）、fabric_versions（原件，只追加）
     洗  clean()    出干净正文、找编号、做画像                 → derived_clean_text、derived_identifiers、derived_profiles
         quality()  徐子雯的字段清洗、编号对齐、五维质量分       → derived_quality_scores、derived_authority_resolutions
     默认只跑上面三步，都只处理这一次抓到的版本。下面两步处理的是整个库里所有到期的活，要用 --only 点名：
@@ -26,16 +26,16 @@
   线上不是这样跑的：每一步是 run/ 里的一个常驻程序（ops/systemd/ 里的服务），按表里的待办分段做。
 
   用法（仓库根目录，本仓的 .venv；会写库，请指向临时库）：
-    python -m store.migrations.runner --db history --apply   # 先建表
+    python -m store.migrations.runner --db fabric --apply   # 先建表
     python main_etl.py --source nmpa --max 5                 # 抓 nmpa 5 条，清洗、打分
     python main_etl.py --source clinicaltrials               # 来源目录里能抓的来源都行（本地导入 local_files 除外）
     python main_etl.py --only clean --run <运行号>            # 只清洗之前某次抓取留下的版本
     python main_etl.py --only quality --run <运行号>          # 只给它们打质量分（要先清洗过）
     python main_etl.py --only measure                        # 全库到期的测量（不看运行号）
     python main_etl.py --only index                          # 全库到期的建索引待办（不看运行号）
-  环境变量：DATAFABRIC_HISTORY_DATABASE_URL 必设（历史库）；
+  环境变量：DATAFABRIC_DATABASE_URL 必设（资料库）；
   index 要 DATAFABRIC_INDEX_TARGETS、WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN；measure 的模型路线要 DATAFABRIC_MEASURE_LLM_*；
-  quality 的药名对齐要联网（PubChem、ChEMBL、OLS4、UniProt）；查不成（断网、DATAFABRIC_HISTORY_FETCH_ENABLED=false）的版本
+  quality 的药名对齐要联网（PubChem、ChEMBL、OLS4、UniProt）；查不成（断网、DATAFABRIC_FETCH_ENABLED=false）的版本
   这次不打分，等查得成时再打，没有药名的照常打。
   附件随抓取一起下载（预算用完的记成 not_attempted）；附件的正文由常驻的 run/attachments.py 解析，这里不跑。
 """
@@ -46,10 +46,10 @@ from collections import Counter
 
 from clean import clean_stage, quality_stage
 from fetch import catalog
-from fetch.fetch_job import history_fetch_job
+from fetch.fetch_job import run_fetch_job
 from run.measure import run_round as measure_round
-from store import history, index_publication
-from store.history_models import FetchRequest, HistoryError
+from store import index_publication, records
+from store.record_models import FabricError, FetchRequest
 
 STEPS = ("fetch", "clean", "quality", "measure", "index")
 DEFAULT_STEPS = ("fetch", "clean", "quality")  # measure、index 处理全库，只在 --only 点名时跑
@@ -68,14 +68,14 @@ def fetch(source, max_records, deadline):
     request = FetchRequest(source_id=source, query=query, source_record_ids=record_ids, max_records=max_records,
                            deadline_seconds=deadline)
     # 任务编号（key）带时间戳：同一个编号会被当成同一次请求，重复提交不会再抓；加上时间戳，每次运行才是新的一次
-    run, _ = history.create_fetch(request, key=f"main-etl-{source}-{int(time.time())}")  # 先记一条抓取任务
-    history_fetch_job(run.id, run.attempt)  # 这里同步抓完；线上是放进队列，由采集工人去执行
+    run, _ = records.create_fetch(request, key=f"main-etl-{source}-{int(time.time())}")  # 先记一条抓取任务
+    run_fetch_job(run.id, run.attempt)  # 这里同步抓完；线上是放进队列，由采集工人去执行
     return report_fetch(run.id)
 
 
 def report_fetch(run_id):
     """读回这次抓取的结果，打印一行人话总结；一个版本都没有就报错退出（后面各步没有东西可处理）。"""
-    run = history.read_run(run_id)
+    run = records.read_run(run_id)
     cover = run.coverage
     why = STOPS.get(cover.get("stop_reason"), cover.get("stop_reason"))
     new, same = cover.get("new_version_count", 0), cover.get("same_version_count", 0)
@@ -94,7 +94,7 @@ def clean(run_id):
     """洗：对这次抓取留下的版本，一次写好干净正文、编号、画像，并登记建索引的待办。规则在 clean/ 目录。"""
     if not run_id:
         raise SystemExit("清洗要知道处理哪次抓取留下的版本：请加 --run <运行号>")
-    c = clean_stage.process_versions(history.read_run(run_id).version_ids)
+    c = clean_stage.process_versions(records.read_run(run_id).version_ids)
     return (f"新清洗 {c['cleaned']} 份正文、沿用旧结果 {c['reused']} 份、等附件正文 {c['waiting_for_attachment_text']} 份；"
             f"这些版本都有了画像（共 {c['profiled']} 份，已有的直接沿用），登记了 {c.get('index_enqueued', 0)} 个建索引待办")
 
@@ -104,7 +104,7 @@ def quality(run_id):
     clean/align.py、clean/quality.py，由 clean/quality_stage.py 串起来；清洗正文不动，“隔离”不拦截。"""
     if not run_id:
         raise SystemExit("打分要知道处理哪次抓取留下的版本：请加 --run <运行号>")
-    c = quality_stage.process_versions(history.read_run(run_id).version_ids)
+    c = quality_stage.process_versions(records.read_run(run_id).version_ids)
     failed = f"；{len(c['failed_versions'])} 份没打成（{c['failed_versions'][0]['error']}）" if c["failed_versions"] else ""
     if c["deferred"]:
         failed += f"；权威库连不上，另有 {c['deferred']} 份有药名的这次不打，等查得成时再打"
@@ -139,7 +139,7 @@ def index(rounds=20):
             if not batch:
                 break
             done.update(batch)
-    except HistoryError as exc:  # 例如没配置桥接服务（WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN）
+    except FabricError as exc:  # 例如没配置桥接服务（WEKNORA_KDD_URL、WEKNORA_KDD_TOKEN）
         return f"失败：{exc.message}（{exc.code}）"
     return f"处理了 {sum(done.values())} 个待办（{counted(done.elements())}）" if done else "没有到期的待办，跳过"
 
@@ -155,7 +155,7 @@ def main(source, max_records, deadline, only=None, run_id=None):
             print("clean  ", clean(run_id))
         if on("quality"):
             print("quality", quality(run_id))
-    except HistoryError as exc:
+    except FabricError as exc:
         raise SystemExit(f"失败：{exc.message}（{exc.code}）") from None
     if on("measure"):
         print("measure", measure())
