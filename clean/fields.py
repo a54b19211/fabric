@@ -1,9 +1,9 @@
-"""字段清洗和 L3 规范化（徐子雯的“洗字段”，规则照她 11-13 版）。只洗字段，不碰清洗正文。
+"""字段清洗和 L3 规范化（字段清洗，规则照原版 11-13 版）。只洗字段，不碰清洗正文。
 
-“一份资料”（doc）是质量评分的输入：一个 dict，键和徐子雯原来的 parsed_result 一样（title、publish_date、markdown、
+“一份资料”（doc）是质量评分的输入：一个 dict，键和原采集层原来的 parsed_result 一样（title、publish_date、markdown、
 structured_data、extra、source_url、source_site、sniffed_meta），由 clean/quality_stage.py 的 document() 从版本拼出来。
-markdown 就是雷达读的清洗正文（clean/clean_text.py 的产物），这里只读不改；她原来加在正文前的 YAML 头也不加
-（那是给她直接推 WeKnora 用的，主线的元数据另外送知识库）。
+markdown 就是雷达读的清洗正文（clean/clean_text.py 的产物），这里只读不改；原版加在正文前的 YAML 头也不加
+（那是给原版直接推 WeKnora 用的，主线的元数据另外送知识库）。
 
 - clean_fields(doc)：标题去 HTML 标签和多余空白；structured_data、extra 里的字符串（含列表和嵌套）空白折叠、全角只转
   字母和数字（全角中文标点不动）；发布日期规范成 YYYY-MM-DD / YYYY-MM / YYYY（不补零）；按站点定 doc_type 和 language。
@@ -11,7 +11,7 @@ markdown 就是雷达读的清洗正文（clean/clean_text.py 的产物），这
 - traced(doc)：血缘要追踪的字段和它们现在的值（通用 4 个 + 站点特有字段 SITE_FIELDS）。
 - sniff_pdf_meta(text)：附件正文头部的 DOI、期刊名、标题（来源权威分要用）。
 都是纯函数：返回新 dict，不改传入的，不联网、不连库。
-空白、全角、去标签、日期这几个小工具用站点抽取器的那一份（fetch/extractors/text_tools.py、dates.py）：她原来也是
+空白、全角、去标签、日期这几个小工具用站点抽取器的那一份（fetch/extractors/text_tools.py、dates.py）：原版也是
 同一份，洗字段和抽取的口径一致。
 """
 
@@ -31,7 +31,7 @@ DOC_TYPES = {
     "fiercepharma": "industry_news", "phirda_rd": "industry_news", "phirda_policy": "industry_news",
     "phirda_healthcare_reform": "industry_news", "phirda_industry": "industry_news", "roche": "industry_news",
     "hkex": "company_announcement",
-    # 主线比她多的来源：从她的枚举里挑最接近的类型补上（她 document_validator 给新来源预留了这几个）
+    # 主线比原版多的来源：从原版的枚举里挑最接近的类型补上（原版 document_validator 给新来源预留了这几个）
     "europe_pmc": "literature", "fda_crl": "regulatory_document", "cde_xxgk": "regulatory_notice", "nccn": "guideline",
     "who_don": "regulatory_notice", "gdelt_doc": "industry_news", "sec_companyfacts": "company_announcement",
     "local_files": "",  # 上传的原件什么都有，不判类型（结构校验空值不查枚举）；别的来源的附件随所属来源
@@ -45,7 +45,7 @@ LANGUAGES = {
 }
 _ZH = re.compile(r"[一-鿿]")
 
-# 血缘追踪的字段：所有站点都有的 4 个，加各站点自己的特有字段（她 domain/schemas.py 里各站点 Extra 模型的字段）。
+# 血缘追踪的字段：所有站点都有的 4 个，加各站点自己的特有字段（原版 domain/schemas.py 里各站点 Extra 模型的字段）。
 # 不在表里的站点追踪 extra 里实际出现的键。
 STANDARD_FIELDS = ("title", "publish_date", "category", "summary")
 SITE_FIELDS = {

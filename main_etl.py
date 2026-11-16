@@ -8,7 +8,7 @@
 
     抓  fetch()    按来源目录读一个来源，原件原样存成版本     → fabric_runs（这次抓取）、fabric_versions（原件，只追加）
     洗  clean()    出干净正文、找编号、做画像                 → derived_clean_text、derived_identifiers、derived_profiles
-        quality()  徐子雯的字段清洗、编号对齐、五维质量分       → derived_quality_scores、derived_authority_resolutions
+        quality()  字段清洗、编号对齐、五维质量分       → derived_quality_scores、derived_authority_resolutions
     默认只跑上面三步，都只处理这一次抓到的版本。下面这步处理的是整个库里所有到期的活，要用 --only 点名：
     存  index()    清洗正文送进知识库 WeKnora（配置了才做）     → index_publications 的待办，正文进 WeKnora
 
@@ -97,7 +97,7 @@ def clean(run_id):
 
 
 def quality(run_id):
-    """洗：徐子雯的那一段——字段清洗、L3 规范化、编号对齐（药名联网）、五维打分，写分数表和对齐表。规则在 clean/fields.py、
+    """洗：五维质量分——字段清洗、L3 规范化、编号对齐（药名联网）、五维打分，写分数表和对齐表。规则在 clean/fields.py、
     clean/align.py、clean/quality.py，由 clean/quality_stage.py 串起来；清洗正文不动，“隔离”不拦截。"""
     if not run_id:
         raise SystemExit("打分要知道处理哪次抓取留下的版本：请加 --run <运行号>")

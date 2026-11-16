@@ -1,5 +1,5 @@
-"""徐子雯的洗字段、编号对齐、五维打分（clean/fields.py、drug_names.py、align.py、quality.py）：不联网、不连库。
-用例取自她 11-13 版单测里的真实写法；分数按她的公式手算。"""
+"""字段清洗、编号对齐、五维打分（clean/fields.py、drug_names.py、align.py、quality.py）：不联网、不连库。
+用例取自原版 11-13 版单测里的真实写法；分数按原版的公式手算。"""
 
 from datetime import date
 
@@ -32,7 +32,7 @@ def test_format_checks_include_the_cas_check_digit():
 
 def test_approval_numbers_are_checked_by_the_format_of_their_source():
     nmpa = align.check_identifiers({"source_site": "nmpa", "extra": {"approval_number": "国药准字H20234567"}})
-    assert nmpa["approval_number"]["std_id"] == "NMPA:国药准字H20234567"  # 她原版按 NDA/ANDA/BLA 校验，必判不合格
+    assert nmpa["approval_number"]["std_id"] == "NMPA:国药准字H20234567"  # 原版按 NDA/ANDA/BLA 校验，必判不合格
     fda = align.check_identifiers({"source_site": "fda_api_enforcement", "extra": {"approval_number": "ANDA207088"}})
     assert fda["approval_number"]["std_id"] == "ANDA:207088"
     crl = align.check_identifiers({"source_site": "fda_crl", "extra": {"application_number": "NDA 214787; BLA761234"}})
@@ -41,7 +41,7 @@ def test_approval_numbers_are_checked_by_the_format_of_their_source():
 
 
 def test_one_authority_that_did_not_answer_makes_a_miss_degraded():
-    """她原版 PubChem 故障就记降级、不进分母；别的库答“没有”也不能当确认没有。只是部分库没查成不算断网。"""
+    """原版 PubChem 故障就记降级、不进分母；别的库答“没有”也不能当确认没有。只是部分库没查成不算断网。"""
     def pubchem_down(name):
         return align.result(name, "pubchem", degraded=True)
 
@@ -143,7 +143,7 @@ def test_a_web_page_is_scored_with_her_weights_and_its_clean_text_is_only_read()
                                                "authority": 0.9, "traceability": 0.83125}, abs=1e-4)
     assert (got["score"], got["level"]) == (pytest.approx(0.8411, abs=1e-4), "高")
     assert got["violations"] == [] and got["confidence"]["reason"] == "来自已知官方站点"
-    assert doc["uuid"] == make_uuid("https://www.nmpa.gov.cn/xxgk/ggtg/a.html")  # uuid5(网址)：和她旧库同一算法
+    assert doc["uuid"] == make_uuid("https://www.nmpa.gov.cn/xxgk/ggtg/a.html")  # uuid5(网址)：和原版旧库同一算法
 
 
 def test_an_empty_old_page_without_address_is_only_given_the_level_quarantine():
@@ -183,7 +183,7 @@ def test_odd_shapes_in_a_projection_are_read_as_empty_and_an_attachment_falls_ba
 
 
 def test_only_a_real_hit_counts_as_aligned():
-    """她原版看 resolved_value：占位名、降级结果都填了原名，也算命中；这里要 found 且 std_id 非空。"""
+    """原版看 resolved_value：占位名、降级结果都填了原名，也算命中；这里要 found 且 std_id 非空。"""
     assert not quality.aligned({"authority_resolutions": {"Placebo": {"found": False, "std_id": None, "skipped": True,
                                                                       "resolved_value": "Placebo"}}})
     assert quality.aligned({"authority_resolutions": {"x": {"found": True, "std_id": "PUBCHEM:1"}}})

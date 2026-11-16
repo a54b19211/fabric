@@ -10,10 +10,10 @@ StartLimitIntervalSec=0
 # stopped), WEKNORA_KDD_URL and WEKNORA_KDD_TOKEN (the bridge service). One loop, one batch at a time.
 
 [Service]
-WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+WorkingDirectory=/data/projects/fabric
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m run.index
+ExecStart=/data/projects/fabric/.venv/bin/python -m run.index
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

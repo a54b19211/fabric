@@ -16,7 +16,7 @@ def test_four_dimensions_are_separate_and_unassessed_ones_say_so():
     assert p["quality"]["source_credibility"]["state"] == "official_registry"
     # 消歧和事实核验不在这一层：如实写未评估，不给分数
     assert p["quality"]["entity_match"] == {"state": "not_assessed", "identifiers": 1,
-                                             "reason": "实体消歧由唐的图谱负责"}
+                                             "reason": "实体消歧由人工审核图谱负责"}
     assert p["quality"]["fact_check"]["state"] == "not_checked"
     assert not any(isinstance(v, (int, float)) and not isinstance(v, bool)
                    for d in p["quality"].values() for k, v in d.items() if k != "identifiers")

@@ -1,4 +1,4 @@
-"""编号对齐和多来源取舍（徐子雯 T3，开题内容二“统一的标识符解析层”）。
+"""编号对齐和多来源取舍（T3，开题内容二“统一的标识符解析层”）。
 
 两条路，结果分开统计（口径不同，混在一起会把药名的真实命中率稀释掉）：
 1. 编号字段（extra 里的 nct_id、pmid、doi、approval_number、application_number、cas_number）只做本地格式校验：
@@ -10,16 +10,16 @@
    查到了就不再问后面的库。问到的结果按“来源分层”选出一个（source_hierarchy）。
    同一个进程里，同一个库、同一个候选名只问一次（_ANSWERS）；没查成的不记，下次再问。
    某个库查不成（超时、429、5xx、返回的不是 JSON 对象）记“降级”：都没查到时，问到的联网库里只要有一个没查成，
-   结果就是降级（没查成不等于没有；她原版 PubChem、ChEMBL 任一个故障都记降级）。一个候选名问到的联网库全都没查成
+   结果就是降级（没查成不等于没有；原版 PubChem、ChEMBL 任一个故障都记降级）。一个候选名问到的联网库全都没查成
    就是断网（all_down），换候选名、换药名都不会好，就停。占位名（安慰剂、生理盐水）不查，记 skipped，不进命中率的分母。
-每个候选名问到的各库结果都存下来（行里的 sources）。徐子雯论文里另外三种取舍策略、Platt 校准和命中率统计在
+每个候选名问到的各库结果都存下来（行里的 sources）。原采集层论文里另外三种取舍策略、Platt 校准和命中率统计在
 ops/align_offline.py，拿存下的结果离线重算，不用再联网。
 
-一个结果（她叫“五元组”）是 dict：found、std_id（PUBCHEM:2244 这样带前缀）、authority（哪个库，她原来叫 source_id）、
+一个结果（原版叫“五元组”）是 dict：found、std_id（PUBCHEM:2244 这样带前缀）、authority（哪个库，原版叫 source_id）、
 raw_value、resolved_value（库里的规范名）、confidence、candidates、degraded。
 出网只走 fetch/transport.py · get（按主机限速、超时、429 重试）；ChEMBL 另外每秒最多一个请求（EBI 的要求）。
 DATAFABRIC_FETCH_ENABLED=false 的实例不出网，只查本地白名单，查不到的记降级。
-和她原版不同：本地白名单查到了，她记命中且 degraded=True，这里记命中、不降级（命中率口径两边一样）。
+和原版不同：本地白名单查到了，原版记命中且 degraded=True，这里记命中、不降级（命中率口径两边一样）。
 """
 
 from __future__ import annotations

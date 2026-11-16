@@ -42,7 +42,7 @@ check-lock:
 	@tmp=$$(mktemp -d) && trap 'rm -rf $$tmp' EXIT && cp requirements.lock $$tmp/lock && \
 	if ! $(UV) pip compile --quiet $(LOCK_INPUTS) $(LOCK_FLAGS) -o $$tmp/lock; then \
 	  echo 'check-lock did not run: resolving $(LOCK_INPUTS) failed (see the uv error above: package index or' \
-	    'network unreachable - on zktest add HTTPS_PROXY=http://127.0.0.1:7890 for this command - or inputs that do not resolve);' \
+	    'network unreachable - on the server add HTTPS_PROXY=http://127.0.0.1:7890 for this command - or inputs that do not resolve);' \
 	    'requirements.lock was not compared.' >&2; \
 	  exit 2; \
 	fi; \

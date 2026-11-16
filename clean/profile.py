@@ -8,7 +8,7 @@
 - 四个维度分开，各是“状态 + 理由”，允许未知，不合成一个分数：
   1. format：格式质量——ok / degraded（截断、缺摘要、上下标被拍平等，正文仍可用）/ broken（没有正文、解析失败）；
   2. source_credibility：来源可信度——按证据细类在注册表里的可信度类别给出（官方登记、官方通报、监管文件、文献索引、未证实…）；
-  3. entity_match：实体匹配——这一层不做消歧（唐的图谱负责），只记录抽到了几个编号，状态 not_assessed；
+  3. entity_match：实体匹配——这一层不做消歧（人工审核图谱负责），只记录抽到了几个编号，状态 not_assessed；
   4. fact_check：事实核验——这一层不做（潘的核验），状态 not_checked。
 - v3 6.2 可复用注释（v5）：
   - experiment_types：实验类型候选（in_vitro 体外 / animal 动物 / human 人体，可多值），每个带依据和原句定位
@@ -159,7 +159,7 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
         "format": fmt,
         "source_credibility": cred,
         "entity_match": {"state": "not_assessed", "identifiers": len(identifiers),
-                         "reason": "实体消歧由唐的图谱负责"},
+                         "reason": "实体消歧由人工审核图谱负责"},
         "fact_check": {"state": "not_checked", "reason": "事实核验在输出前由潘的核验负责"},
     }
     reasons = []

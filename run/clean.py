@@ -1,4 +1,4 @@
-"""清洗段的命令行入口：给新抓到的版本写出干净正文、编号和画像，再给画像过的版本打徐子雯的五维质量分。线上用 --loop 常驻
+"""清洗段的命令行入口：给新抓到的版本写出干净正文、编号和画像，再给画像过的版本打五维质量分。线上用 --loop 常驻
 （ops/systemd/datafabric-clean.service）。每个版本只处理一次，结果只追加、可以重跑。
 
 从哪读起：main()，它按参数做两件事之一：清洗加打分（调用 clean/clean_stage.py 的 process，再调 clean/quality_stage.py 的

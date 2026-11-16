@@ -1,4 +1,4 @@
-"""药名对齐的离线评估（徐子雯论文用）：另外三种多来源取舍策略、Platt 校准、命中率。主线不用（主线只用
+"""药名对齐的离线评估（论文评估用）：另外三种多来源取舍策略、Platt 校准、命中率。主线不用（主线只用
 clean/align.py 的来源分层），也不联网：拿 derived_authority_resolutions 里存下的 sources（每个候选名问到的各库结果）重算。
 
     from ops.align_offline import STRATEGIES, summarize

@@ -24,7 +24,7 @@ CONFIG = {
 
     # ── 详情页解析 ──
     # 详情页先回一个 202 的脚本挑战页，要等正文区出来再读。等的就是提取函数读的正文区（新版 / 旧版两种写法），
-    # 不等外面的框（徐子雯 11-13 修正；2026-11-14 实测新版页正文区和框同时出现，读到的一样）。
+    # 不等外面的框（原采集层 11-13 修正；2026-11-14 实测新版页正文区和框同时出现，读到的一样）。
     "detail_extractor": extract_cde_detail,
     "detail_wait_selector": "div.new_detail_content, div.new_detail_content_old",
 }

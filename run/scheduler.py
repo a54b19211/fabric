@@ -6,7 +6,7 @@
 --once 只跑一轮，有来源失败或被阻塞时以非零状态退出。
 
 读写的表（都在资料库）：fabric_source_watches（各来源刷新计划的进度）、fabric_runs（新建采集任务、读任务状态）。
-图谱的发表（原采集库里的待办 → 资料库）不在这里，是图谱自己的常驻程序 graph/publish/publisher.py。
+图谱（抽取、审核、图发布）已移到另一个项目 Atlas，不在这个仓库。
 """
 
 import argparse

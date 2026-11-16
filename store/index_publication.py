@@ -1,4 +1,4 @@
-"""正文进 WeKnora：清洗正文 → 索引待办（index_publications）→ 桥接服务（WeKnora-kdd-bridge）→ WeKnora。
+"""正文进 WeKnora：清洗正文 → 索引待办（index_publications）→ 桥接服务（本仓 weknora/）→ WeKnora。
 
 从哪读起：run_worker() 是常驻循环，一轮做两件事：scan_committed() 补扫待办，work_once() 领一批到期待办逐条处理。
 - 待办：一条 = (索引目标, 记录, 一份清洗正文[, 太长时的一片])。同一记录里清洗正文相同的版本只建一条，代表版本是最先
@@ -176,7 +176,7 @@ def metadata(record, proof_available_at, artifact, identifiers):
     return {k: v for k, v in values.items() if v not in (None, [], "")}
 
 
-# 桥接（WeKnora-kdd-bridge 的 Publication，extra=forbid）认识的字段。清单就是请求体（发送时加上 content）；
+# 桥接（weknora/models.py 的 Publication，extra=forbid）认识的字段。清单就是请求体（发送时加上 content）；
 # 这次改动之前入队的清单里还多几项只留在本地的说明字段，发送时按这个名单滤掉
 BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256", "artifact_key",
                  "piece", "is_demo", "knowledge_base_id", "source_scope", "raw_locator", "content_sha256", "metadata",

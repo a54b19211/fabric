@@ -7,7 +7,7 @@ only says that this system's cap was not hit, never that the window is whole. Ev
 run's coverage; the ones still full at the finest size are marked possibly_truncated.
 
 GDELT asks for one request every 5 seconds (the catalog spaces them 6 s apart) and takes 12-20 s to answer. It answers
-429 to most requests whatever the spacing (measured 2026-11-13 from zktest, direct and through the proxy, gaps of 6 s to
+429 to most requests whatever the spacing (measured 2026-11-13 from the server, direct and through the proxy, gaps of 6 s to
 5 minutes, about 80% of 160 requests; see fetch/catalog.py), so a request is not asked once but up to TRIES times: after
 each 429 the read waits the interval the answer names and sends the request again. After the last 429, or when there is
 no time left for the wait, the read ends as a failure that says so.

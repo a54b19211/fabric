@@ -8,10 +8,10 @@ StartLimitIntervalSec=0
 # Paths: WorkingDirectory and the python below are this host's checkout and venv; change both for another deployment.
 
 [Service]
-WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+WorkingDirectory=/data/projects/fabric
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m run.scheduler --poll-seconds 30
+ExecStart=/data/projects/fabric/.venv/bin/python -m run.scheduler --poll-seconds 30
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

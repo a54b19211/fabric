@@ -31,7 +31,7 @@ run/clean.py。
    - 其他来源：投影里的 clean_text 按 Markdown 规则清洗（偏移回到投影正文，写明定位基准）。
 2. 编号（derived_identifiers）：在这份正文上抽取，偏移指这份正文。
 3. 画像（derived_profiles）：分类、四项质量状态（格式、来源可信度、实体匹配、事实核验，不算分）、分流（clean.profile）。
-   徐子雯的五维质量分不在这里，是之后的质量段（clean/quality_stage.py）。
+   五维质量分不在这里，是之后的质量段（clean/quality_stage.py）。
 4. 临床登记差分（clean/registry_changes.py · record_versions）：和这个版本取代的上一版逐字段比。
 5. 索引待办（store.index_publication.enqueue_versions）：画像写下的同一事务里，按画像所基于的那份正文入队。
 图谱等派生来源不在这一层处理。

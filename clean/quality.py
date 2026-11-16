@@ -1,9 +1,9 @@
-"""五维质量分（徐子雯 T4，开题内容三）、结构校验（T5）和来源权威分。纯函数：不联网、不连库。
+"""五维质量分（T4，开题内容三）、结构校验（T5）和来源权威分。纯函数：不联网、不连库。
 
 输入是一份资料 doc（键见 clean/fields.py 开头；对齐结果在 authority_resolutions，血缘在 lineage），输出 score()。
 SCORER_VERSION 是这套口径的名字：改权重、阈值或任何一维的算法都要升版本，旧分数按版本留在表里，论文写明引用哪一版。
 
-v1 = 徐子雯 11-13 版：
+v1 = 原采集层 11-13 版：
 - 五维权重：完整性 0.30、准确性 0.20、时效性 0.15、权威性 0.25、可追溯性 0.10；总分 ≥0.80 高、≥0.60 中、≥0.40 低，其余隔离。
 - 完整性：正文 ≥100 字 0.5 + 结构化字段非空比例 × 0.3 + 有标题 0.2。
 - 准确性（6 个子信号，没有证据的给中性 0.7，不判劣）：字段能在正文找到 0.25、数值字段出现在正文 0.15、日期合法 0.15、
@@ -11,16 +11,16 @@ v1 = 徐子雯 11-13 版：
 - 时效性：发布年离今年 ≤5 年 1.0、≤10 年 0.7、≤20 年 0.5、更早 0.3；没有日期 0.5。
 - 权威性：source_confidence()——官方站点 0.90～0.98（再看顶刊、DOI、期刊名）、顶刊 0.85、有 DOI 0.70/0.75、只有期刊名 0.50、都没有 0.30。
 - 可追溯性：网址是 http(s) 0.40 + 血缘覆盖“解析”“清洗”两步 0.35 + 字段有值变化的记录 0.25。
-和她原版不一样的地方（公式、权重、阈值一样，不同的是下面几处口径和输入）：
-1. “今天”是参数（打分那天），同一份资料同一天重算分数相同；她原版用运行时的 datetime.now()。
-2. 药名对齐算命中要 found 且 std_id 非空，和她的命中率口径（ops/align_offline.py 的 summarize）一致；她原版看 resolved_value，占位名和降级也算命中。
+和原版不一样的地方（公式、权重、阈值一样，不同的是下面几处口径和输入）：
+1. “今天”是参数（打分那天），同一份资料同一天重算分数相同；原版用运行时的 datetime.now()。
+2. 药名对齐算命中要 found 且 std_id 非空，和原版的命中率口径（ops/align_offline.py 的 summarize）一致；原版看 resolved_value，占位名和降级也算命中。
 3. 隔离只是等级，不拦截：所有版本照常建索引、给雷达（主持人：前期多出产出，未核的也带标记往下流）。
-4. 正文是主线的清洗正文：前面没有她加的 YAML 头，也没有她站点清洗器的改写（临床登记改写成叙述段、Fierce 截导航），
+4. 正文是主线的清洗正文：前面没有原版加的 YAML 头，也没有原版站点清洗器的改写（临床登记改写成叙述段、Fierce 截导航），
    ClinicalTrials 也不是整条 study JSON。准确性里“字段在正文找得到”、编号、单位三个子信号因此会不同。
-5. PubMed：她的正文是一行行元数据（pmid、作者、DOI……）加全文，主线清洗正文只有标题和摘要，字段在正文里大多找不到；
-   她抓取当场打分时 extra 还是空的（落库时才补），不做 pmid、doi 的格式校验，主线按落库后的 extra 校验，多两条对齐血缘。
-6. 结构校验不查 status：主线没有她的审核状态。
-7. 编号格式族按来源选（clean/align.py）：她 approval_number 一律按 NDA/ANDA/BLA 校验，国药准字必判不合格；主线 NMPA、
+5. PubMed：原版的正文是一行行元数据（pmid、作者、DOI……）加全文，主线清洗正文只有标题和摘要，字段在正文里大多找不到；
+   原版抓取当场打分时 extra 还是空的（落库时才补），不做 pmid、doi 的格式校验，主线按落库后的 extra 校验，多两条对齐血缘。
+6. 结构校验不查 status：主线没有原版的审核状态。
+7. 编号格式族按来源选（clean/align.py）：原版 approval_number 一律按 NDA/ANDA/BLA 校验，国药准字必判不合格；主线 NMPA、
    CDE 按国药准字，FDA 完整回应函的 application_number 也逐个校验。校验结果不进分数，只进对齐血缘。
 """
 
@@ -49,7 +49,7 @@ IDENTIFIER_PATTERNS = (
 KNOWN_UNITS = {"mg", "g", "μg", "ug", "mcg", "ng", "kg", "ml", "l", "iu", "%", "mmol", "mol", "meq", "mg/kg", "g/kg",
                "mg/m2", "u/ml"}
 
-# 来源权威分：顶刊白名单和已知官方站点（她 domain/source_mapper.py 的两张表，比较时都转小写）
+# 来源权威分：顶刊白名单和已知官方站点（原版 domain/source_mapper.py 的两张表，比较时都转小写）
 TOP_JOURNALS = (
     "the lancet", "new england journal of medicine", "nature medicine", "jama", "bmj", "cell", "nature", "science",
     "nature reviews drug discovery", "journal of clinical oncology", "annals of internal medicine", "circulation",

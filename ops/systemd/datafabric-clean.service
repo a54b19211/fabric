@@ -14,10 +14,10 @@ StartLimitIntervalSec=0
 # Status: python -m run.clean --status
 
 [Service]
-WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+WorkingDirectory=/data/projects/fabric
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m run.clean --loop --poll-seconds 60
+ExecStart=/data/projects/fabric/.venv/bin/python -m run.clean --loop --poll-seconds 60
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

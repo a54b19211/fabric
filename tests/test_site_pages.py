@@ -81,7 +81,7 @@ def test_fda_press_starts_at_the_newsroom_address_and_lists_links_without_the_ol
 
 
 def test_fda_press_body_is_the_release_itself_not_the_page_header():
-    """详情页（2026-11-14 存的 <main>）：正文取 div[role=main]（徐子雯 11-13 修正），从“For Immediate Release”起；
+    """详情页（2026-11-14 存的 <main>）：正文取 div[role=main]（原采集层 11-13 修正），从“For Immediate Release”起；
     原来落到 main article，开头多出“FDA News Release / 标题 / More Press Announcements”。"""
     got = SITE_PROFILES["fda_press"]["detail_extractor"](page("fda_press_detail.html"))
     assert got["title"].startswith("FDA Approves First Factor") and got["publish_date"] == "2026-11-09"

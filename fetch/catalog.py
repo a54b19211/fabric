@@ -213,7 +213,7 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     # 批准资料看 Drugs@FDA；说明书/召回覆盖数不能冒充批准覆盖
     _declared("drugs_fda", "Drugs@FDA", ("regulatory_approval",), ("A",), "fda.gov"),
-    # 徐子雯原版有 DrugBank 的站点配置和抓取器（config/sites/drugbank.py、drugbank_fetcher.py），主线不搬
+    # 原采集层有 DrugBank 的站点配置和抓取器（config/sites/drugbank.py、drugbank_fetcher.py），主线不搬
     _declared("drugbank", "DrugBank", ("drug_database",), ("A", "B"), "drugbank.com",
               blocked_reason="不在线抓：主持人 2026-11-14 决定退出采集，以后下载 DrugBank 数据库文件（学术许可）离线导入"),
     # ——业务验收和 v3 缺口清单点名需要、还没有插件的——
@@ -254,7 +254,7 @@ DERIVED = {
 # reviewed_graph、primekg_graph：图谱 2026-11-16 拆到 Atlas，图包由 Atlas 自己导入，Fabric 不再收
 RETIRED = {
     "legacy_documents": "已授权旧文档的精确冻结桥",
-    "reviewed_graph": "唐的审核图发布（已移交 Atlas）",
+    "reviewed_graph": "人工审核图谱发布（已移交 Atlas）",
     "primekg_graph": "PrimeKG 背景图（已移交 Atlas）",
 }
 # 可读开关默认关的来源（V047）：去掉环境许可名单后多开放的来源，原名单找不回，先关上，由管理员逐个打开。NCCN 一定关

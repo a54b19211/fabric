@@ -1,9 +1,9 @@
-"""质量段：给画像过的版本打徐子雯的五维质量分，编号对齐、字段清洗结果和血缘一起存下。
+"""质量段：给画像过的版本打五维质量分，编号对齐、字段清洗结果和血缘一起存下。
 雷达读的清洗正文、编号、画像一个字不动；分数只追加；“隔离”只是等级，不拦截，所有版本照常建索引、给雷达。
 
 从哪读起：process()。一轮按“新抓到的先做”翻“有当前画像、还没有当前评分器版本分数”的版本号，一页 TODO_LIMIT 个，
 做完一页还有时间就接着翻下一页；再 BATCH 个一组取字段，每个版本：
-  document()   版本 → 一份资料 doc（键和徐子雯原来的 parsed_result 一样；markdown 就是这个版本的清洗正文）
+  document()   版本 → 一份资料 doc（键和原采集层原来的 parsed_result 一样；markdown 就是这个版本的清洗正文）
   score_doc()  记“解析”血缘 → 字段清洗（clean/fields.py，记“清洗”血缘）→ L3 规范化（记“规范化”血缘）
                → 编号对齐（clean/align.py，药名要联网，记“对齐”血缘）→ 五维打分和结构校验（clean/quality.py）
   _write()     写 derived_quality_scores（一个版本、一个评分器版本一行）和 derived_authority_resolutions
@@ -91,8 +91,8 @@ def _list(value):
 
 
 def document(row) -> dict:
-    """一个版本 → 评分要的一份资料。uuid 和徐子雯旧库同一算法（网页 uuid5(网址)、接口记录 uuid5(站点:记录键)），
-    分数能和她旧库的文档对上。字段从投影里取（facts 里站点抽取器给的 extra / structured），不改写；形状不对的当空。"""
+    """一个版本 → 评分要的一份资料。uuid 和原采集层旧库同一算法（网页 uuid5(网址)、接口记录 uuid5(站点:记录键)），
+    分数能和原版旧库的文档对上。字段从投影里取（facts 里站点抽取器给的 extra / structured），不改写；形状不对的当空。"""
     facts = _dict(row["facts"])
     source, role, title = row["source_id"], facts.get("role"), row["title"] or ""
     published = row["published"] or ""
@@ -115,7 +115,7 @@ def document(row) -> dict:
 
 def _attachment(doc, row):
     """附件（PDF 等）：标题取正文第一个 # 标题，没有就用版本标题（附件的文件名）；DOI、期刊名从正文头部嗅
-    （徐子雯 route_pdf 的做法）。"""
+    （原采集层 route_pdf 的做法）。"""
     meta = fields.sniff_pdf_meta(doc["markdown"])
     title = meta["sniffed_title"] or doc["title"]
     doc.update(title=title, publish_date="", parse_method=row["text_pv"] or "attachment_parse",
@@ -128,7 +128,7 @@ def _names(items, key):
 
 
 def _clinicaltrials(doc, row, facts):
-    """ClinicalTrials：照她 config/sites/ClinicalTrials.py 的字段映射。发布日期用最近更新公布日，药名取药物类干预。"""
+    """ClinicalTrials：照原版 config/sites/ClinicalTrials.py 的字段映射。发布日期用最近更新公布日，药名取药物类干预。"""
     interventions = [i for i in _list(facts.get("interventions")) if isinstance(i, dict)]
     drugs = [str(i["name"]).strip() for i in interventions if i.get("type") in CT_DRUG_TYPES and i.get("name")]
     updated = row["updated"] or ""
@@ -147,16 +147,16 @@ def _clinicaltrials(doc, row, facts):
 
 
 def _author(node):
-    """一个作者写成她 esummary 里的样子：“姓 名缩写”；团体作者用团体名。"""
+    """一个作者写成原版 esummary 里的样子：“姓 名缩写”；团体作者用团体名。"""
     return node.findtext("CollectiveName") or " ".join(
         part for part in (node.findtext("LastName"), node.findtext("Initials")) if part)
 
 
 def _pubmed(doc, row, facts):
-    """PubMed：照她 pubmed_fetcher._build_result 拼，structured_data 是她那 15 个键（药名、生产企业她也留空）；
-    extra 是她落库时按 PubmedExtra 从 structured_data 补的那几个。期刊名、作者只在原件 XML 里。
+    """PubMed：照原版 pubmed_fetcher._build_result 拼，structured_data 是原版那 15 个键（药名、生产企业原版也留空）；
+    extra 是原版落库时按 PubmedExtra 从 structured_data 补的那几个。期刊名、作者只在原件 XML 里。
     全文状态看这条记录有没有全文附件版本：PMC 全文 XML → pmc_fulltext；Unpaywall 的 OA PDF → unpaywall_pdf，
-    oa_pdf_url 是它的地址；都没有 → abstract_only。主线清洗正文只有标题和摘要（她原版正文里还有一行行元数据）。"""
+    oa_pdf_url 是它的地址；都没有 → abstract_only。主线清洗正文只有标题和摘要（原版正文里还有一行行元数据）。"""
     journal, authors = "", []
     try:
         root = ET.fromstring(row.get("raw") or "")
@@ -180,8 +180,8 @@ def _pubmed(doc, row, facts):
 
 
 def _europe_pmc(doc, row, facts):
-    """Europe PMC：她没有这个来源的抓取器，structured_data 用通用 4 个键，类别照她 PubMed 写“医学文献”；编号和期刊名
-    放进 extra（她的 EuropePmcExtra），DOI 和期刊名也给权威分用。主线不抓它的全文，fulltext_status 就是 abstract_only。"""
+    """Europe PMC：原版没有这个来源的抓取器，structured_data 用通用 4 个键，类别照原版 PubMed 写“医学文献”；编号和期刊名
+    放进 extra（原版的 EuropePmcExtra），DOI 和期刊名也给权威分用。主线不抓它的全文，fulltext_status 就是 abstract_only。"""
     journal = str(_dict(_dict(facts.get("journal")).get("journal")).get("title") or "")
     doi = str(facts.get("doi") or "")
     doc["structured_data"].update(category="医学文献", summary=str(facts.get("abstract") or "")[:500])
@@ -191,7 +191,7 @@ def _europe_pmc(doc, row, facts):
 
 
 def _fda_crl(doc, row, facts):
-    """FDA 完整回应函：字段照她 schemas 里的 FdaCrlExtra。"""
+    """FDA 完整回应函：字段照原版 schemas 里的 FdaCrlExtra。"""
     apps = facts.get("application_numbers")
     doc["extra"] = {"application_number": "; ".join(map(str, apps)) if isinstance(apps, list) else str(apps or ""),
                     **{k: str(facts.get(k) or "") for k in ("letter_date", "letter_type", "file_name")}}
@@ -204,7 +204,7 @@ _RECORDS = {"clinicaltrials": _clinicaltrials, "pubmed": _pubmed, "europe_pmc": 
 # ───────────── 一个版本：洗字段、对齐、打分 ─────────────
 
 def _step(lineage, doc, step, op, before):
-    """这一步对每个追踪字段记一条 {step, op, input, output}（她 lineage_tracer.record_step 的结构）。"""
+    """这一步对每个追踪字段记一条 {step, op, input, output}（原版 lineage_tracer.record_step 的结构）。"""
     for field, value in fields.traced(doc).items():
         lineage.setdefault(field, []).append({"step": step, "op": op, "input": before.get(field, ""), "output": value})
 

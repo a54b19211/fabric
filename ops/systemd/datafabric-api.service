@@ -4,10 +4,10 @@ After=network.target
 StartLimitIntervalSec=0
 
 [Service]
-WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+WorkingDirectory=/data/projects/fabric
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 18511
+ExecStart=/data/projects/fabric/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 18511
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

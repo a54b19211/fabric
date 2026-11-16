@@ -4,10 +4,10 @@ After=network.target
 StartLimitIntervalSec=0
 
 [Service]
-WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+WorkingDirectory=/data/projects/fabric
 EnvironmentFile=%h/.config/datafabric-publication/runtime.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/rq worker --url redis://127.0.0.1:16379/4 extraction
+ExecStart=/data/projects/fabric/.venv/bin/rq worker --url redis://127.0.0.1:16379/4 extraction
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120

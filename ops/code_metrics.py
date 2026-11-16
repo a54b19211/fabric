@@ -4,8 +4,7 @@
     python <dir>/code_metrics.py --check [paths...]  # fail on a function over the limits without a reason
 
 Without paths it measures those of `[tool.code-metrics] paths` in the repository's pyproject.toml (the
-directory above this script). The script is the same file in every repository (devtools keeps the canonical
-copy and checks the copies); only that setting and the exceptions file are the repository's own.
+directory above this script). The script is the same file in every repository; only that setting and the exceptions file are the repository's own.
 
 A function's length is its lines from `def` to its last line. Its complexity is McCabe's: 1 plus one per
 if / elif / for / while / except / with-less branch point, conditional expression, comprehension `for` and

@@ -1,8 +1,8 @@
-"""适配示例：徐子雯的 T7 实证评估（她包里的 evaluation/*、scripts/quality_gate_eval.py）对着主线的打分跑。主线不调用。
-她的评估只从 pipeline.quality_checker 取 _DIM_WEIGHTS、_score_dimensions、_score_completeness、_score_authority、
-check_quality.fn；这里用 clean/quality.py 顶上（doc 的键和她的 parsed_result 一样）。scikit-learn 不在锁文件里，
-quality_gate_eval 要在装了它的环境里跑。她的文件复制到一个目录（里面有 evaluation/、scripts/），再：
-    python -I ops/xu_eval_adapter.py <那个目录> <一份资料 doc.json>
+"""适配示例：原采集层的 T7 实证评估（原版包里的 evaluation/*、scripts/quality_gate_eval.py）对着主线的打分跑。主线不调用。
+原版的评估只从 pipeline.quality_checker 取 _DIM_WEIGHTS、_score_dimensions、_score_completeness、_score_authority、
+check_quality.fn；这里用 clean/quality.py 顶上（doc 的键和原版的 parsed_result 一样）。scikit-learn 不在锁文件里，
+quality_gate_eval 要在装了它的环境里跑。原版的文件复制到一个目录（里面有 evaluation/、scripts/），再：
+    python -I ops/quality_eval_adapter.py <那个目录> <一份资料 doc.json>
 """
 
 import json
@@ -31,7 +31,7 @@ shim.check_quality = types.SimpleNamespace(fn=check_quality)
 sys.modules.update({"pipeline": types.ModuleType("pipeline"), "pipeline.quality_checker": shim})
 
 if __name__ == "__main__":
-    from evaluation import ablation, baselines, data_polluter  # 她的代码，原样
+    from evaluation import ablation, baselines, data_polluter  # 原版的代码，原样
 
     doc = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
     out = {"ablation": ablation.run_ablation(doc),
