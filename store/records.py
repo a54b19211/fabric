@@ -250,7 +250,7 @@ def _close_run(conn, run, version_ids, new_ids, coverage, error, now):
 
 
 def background_version_ids(conn) -> list[str]:
-    """回填运行新存的版本（背景材料，clean/measure_runs.py 不测它们）。"""
+    """回填运行新存的版本（背景材料）。"""
     return [r[0] for r in conn.execute(text(
         "SELECT DISTINCT jsonb_array_elements_text(coverage->'backfill'->'background_version_ids') FROM fabric_runs "
         "WHERE jsonb_typeof(coverage->'backfill'->'background_version_ids') = 'array'"))]

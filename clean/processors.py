@@ -11,15 +11,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from clean import attachment_parse, clean_text, measure_extract, profile, registry_diff
+from clean import attachment_parse, clean_text, profile, registry_diff
 
 # old graph packages (retired, moved to Atlas) are not cleaned
 UNCLEANED_SOURCES = ("reviewed_graph", "primekg_graph")
 # registry records whose versions are compared field by field (registry_diff)
 REGISTRY_DIFF_SOURCES = frozenset({"clinicaltrials"})
-# narrative sources whose cleaned text is read for measurements (datafabric.measure_extract); one at a time, each
-# behind its acceptance slice (WHO DON case counts first)
-MEASURE_SOURCES = ("who_don",)
 
 
 def _attachment_sources() -> frozenset[str]:
@@ -43,8 +40,6 @@ PROCESSORS = (
     Processor("registry_diff", registry_diff.PROCESSOR_VERSION, "derived_registry_changes",
               lambda s: s in REGISTRY_DIFF_SOURCES),
     Processor("profile", profile.PROCESSOR_VERSION, "derived_profiles", lambda s: s not in UNCLEANED_SOURCES),
-    Processor("measure_extract", measure_extract.PROCESSOR_VERSION, "derived_measurements",
-              lambda s: s in MEASURE_SOURCES),
 )
 
 
