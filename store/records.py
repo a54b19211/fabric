@@ -109,11 +109,18 @@ VOLATILE_FIELDS = {"clinicaltrials": [("derivedSection", "miscInfoModule", "vers
 #   正文和附件清单，HTML 里解析没读到的变动不算新版本；
 # - 附件（attachment）的 store_path 是本机落盘路径，换一台机器、换一个数据目录就变；文件本身看 sha256。
 UNCOMPARED_KEYS = {"web_capture": ("html", "html_sha256", "html_store_path"), "attachment": ("store_path",)}
+# 同一个值来源有两种写法、两次读取之间来回换的：比较前改写成一种。
+# WHO 公告里指向媒体文件的链接，有时是真实路径，有时是内容系统没解析出路径时的全零占位
+# （https://cdn.who.int/media/00000000-0000-0000-0000-000000000000?sfvrsn=…），LastModified 不变，两种写法的 sfvrsn
+# （媒体文件的版本号）相同：这类链接只比 sfvrsn。2024-DON503 因此来回出了 14 个版本（2026-10-23 至 11-15）。
+REWRITTEN = {"who_don": (re.compile(r'https://cdn\.who\.int/media/[^\s"\\?<>]*\?sfvrsn=([0-9A-Za-z_]+)'),
+                         r"https://cdn.who.int/media/?sfvrsn=\1")}
 
 
 def normalized_raw(source_id: str, raw: str) -> str:
     """比较两份原件用的文本：JSON 原件去掉上面两类字段后按键排序重新写出（Europe PMC 同一条记录每次返回的键顺序
-    不同，曾让 8444 条记录出了 23927 个版本）；不是 JSON 的原件（PubMed XML）就是原文。"""
+    不同，曾让 8444 条记录出了 23927 个版本），再把 REWRITTEN 里的写法统一；不是 JSON 的原件（PubMed XML）就是原文。
+    规则改了以后，已存版本的指纹用 ops/backfill_fingerprint.py --recompute <来源> 重算。"""
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
@@ -127,7 +134,11 @@ def normalized_raw(source_id: str, raw: str) -> str:
                 node = node.get(key) if isinstance(node, dict) else None
             if isinstance(node, dict):
                 node.pop(last, None)
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    normalized = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if source_id in REWRITTEN:
+        pattern, replacement = REWRITTEN[source_id]
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
 
 
 def fingerprint(source_id: str, raw: str) -> str:

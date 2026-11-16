@@ -28,6 +28,21 @@ def test_the_clinicaltrials_data_date_is_not_a_change():
     assert fingerprint("europe_pmc", raw("2026-11-02")) != fingerprint("europe_pmc", raw("2026-11-03"))  # only CT's
 
 
+def test_a_who_media_link_written_as_the_null_placeholder_is_not_a_change():
+    """Live 2026-10-23..11-15: 2024-DON503 alternated between the two writings of one link, LastModified unchanged,
+    and got 14 versions. The link is compared by its sfvrsn (the version of the media item); the text still counts."""
+    def raw(link, text="WHO. Terms of Reference"):
+        return json.dumps({"Id": "322c49c3", "LastModified": "2026-10-23T12:53:04Z",
+                           "FurtherInformation": '<li><a href="' + link + '">' + text + "</a></li>"})
+
+    real = "https://cdn.who.int/media/docs/default-source/influenza/nic_tor_en.pdf?sfvrsn=93513e78_30"
+    placeholder = "https://cdn.who.int/media/00000000-0000-0000-0000-000000000000?sfvrsn=93513e78_30"
+    assert fingerprint("who_don", raw(real)) == fingerprint("who_don", raw(placeholder))
+    assert fingerprint("who_don", raw(real)) != fingerprint("who_don", raw(real.replace("_30", "_31")))  # new file
+    assert fingerprint("who_don", raw(real)) != fingerprint("who_don", raw(real, "WHO. Terms of Reference (2024)"))
+    assert fingerprint("europe_pmc", raw(real)) != fingerprint("europe_pmc", raw(placeholder))  # only for WHO
+
+
 def capture(html, markdown="# T\n\nbody", attachments=(), **extra):
     return json.dumps({"schema_version": "datafabric.web_capture.v1", "role": "web_capture", "site": "nmpa",
                        "url": "https://x/a.html", "html": html, "html_sha256": "h" + html,
