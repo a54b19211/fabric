@@ -63,10 +63,12 @@ def _parse(conn, facts):
         {"pv": attachment_parse.PROCESSOR_VERSION, "sha": facts.get("sha256") or ""},
     ).mappings().first()
     if reused:
-        return {"status": "parsed", "text": reused["text"], "file_ext": reused["file_ext"],
-                "parse_method": "reused_same_sha256:" + str(reused["parse_method"]), "error": None,
-                "attempts": ["reused_same_sha256"], "segments": reused["segments"],
-                "locator_kind": reused["locator_kind"]}
+        # 复用的旧结果也过一遍“大文件几乎没字”的判断：扫描件以前记成了只有几个字的 parsed
+        return attachment_parse.without_text_layer(
+            {"status": "parsed", "text": reused["text"], "file_ext": reused["file_ext"],
+             "parse_method": "reused_same_sha256:" + str(reused["parse_method"]), "error": None,
+             "attempts": ["reused_same_sha256"], "segments": reused["segments"],
+             "locator_kind": reused["locator_kind"]}, int(facts.get("size") or 0))
     return attachment_parse.parse_file(
         store_path=facts.get("store_path"), sha256=facts.get("sha256"), file_ext=facts.get("file_ext")
     )
