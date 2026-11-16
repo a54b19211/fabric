@@ -1,6 +1,5 @@
 """雷达读的资料库接口（/api/fabric/*）：来源、版本、变更、清洗正文、附件正文、登记差分、上一版、检索、
-采集任务。读接口要读凭据（DATAFABRIC_READ_TOKEN 或管理员凭据），写接口要管理员凭据。
-测量在 api/routers/measurements.py。"""
+采集任务。读接口要读凭据（DATAFABRIC_READ_TOKEN 或管理员凭据），写接口要管理员凭据。"""
 
 import hmac
 import os

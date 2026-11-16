@@ -569,7 +569,7 @@ def score_one(conn, version):
     <span class="g">write_to_history</span>(conn, version, parsed)          <span class="c"># 存两张新表；"隔离"只记等级</span>
 
 <span class="c"># 两个调用点，都是现有文件：</span>
-<span class="c">#   main_etl.py（主线现在的 pipeline.py 改名）：fetch → clean → quality → index → measure</span>
+<span class="c">#   main_etl.py（主线现在的 pipeline.py 改名）：fetch → clean → quality → index</span>
 <span class="c">#   run/clean.py --loop：每轮 clean_stage.process() 之后调 quality_stage.process(time_budget_seconds=60)</span></pre>
   <p class="note">主线根目录的 <code>pipeline.py</code> 必须改名，否则和她的 <code>pipeline/</code> 包重名，<code>import pipeline</code> 会撞。改成 <code>main_etl.py</code>：正好是她原来的入口名，主线里只有注释引用它。</p>
 
@@ -709,7 +709,7 @@ def score_one(conn, version):
     <div class="stage mixed">
       <div class="stage-h"><span class="verb">存</span></div>
       <div class="box main"><span class="t">derived_clean_text · identifiers · profiles</span><span class="s">+ 建索引待办 → 桥 → WeKnora</span></div>
-      <div class="box main"><span class="t">derived_registry_* · derived_measurements</span></div>
+      <div class="box main"><span class="t">derived_registry_*</span></div>
       <div class="box glue"><span class="t">write_to_history</span></div>
       <div class="box xu"><span class="t">derived_quality_scores · derived_authority_resolutions</span><span class="s">雷达本次不读</span></div>
     </div>
@@ -719,7 +719,6 @@ def score_one(conn, version):
       <div class="box radar"><span class="t">监测</span><code>/changes</code><code>/version-differences</code><code>/registry-changes</code></div>
       <div class="box radar"><span class="t">找和读</span><code>/records</code><code>/versions/{id}</code><code>/search</code>（WeKnora）<code>/clean-text</code><code>/derived-text</code></div>
       <div class="box radar"><span class="t">许可、健康、补抓</span><code>/sources</code><code>/source-health</code><code>/fetch → /runs</code></div>
-      <div class="box radar"><span class="t">数值序列</span><code>/measurements</code><code>/measurements/changes</code></div>
       <div class="box radar"><span class="t">逐句核验</span><span class="s">雷达把清洗正文窗口发给 BioCheck；MechEvidence 收到的也是这份正文</span></div>
     </div>
   </div>
@@ -736,7 +735,6 @@ def score_one(conn, version):
       <tr><td>附件正文</td><td><code>GET /derived-text</code></td><td>主线 <code>attachment_parse</code>（MinerU）</td><td><code>status</code>、<code>text</code>、<code>text_sha256</code>、<code>processor_version</code>、<code>segments</code>、<code>attachment_of</code>、<code>attempt</code></td><td>不补（她的 route_pdf 不用）</td></tr>
       <tr><td>登记变化、版本差异</td><td><code>/registry-changes</code>、<code>/version-differences</code></td><td>主线</td><td><code>changes[{field, json_pointer, change_kind, material, description}]</code>；<code>kind</code>、<code>body_changed</code> 等</td><td>不补</td></tr>
       <tr><td>语义检索（WeKnora）</td><td><code>POST /search</code></td><td>主线 <code>store/retrieval.py</code> + <code>index_publication</code>；校验命中时要求版本有当前画像行</td><td><code>results[{version_id, text, start, end, artifact{processor_version, text_sha256}, rerank_score}]</code>、<code>execution</code>、<code>coverage</code></td><td>不补。第 5 步删画像质量字段时，画像行必须照写，否则检索无命中</td></tr>
-      <tr><td>数值序列</td><td><code>/measurements</code>、<code>/measurements/changes</code></td><td>主线测量</td><td><code>measurement_id</code>、<code>check.status</code>、<code>period</code>、<code>value_text</code>、<code>quote</code>、<code>seq</code> 等</td><td>不补</td></tr>
       <tr><td>来源健康、按需抓取</td><td><code>/source-health</code>、<code>/fetch → /runs/{id} → /records?run_id</code></td><td>主线</td><td><code>collection.state</code>、<code>watches</code>；<code>run.state</code>、<code>items</code>；补数版本 <code>coverage.backfill</code></td><td>不补。她的工作台是本地文件版，不接</td></tr>
       <tr><td>图谱候选</td><td><code>/graph/{id}/resolve</code></td><td>主线</td><td><code>candidates[{id, name, identity_status, evidence}]</code></td><td>不补</td></tr>
       <tr><td>BioCheck 核对（Fabric 发出）</td><td>BioCheck <code>/v1</code>、<code>/v3</code></td><td>主线 <code>（Fabric 发 BioCheck 的核对 11-13 精简时已拆掉）</code>：编号、画像实验类型、测量读数</td><td>subject 带 <code>artifact{processor_version, text_sha256}</code>；passages 从清洗正文截取；条目带清洗正文里的偏移</td><td>可选：她的 CAS 校验位、NDA/ANDA/BLA 格式校验，以后补进主线编号抽取</td></tr>

@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.exception_logger import ExceptionLogger
-from api.routers import fabric, measurements
+from api.routers import fabric
 
 app = FastAPI(
     title="ZK Data Fabric API",
@@ -34,7 +34,6 @@ app.add_middleware(
 
 # ── 路由注册 ────────────────────────────────────────────────────────────
 app.include_router(fabric.router)
-app.include_router(measurements.router)
 
 
 # ── 统一错误处理 ────────────────────────────────────────────────────────
