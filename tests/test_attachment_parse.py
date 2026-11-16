@@ -121,6 +121,18 @@ def test_a_stored_web_page_and_an_archive_are_unsupported_and_say_what_they_are(
     assert (packed["status"], packed["file_ext"]) == ("unsupported", ".zip") and tools == []  # not sent as a Word file
 
 
+def test_a_large_file_with_next_to_no_text_is_a_scan_that_needs_ocr(tmp_path, monkeypatch):
+    """Live: NMPA .docx files of 4-9 MB parsed to the two characters of their heading, a 94 KB PDF to six."""
+    monkeypatch.setattr(ap, "_mineru", lambda path: {
+        "success": True, "markdown": "附件", "error": "",
+        "content_list": [{"type": "text", "text": "附件", "page_idx": 0}, {"type": "image", "page_idx": 0}]})
+    scan = ap.parse_file(**stored(tmp_path, "scan.pdf", PDF + b"\x00" * 60_000))
+    assert (scan["status"], scan["error"], scan["text"]) == ("unsupported", "text_layer_missing", "")
+    assert scan["attempts"] == ["mineru:ok", "text_layer_missing"] and scan["parse_method"] == "mineru"
+    small = ap.parse_file(**stored(tmp_path, "note.pdf", PDF))  # a short note in a small file is just short
+    assert small["status"] == "parsed" and "附件" in small["text"]
+
+
 def test_mineru_endpoint_is_configurable(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_MINERU_URL", "http://127.0.0.1:9/")
     assert ap.mineru_base() == "http://127.0.0.1:9"

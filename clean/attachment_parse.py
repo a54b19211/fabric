@@ -111,6 +111,22 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# 文件不小、解析出来却几乎没有字：内容在页面图片里（扫描件），解析器没给出文字层。实测 NMPA 4–9 MB 的 .docx 只解析出
+# “附件”两个字、94 KB 的 PDF 只有 6 个字；真正的短文档 14 KB 就有 120 字以上
+SCAN_MIN_BYTES = 50_000
+SCAN_MAX_CHARS = 20
+_PAGE_MARK = re.compile(r"〔第\d+页〕|\s")
+
+
+def without_text_layer(result: dict, size: int) -> dict:
+    """解析成功但几乎没有字的大文件：改记为 unsupported，原因 text_layer_missing（要 OCR），不当成只有几个字的正文。"""
+    if result["status"] != "parsed" or size < SCAN_MIN_BYTES \
+            or len(_PAGE_MARK.sub("", result["text"])) >= SCAN_MAX_CHARS:
+        return result
+    return _result("unsupported", method=result["parse_method"], error="text_layer_missing", ext=result["file_ext"],
+                   attempts=[*result["attempts"], "text_layer_missing"])
+
+
 def _result(status, *, text="", method=None, error=None, ext=None, attempts=(), segments=None, locator_kind=None):
     return {
         "status": status,
@@ -225,7 +241,7 @@ def parse_file(*, store_path: str, sha256: str, file_ext: str | None = None, **_
         # 解析器（尤其 LibreOffice）会在输入文件旁写东西：一律在临时副本上做；文件名带正确后缀
         copy = Path(work) / ("original" + ext)
         shutil.copyfile(path, copy)
-        return _parse_copy(copy, ext)
+        return without_text_layer(_parse_copy(copy, ext), path.stat().st_size)
 
 
 def _unusable_original(path, store_path, sha256, file_ext):
