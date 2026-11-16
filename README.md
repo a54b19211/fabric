@@ -59,7 +59,6 @@ python main_etl.py --only index                           # 测量、送知识�
 | datafabric-index | `python -m run.index` | 清洗正文送进 WeKnora |
 | datafabric-measure | `python -m run.measure` | 从 WHO 通报正文读数字（未核的读数也带标记往下流） |
 | datafabric-api | `uvicorn api.main:app` | HTTP 接口 |
-| datafabric-weknora | `uvicorn weknora.app:app_factory` | WeKnora 桥接（127.0.0.1:18564）：上传固定版本、召回、特征；配置是 `WEKNORA_KDD_CONFIG` 指的 runtime.json，字段见 `docs/weknora桥接.md`；WeKnora 自身用官方镜像，部署文件在 `ops/weknora/` |
 
 附件正文解析 `python -m run.attachments --loop` 没有服务文件，要用时手动起。环境变量：
 - 抓、洗、存都要：`DATAFABRIC_DATABASE_URL`（资料库）；定时刷新再要 `DATAFABRIC_REDIS_URL`（采集队列）、
