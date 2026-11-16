@@ -116,15 +116,17 @@ def apply(role: str, engine) -> list[str]:
 
 
 def seed_sources(engine) -> None:
-    """A fabric_sources row for each catalog source (fetch.catalog.source_catalog) that has none; an existing row is
-    the administrator's decision (read_enabled) and stays as it is."""
+    """A fabric_sources row for each catalog source (fetch.catalog.source_catalog) that has none (readable unless it is
+    in DEFAULT_CLOSED); an existing row is the administrator's decision (read_enabled, fetch_enabled) and stays."""
+    from fetch.catalog import DEFAULT_CLOSED
     from fetch.sources import SOURCE_CATALOG
     from store.record_models import canonical
 
     with engine.begin() as conn:
         for source_id, catalog in SOURCE_CATALOG.items():
-            conn.execute(text("INSERT INTO fabric_sources (source_id, catalog) VALUES (:id, CAST(:catalog AS jsonb)) "
-                              "ON CONFLICT (source_id) DO NOTHING"), {"id": source_id, "catalog": canonical(catalog)})
+            conn.execute(text("INSERT INTO fabric_sources (source_id, catalog, read_enabled) "
+                              "VALUES (:id, CAST(:catalog AS jsonb), :ok) ON CONFLICT (source_id) DO NOTHING"),
+                         {"id": source_id, "catalog": canonical(catalog), "ok": source_id not in DEFAULT_CLOSED})
 
 
 def main(argv=None) -> int:

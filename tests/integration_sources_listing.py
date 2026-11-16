@@ -1,10 +1,15 @@
-"""GET /api/fabric/sources against a migrated fabric library: readable sources, retired ones, the radar's capabilities."""
+"""GET /api/fabric/sources against a migrated fabric library: readable sources, retired ones, the radar's capabilities;
+the source switches (/admin/sources, V047)."""
+
+import json
 
 import pytest
+from fastapi import HTTPException
 from integration_migration_runner import pg  # noqa: F401 - fixture
 from sqlalchemy import text
 
 from api.routers import fabric as router
+from fetch import source_refresh
 from fetch.catalog import RETIRED
 from fetch.sources import SOURCE_CATALOG
 from store import records as store
@@ -67,3 +72,27 @@ def test_switching_off_public_reads_keeps_only_an_upload(library, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_FETCH_ENABLED", "false")
     assert caps("pubmed")["fetch"] is None
     assert caps("local_files")["fetch"] == {"modes": ["upload"]}
+
+
+def test_a_new_library_starts_with_the_default_closed_sources_unreadable(pg, monkeypatch):
+    _, engine = pg("defaults")
+    monkeypatch.setattr(store, "fabric_engine", lambda: engine)
+    runner.apply("fabric", engine)
+    rows = by_id(router.admin_sources()["sources"])
+    assert rows["nccn"]["read_enabled"] is False and rows["pubmed"]["read_enabled"] is False
+    assert rows["clinicaltrials"]["read_enabled"] is True and rows["nccn"]["fetch_enabled"] is True
+    assert rows["clinicaltrials"]["latest_run"] is None
+
+
+def test_a_switch_change_is_logged_and_stops_the_scheduled_fetch(library, monkeypatch):
+    body = router.SourceSwitches(fetch_enabled=False, changed_by="host")
+    changed = router.admin_source_switches("who_don", body)
+    assert (changed["read_enabled"], changed["fetch_enabled"], changed["changed_by"]) == (True, False, "host")
+    assert by_id(router.admin_sources()["sources"])["who_don"]["last_change"]["changed_by"] == "host"
+    monkeypatch.setenv("DATAFABRIC_WATCHES", json.dumps([
+        {"id": "who", "request": {"source_id": "who_don", "query": "*"}, "cadence_seconds": 900}]))
+    assert source_refresh.refresh_once() == [{"watch_id": "who", "state": "disabled"}]
+    with pytest.raises(HTTPException) as missing:
+        router.admin_source_switches("no_such_source", router.SourceSwitches(read_enabled=True))
+    assert missing.value.status_code == 404
+

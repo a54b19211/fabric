@@ -2,6 +2,7 @@
 
 从哪读起：main() 里的 while 循环。一轮调一次 fetch/source_refresh.py 的 refresh_once（按 DATAFABRIC_WATCHES 里
 各来源的刷新计划建采集任务、放进队列，由 fetch/fetch_job.py 的采集工人去抓），打印这一轮的结果。
+来源的两个开关（fabric_sources 的 read_enabled、fetch_enabled，管理员经 /api/fabric/admin/sources 改）关着的 watch 不抓。
 --once 只跑一轮，有来源失败或被阻塞时以非零状态退出。
 
 读写的表（都在资料库）：fabric_source_watches（各来源刷新计划的进度）、fabric_runs（新建采集任务、读任务状态）。

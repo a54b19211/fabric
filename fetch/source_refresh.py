@@ -76,13 +76,20 @@ def _key(watch):
 
 
 def refresh_once():
-    """每个到点的 watch 走一步，返回这一轮走了的 [{"watch_id", "state"}]。没有配置时什么都不做。"""
+    """每个到点的 watch 走一步，返回这一轮走了的 [{"watch_id", "state"}]；来源的开关关着的记 "disabled"，不抓。
+    没有配置时什么都不做。"""
     configured = watches()
     if not configured:
         return []
     engine = records.fabric_engine()
+    with engine.begin() as conn:  # 两个开关（V047）都开着的来源才定时抓；管理员经 /api/fabric/admin/sources 改
+        enabled = set(conn.execute(text(
+            "SELECT source_id FROM fabric_sources WHERE read_enabled AND fetch_enabled")).scalars())
     results = []
     for watch in configured:
+        if watch.request.source_id not in enabled:
+            results.append({"watch_id": watch.id, "state": "disabled"})
+            continue
         key = _key(watch)
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO fabric_source_watches (watch_key, watch_id) VALUES (:key, :id) "

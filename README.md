@@ -68,8 +68,9 @@ python main_etl.py --only index                           # 测量、送知识�
   只有站点配置写了 `proxy_env` 的站点用代理）；`DATAFABRIC_FETCH_ENABLED=false`（这个实例不出网，只读已存的版本）；
   磁盘余量 `DATAFABRIC_PUBLICATION_DISK_PATH`（默认当前目录）低于 `DATAFABRIC_PUBLICATION_MIN_FREE_BYTES`（默认 15 GB）时不建新的采集任务。
 
-来源能不能读看 `fabric_sources.read_enabled`。升级旧库：V042 加 `fingerprint`、`replaced_by`（再跑 `ops/backfill_fingerprint.py`
-补旧指纹，不补也能用）；V043、V044 质量分表和对齐表；V045 `fabric_source_watches`（刷新进度从原采集库挪来，从新周期开始）；V046 只改名：表 `history_*` → `fabric_*`。
+来源开关在库里：`fabric_sources.read_enabled`（能不能读）、`fetch_enabled`（定时刷新抓不抓），管理员用 `GET /api/fabric/admin/sources` 看、
+`PATCH /api/fabric/admin/sources/{source_id}`（`{"read_enabled":..,"fetch_enabled":..,"changed_by":..}`）改，每次改记进 `fabric_source_switch_log`。升级旧库：V042 加 `fingerprint`、`replaced_by`（再跑 `ops/backfill_fingerprint.py`
+补旧指纹，不补也能用）；V043、V044 质量分表和对齐表；V045 `fabric_source_watches`（刷新进度从原采集库挪来，从新周期开始）；V046 只改名：表 `history_*` → `fabric_*`；V047 加 `fetch_enabled` 和改开关的记录，并关掉 `fetch/catalog.py · DEFAULT_CLOSED` 里来源的可读开关。
 
 测试：`make test`（单元，不连库）、`make lint`、`make metrics`（函数 80 行、复杂度 20 的门槛）、`make test-integration`（起临时
 PostgreSQL 容器，跑完删掉）、`make check-lock`（要连 PyPI；zktest 上临时加 `HTTPS_PROXY=http://127.0.0.1:7890`）。

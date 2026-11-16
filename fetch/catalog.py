@@ -8,8 +8,8 @@
 
 status 的三种取值：active 已接通，可以按声明读取；declared 已登记、还没有插件；
 blocked 不抓：试过接入但被来源拒绝（例如反爬拦截），或者决定了不在线抓（DrugBank），原因写在 blocked_reason。
-许可：主持人定的口径是学术、非商用、不再分发。fabric_sources 里每个来源有一个可读开关 read_enabled，
-迁移补行时默认打开；管理员要停读哪个来源就把它关掉。
+许可：主持人定的口径是学术、非商用、不再分发。fabric_sources 里每个来源有可读开关 read_enabled 和定时抓取开关
+fetch_enabled，管理员经 /api/fabric/admin/sources 改。迁移补行时默认都打开，DEFAULT_CLOSED 里的来源可读开关默认关。
 """
 
 from __future__ import annotations
@@ -255,6 +255,11 @@ DERIVED = {
 GRAPH_SOURCES = ("reviewed_graph", "primekg_graph")
 # 已退役（v3 6.3，2026-11-06 决定）：不再写入、不能被选、不作索引目标；旧编号经 legacy_aliases 照读
 RETIRED = {"legacy_documents": "已授权旧文档的精确冻结桥"}
+# 可读开关默认关的来源（V047）：去掉环境许可名单后多开放的来源，原名单找不回，先关上，由管理员逐个打开。NCCN 一定关
+DEFAULT_CLOSED = frozenset({
+    "cde_zdyz", "fda_drug_safety", "fda_press", "fiercepharma", "gdelt_doc", "hkex", "local_files", "nccn",
+    "phirda_industry", "phirda_policy", "phirda_rd", "phirda_healthcare_reform", "pubmed", "roche", "sec_companyfacts",
+})
 
 CATALOG: dict[str, CollectionSpec] = {s.source_id: s for s in SPECS}
 FETCHABLE = frozenset(s.source_id for s in SPECS if s.fetchable)

@@ -371,3 +371,25 @@ def index_retry(publication_id: str):
     from store.index_publication import retry
 
     return _call(retry, publication_id)
+
+
+class SourceSwitches(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    read_enabled: bool | None = None
+    fetch_enabled: bool | None = None
+    changed_by: str = Field(default="fabric-admin", min_length=1, max_length=80)  # 谁改的，记进 fabric_source_switch_log
+
+
+@router.get("/admin/sources", dependencies=[Depends(require_admin)])
+def admin_sources():
+    """每个来源的 read_enabled、fetch_enabled、最近一次采集任务、各固定刷新的状态、最近一次改开关（fetch/source_admin.py）。"""
+    from fetch.source_admin import list_sources
+
+    return _call(list_sources)
+
+
+@router.patch("/admin/sources/{source_id}", dependencies=[Depends(require_admin)])
+def admin_source_switches(source_id: str, body: SourceSwitches):
+    from fetch.source_admin import set_switches
+
+    return _call(set_switches, source_id, body.changed_by, body.read_enabled, body.fetch_enabled)
