@@ -12,8 +12,10 @@ run/clean.py。
 （临床登记差分）。写画像的同一个事务里还会给 index_publications（建索引待办）排活。
 
 运行方式（2026-11-04 现役约 70 万版本 / 13GB，之后到千万级）：
-- 领活：一批 = 还没有当前画像、也不在等附件正文的版本，按（来源, published_seq）先后；领到的版本行锁到这批写完。
-  没活时这条查询是一次全表的反连接（隔离库实测 70 万个已画像版本约 0.8 秒），每轮只查一次，不分来源。
+- 领活：各来源轮流，每个来源一批 = 这个来源还没有当前画像、也不在等附件正文的版本，新的先做（published_seq
+  从大到小）；领到的版本行锁到这批写完。刚抓到的版本一轮之内就洗到，一个来源的大量存量不挡别的来源，存量在后面
+  接着做。一个来源没活了，这次运行不再查它（没活时那条查询是这个来源全部版本的反连接，70 万个已画像版本约 0.8 秒）。
+  退役来源（fetch.catalog.RETIRED：旧图包、legacy_documents）不清洗。
   整批写不成时逐个重做，做不成的版本记在返回的 failed_versions 里，本轮跳过，下一轮再试。
 - 已经洗过的不重洗：这个版本在当前清洗器版本下已有正文（derived_clean_text 有 (version_id, processor_version)
   这一行），就用那份正文重算编号和画像（例如只有画像处理器升级时）。每份正文只留一个摘要 text_sha256。
@@ -84,9 +86,7 @@ def _cleaner_input(row):
         except ValueError:
             markdown = ""
         return {"markdown": markdown, "source_id": source}, "raw_json:/parsed/markdown"
-    # documents 库存按原站套站点模板
-    site = facts.get("source_site") if source == "legacy_documents" else source
-    return {"markdown": row["clean_text"] or "", "source_id": site}, "projection_clean_text"
+    return {"markdown": row["clean_text"] or "", "source_id": source}, "projection_clean_text"
 
 
 # 定位基准：段落 source 的偏移相对什么。网页/站点记录是原件 JSON 里 /parsed/markdown 字段解码后的值；
@@ -158,12 +158,12 @@ _FIELDS = """
 """
 _PROFILED = """EXISTS (SELECT 1 FROM derived_profiles p WHERE p.version_id=v.version_id
                        AND p.processor_version=:prof AND p.text_processor_version=ANY(:texts))"""
-# 领一批：还没有当前画像、也不在等附件正文的版本，每个来源按发布先后；别的进程锁着的跳过
+# 领一个来源的一批：还没有当前画像、也不在等附件正文的版本，新的先做；别的进程锁着的跳过
 _TODO_SQL = _FIELDS + """
-    WHERE NOT (v.source_id = ANY(:skip_sources)) AND v.record_kind<>'graph' AND NOT (v.version_id = ANY(:skip))
+    WHERE v.source_id=:source AND v.record_kind<>'graph' AND NOT (v.version_id = ANY(:skip))
       AND NOT """ + _PROFILED + """
       AND NOT EXISTS (SELECT 1 FROM derived_stage_waiting w WHERE w.stage_key=:k AND w.version_id=v.version_id)
-    ORDER BY v.source_id, v.published_seq LIMIT :n
+    ORDER BY v.published_seq DESC LIMIT :n
     FOR NO KEY UPDATE OF v SKIP LOCKED
 """
 # 同一组字段，按版本号取（等待表补做、main_etl.py 单次调试都用它）
@@ -346,8 +346,15 @@ def process_versions(version_ids):
     return counts
 
 
+def _sources(engine):
+    """要清洗的来源（资料库里登记的来源，去掉不清洗的）。"""
+    with engine.begin() as conn:
+        return [s for (s,) in conn.execute(text("SELECT source_id FROM fabric_sources ORDER BY source_id"))
+                if s not in SKIP_SOURCES]
+
+
 def process(*, batch=BATCH, time_budget_seconds=600):
-    """一批一批地领还没画像的版本处理，直到没有活或到时间；返回计数。"""
+    """各来源轮流，一批一批地领还没画像的版本处理（新的先做），直到没有活或到时间；返回计数。"""
     from store.records import fabric_engine
 
     engine = fabric_engine()
@@ -357,15 +364,18 @@ def process(*, batch=BATCH, time_budget_seconds=600):
               "quarantine": 0, "weak_signal": 0, "normal": 0, "failed_versions": []}
     while _process_waiting(engine, key, counts) and time.monotonic() - began < time_budget_seconds:
         pass
-    while time.monotonic() - began < time_budget_seconds and _process_batch(engine, key, batch, counts):
-        pass
+    sources = _sources(engine)
+    while sources and time.monotonic() - began < time_budget_seconds:
+        # 每个来源一批；领不到活的来源这次运行不再查
+        sources = [s for s in sources if time.monotonic() - began < time_budget_seconds
+                   and _process_batch(engine, key, batch, counts, s)]
     return counts
 
 
-def _process_batch(engine, key, batch, counts):
-    """领一批版本处理掉，返回领到几个（0：没活了）。整批做不成时在同一事务里逐个重做，
+def _process_batch(engine, key, batch, counts, source):
+    """领这个来源的一批版本处理掉，返回领到几个（0：没活了）。整批做不成时在同一事务里逐个重做，
     做不成的版本记进 counts["failed_versions"]，本轮不再领它。"""
-    params = {"skip_sources": list(SKIP_SOURCES), "n": batch, "k": key,
+    params = {"source": source, "n": batch, "k": key,
               "skip": [f["version_id"] for f in counts["failed_versions"]],
               "prof": profile.PROCESSOR_VERSION, "texts": [clean_text.PROCESSOR_VERSION, attachment_parse.PROCESSOR_VERSION]}
     with engine.begin() as conn:

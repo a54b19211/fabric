@@ -2,7 +2,7 @@
 
 A processor's applicability is a predicate over the source (not a list kept beside it): the sources with attachments are
 the collection catalog's, the registry-difference sources are the ones named here, the sources that are never cleaned
-are the graph sources. The capabilities Fabric publishes per source (store.source_listing) and the
+are the retired sources (fetch.catalog.RETIRED). The capabilities Fabric publishes per source (store.source_listing) and the
 processing stages (clean.clean_stage, clean.registry_changes) read these names, so there is one list to change.
 """
 
@@ -12,9 +12,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from clean import attachment_parse, clean_text, profile, registry_diff
+from fetch.catalog import RETIRED
 
-# old graph packages (retired, moved to Atlas) are not cleaned
-UNCLEANED_SOURCES = ("reviewed_graph", "primekg_graph")
+# retired sources are not cleaned: the old graph packages moved to Atlas, and legacy_documents is the frozen
+# bridge whose content was migrated into the real sources (cleaned there, as their migrated versions)
+UNCLEANED_SOURCES = tuple(sorted(RETIRED))
 # registry records whose versions are compared field by field (registry_diff)
 REGISTRY_DIFF_SOURCES = frozenset({"clinicaltrials"})
 

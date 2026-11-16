@@ -25,6 +25,9 @@ def test_applicability_is_a_predicate_over_the_source_not_a_second_list():
         assert ("registry_diff" in applied) == (source == "clinicaltrials")
         assert "clean_text" in applied
     assert processors.applicable("reviewed_graph") == {} == processors.applicable("primekg_graph")
+    # the retired bridge is not cleaned either: its content is cleaned in the real sources it was migrated into
+    assert processors.applicable("legacy_documents") == {}
+    assert "legacy_documents" in clean_stage.SKIP_SOURCES
 
 
 def test_the_processing_stages_use_the_registry_names():
