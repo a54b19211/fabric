@@ -38,7 +38,7 @@
 
 ## 怎么跑
 
-环境：CPython 3.10、uv 0.13.0；`make venv` 只按 `requirements.lock` 装（契约包、模型传输包取旁边检出构建的 `dist/`）。
+环境：CPython 3.12、uv 0.13.0；`make venv` 只按 `requirements.lock` 装（契约包、模型传输包取旁边检出构建的 `dist/`）。
 
 调试一个来源（`main_etl.py`，会写库，一定指向临时库）：
 ```bash

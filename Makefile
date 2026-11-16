@@ -1,15 +1,15 @@
 # The one entry point for this checkout (README: 怎么跑).
-# uv 0.13.0 from PATH (~/.local/bin/uv) or UV=<path>. requirements.lock is resolved for CPython 3.10 (the
+# uv 0.13.0 from PATH (~/.local/bin/uv) or UV=<path>. requirements.lock is resolved for CPython 3.12 (the
 # interpreter of the running Fabric) on x86_64-unknown-linux-gnu, with a sha256 for every distribution;
 # `make venv` installs only from it.
 UV ?= uv
-PYTHON ?= 3.10
+PYTHON ?= 3.12
 # the shared contract wheel (built in the sibling extraction-contract checkout; hash in the lock)
 EXTRACTION_CONTRACT_WHEELS ?= ../extraction-contract/dist
 VENV ?= .venv
 PY = $(VENV)/bin/python
 LOCK_INPUTS = requirements.txt requirements-contract.txt
-LOCK_FLAGS = --generate-hashes --python-version 3.10 --python-platform x86_64-unknown-linux-gnu \
+LOCK_FLAGS = --generate-hashes --python-version 3.12 --python-platform x86_64-unknown-linux-gnu \
 	--find-links $(EXTRACTION_CONTRACT_WHEELS)
 
 .PHONY: help venv test test-integration lint metrics check check-install check-lock lock

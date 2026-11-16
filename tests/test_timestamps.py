@@ -63,7 +63,12 @@ def test_other_values_read_as_fromisoformat_reads_them(text):
     assert parse_timestamp(text) == datetime.fromisoformat(text)
 
 
-@pytest.mark.parametrize("text", ["", "yesterday", "2026-11-06T09:42:58.1234567+00:00", "2026-13-06T09:42:58+00:00"])
+@pytest.mark.parametrize("text", ["", "yesterday", "2026-13-06T09:42:58+00:00"])
 def test_what_is_no_timestamp_still_raises(text):
     with pytest.raises(ValueError):
         parse_timestamp(text)
+
+
+def test_seven_fraction_digits_are_cut_to_microseconds():
+    # Python 3.11+ reads a 7-digit fraction (some .NET-style APIs send it) and drops the last digit
+    assert parse_timestamp("2026-11-06T09:42:58.1234567+00:00").microsecond == 123456
