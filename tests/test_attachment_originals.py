@@ -211,6 +211,17 @@ def test_pdf_header_keeps_content_path_stable_despite_http_type_change(http_sour
     assert repeated["local_path"] == first["local_path"] and repeated["file_ext"] == ".pdf"
 
 
+def test_a_link_that_answers_with_a_web_page_is_not_stored_as_an_attachment(http_source, tmp_path):
+    """CDE: the related-news links of a page were stored as 33 attachments that are HTML pages. A link whose answer
+    is HTML and whose address is not an .htm file is another page; an .htm file (HKEX) is still an attachment."""
+    http_source["body"] = b"<!DOCTYPE html>\r\n<html lang=\"zh\"><head></head><body>news</body></html>"
+    with pytest.raises(ValueError, match="html_page_not_a_file"):
+        client.download_pdf("https://www.cde.org.cn/main/news/viewInfoCommon/12842c9b", source_site="synthetic_files")
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]  # nothing written
+    stored = client.download_pdf("https://www1.hkexnews.hk/listedco/2026/1105/a_c.htm", source_site="synthetic_files")
+    assert Path(stored["local_path"]).is_file()
+
+
 def test_an_attachment_that_is_a_web_page_gets_the_html_extension_and_not_bin():
     """HKEX announcements are sometimes .htm pages: the content type says what they are."""
     from types import SimpleNamespace

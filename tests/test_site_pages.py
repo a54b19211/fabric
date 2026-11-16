@@ -59,7 +59,10 @@ def test_cde_detail_extractor_still_reads_the_older_page_layout():
 
     html = ("<html><head><meta name='ArticleTitle' content='某通告'><meta name='PubDate' content='20260403'></head><body>"
             "<div class='new_detail_content'><p>正文一段。</p></div>"
-            "<div class='relatedNews'><a href='/main/att/download/x1'>附件一.pdf</a></div></body></html>")
+            "<div class='relatedNews'><a href='/main/att/download/x1'>附件一.pdf</a>"
+            # the same block lists related news pages: other pages, not files (the old crawler stored 33 of them)
+            "<a href='/main/news/viewInfoCommon/12842c9b5ced9beeebcca67100a11610'>相关新闻一</a>"
+            "<a href='/main/newspic/view/032ea88269c937aa6eff394d46f82af4'>图片新闻</a></div></body></html>")
     got = extract_cde_detail(Selector(html))
     assert got["title"] == "某通告" and got["publish_date"] == "2026-04-03" and got["body_text"] == "正文一段。"
     assert got["attachment_links"] == [{"name": "附件一.pdf", "url": "https://www.cde.org.cn/main/att/download/x1"}]

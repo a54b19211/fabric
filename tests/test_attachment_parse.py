@@ -108,6 +108,19 @@ def test_unknown_type_is_unsupported(tmp_path, tools):
     assert out["status"] == "unsupported" and tools == []
 
 
+def test_a_stored_web_page_and_an_archive_are_unsupported_and_say_what_they_are(tmp_path, tools):
+    import io
+    import zipfile
+
+    page = ap.parse_file(**stored(tmp_path, "x.bin", b"<!DOCTYPE html>\r\n<html lang=\"zh\"><body>news</body></html>"))
+    assert (page["status"], page["error"], page["file_ext"]) == ("unsupported", "html_page_not_a_file", ".html")
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("a.pdf", "x")
+    packed = ap.parse_file(**stored(tmp_path, "y.bin", archive.getvalue()))
+    assert (packed["status"], packed["file_ext"]) == ("unsupported", ".zip") and tools == []  # not sent as a Word file
+
+
 def test_mineru_endpoint_is_configurable(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_MINERU_URL", "http://127.0.0.1:9/")
     assert ap.mineru_base() == "http://127.0.0.1:9"

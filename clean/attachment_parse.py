@@ -91,6 +91,12 @@ def _excel(path: str) -> str:
     return excel_to_markdown(path)
 
 
+def is_web_page(content: bytes) -> bool:
+    from fetch.web_client import is_web_page as check
+
+    return check(content)
+
+
 def _sniff(content: bytes) -> str:
     from fetch.web_client import _sniff_bytes
 
@@ -209,7 +215,10 @@ def parse_file(*, store_path: str, sha256: str, file_ext: str | None = None, **_
         return _jats(path, ext)
     if ext not in SUPPORTED:
         with path.open("rb") as stream:
-            ext = _sniff(stream.read(4 * 1024 * 1024))
+            head = stream.read(4 * 1024 * 1024)
+        if is_web_page(head):  # 存成附件的其实是一个网页（旧采集把 CDE 的相关新闻页当成了附件）：写明，不当成未知文件
+            return _result("unsupported", error="html_page_not_a_file", ext=".html")
+        ext = _sniff(head)
     if ext not in SUPPORTED:
         return _result("unsupported", ext=ext)
     with tempfile.TemporaryDirectory(prefix="attachment-parse-") as work:

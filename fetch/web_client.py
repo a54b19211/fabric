@@ -32,6 +32,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def is_web_page(content: bytes) -> bool:
+    """这段字节开头是 HTML 页面（<!doctype html / <html），不是文件。"""
+    head = content[:512].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return head.startswith((b"<!doctype html", b"<html"))
+
+
 def _sniff_bytes(content: bytes) -> str:
     """通过文件头魔数判断真实类型。"""
     if len(content) < 8:
@@ -53,6 +59,7 @@ def _sniff_bytes(content: bytes) -> str:
                 return ".xlsx"
             if any(n.startswith("word/") for n in names):
                 return ".docx"
+            return ".zip"  # 压缩包（NMPA 的附件包）：不是 Word，不拿去解析
         except Exception as e:
             logger.warning(f"[Scrapling] MIME 嗅探失败，回退 .docx: {e}")
         return ".docx"
@@ -278,6 +285,9 @@ def download_pdf(
                  传附件记录号，同一个文件每次落到同一个路径。
         proxy:   这个站点的代理（fetch.site_crawler.site_proxy，如 nccn 的 DATAFABRIC_PROXY_NCCN）；None 直连。
     返回里的 file_name 是站点在响应头 Content-Disposition 里给的文件名（没有就是空串）。
+    链接指向的是网页（响应是 HTML，网址又不以 .htm/.html 结尾）时抛 ValueError("html_page_not_a_file")，不落盘：
+    那是另一个页面，不是附件（CDE“相关新闻”里的新闻页曾被旧采集当附件存了 33 个 .bin）。港交所的 .htm 公告附件
+    网址本身以 .htm 结尾，照存。
     """
     file_uuid = make_uuid(pdf_url)
     save_dir = APP.RAW_DIR / source_site
@@ -303,6 +313,8 @@ def download_pdf(
         raise ValueError("附件响应为空，未采用旧缓存")
     # PDF文件头比可能变化的响应头可靠；其余类型沿用已有判别规则。
     file_ext = ".pdf" if content.startswith(b"%PDF") else _ext_from_response(resp, pdf_url)
+    if (file_ext == ".html" or is_web_page(content)) and not urlparse(pdf_url).path.lower().endswith((".htm", ".html")):
+        raise ValueError("html_page_not_a_file")
     stored = store_original(content, store_as or pdf_url, source_site, file_ext)
     save_path, skipped = stored["local_path"], stored["skipped"]
 

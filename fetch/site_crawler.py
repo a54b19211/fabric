@@ -188,7 +188,7 @@ class _Reader:
         self.profile = SITE_PROFILES[self.site]
         self.spec = spec(self.site)
         self.records: list[ArchiveRecord | None] = []
-        # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_attempted ...）。放在读取结果里，
+        # 本次读取的附件覆盖情况（stored / download_failed / too_large / not_a_file / not_attempted ...）。放在读取结果里，
         # 不放进页面原件：原件只放来源给出的内容，否则同一页面每重试一次就因状态不同多一个版本。
         self.coverage: list[dict] = []
         # 本次读取里读不到的条目（网址 + 原因），同样只记在读取结果里，不存版本
@@ -229,7 +229,8 @@ class _Reader:
                                 store_as=record_id if key else "", proxy=site_proxy(self.site))
             sha, size = _sha256_file(info["local_path"])
         except ValueError as exc:
-            status = "too_large" if str(exc) == "response_too_large" else "download_failed"
+            status = {"response_too_large": "too_large", "html_page_not_a_file": "not_a_file"}.get(
+                str(exc), "download_failed")
             entry.update(status=status, error=str(exc)[:80])
             self.coverage.append({"parent_record_id": parent_id, **entry})
             return entry

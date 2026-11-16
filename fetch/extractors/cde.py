@@ -1,6 +1,11 @@
 """国家药品审评中心（CDE）详情页特解"""
+import re
+
 from fetch.extractors import extract_approval_number, extract_labeled_field
 from fetch.extractors.dates import normalize_date
+
+# 文件下载链接：/main/att/download/<id>、/zdyz/downloadAtt?idCODE=…，或者网址直接以文件后缀结尾
+_FILE_LINK = re.compile(r"/att/download/|downloadAtt|\.(?:pdf|docx?|xlsx?|zip|rar|wps)(?:\?|$)", re.I)
 
 
 def extract_cde_detail(page) -> dict:
@@ -51,12 +56,13 @@ def extract_cde_detail(page) -> dict:
         ),
     }
 
-    # 附件：div.relatedNews 里的链接；指导原则专栏是信息表里指向 /zdyz/downloadAtt 的链接
+    # 附件：div.relatedNews 里的文件下载链接；指导原则专栏是信息表里指向 /zdyz/downloadAtt 的链接。
+    # relatedNews 里还有“相关新闻”的页面链接（/main/news/viewInfoCommon/…、/main/newspic/view/…）：那是别的页面，不是附件
     related = page.css("div.relatedNews")
     for a in related[0].css("a") if related else page.css("a[href*='downloadAtt']"):
         href = a.attrib.get("href", "")
         name = a.get_all_text(strip=True) or "未命名附件"
-        if href:
+        if href and _FILE_LINK.search(href):
             if href.startswith("/"):
                 href = "https://www.cde.org.cn" + href
             result["attachment_links"].append({"name": name, "url": href})

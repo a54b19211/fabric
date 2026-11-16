@@ -277,6 +277,15 @@ def test_too_large_attachment_is_a_recorded_gap(fake_web, monkeypatch):
     assert {a["status"] for a in batch["attachment_coverage"]} == {"too_large"} and len(batch["records"]) == 1
 
 
+def test_a_link_that_turns_out_to_be_a_web_page_is_a_recorded_gap_not_an_attachment(fake_web, monkeypatch):
+    def a_page(*a, **k):
+        raise ValueError("html_page_not_a_file")
+
+    monkeypatch.setattr(site_crawler, "download_pdf", a_page)
+    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
+    assert {a["status"] for a in batch["attachment_coverage"]} == {"not_a_file"} and len(batch["records"]) == 1
+
+
 def test_codex_r61_same_page_read_twice_is_the_same_raw(fake_web):
     """抓取时间、本次附件读没读到都不进原件：同一页面重读不制造新版本。"""
     a = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
