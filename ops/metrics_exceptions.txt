@@ -12,6 +12,11 @@
 # (git rev-list ebe7c17 ^82bad7b ^d316aad: the rebuild branch since it left the team's 82bad7b, without what
 # came in from feat/server_fix). Code in this section is split, not frozen: the section is to be empty.
 
+weknora/service.py:Service.feature  41/22  bridge code moved in from the WeKnora fork (extensions/kdd) unchanged; split per check
+weknora/service.py:Service.inspect  38/25  bridge code moved in from the WeKnora fork unchanged; split the per-chunk checks out
+weknora/service.py:Service.search  138/65  bridge code moved in from the WeKnora fork unchanged; split channels, batching and fusion
+weknora/service.py:Service.status  33/31  bridge code moved in from the WeKnora fork unchanged; split the state derivation out
+
 # ---- (b) The team's older shared code ----
 # Code the team wrote before this round: under 40% of each function's lines come from the rebuild line (under
 # 10% for all but five of them). Each entry names the split it needs.

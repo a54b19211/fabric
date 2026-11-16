@@ -1,0 +1,5 @@
+# new server: host PG17 owns 5432, so the WeKnora database is published on 127.0.0.1:15432 only
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:15432:5432"

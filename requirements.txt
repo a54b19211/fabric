@@ -31,7 +31,7 @@ openpyxl==3.1.5              # 读取 .xlsx（纯 Python，跨平台）
 xlrd==2.0.1                  # 读取 .xls 旧版二进制格式（纯 Python，跨平台）
 
 # --- 后端 API ---
-fastapi>=0.111.0             # Web 框架
+fastapi>=0.115              # Web 框架（api/ 与 weknora/ 桥接服务）
 uvicorn[standard]>=0.29.0    # ASGI 服务器
 
 # --- 任务队列 ---
@@ -43,5 +43,5 @@ pytest>=8.0                  # 测试框架
 pytest-cov>=5.0              # 覆盖率报告
 pytest-mock>=3.14            # mock 工具
 ruff==0.17.0                 # lint（make lint，配置见 pyproject.toml）
-psycopg[binary]==3.3.7       # 集成测试连隔离 PostgreSQL 用的 psycopg 3 驱动
+psycopg[binary]==3.3.7       # psycopg 3：weknora/ 桥接只读连 WeKnora 库；集成测试连隔离 PostgreSQL
 

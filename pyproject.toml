@@ -23,4 +23,5 @@ paths = [
     "run",
     "settings.py",
     "store",
+    "weknora",
 ]

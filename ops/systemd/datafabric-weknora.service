@@ -1,0 +1,25 @@
+[Unit]
+Description=Data-Fabric WeKnora bridge (weknora/): publishes fixed versions into WeKnora, serves search and features
+After=network.target
+StartLimitIntervalSec=0
+
+# What it does (read weknora/app.py, then weknora/service.py): uploads clean text to WeKnora over WeKnora's own HTTP
+# API, keeps receipts in a SQLite journal, and reads WeKnora's PostgreSQL only in read-only transactions.
+# Callers: datafabric-index and datafabric-api (WEKNORA_KDD_URL=http://127.0.0.1:18564, WEKNORA_KDD_TOKEN = "token" below).
+# Configuration: WEKNORA_KDD_CONFIG names a private runtime.json (mode 600; fields in docs/weknora桥接.md), not runtime.env.
+# One worker only: the receipt journal is not shared between processes. Port 18564 is the one the old
+# bioradar-weknora-kdd unit used, so callers keep their URL.
+
+[Service]
+WorkingDirectory=%h/zk_projects/ZK_Data-Fabric-test
+Environment=PYTHONUNBUFFERED=1
+Environment=WEKNORA_KDD_CONFIG=%h/.config/weknora-kdd/runtime.json
+ExecStart=%h/zk_projects/ZK_Data-Fabric-test/zk_env/bin/python -m uvicorn weknora.app:app_factory --factory --host 127.0.0.1 --port 18564 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=default.target
