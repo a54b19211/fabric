@@ -63,7 +63,7 @@ def plan():
 def _segments(conn, keys):
     """removed -> kept, and kept -> its new replaced_by, for these (source, record) pairs."""
     rows = conn.execute(text(
-        "SELECT v.version_id, v.fingerprint, v.replaced_by, v.version_id IN (" + PINNED + ") AS pinned "
+        "SELECT v.version_id, v.fingerprint, v.replaced_by, EXISTS (SELECT 1 FROM dedupe_pinned p WHERE p.version_id=v.version_id) AS pinned "
         "FROM fabric_versions v JOIN unnest(CAST(:s AS text[]), CAST(:r AS text[])) k(s, r) "
         "ON v.source_id=k.s AND v.source_record_id=k.r"), {"s": [k[0] for k in keys], "r": [k[1] for k in keys]})
     rows = {r["version_id"]: r for r in rows.mappings()}
@@ -117,11 +117,17 @@ def apply(batch):
     with fabric_engine().begin() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS dedupe_version_map "
                           "(removed char(64) PRIMARY KEY, kept char(64) NOT NULL, source_id text NOT NULL)"))
+        # pinned versions as an indexed table, computed once: an IN/NOT IN over the subquery is evaluated per row
+        conn.execute(text("DROP TABLE IF EXISTS dedupe_pinned"))
+        conn.execute(text(f"CREATE TABLE dedupe_pinned AS SELECT DISTINCT version_id FROM ({PINNED}) x "
+                          "WHERE version_id IS NOT NULL"))
+        conn.execute(text("ALTER TABLE dedupe_pinned ADD PRIMARY KEY (version_id)"))
     total = defaultdict(int)
     while True:
         with fabric_engine().begin() as conn:
             keys = conn.execute(text(f"SELECT DISTINCT d.source_id, d.source_record_id FROM ({DUPES}) d "
-                                     f"WHERE d.rm NOT IN ({PINNED}) LIMIT :n"), {"n": batch}).all()
+                                     f"WHERE NOT EXISTS (SELECT 1 FROM dedupe_pinned pin WHERE pin.version_id = d.rm) "
+                                     f"LIMIT {int(batch)}")).all()
             if not keys:
                 break
             mapping, successor = _segments(conn, keys)
