@@ -670,7 +670,7 @@ class Service:
             if mode == "vector":
                 body["query_embedding"] = query_embedding
             try:
-                data = self.request("POST", "/api/v1/knowledge-bases/" + req.knowledge_base_id + "/hybrid-search", json=body)["data"] or []
+                data = self.request("GET", "/api/v1/knowledge-bases/" + req.knowledge_base_id + "/hybrid-search", json=body)["data"] or []
             except HTTPException:
                 execution[mode] = "failed"
                 execution["degraded_reasons"].append(mode + "_retrieval_failed")
