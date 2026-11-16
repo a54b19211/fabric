@@ -224,8 +224,8 @@ def _link_attachments(conn, run, prepared, version_ids):
         parent_version = by_record.get(facts["parent_record_id"])
         conn.execute(text("""
           INSERT INTO fabric_attachment_links (attachment_version_id,parent_record_id,parent_version_id,link_basis,run_id)
-          SELECT :a,:p,:pv,:basis,:run WHERE NOT EXISTS (SELECT 1 FROM fabric_attachment_links
-            WHERE attachment_version_id=:a AND parent_record_id=:p AND COALESCE(parent_version_id,'')=COALESCE(:pv,''))"""),
+          SELECT :a,:p,CAST(:pv AS text),:basis,:run WHERE NOT EXISTS (SELECT 1 FROM fabric_attachment_links
+            WHERE attachment_version_id=:a AND parent_record_id=:p AND COALESCE(parent_version_id,'')=COALESCE(CAST(:pv AS text),''))"""),
             {"a": version, "p": facts["parent_record_id"], "pv": parent_version, "run": run["id"],
              "basis": "same_run_parent_version" if parent_version else "parent_version_unknown"})
 
