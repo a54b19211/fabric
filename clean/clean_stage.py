@@ -387,6 +387,7 @@ def _process_batch(engine, key, batch, counts, source):
         rows = [dict(r) for r in conn.execute(text(_TODO_SQL), params).mappings()]
         if not rows:
             return 0
+        rows.sort(key=lambda r: r["published_seq"])  # 这一批是最新的几个版本；批内仍按发布先后处理
         # 锁到之后再看一眼：别的进程可能刚在放锁之前写完了其中几个
         done = set(conn.execute(text("SELECT v.version_id FROM fabric_versions v WHERE v.version_id=ANY(:ids) AND "
                                      + _PROFILED), {**params, "ids": [r["version_id"] for r in rows]}).scalars())

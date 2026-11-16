@@ -73,6 +73,8 @@ def set_old_targets(monkeypatch):
     target = index.IndexTarget(source_instance="synthetic.index.pg", source_id="legacy_documents", is_demo=True,
                                knowledge_base_id="synthetic-isolated-kb", source_scope="research")
     monkeypatch.setattr(index, "targets", lambda: [target])
+    # those entries were built when the bridge was still cleaned; the clean stage skips retired sources now
+    monkeypatch.setattr(clean_stage, "SKIP_SOURCES", ("reviewed_graph", "primekg_graph"))
 
 
 def rows(pg, query, params=None):
