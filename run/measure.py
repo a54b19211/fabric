@@ -26,7 +26,7 @@ def rules_from_env() -> bool:
     return os.environ.get("DATAFABRIC_MEASURE_RULES_ROUTE", "true").lower() != "false"
 
 
-def run_round(*, model=None, with_rules=None, client=None, max_windows=ROUND_WINDOWS) -> dict:
+def run_round(*, model=None, with_rules=None, max_windows=ROUND_WINDOWS) -> dict:
     """One round: plan the new clean texts, then read due windows until none is left (or max_windows)."""
     model = model or measure_extract.model_from_env()
     with_rules = rules_from_env() if with_rules is None else with_rules
@@ -34,7 +34,7 @@ def run_round(*, model=None, with_rules=None, client=None, max_windows=ROUND_WIN
         return {"state": "disabled"}
     counts = {"planned": measure_runs.plan(model=model, with_rules=with_rules), "windows": {}}
     for _ in range(max_windows):
-        state = measure_runs.process_once(model=model, with_rules=with_rules, client=client)["state"]
+        state = measure_runs.process_once(model=model, with_rules=with_rules)["state"]
         counts["windows"][state] = counts["windows"].get(state, 0) + 1
         if state == "idle":
             break

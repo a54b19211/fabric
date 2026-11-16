@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 
-import httpx
 from sqlalchemy import text
 
 from clean import measure_extract as mx
@@ -125,7 +124,7 @@ _CLAIM = """
 """
 
 
-def process_once(*, model=None, with_rules=True, client: httpx.Client | None = None) -> dict:
+def process_once(*, model=None, with_rules=True) -> dict:
     """Read one due window of a run of this process's routes and write what it found, all in one transaction."""
     mine = routes(model, with_rules)
     if not mine:
@@ -143,29 +142,23 @@ def process_once(*, model=None, with_rules=True, client: httpx.Client | None = N
         if art is None:
             _attempt(conn, w, "artifact_changed")
             return {"state": _release(conn, w, "failed_final", "artifact_changed")}
-        return {"state": _read(conn, w, art, model, client)}
+        return {"state": _read(conn, w, art, model)}
 
 
-def _measures(w, art, model, client):
+def _measures(w, art, model):
     """(measures, skipped, output, error) the window's route read: the rules, or one model call."""
     window = (w["start_char"], w["end_char"])
     if mx.route_of(w["producer_identity"]) == mx.RULES:
         return (*mx.rules_measures(art["text"], art["segments"], window, w["source_record_id"]), None, None)
-    owned = client is None
-    client = client or httpx.Client(follow_redirects=False, trust_env=False)
-    try:
-        measures, output, error = mx.model_measures(model, w["title"], art["text"], window, client)
-        return measures, [], output, error
-    finally:
-        if owned:
-            client.close()
+    measures, output, error = mx.model_measures(model, w["title"], art["text"], window)
+    return measures, [], output, error
 
 
-def _read(conn, w, art, model, client):
+def _read(conn, w, art, model):
     """Read the window by its run's route, store the readings and objects, release the window; its new state."""
     asked = int(mx.route_of(w["producer_identity"]) == mx.MODEL)  # model requests sent for the window
     try:
-        measures, skipped, output, error = _measures(w, art, model, client)
+        measures, skipped, output, error = _measures(w, art, model)
     except Exception as exc:  # noqa: BLE001 - a fault of a route fails its window (retried, then owed), not the worker
         measures, skipped, output, error = [], [], None, ("failed", f"route_error:{type(exc).__name__}")
     if error:

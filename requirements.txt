@@ -17,6 +17,7 @@ trafilatura==1.12.2
 
 # --- HTTP ---
 httpx>=0.27                  # MinerU 云端 API HTTP 客户端
+openai==2.35.0               # 测量的模型调用（clean/measure_extract.py，OpenAI 兼容接口）
 
 # --- 数据库 ---
 sqlalchemy>=2.0              # ORM

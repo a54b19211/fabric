@@ -18,7 +18,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-import llm_transport as lt
+import httpx
+import openai
 from extraction_contract import normalize as norm
 from pydantic import BaseModel, Field, ValidationError
 
@@ -159,7 +160,7 @@ PROMPT = BASE + f"""
 
 @dataclass(frozen=True)
 class Model:
-    provider: lt.Provider
+    client: openai.OpenAI
     config: dict  # what decides the answer (not the URL or the key): part of the producer identity
 
 
@@ -171,12 +172,18 @@ def model_from_env() -> Model | None:
     kind = os.environ.get("DATAFABRIC_MEASURE_LLM_KIND", "openai_compatible")
     endpoint = os.environ.get("DATAFABRIC_MEASURE_LLM_ENDPOINT_ID", "default")
     thinking = os.environ.get("DATAFABRIC_MEASURE_LLM_THINKING", "false").lower() == "true"
-    provider = lt.Provider(kind=kind, base_url=base, model=name, api_key=os.environ.get("DATAFABRIC_MEASURE_LLM_KEY", ""),
-                           timeout_seconds=float(os.environ.get("DATAFABRIC_MEASURE_LLM_TIMEOUT", "60")),
-                           endpoint_id=endpoint)
-    return Model(provider, {"kind": kind, "model": name, "endpoint_id": endpoint, "thinking": thinking,
-                            "temperature": None if thinking else 0.0,
-                            "max_tokens": int(os.environ.get("DATAFABRIC_MEASURE_LLM_MAX_TOKENS", "2000"))})
+    client = make_client(base, os.environ.get("DATAFABRIC_MEASURE_LLM_KEY", ""),
+                         float(os.environ.get("DATAFABRIC_MEASURE_LLM_TIMEOUT", "60")))
+    return Model(client, {"kind": kind, "model": name, "endpoint_id": endpoint, "thinking": thinking,
+                          "temperature": None if thinking else 0.0,
+                          "max_tokens": int(os.environ.get("DATAFABRIC_MEASURE_LLM_MAX_TOKENS", "2000"))})
+
+
+def make_client(base_url: str, api_key: str, timeout: float) -> openai.OpenAI:
+    """One OpenAI-compatible client: no retries (a failed window is retried by the measure worker), no proxy from the
+    environment (the model endpoints are on the intranet)."""
+    return openai.OpenAI(base_url=base_url, api_key=api_key or "unused", timeout=timeout, max_retries=0,
+                         http_client=httpx.Client(trust_env=False, follow_redirects=False))
 
 
 def config_sha256(config: dict) -> str:
@@ -200,26 +207,37 @@ def parse_output(content):
     return [m.model_dump() for m in item.measures[:MAX_MEASURES]], None
 
 
-def model_measures(model: Model, title, text, window, client):
+def _thinking_switch(config):
+    """The provider's per-call thinking switch (sent in the body beside the standard fields)."""
+    if config["kind"] == "deepseek":
+        return {"thinking": {"type": "enabled" if config["thinking"] else "disabled"}}
+    if config["kind"] == "vllm":  # local vLLM serving Qwen reads the switch from its chat template
+        return {"chat_template_kwargs": {"enable_thinking": bool(config["thinking"])}}
+    return None
+
+
+def model_measures(model: Model, title, text, window):
     """(measures, output, error) of one model call over one window. error: None, or (window state, reason) - a
     "not now" answer (429 / 503) leaves the window budget_spent, anything else failed."""
     a, b = window
     payload = {"windows": [{"index": 1, "title": (title or "")[:500], "position": f"{a}-{b} / {len(text)}",
                             "text": text[a:b]}]}
-    body = lt.build_body(model.provider, [{"role": "system", "content": PROMPT},
-                                          {"role": "user", "content": canonical(payload)}],
-                         max_tokens=model.config["max_tokens"], thinking=model.config["thinking"])
-    record = lt.CallRecord(stage="measure_extract", endpoint_id=model.provider.endpoint_id, model=model.provider.model)
-    attempt = lt.send(model.provider, body, record, client=client, max_requests=1)
-    if attempt.status in (429, 503):
-        return [], None, ("budget_spent", f"http_{attempt.status}")
-    if attempt.delivered != "yes" or attempt.status != 200:
-        return [], None, ("failed", attempt.error or "no_answer")
-    answer = attempt.envelope()
-    if answer.problem:
-        return [], None, ("failed", answer.problem)
-    measures, why = parse_output(answer.content)
-    return measures or [], answer.content, ("failed", why) if why else None
+    config = model.config
+    try:
+        answer = model.client.chat.completions.create(
+            model=config["model"], max_tokens=config["max_tokens"], response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": PROMPT}, {"role": "user", "content": canonical(payload)}],
+            temperature=openai.NOT_GIVEN if config["temperature"] is None else 0,
+            extra_body=_thinking_switch(config))
+    except openai.APIStatusError as exc:
+        return [], None, ("budget_spent" if exc.status_code in (429, 503) else "failed", f"http_{exc.status_code}")
+    except openai.APIError as exc:  # timeout, connection refused, a body that is not a chat completion
+        return [], None, ("failed", type(exc).__name__)
+    if not answer.choices or answer.choices[0].message is None:
+        return [], None, ("failed", "no_choices")
+    content = answer.choices[0].message.content
+    measures, why = parse_output(content)
+    return measures or [], content, ("failed", why) if why else None
 
 
 # ---- the rules route ------------------------------------------------------------------------------------------------

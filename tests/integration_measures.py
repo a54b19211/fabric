@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import llm_transport as lt
 import pytest
 from fastapi.testclient import TestClient
 from integration_records import pg, pg_engine  # noqa: F401  (fixtures)
@@ -80,12 +79,10 @@ class FakeModel:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def model(self):
-        provider = lt.Provider(kind="openai_compatible", base_url=f"http://127.0.0.1:{self.server.server_port}/v1",
-                               model="fake-measure-model", api_key="synthetic-key", timeout_seconds=2.0,
-                               endpoint_id="loopback-fake")
-        return mx.Model(provider, {"kind": "openai_compatible", "model": "fake-measure-model",
-                                   "endpoint_id": "loopback-fake", "thinking": False, "temperature": 0.0,
-                                   "max_tokens": 2000})
+        client = mx.make_client(f"http://127.0.0.1:{self.server.server_port}/v1", "synthetic-key", 2.0)
+        return mx.Model(client, {"kind": "openai_compatible", "model": "fake-measure-model",
+                                 "endpoint_id": "loopback-fake", "thinking": False, "temperature": 0.0,
+                                 "max_tokens": 2000})
 
 
 @pytest.fixture
