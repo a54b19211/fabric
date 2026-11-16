@@ -28,7 +28,7 @@ from store.timestamps import parse_timestamp
 from store.weknora_index_client import WeKnoraIndexClient, publication_id
 
 OBSERVATION_PARSER = "datafabric.observation.projection.v0.1"  # 旧的观测记录（已不再产生）不进知识库
-FRESH_DAYS = 3  # first_seen 在这几天内的版本算新增（lane=new），比回填先上传
+FRESH_DAYS = 3  # first_seen 在这几天内、来源自己的版本算新增（lane=new），比回填先上传
 MAX_IDENTIFIERS = 50
 TOMBSTONES = ("withdrawn", "deleted", "retracted")
 BATCH = 20  # 一轮领几条
@@ -202,13 +202,20 @@ def _body(row, content):
     return {**{k: v for k, v in row["manifest"].items() if k in BRIDGE_FIELDS}, "content": content}
 
 
+def _lane(record, now):
+    """new：来源自己刚抓到的版本；backfill：其余。旧库迁入的版本（migrated_record）不管哪天导入都是存量——
+    2026-11-16 有 36 万条迁入的临床登记排在 new 里，当天抓到的 WHO 公告只能跟在它们后面。"""
+    fresh = (now - record.first_seen_at).days < FRESH_DAYS
+    return "new" if fresh and (record.facts or {}).get("publication_role") != "migrated_record" else "backfill"
+
+
 def _enqueue(conn, target, record, artifact, meta, pieces):
     """一条（目标, 记录, 产物）的索引待办：同一记录里清洗正文相同的版本只建一条，代表版本是最先产出这份正文的
     版本。复用键 (目标, 记录, 产物, 片) 由数据库唯一索引保证（V028）：两个事务同时入队同一份正文时，后一个什么也不做。
     太长的产物分片（store.index_pieces）：一片一个物理条目；一次放得下的不分片。
     新建后，同一记录的其他待办尽快复查（处理器升级后旧产物会被判为 superseded 并撤下，记录保留）。"""
     key = artifact_key(artifact)
-    lane = "new" if (datetime.now(record.first_seen_at.tzinfo) - record.first_seen_at).days < FRESH_DAYS else "backfill"
+    lane = _lane(record, datetime.now(record.first_seen_at.tzinfo))
     inserted = 0
     for piece in pieces or [None]:
         manifest = _manifest(target, record, artifact, meta, piece)
