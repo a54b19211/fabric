@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from clean import attachment_parse, clean_text, measure_extract, profile, registry_diff
 
-# graph packages are not cleaned: they are read through the graph interface, not as text
+# old graph packages (retired, moved to Atlas) are not cleaned
 UNCLEANED_SOURCES = ("reviewed_graph", "primekg_graph")
 # registry records whose versions are compared field by field (registry_diff)
 REGISTRY_DIFF_SOURCES = frozenset({"clinicaltrials"})

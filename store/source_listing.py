@@ -8,7 +8,7 @@ source's newest published_seq (kept on its fabric_sources row, demo and real ver
 from __future__ import annotations
 
 from clean import processors
-from fetch.catalog import CATALOG, GRAPH_SOURCES, RETIRED
+from fetch.catalog import CATALOG, RETIRED
 
 CAPABILITIES_VERSION = "datafabric.source_capabilities.v1"
 
@@ -23,7 +23,7 @@ def capabilities(source_id: str, readable: bool, fetch_enabled: bool) -> dict:
     applied = processors.applicable(source_id) if readable else {}
     return {
         "readable": readable,
-        "select": readable and source_id not in RETIRED and source_id not in GRAPH_SOURCES,
+        "select": readable and source_id not in RETIRED,
         "fetch": {"modes": modes} if modes else None,
         "attachments": {"versions": True} if "attachment_parse" in applied else None,
         "registry_diff": {"processor": applied["registry_diff"]} if "registry_diff" in applied else None,

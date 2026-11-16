@@ -43,8 +43,8 @@ def test_readable_sources_are_listed_by_id_and_the_retired_bridge_apart(library)
     ids = [item["source_id"] for item in body["sources"]]
     assert ids == sorted(ids) and set(ids) == set(SOURCE_CATALOG) - set(RETIRED)
     assert by_id(body["sources"])["nmpa"]["name"] == SOURCE_CATALOG["nmpa"]["name"]
-    (retired,) = body["retired_sources"]
-    assert retired["source_id"] == "legacy_documents" and retired["capabilities"]["readable"] is True
+    retired = {r["source_id"]: r for r in body["retired_sources"]}
+    assert retired["legacy_documents"]["capabilities"]["readable"] is True
 
 
 @pytest.mark.parametrize("source_id,select,modes,attachments,diff", [

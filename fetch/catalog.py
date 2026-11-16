@@ -247,14 +247,16 @@ SPECS: tuple[CollectionSpec, ...] = (
 
 # 不从外面采集、在 Fabric 里派生或受控导入的来源：在 fabric_sources 里有一行（管理员的可读开关），不进采集目录
 DERIVED = {
-    "reviewed_graph": "唐的有界审核图发布",
-    "primekg_graph": "PrimeKG 当前有界背景",
     "external_archive": "受控历史归档",  # 固定原件的受控导入（POST /api/fabric/archives）
 }
-# 图包：只经图谱接口读，不能被选作分析来源
-GRAPH_SOURCES = ("reviewed_graph", "primekg_graph")
-# 已退役（v3 6.3，2026-11-06 决定）：不再写入、不能被选、不作索引目标；旧编号经 legacy_aliases 照读
-RETIRED = {"legacy_documents": "已授权旧文档的精确冻结桥"}
+# 已退役：不再写入、不能被选、不作索引目标，已存的旧版本照读。
+# legacy_documents：v3 6.3（2026-11-06）决定，旧编号经 legacy_aliases 照读。
+# reviewed_graph、primekg_graph：图谱 2026-11-16 拆到 Atlas，图包由 Atlas 自己导入，Fabric 不再收
+RETIRED = {
+    "legacy_documents": "已授权旧文档的精确冻结桥",
+    "reviewed_graph": "唐的审核图发布（已移交 Atlas）",
+    "primekg_graph": "PrimeKG 背景图（已移交 Atlas）",
+}
 # 可读开关默认关的来源（V047）：去掉环境许可名单后多开放的来源，原名单找不回，先关上，由管理员逐个打开。NCCN 一定关
 DEFAULT_CLOSED = frozenset({
     "cde_zdyz", "fda_drug_safety", "fda_press", "fiercepharma", "gdelt_doc", "hkex", "local_files", "nccn",
