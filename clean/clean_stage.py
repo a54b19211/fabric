@@ -272,6 +272,16 @@ def _profile_row(r, prof, text_pv):
             "level": json.dumps(prof["reading_level"])}
 
 
+# 写编号（ops/backfill_identifiers.py 也用它）：已有的不重复写
+INSERT_IDENTIFIERS = """
+    INSERT INTO derived_identifiers
+      (version_id,processor_version,text_processor_version,kind,value,start_offset,end_offset)
+    SELECT :v,:pv,:tpv,:kind,:value,:s,:e
+    WHERE NOT EXISTS (SELECT 1 FROM derived_identifiers WHERE version_id=:v AND processor_version=:pv
+                      AND text_processor_version=:tpv AND kind=:kind AND value=:value AND start_offset=:s)
+"""
+
+
 def _write_rows(conn, clean_rows, id_rows, profile_rows, counts):
     """The batch's writes, in this order: clean texts, identifiers, profiles, then (with the profiles,
     in the same transaction) the index and extraction-check work they make due."""
@@ -285,13 +295,7 @@ def _write_rows(conn, clean_rows, id_rows, profile_rows, counts):
             WHERE NOT EXISTS (SELECT 1 FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv)
         """), clean_rows)
     if id_rows:
-        conn.execute(text("""
-            INSERT INTO derived_identifiers
-              (version_id,processor_version,text_processor_version,kind,value,start_offset,end_offset)
-            SELECT :v,:pv,:tpv,:kind,:value,:s,:e
-            WHERE NOT EXISTS (SELECT 1 FROM derived_identifiers WHERE version_id=:v AND processor_version=:pv
-                              AND text_processor_version=:tpv AND kind=:kind AND value=:value AND start_offset=:s)
-        """), id_rows)
+        conn.execute(text(INSERT_IDENTIFIERS), id_rows)
     if profile_rows:
         conn.execute(text("""
             INSERT INTO derived_profiles

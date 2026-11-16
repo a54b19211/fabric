@@ -1,6 +1,6 @@
 """清洗层：从正文里抽取并规范化编号（设计 v3 §3.3“解析与清洗”）。
 
-覆盖：NCT、CTR（CDE 药物临床试验登记号）、ChiCTR、PMID、PMCID、DOI、批准文号（国药准字）、
+覆盖：NCT、CTR（CDE 药物临床试验登记号）、ChiCTR、EU CT 号（CTIS）、PMID、PMCID、DOI、批准文号（国药准字）、
 带标签的批准文号/注册证号、受理号（CDE）、股票代码（A 股 / 北交所 / 港股）。
 全仓库只有这一份编号规则：站点提取器、来源投影、图谱模型的编号格式都从这里取（NCT_ID 等）。规范化后的同一编号用来把不同来源的同一试验、论文、
 药品、公司连起来——但只当同源链接和同一性候选。错连（假阳性）会把两件不相干的事并到一起，
@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import re
 
-PROCESSOR_VERSION = "datafabric.identifiers.v2"
+# v3（2026-11-16）：加 EU CT 号；同一编号在正文里出现多次只出一条。已洗过的版本用 ops/backfill_identifiers.py 补
+PROCESSOR_VERSION = "datafabric.identifiers.v3"
 
 # 编号两侧不能紧挨 ASCII 字母数字：XNCT012345678、NCT012345678（9 位）都不是 NCT
 _L = r"(?<![A-Za-z0-9])"
@@ -63,6 +64,10 @@ _CTR = re.compile(_L + r"CTR(20[0-9]{6})" + _R, _FLAGS)
 
 # ChiCTR：旧式 ChiCTR-类型码-8 位（类型码如 IOR、TRC、TNRC，3–4 个字母），新式 ChiCTR + 10 位
 _CHICTR = re.compile(_L + r"ChiCTR(?:-([A-Z]{3,4})-([0-9]{8})|([0-9]{10}))" + _R, _FLAGS)
+
+# EU CT 号：欧盟临床试验法规下 CTIS 给的试验编号 = 4 位年份-6 位（5 开头）-2 位-2 位，如 2024-515622-80-00。
+# 两侧不能再接数字、字母或连字符。旧的 EudraCT 号（2019-001234-56）不收：三段数字的写法和别的编号、日期太像
+_EUCT = re.compile(r"(?<![A-Za-z0-9-])(20[0-9]{2}-5[0-9]{5}-[0-9]{2}-[0-9]{2})(?![A-Za-z0-9-])", _FLAGS)
 
 # PMID：裸数字到处都是（例数、金额、日期），只有明确写了 PMID / PubMed ID 标签才算；
 # PMID 没有前导 0，1–8 位
@@ -215,6 +220,8 @@ def _trial_and_literature_hits(folded: str):
         else:
             value = f"ChiCTR-{m.group(1).upper()}-{m.group(2)}"
         yield "chictr", value, m.start(), m.end()
+    for m in _EUCT.finditer(folded):
+        yield "euct", m.group(1), m.start(), m.end()
     for m in _PMID.finditer(folded):
         yield "pmid", m.group(1), m.start(), m.end()
     for m in _PMCID.finditer(folded):
@@ -272,11 +279,17 @@ def _scan(text: str):
 
 
 def extract(text: str) -> list[dict]:
-    """每个命中：{"kind", "value"（规范化后）, "raw"（原文片段）, "start", "end"}；
-    start/end 是原文 text 的偏移，text[start:end] == raw。按 start 排序，同一位置不重复。"""
+    """每个编号：{"kind", "value"（规范化后）, "raw"（原文片段）, "start", "end"}；
+    start/end 是原文 text 的偏移，text[start:end] == raw。按 start 排序。同一个编号（kind + value）在正文里出现多次
+    只出一条，位置是第一次出现的地方：一份登记正文里同一个 NCT 号曾记了 14 条，一份说明书里同一个号 230 条。"""
     if not isinstance(text, str):
         raise TypeError("extract() 需要 str")
-    return _scan(text)
+    seen, first = set(), []
+    for hit in _scan(text):
+        if (hit["kind"], hit["value"]) not in seen:
+            seen.add((hit["kind"], hit["value"]))
+            first.append(hit)
+    return first
 
 
 def normalize(kind: str, raw: str) -> str | None:

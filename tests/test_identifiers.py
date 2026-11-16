@@ -9,6 +9,24 @@ import pytest
 from clean import identifiers as ids
 
 
+def test_eu_ct_number_of_ctis_is_extracted():
+    """Spot check 2026-11-16: 2024-515622-80-00 in a registry record's secondary ids was not extracted."""
+    text = "secondaryIdInfos: id: 2024-515622-80-00; type: CTIS (EU CT number). EudraCT 2019-001234-56"
+    hits = ids.extract(text)
+    assert [(h["kind"], h["value"]) for h in hits] == [("euct", "2024-515622-80-00")]  # the old EudraCT form is not taken
+    assert text[hits[0]["start"]:hits[0]["end"]] == "2024-515622-80-00"
+    assert ids.normalize("euct", " 2024-515622-80-00 ") == "2024-515622-80-00"
+    for not_one in ("2024-515622-80-001", "12024-515622-80-00", "2024-415622-80-00", "2024-515622-80-00-1",
+                    "A2024-515622-80-00"):
+        assert ids.extract(not_one) == [], not_one
+
+
+def test_an_identifier_mentioned_several_times_is_reported_once_at_its_first_mention():
+    text = "Rollover from NCT00048581 or NCT00048568. Completion of NCT00048581 (ＮＣＴ００048568) is required."
+    hits = ids.extract(text)
+    assert [(h["value"], h["start"]) for h in hits] == [("NCT00048581", 14), ("NCT00048568", 29)]
+
+
 def hits(text):
     return [(h["kind"], h["value"]) for h in ids.extract(text)]
 
@@ -26,7 +44,7 @@ def assert_offsets(text):
 
 
 def test_processor_version():
-    assert ids.PROCESSOR_VERSION == "datafabric.identifiers.v2"
+    assert ids.PROCESSOR_VERSION == "datafabric.identifiers.v3"
 
 
 # ---------- NCT ----------
@@ -203,7 +221,7 @@ def test_stock_suffix_forms():
 
 def test_stock_hk_normalised_to_four_digits():
     assert hits("腾讯控股（00700.HK）、阿里巴巴 09988.HK、0700.HK") == [
-        ("stock", "0700.HK"), ("stock", "9988.HK"), ("stock", "0700.HK")]
+        ("stock", "0700.HK"), ("stock", "9988.HK")]  # 00700.HK and 0700.HK are one code, reported once
     assert ids.normalize("stock", "01801.HK") == "1801.HK"
     assert ids.normalize("stock", "13800.HK") == "13800.HK"
 
