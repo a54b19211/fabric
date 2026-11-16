@@ -17,14 +17,15 @@
 | `api/` 对外 | 雷达读的 HTTP 接口：`api/routers/fabric.py`（`/api/fabric/*`） |
 | `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗 `clean.py`、附件 `attachments.py`、索引 `index.py` |
 | `weknora/` 桥接 | WeKnora 桥接服务（独立进程 18564，`ops/systemd/datafabric-weknora.service`）：上传、停用、特征、检索、重排，见代码地图 |
-| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、服务文件 `systemd/`、代码门槛 |
+| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`（规则改了以后 `--recompute <来源>` 重算）、补编号 `backfill_identifiers.py`、删重复版本 `dedupe_versions.py`、服务文件 `systemd/`、代码门槛 |
 
 谁调谁：`run/`、`api/` → `fetch/`、`clean/` → `store/`。存（`store/records.py`）不调读取和清洗，只用来源目录、投影和数据形状
 这些不连库、不联网的东西。图谱（抽取、消歧、审核、图发布）是另一个项目 Atlas，不在这里；资料库里旧的图包版本照常能读，不再能导入。
 
 ## 版本怎么定（`store/records.py` 的 `fingerprint`、`_publish`）
 
-每条原件算一个内容指纹：JSON 按键排序重写，去掉 ClinicalTrials 每次都改的 `versionHolder`，网页抓取不看 HTML
+每条原件算一个内容指纹：JSON 按键排序重写，去掉 ClinicalTrials 每次都改的 `versionHolder`，WHO 公告里同一个媒体文件链接的
+两种写法（真实路径 / 全零占位）只比 `sfvrsn`，网页抓取不看 HTML
 （只看解析出的标题、正文和附件清单），附件不看本机落盘路径 `store_path`；不是 JSON 的原样算。和这条记录的当前版本
 （`replaced_by` 为空的那个）比：相同就不存；不同就存一个新版本，旧版本的 `replaced_by` 指向它。原件只追加，A→B→A 是第三个版本。
 附件文件按 sha256 去重；定时刷新连续读到 3 条“已存且没变”就停。
@@ -53,7 +54,7 @@ python main_etl.py --only index                           # 送知识库处理�
 |---|---|---|
 | datafabric-scheduler | `python -m run.scheduler` | 到点给各来源建采集任务，放进队列 |
 | datafabric-fetch-worker | `rq worker … extraction` | 执行采集任务（`fetch/fetch_job.py`），原件存成版本 |
-| datafabric-clean | `python -m run.clean --loop` | 新版本的正文、编号、画像、登记差分；之后给画像过的版本打质量分（每轮限时 60 秒，到点做完手上那个版本才停） |
+| datafabric-clean | `python -m run.clean --loop` | 新版本的正文、编号、画像、登记差分（各来源轮流，每个来源新的先做；退役来源不洗）；之后给画像过的版本打质量分（每轮限时 60 秒，到点做完手上那个版本才停） |
 | datafabric-index | `python -m run.index` | 清洗正文送进 WeKnora |
 | datafabric-api | `uvicorn api.main:app` | HTTP 接口 |
 
