@@ -1,5 +1,5 @@
 """
-站点提取器和字段清洗（clean/fields.py）共用的文本小工具：空白、全角、去标签、标题。
+站点提取器共用的文本小工具：空白、全角、去标签、标题。
 日期规范在 fetch/extractors/dates.py；正文清洗只在 clean/clean_text.py。
 """
 

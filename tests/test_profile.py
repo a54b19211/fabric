@@ -94,3 +94,17 @@ def test_reading_level_is_what_fabric_has_not_what_a_model_read():
     got = pf.profile(source_id="europe_pmc", chars=10, warnings=[], identifiers=[], text="in vitro")
     assert got["processor_version"] == "datafabric.profile.v5"
     assert got["experiment_types"][0]["type"] == "in_vitro" and got["reading_level"]["level"] == "abstract"
+
+
+def test_quality_level_folds_route_format_and_credibility():
+    from clean.profile import quality_level
+
+    def prof(route, fmt="ok", cred="registry"):
+        return {"route": route, "quality": {"format": {"state": fmt}, "source_credibility": {"state": cred}}}
+
+    assert quality_level(None) is None
+    assert quality_level(prof("quarantine", "broken")) == "隔离"
+    assert quality_level(prof("weak_signal")) == "低"
+    assert quality_level(prof("normal")) == "高"
+    assert quality_level(prof("normal", "degraded")) == "中"
+    assert quality_level(prof("normal", cred="unknown")) == "中"

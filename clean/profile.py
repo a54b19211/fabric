@@ -9,7 +9,7 @@
   1. format：格式质量——ok / degraded（截断、缺摘要、上下标被拍平等，正文仍可用）/ broken（没有正文、解析失败）；
   2. source_credibility：来源可信度——按证据细类在注册表里的可信度类别给出（官方登记、官方通报、监管文件、文献索引、未证实…）；
   3. entity_match：实体匹配——这一层不做消歧（人工审核图谱负责），只记录抽到了几个编号，状态 not_assessed；
-  4. fact_check：事实核验——这一层不做（潘的核验），状态 not_checked。
+  4. fact_check：事实核验——这一层不做（输出前由 BioCheck 核验），状态 not_checked。
 - v3 6.2 可复用注释（v5）：
   - experiment_types：实验类型候选（in_vitro 体外 / animal 动物 / human 人体，可多值），每个带依据和原句定位
     （清洗正文里的字符范围和原文）。登记记录按来源性质是 human；监管公告、标签、召回等不是研究材料，记
@@ -37,6 +37,20 @@ BREAKING = ("no_body", "invalid_json", "not_a_record")
 
 # 可信度类别按证据细类取自注册表（fetch.evidence_types），这里不另写一份
 CREDIBILITY = {k: t.credibility for k, t in FINE_TYPES.items() if t.credibility}
+
+
+def quality_level(prof):
+    """画像折成一个质量等级（/clean-text?quality=true 给 Atlas 的门槛用）：分流 quarantine → 隔离，weak_signal → 低；
+    normal 里格式 ok 且来源可信度已知（不是 unknown/unverified）→ 高，其余 → 中。没有画像 → None。"""
+    if not prof:
+        return None
+    q = prof.get("quality") or {}
+    if prof.get("route") == "quarantine":
+        return "隔离"
+    if prof.get("route") == "weak_signal":
+        return "低"
+    good = (q.get("format") or {}).get("state") == "ok" and         (q.get("source_credibility") or {}).get("state") not in (None, "unknown", "unverified")
+    return "高" if good else "中"
 
 # 采集目录里的来源，文档类型就是目录写的第一种证据类型；目录外的只有 documents 库存的冻结桥
 NON_CATALOG_DOC_TYPES = {"legacy_documents": "stored_document"}
@@ -160,7 +174,7 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
         "source_credibility": cred,
         "entity_match": {"state": "not_assessed", "identifiers": len(identifiers),
                          "reason": "实体消歧由人工审核图谱负责"},
-        "fact_check": {"state": "not_checked", "reason": "事实核验在输出前由潘的核验负责"},
+        "fact_check": {"state": "not_checked", "reason": "事实核验在输出前由 BioCheck 核验负责"},
     }
     reasons = []
     if fmt["state"] == "broken":

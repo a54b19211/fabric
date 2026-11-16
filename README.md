@@ -12,12 +12,12 @@
 |---|---|
 | `main_etl.py` | 一个来源从抓到存的全过程，从上往下一步一个函数；调试和学习从这里读起 |
 | `fetch/` 抓 | 来源目录 `catalog.py`、读法 `sources.py`、原件投影 `projection.py`、网站读取 `site_crawler.py`、站点配置 `sites/`、详情页提取 `extractors/`、出网 `transport.py`、采集任务 `fetch_job.py`、定时刷新 `source_refresh.py` |
-| `clean/` 洗 | 正文 `clean_text.py`、编号 `identifiers.py`、画像 `profile.py`、登记差分 `registry_changes.py`，由 `clean_stage.py` 按版本批量做；字段清洗 `fields.py`、编号对齐 `align.py`（药名 `drug_names.py`）、质量分 `quality.py`，由 `quality_stage.py` 批量做；附件解析 |
+| `clean/` 洗 | 正文 `clean_text.py`、编号 `identifiers.py`、画像 `profile.py`、登记差分 `registry_changes.py`，由 `clean_stage.py` 按版本批量做；附件解析 |
 | `store/` 存 | 资料库：存版本和读版本 `records.py`、数据形状 `record_models.py`、送知识库 `index_publication.py`、检索 `retrieval.py`、迁移 `migrations/` |
 | `api/` 对外 | 雷达读的 HTTP 接口：`api/routers/fabric.py`（`/api/fabric/*`） |
-| `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗和打分 `clean.py`、附件 `attachments.py`、索引 `index.py` |
+| `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗 `clean.py`、附件 `attachments.py`、索引 `index.py` |
 | `weknora/` 桥接 | WeKnora 桥接服务（独立进程 18564，`ops/systemd/datafabric-weknora.service`）：上传、停用、特征、检索、重排，见代码地图 |
-| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、对齐离线评估 `align_offline.py`、质量分评估适配 `quality_eval_adapter.py`、服务文件 `systemd/`、代码门槛 |
+| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、服务文件 `systemd/`、代码门槛 |
 
 谁调谁：`run/`、`api/` → `fetch/`、`clean/` → `store/`。存（`store/records.py`）不调读取和清洗，只用来源目录、投影和数据形状
 这些不连库、不联网的东西。图谱（抽取、消歧、审核、图发布）是另一个项目 Atlas，不在这里；资料库里旧的图包版本照常能读，不再能导入。
@@ -29,13 +29,10 @@
 （`replaced_by` 为空的那个）比：相同就不存；不同就存一个新版本，旧版本的 `replaced_by` 指向它。原件只追加，A→B→A 是第三个版本。
 附件文件按 sha256 去重；定时刷新连续读到 3 条“已存且没变”就停。
 
-## 质量分（五维质量分，`clean/quality_stage.py`；和原版的不同写在 `clean/quality.py` 开头）
+## 质量等级（`clean/profile.py` · `quality_level`）
 
-画像过的版本再走一遍原版的“洗”：字段清洗和 L3 规范化（`fields.py`）→ 编号对齐（`align.py`：编号字段按来源本地查格式；药名切成
-候选名依次问 GSRS（配了才问）、PubChem、ChEMBL、OLS4、UniProt，GSRS/PubChem 查到就停，按“来源分层”取舍）→ 五维打分（`quality.py`），
-写 `derived_quality_scores`、`derived_authority_resolutions`。清洗正文一字不动，等级“隔离”不拦截；`/clean-text?quality=true` 带出分数。
-别和画像混：画像（`profile.py`）的 `quality` 是格式、来源可信度等四项状态（不算分），`route=quarantine` 是没有正文的分流。
-有库没查成的版本不存、下一轮再查；全都没查成（断网、不出网的实例）这一轮之后只做不用联网的，待打分的一页页往下翻，不会被堵住；多个进程可同时打分（`FOR UPDATE SKIP LOCKED`）。
+画像的 `quality` 是格式、来源可信度、实体匹配、事实核验四项状态，`route` 是分流。`/clean-text?quality=true` 把它折成一个等级给 Atlas：
+`route=quarantine` → 隔离，`weak_signal` → 低；`normal` 里格式 ok 且来源可信度已知 → 高，其余 → 中。
 
 ## 怎么跑
 
@@ -64,7 +61,7 @@ python main_etl.py --only index                           # 送知识库处理�
 - 抓、洗、存都要：`DATAFABRIC_DATABASE_URL`（资料库）；定时刷新再要 `DATAFABRIC_REDIS_URL`（采集队列）、
   `DATAFABRIC_WATCHES`（刷新哪些来源，进度存在资料库的 `fabric_source_watches`）。
 - 接口：`DATAFABRIC_READ_TOKEN` / `DATAFABRIC_ADMIN_TOKEN`；知识库：`DATAFABRIC_INDEX_TARGETS`、`WEKNORA_KDD_URL`、`WEKNORA_KDD_TOKEN`。
-- 可选：`DATAFABRIC_GSRS_URL`（本地 GSRS，药名先问它）；`DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（NCCN 走服务器上的 mihomo，
+- 可选：`DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（NCCN 走服务器上的 mihomo，
   只有站点配置写了 `proxy_env` 的站点用代理）；`DATAFABRIC_FETCH_ENABLED=false`（这个实例不出网，只读已存的版本）；
   磁盘余量 `DATAFABRIC_PUBLICATION_DISK_PATH`（默认当前目录）低于 `DATAFABRIC_PUBLICATION_MIN_FREE_BYTES`（默认 15 GB）时不建新的采集任务。
 
@@ -81,7 +78,7 @@ PostgreSQL 容器，跑完删掉）、`make check-lock`（要连 PyPI；服务�
 2. 抓：`fetch/catalog.py`（有哪些来源）→ `fetch/fetch_job.py` 的 `run_fetch_job` → `fetch/sources.py` 的
    `read_public` → 网站走 `fetch/site_crawler.py`，站点知识在 `fetch/sites/<站点>.py` 和 `fetch/extractors/`。
 3. 存版本：`store/records.py` 的 `finish_fetch` → `_publish`（投影 `fetch/projection.py`，上面“版本怎么定”）。
-4. 洗：`clean/clean_stage.py` 的 `process` → `clean_text.py`、`identifiers.py`、`profile.py`；质量分 `clean/quality_stage.py`；
+4. 洗：`clean/clean_stage.py` 的 `process` → `clean_text.py`、`identifiers.py`、`profile.py`；
    送知识库 `store/index_publication.py`；对外 `api/routers/fabric.py`。
 
 经过哪些文件、函数和表见 [docs/代码地图.md](docs/代码地图.md)（学生不用读 `tests/`）。出网只走 `fetch/transport.py` 的 `get`（限速、超时、429 重试），不要自己 `sleep`。
