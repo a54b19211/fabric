@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The integration suite (tests/integration_*.py) on throwaway PostgreSQL (paradedb) and Redis containers.
+# The integration suite (tests/integration_*.py) on a throwaway PostgreSQL (paradedb) container.
 #
 #   bash ops/run_integration_tests.sh [tests/integration_x.py ...]     (`make test-integration` runs all)
 #
-# Several fixtures only accept fixed loopback ports (18436, 18636), which may be taken on the
+# The fixtures only accept a fixed loopback port (18436), which may be taken on the
 # host. Those groups run inside a private network namespace (unshare -rn) in which small forwarders on
 # 127.0.0.1 reach the containers through their unix sockets; on the host the containers listen on 127.0.0.1
 # above 19800 only.
@@ -25,12 +25,11 @@ ROOT=$(pwd)
 PY=${PYTHON:-$ROOT/.venv/bin/python}
 PREFIX=${ITEST_PREFIX:-fabric-itest}
 PG_IMAGE=paradedb/paradedb:v0.25.11-pg17
-REDIS_IMAGE=redis:7.4-alpine
 [ -x "$PY" ] || { echo "no interpreter at $PY: run make venv first" >&2; exit 2; }
 
 R=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 PW=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
-PG=$PREFIX-pg-$R RTPG=$PREFIX-pg-rt-$R RD=$PREFIX-redis-$R
+PG=$PREFIX-pg-$R
 LABEL=fabric-itest.run
 MANIFEST=${ITEST_MANIFEST:-$ROOT/.test-artifacts/fabric-itest-$R.containers.jsonl}
 mkdir -p "$(dirname "$MANIFEST")"
@@ -108,44 +107,19 @@ trap 'exit 143' TERM
 record "\"event\":\"run\",\"run\":\"$R\",\"prefix\":\"$PREFIX\",\"label\":\"$LABEL=$R\""
 
 free_port() { for p in $(seq "$1" 19990); do ss -ltn | grep -q ":$p " || { echo "$p"; return; }; done; }
-P1=$(free_port 19871); P2=$(free_port $((P1 + 1))); P3=$(free_port $((P2 + 1)))
+P1=$(free_port 19871)
 mkdir -p "$SOCK"
 
 start pg "$PG" -e POSTGRES_PASSWORD="$PW" -e POSTGRES_DB=zk_fabric_test \
   -v "$SOCK":/var/run/postgresql -p "127.0.0.1:$P1:5432" "$PG_IMAGE" >/dev/null || exit 2
-start pg-runtime "$RTPG" -e POSTGRES_USER=datafabric_runtime_test -e POSTGRES_DB=datafabric_runtime_test \
-  -e POSTGRES_HOST_AUTH_METHOD=trust -p "127.0.0.1:$P2:5432" "$PG_IMAGE" >/dev/null || exit 2
-start redis "$RD" -p "127.0.0.1:$P3:6379" "$REDIS_IMAGE" >/dev/null || exit 2
-echo "containers: $PG (127.0.0.1:$P1), $RTPG ($P2), $RD ($P3); manifest $MANIFEST"
-for c in "$PG" "$RTPG"; do
-  for _ in $(seq 60); do docker exec "$c" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
-done
+echo "container: $PG (127.0.0.1:$P1); manifest $MANIFEST"
+for _ in $(seq 60); do docker exec "$PG" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
 sleep 3  # the image restarts PostgreSQL once after its init scripts
-for db in zk_fabric_test bioradar_kdd_opus_fabric zk_fabric_identity_test; do
-  [ "$db" = zk_fabric_test ] || docker exec "$PG" psql -U postgres -c "CREATE DATABASE $db" >/dev/null
-  for _ in $(seq 30); do
-    docker exec "$PG" psql -U postgres -d "$db" -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null 2>&1 && break
-    sleep 1
-  done
+for _ in $(seq 30); do
+  docker exec "$PG" psql -U postgres -d zk_fabric_test -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null 2>&1 && break
+  sleep 1
 done
-# the runtime database starts with only what the migrations expect (plpgsql, vector)
-for e in $(docker exec "$RTPG" psql -U datafabric_runtime_test -d datafabric_runtime_test -At \
-  -c "SELECT extname FROM pg_extension WHERE extname NOT IN ('plpgsql','vector')"); do
-  docker exec "$RTPG" psql -U datafabric_runtime_test -d datafabric_runtime_test \
-    -c "DROP EXTENSION IF EXISTS \"$e\" CASCADE" >/dev/null 2>&1
-done
-docker exec "$RTPG" psql -U datafabric_runtime_test -d datafabric_runtime_test \
-  -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null 2>&1
-
 if [ $# -gt 0 ]; then TARGETS="$*"; else TARGETS=$(ls tests/integration_*.py | tr '\n' ' '); fi
-NS="" RT="" ID=""
-for t in $TARGETS; do
-  case "$t" in
-    *integration_extraction_runtime*|*integration_research_read*) RT="$RT $t" ;;
-    *integration_identity_review*) ID="$ID $t" ;;
-    *) NS="$NS $t" ;;
-  esac
-done
 export PYTHONDONTWRITEBYTECODE=1
 OPTS="-p no:cacheprovider -o addopts= -q -rfEs"
 FWD="$PY $ROOT/ops/unix_forward.py"
@@ -154,7 +128,7 @@ FAILED=""
 # one private namespace per group: forwarders for the fixed ports, then pytest; the group's exit code is kept
 in_ns() {
   timeout 2400 unshare -rn bash -c "ip link set lo up
-    for p in 18436 18636; do $FWD $SOCK/.s.PGSQL.5432 \$p >/dev/null 2>&1 & done
+    for p in 18436; do $FWD $SOCK/.s.PGSQL.5432 \$p >/dev/null 2>&1 & done
     sleep 1; $PY -m pytest $OPTS $1; RC=\$?; kill \$(jobs -p); exit \$RC"
 }
 group() {  # name, then the command; records a failing group
@@ -163,20 +137,8 @@ group() {  # name, then the command; records a failing group
   echo "== $name"
   "$@" || FAILED="$FAILED $name"
 }
-if [ -n "$NS" ]; then
-  DATAFABRIC_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18436/zk_fabric_test \
-    group "netns group:$NS" in_ns "$NS"
-fi
-if [ -n "$ID" ]; then
-  DATAFABRIC_PUBLICATION_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18636/bioradar_kdd_opus_fabric \
-  DATAFABRIC_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18636/zk_fabric_identity_test \
-    group "identity group:$ID" in_ns "$ID"
-fi
-if [ -n "$RT" ]; then
-  DATAFABRIC_TEST_DB_PORT=$P2 DATAFABRIC_TEST_REDIS_PORT=$P3 \
-  DATAFABRIC_RESEARCH_TEST_DATABASE_URL=postgresql://datafabric_runtime_test@127.0.0.1:$P2/datafabric_runtime_test \
-    group "runtime group:$RT" timeout 900 "$PY" -m pytest $OPTS $RT
-fi
+DATAFABRIC_DATABASE_URL=postgresql://postgres:$PW@127.0.0.1:18436/zk_fabric_test \
+  group "netns group:$TARGETS" in_ns "$TARGETS"
 if [ -n "$FAILED" ]; then
   echo "integration groups that failed:$FAILED" >&2
   exit 1

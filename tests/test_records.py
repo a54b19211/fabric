@@ -1,9 +1,7 @@
 """固定原件投影和旧链路保护；联网完全用HTTP替身，PG另在integration_records运行。"""
 
 import json
-from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -172,48 +170,11 @@ def test_public_page_budget_is_partial_and_raw_original(monkeypatch):
 
 def test_unknown_enrollment_not_zero():
     from fetch.api_fields import _extract_extra_value
-    from graph.db.schemas import ClinicalTrialsExtra
 
     assert _extract_extra_value({}, {"path": "n", "type": "int"}) is None
     assert _extract_extra_value({"n": 0}, {"path": "n", "type": "int"}) == 0
     assert _extract_extra_value({"n": True}, {"path": "n", "type": "int"}) is None
-    assert ClinicalTrialsExtra().enrollment is None
 
-
-def test_legacy_no_database_is_not_saved(monkeypatch):
-    import graph.db.session
-    from graph.db import repository
-
-    @contextmanager
-    def absent():
-        yield None
-
-    monkeypatch.setattr(graph.db.session, "get_session", absent)
-    with pytest.raises(RuntimeError, match="未保存"):
-        repository.upsert_document(SimpleNamespace())
-
-
-def test_legacy_changed_text_rejected_before_old_result_write(monkeypatch):
-    import graph.db.session
-    from graph.db import repository
-
-    document = SimpleNamespace(raw_content="old raw", extraction_status="completed")
-    session = Mock()
-    session.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = document
-
-    @contextmanager
-    def existing():
-        yield session
-
-    monkeypatch.setattr(graph.db.session, "get_session", existing)
-    with pytest.raises(RuntimeError, match="旧结果已保留"):
-        repository.upsert_document(
-            SimpleNamespace(uuid="old", raw_content="changed raw")
-        )
-    assert (
-        document.raw_content == "old raw" and document.extraction_status == "completed"
-    )
-    session.flush.assert_not_called()
 
 
 def test_epmc_repeated_or_missing_cursor_is_not_eof(monkeypatch):

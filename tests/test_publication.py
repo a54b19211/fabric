@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from graph.publish.collected_document import (
+from fetch.legacy_documents import (
     CollectedDocument,
     collected_document,
     project_collected,
@@ -107,7 +107,7 @@ def test_no_protocol_is_text_and_delete_is_explicit_tombstone_not_empty_success(
 
 
 def test_collected_old_wrappers_are_not_rewritten():
-    from graph.publish.reviewed_graph import StoredDocument
+    from fetch.legacy_documents import StoredDocument
 
     raw = "SYNTHETIC original"
     old = StoredDocument(
@@ -172,13 +172,13 @@ def test_real_nmpa_collector_headers_are_not_narrative_and_originals_stay_exact(
     ],
 )
 def test_unrecognized_metadata_or_body_is_not_deleted(raw):
-    from graph.publish.collected_document import _narrative_text
+    from fetch.legacy_documents import _narrative_text
 
     assert _narrative_text(raw, "nmpa") == raw
 
 
 def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles_survive():
-    from graph.publish.collected_document import _narrative_text
+    from fetch.legacy_documents import _narrative_text
 
     raw = (
         "SYNTHETIC A<B, CD4<CD8 and <anti-BCMA> stay in prose.\n"
@@ -206,41 +206,3 @@ def test_only_real_html_tables_lose_markup_while_cell_text_and_biomedical_angles
         _narrative_text("Example <table>not a cell</table>", "nmpa")
         == "Example <table>not a cell</table>"
     )
-
-
-@pytest.mark.parametrize("unit", ["characters", "bytes"])
-def test_input_size_diagnostics_have_only_safe_field_limit_and_unit(unit):
-    from graph.publish.publication import _validation_error
-    from store.record_models import MAX_RECORD_BYTES
-
-    marker = "SYNTHETIC_VALUE_MUST_NOT_BE_RECORDED"
-    raw = marker + (
-        "x" * MAX_RECORD_BYTES
-        if unit == "characters"
-        else "药" * (MAX_RECORD_BYTES // 3 + 1)
-    )
-    with pytest.raises(ValidationError) as failure:
-        ArchiveRecord(
-            source_record_id="SYNTHETIC", record_kind="document", raw_content=raw
-        )
-    diagnostic = _validation_error(failure.value)
-    assert set(diagnostic) == {"code", "message", "field", "limit", "unit"}
-    assert diagnostic["code"] == "publication_record_too_large"
-    assert diagnostic["field"] == "raw_content"
-    assert diagnostic["limit"] == MAX_RECORD_BYTES and diagnostic["unit"] == unit
-    assert marker not in json.dumps(diagnostic)
-    assert "input_value" not in json.dumps(diagnostic)
-
-
-def test_other_validation_does_not_copy_input_or_exception_message():
-    from graph.publish.publication import _validation_error
-
-    marker = "SYNTHETIC_INVALID_SOURCE_VALUE_MUST_NOT_BE_RECORDED"
-    with pytest.raises(ValidationError) as failure:
-        ArchiveRecord(
-            source_record_id="bad\n" + marker, record_kind="document", raw_content="ok"
-        )
-    diagnostic = _validation_error(failure.value)
-    assert set(diagnostic) == {"code", "message"}
-    assert diagnostic["code"] == "publication_input_invalid"
-    assert marker not in json.dumps(diagnostic)

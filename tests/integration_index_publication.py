@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 
 from clean import clean_stage
-from graph.publish.collected_document import collected_document
+from fetch.legacy_documents import collected_document
 from store import index_publication as index
 from store import records, retrieval
 from store.migrations import runner

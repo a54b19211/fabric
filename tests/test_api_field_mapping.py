@@ -23,7 +23,6 @@
 from fetch.api_fields import _extract_extra_value, _get_nested
 from fetch.sites.fda.api_drug_label import CONFIG as LABEL_CFG
 from fetch.sites.fda.api_enforcement import CONFIG as ENFORCEMENT_CFG
-from graph.db.schemas import EXTRA_MODEL_MAP, validate_extra
 
 # 真实 openFDA 召回记录（2026-09-20 采集，uuid 0fa81856）
 RECORD_WITH_OPENFDA = {
@@ -154,30 +153,3 @@ def test_enforcement_approval_number_extracted_from_openfda():
     spec = ENFORCEMENT_CFG["extra_fields"]["approval_number"]
     assert _extract_extra_value(RECORD_WITH_OPENFDA, spec) == "NDA020779"
     assert _extract_extra_value(RECORD_WITHOUT_OPENFDA, spec) == ""
-
-
-def test_enforcement_extra_keeps_approval_number_after_validation():
-    """validate_extra 不能把新字段当未知字段丢掉。"""
-    raw = _extract_extra_value(
-        RECORD_WITH_OPENFDA, ENFORCEMENT_CFG["extra_fields"]["approval_number"]
-    )
-    out = validate_extra("fda_api_enforcement", {"drug_name": "VIRACEPT", "approval_number": raw})
-    assert out["approval_number"] == "NDA020779"
-    assert out["drug_name"] == "VIRACEPT"
-
-
-def test_label_extra_model_registered():
-    """fda_api_drug_label 之前不在 EXTRA_MODEL_MAP，extra 完全不受校验。"""
-    assert "fda_api_drug_label" in EXTRA_MODEL_MAP
-    out = validate_extra(
-        "fda_api_drug_label",
-        {"approval_number": "ANDA217782", "product_ndc": ["85742-007"], "spl_set_id": "x"},
-    )
-    assert out == {
-        "drug_name": "",
-        "approval_number": "ANDA217782",
-        "product_ndc": ["85742-007"],
-        "spl_set_id": "x",
-    }
-
-

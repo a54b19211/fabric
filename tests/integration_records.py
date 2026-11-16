@@ -1,5 +1,5 @@
 """资料库在真实 PostgreSQL 上（隔离 schema，不用 SQLite，不碰现役表）：版本只在内容指纹变了时新存（V042 前存的
-版本也一样），按模式和截止时间读、分页、变更、上一版，图包，登记差分，附件，GDELT 窗口。"""
+版本也一样），按模式和截止时间读、分页、变更、上一版，登记差分，附件，GDELT 窗口。"""
 
 import hashlib
 import json
@@ -9,7 +9,6 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-import legacy_bridge
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,13 +17,9 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from api.routers.fabric import router
-from graph.api.fabric_graph import router as fabric_graph_router
-from graph.publish import fabric_graph
-from graph.publish.graph_publish import bind_document_text, build_document_bundle
-from graph.publish.reviewed_graph import GraphDocumentRef, StoredDocument, document_native_id
 from store import records as store
 from store.migrations import runner
-from store.record_models import ArchiveImport, ArchiveRecord, FabricError, FetchRequest, canonical, sha256
+from store.record_models import ArchiveImport, ArchiveRecord, FabricError, FetchRequest, sha256
 
 READ = {"Authorization": "Bearer test-reader-only"}
 NMPA_PAGE = "https://www.nmpa.gov.cn/xxgk/ggtg/3.html"
@@ -51,7 +46,6 @@ def archive(records, available="2016-06-01"):
 def _client():
     app = FastAPI()
     app.include_router(router)
-    app.include_router(fabric_graph_router)
     return TestClient(app)
 
 
@@ -91,7 +85,6 @@ def pg_engine():
 def pg(pg_engine, monkeypatch):
     monkeypatch.setenv("DATAFABRIC_READ_TOKEN", "test-reader-only")
     monkeypatch.setenv("DATAFABRIC_ADMIN_TOKEN", "test-admin-only")
-    legacy_bridge.open_old_writer(monkeypatch)  # the graph packages here cite legacy versions, as before the retirement
     monkeypatch.setattr(store, "fabric_engine", lambda: pg_engine)
     runner.apply("fabric", store.fabric_engine())
     with pg_engine.begin() as conn:
@@ -563,299 +556,6 @@ def test_document_full_text_correction_survives_real_storage_and_old_version_rea
                                True, "current", datetime.now().astimezone())
     assert again.raw_content == old.raw_content == original.raw_content
     assert again.clean_text.endswith("40套、8000万元。")
-
-
-# ——图包：发布前核对引用的原件和引文（fabric_graph.import_graph），读图时核对引用的原件——
-
-
-def _synthetic_graph_observation():
-    # 明确教学数据，不伪称现役唐已有人工批准关系。
-    raw = "药物甲靶向蛋白乙。"
-    return {
-        "schema_version": "datafabric.legacy.graph.observation.v1",
-        "namespace": "fixture.tang",
-        "is_demo": True,
-        "scope_record_ids": ["demo-doc"],
-        "scope_record_count": 1,
-        "batch_offset": 0,
-        "selected_document_uuids": ["demo-doc"],
-        "next_document_offset": None,
-        "selection_truncated": False,
-        "documents": [
-            {
-                "uuid": "demo-doc",
-                "source_site": "external_archive",
-                "title": "明确合成的审核原件",
-                "raw_content": raw,
-            }
-        ],
-        "entities": [
-            {
-                "id": 1,
-                "source_doc_uuid": "demo-doc",
-                "entity_type": "Drug",
-                "entity_name": "药物甲",
-                "dict_id": 10,
-                "source_text": "药物甲",
-                "review_status": "approved",
-            },
-            {
-                "id": 2,
-                "source_doc_uuid": "demo-doc",
-                "entity_type": "Target",
-                "entity_name": "蛋白乙",
-                "dict_id": 20,
-                "source_text": "蛋白乙",
-                "review_status": "approved",
-            },
-        ],
-        "relations": [
-            {
-                "id": 3,
-                "source_doc_uuid": "demo-doc",
-                "from_entity_id": 1,
-                "to_entity_id": 2,
-                "relation_type": "TARGETS",
-                "relation_props": {},
-                "source_text": raw,
-                "review_status": "approved",
-            }
-        ],
-        "verified_dict_ids": ["10", "20"],
-        "merge_logs": [],
-    }
-
-
-def _fixture_document(value):
-    return StoredDocument(
-        source_doc_uuid=value["uuid"],
-        source_site=value["source_site"],
-        title=value.get("title") or value["uuid"],
-        source_url=value.get("source_url") or None,
-        original_raw_content=value["raw_content"],
-        original_raw_sha256=sha256(value["raw_content"]),
-        publish_date_raw=value.get("publish_date") or None,
-        original_created_at=str(value["created_at"]) if value.get("created_at") else None,
-        original_updated_at=str(value["updated_at"]) if value.get("updated_at") else None,
-    )
-
-
-def _publish_fixture_graph(observation, key):
-    """把一批明确的旧文档原件冻结成 legacy 版本，再发布引用它们的审核图（生产上由 graph.publish.publication 发表）。"""
-    documents = [_fixture_document(value) for value in observation["documents"]]
-    if not documents or len(documents) > 6:
-        raise FabricError("legacy_batch_budget", "每批须有1至6篇明确旧文档")
-    request = ArchiveImport(
-        source_id="legacy_documents", is_demo=observation.get("is_demo") is True,
-        scope_description="明确旧UUID本批原文冻结，不赋历史资格", declared_count=len(documents),
-        declared_complete=True,
-        records=[ArchiveRecord(source_record_id=document_native_id(doc), record_kind="document",
-                               raw_content=doc.model_dump_json()) for doc in documents],
-    )
-    run = legacy_bridge.write(request, key + ":documents")
-    with store.fabric_engine().begin() as conn:
-        now = store._now(conn)
-    refs, versions = [], {}
-    for version_id, doc in zip(run.version_ids, documents, strict=True):
-        record = store.read_version(version_id, "legacy_documents", document_native_id(doc), request.is_demo,
-                                    "current", now)
-        versions[record.version_id] = record
-        refs.append(GraphDocumentRef(source_id=record.source_id, source_record_id=record.source_record_id,
-                                     version_id=record.version_id, raw_sha256=record.raw_sha256,
-                                     origin_doc_uuid=doc.source_doc_uuid))
-    bundle = bind_document_text(build_document_bundle(observation, documents, refs), versions)
-    native = "legacy-graph:" + sha256(canonical({
-        "namespace": bundle.namespace, "scope": bundle.scope_manifest_sha256 or bundle.scope_record_ids,
-        "offset": bundle.batch_offset, "selected": bundle.selected_document_uuids}))
-    return fabric_graph.import_graph(ArchiveImport(
-        source_id="reviewed_graph", is_demo=bundle.is_demo, scope_description=bundle.scope_description,
-        declared_count=1, declared_complete=False,
-        records=[ArchiveRecord(source_record_id=native, record_kind="graph", raw_content=bundle.model_dump_json())],
-    ), key + ":graph")
-
-
-def _published_graph(pg, key="graph-fixture"):
-    observation = _synthetic_graph_observation()
-    original = _fixture_document(observation["documents"][0])
-    frozen = legacy_bridge.write(ArchiveImport(source_id="legacy_documents", is_demo=True,
-        scope_description="synthetic source before explicit fixture review", declared_count=1,
-        records=[ArchiveRecord(source_record_id=document_native_id(original), record_kind="document",
-            raw_content=original.model_dump_json())]), key + ":fixture-source")
-    saved = store.read_version(frozen.version_ids[0], "legacy_documents", document_native_id(original),
-        True, "current", datetime.now().astimezone())
-    stamp = datetime.now().astimezone().isoformat()
-    observation["dictionary_context"] = {}
-    # These are explicit synthetic audit inputs; the real review producer is tested separately.
-    for entity in observation["entities"]:
-        observation["dictionary_context"][str(entity["dict_id"])] = {
-            "id": entity["dict_id"], "is_verified": True, "verified_by": "synthetic-reviewer",
-            "verified_at": stamp, "verification_basis": "synthetic source check"}
-        entity.update(identity_confirmed_by="synthetic-reviewer", identity_confirmed_at=stamp,
-                      identity_confirmation_basis="synthetic fixed-source confirmation")
-    for item in observation["entities"] + observation["relations"]:
-        item["current_review_evidence"] = [{
-            "source_id": saved.source_id, "source_record_id": saved.source_record_id,
-            "version_id": saved.version_id, "raw_sha256": saved.raw_sha256,
-            "source_doc_uuid": original.source_doc_uuid, "quote": item["source_text"]}]
-    observation["relations"][0].update(reviewed_by="synthetic-reviewer", reviewed_at=stamp)
-    run = _publish_fixture_graph(observation, key)
-    with pg.begin() as conn:
-        payload = conn.execute(
-            text("SELECT payload FROM fabric_versions WHERE version_id=:id"),
-            {"id": run.version_ids[0]},
-        ).scalar_one()
-        now = store._now(conn)
-    return observation, run, payload, now
-
-
-def _graph_archive(payload, **extra):
-    return ArchiveImport(
-        source_id="reviewed_graph", is_demo=True, scope_description="explicit synthetic graph", declared_count=1,
-        declared_complete=False,
-        records=[ArchiveRecord(source_record_id=payload["source_record_id"], record_kind="graph",
-                               raw_content=payload["raw_content"])],
-        **extra,
-    )
-
-
-def test_graph_roundtrip_unicode_quote_and_idempotency(pg):
-    from graph.publish.reviewed_graph import GraphBundle
-
-    observation, run, payload, now = _published_graph(pg)
-    graph = GraphBundle.model_validate_json(payload["raw_content"])
-    assert graph.edges[0].binding_status == "bound"
-    assert graph.edges[0].evidence[0].quote == "药物甲靶向蛋白乙。"
-    assert graph.nodes[0].identity_status == "confirmed"
-    assert _publish_fixture_graph(observation, "graph-fixture").version_ids == run.version_ids
-    result = fabric_graph.read_graph_neighborhood(
-        run.version_ids[0], "reviewed_graph", payload["source_record_id"], True, "current", now,
-        seed_ids=["fixture.tang.entity_dict|10"], direction="out",
-    )
-    assert len(result.edges) == 1 and result.edges[0].target.id == "20"
-    assert result.graph_ref.version_id == run.version_ids[0]
-    assert result.coverage.scope == "selected_published_subgraph"
-    resolved = fabric_graph.read_graph_resolution(
-        run.version_ids[0], "reviewed_graph", payload["source_record_id"], True, "current", now, name="药物甲",
-    )
-    assert resolved.status == "resolved" and resolved.candidates[0].id == "10"
-
-
-def test_graph_quote_tamper_is_rejected_and_previous_versions_remain(pg):
-    from graph.publish.reviewed_graph import GraphBundle
-
-    _, _, payload, now = _published_graph(pg)
-    graph = GraphBundle.model_validate_json(payload["raw_content"])
-    graph.edges[0].evidence[0].quote = "伪造证据"
-    invalid = {**payload, "raw_content": graph.model_dump_json()}
-    with pytest.raises(FabricError) as error:
-        fabric_graph.import_graph(_graph_archive(invalid), "bad-quote")
-    assert error.value.code == "graph_quote_mismatch"
-    unchanged = store.read_version(payload["version_id"], "reviewed_graph", payload["source_record_id"], True,
-                                   "current", now)
-    assert unchanged.raw_sha256 == payload["raw_sha256"]
-    with pg.begin() as conn:
-        assert conn.execute(text("SELECT count(*) FROM fabric_versions WHERE record_kind='graph'")).scalar_one() == 1
-
-
-def test_current_graph_cannot_gain_old_archive_proof_or_future_merge(pg):
-    from graph.publish.reviewed_graph import GraphBundle, GraphRedirect
-
-    _, _, payload, now = _published_graph(pg)
-    request = _graph_archive(payload, proof={"available_at": {"value": "2016-01-01", "precision": "day"}})
-    with pytest.raises(FabricError) as error:
-        fabric_graph.import_graph(request, "bad-old-graph-proof")
-    assert error.value.code == "graph_history_unsupported"
-    graph = GraphBundle.model_validate_json(payload["raw_content"])
-    graph.redirects = [
-        GraphRedirect(
-            source={"namespace": "fixture.tang.entity_dict", "id": "9"},
-            target={"namespace": "fixture.tang.entity_dict", "id": "10"},
-            merge_log_id="fixture",
-            merged_at=now + timedelta(days=1),
-        )
-    ]
-    # 外部模型重新校验，避免绕开入口验证。
-    graph = GraphBundle.model_validate(graph.model_dump())
-    changed = {**payload, "raw_content": graph.model_dump_json()}
-    with pytest.raises(FabricError) as error:
-        fabric_graph.import_graph(_graph_archive(changed), "bad-future-merge")
-    assert error.value.code == "future_graph_merge"
-
-
-def test_graph_reads_reject_a_bound_document_not_visible_at_same_cutoff(pg):
-    _, _, payload, now = _published_graph(pg)
-    old_time = now - timedelta(days=2)
-    # 模拟已有旧版错误包的日期：只在临时schema插入，验证读取边界不会沿用包资格带入后见原件。
-    corrupted = {
-        **payload,
-        "version_id": sha256(payload["version_id"] + "explicit-test-old-date"),
-        "first_seen_at": old_time.isoformat(),
-        "received_at": old_time.isoformat(),
-    }
-    with pg.begin() as conn:
-        conn.execute(
-            text("""
-            INSERT INTO fabric_versions(version_id,source_id,is_demo,source_record_id,record_kind,first_seen_at,received_at,proof_available_at,published_seq,payload)
-            VALUES(:id,'reviewed_graph',true,:native,'graph',:first,:first,NULL,999,CAST(:payload AS jsonb))
-        """),
-            {"id": corrupted["version_id"], "native": corrupted["source_record_id"], "first": old_time,
-             "payload": canonical(corrupted)},
-        )
-    with pytest.raises(FabricError) as error:
-        fabric_graph.read_graph_resolution(corrupted["version_id"], "reviewed_graph", corrupted["source_record_id"],
-                                            True, "operational_replay", old_time + timedelta(hours=1), name="药物甲")
-    assert error.value.code == "graph_evidence_not_visible"
-
-
-def test_primekg_only_replays_background_after_local_first_seen(pg):
-    from graph.publish.graph_publish import publish_primekg
-
-    capture = {
-        "is_demo": False,
-        "source": "primekg_current_projection",
-        "observed_at": "2026-10-18T00:00:00Z",
-        "seed": {"node_source": "NCBI", "primekg_id": "1956"},
-        "has_more": True,
-        "rows": [
-            {
-                "from_node": {"name": "EGFR", "source": "NCBI", "id": "1956", "type": "gene/protein"},
-                "to_node": {"name": "synthetic disease", "source": "MONDO", "id": "1", "type": "disease"},
-                "relation_type": "disease_protein",
-                "properties": {"display_relation": "associated with"},
-            }
-        ],
-    }
-    run = publish_primekg(capture, "synthetic-primekg-shape")
-    with pg.begin() as conn:
-        row = conn.execute(
-            text("SELECT payload FROM fabric_versions WHERE version_id=:id"), {"id": run.version_ids[0]},
-        ).scalar_one()
-        now = store._now(conn)
-    result = fabric_graph.read_graph_resolution(
-        run.version_ids[0], "primekg_graph", row["source_record_id"], False, "current", now,
-        external_namespace="NCBI", external_id="1956",
-    )
-    assert result.status == "resolved" and result.candidates[0].identity_status == "background"
-    replayed = store.read_version(run.version_ids[0], "primekg_graph", row["source_record_id"], False,
-                                  "operational_replay", now)
-    assert replayed.version_id == run.version_ids[0] and replayed.facts["graph_kind"] == "background"
-    with pytest.raises(FabricError) as error:
-        store.read_version(run.version_ids[0], "primekg_graph", row["source_record_id"], False,
-                           "operational_replay", date("2018-01-01T00:00:00Z"))
-    assert error.value.code == "version_not_found"
-    with pytest.raises(FabricError) as error:
-        store.read_version(run.version_ids[0], "primekg_graph", row["source_record_id"], False,
-                           "public_history_reconstruction", now)
-    assert error.value.code == "graph_history_unsupported"
-
-
-def test_graph_manifest_cannot_bind_demo_document_into_real_package(pg):
-    _, _, payload, _ = _published_graph(pg)
-    request = _graph_archive(payload)
-    request.is_demo = False
-    with pytest.raises(FabricError) as error:
-        fabric_graph.import_graph(request, "demo-to-real-graph")
-    assert error.value.code == "graph_demo_mismatch"
 
 
 # ——登记差分（V022）：清洗时和上一版比着写；读取遵守模式和截止时间——

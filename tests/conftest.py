@@ -4,7 +4,7 @@ tests/ 共享 fixtures —— 所有 mock，不连接数据库。
 import sys
 from pathlib import Path
 
-# 将项目根目录加入 sys.path，确保测试能 import 项目模块（graph/disambiguation/、db/ 等）
+# 将项目根目录加入 sys.path，确保测试能 import 项目模块
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from unittest.mock import MagicMock, patch
@@ -39,13 +39,6 @@ def mock_session():
 def mock_engine():
     """Mock create_engine，阻止真实数据库连接。"""
     with patch("sqlalchemy.create_engine") as mock:
-        yield mock
-
-
-@pytest.fixture
-def mock_get_session():
-    """Mock graph.db.session.get_session，注入 mock_session。"""
-    with patch("graph.db.session.get_session") as mock:
         yield mock
 
 

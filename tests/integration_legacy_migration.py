@@ -11,9 +11,8 @@ import pytest
 from integration_records import _fetch_study, pg, pg_engine  # noqa: F401  -- 隔离库夹具
 from sqlalchemy import text
 
+from fetch.legacy_documents import CollectedDocument, document_native_id
 from fetch.legacy_migration import CONVERTER, migrate, plan
-from graph.publish.collected_document import CollectedDocument
-from graph.publish.reviewed_graph import document_native_id
 from store import records as store
 from store.record_models import ArchiveImport, ArchiveRecord, FabricError, sha256
 
@@ -264,23 +263,3 @@ def test_migration_never_changes_a_legacy_version_or_backfills_a_visibility_time
     assert real["first_seen_at"] >= adopted_after - timedelta(seconds=5)  # adopted now, not in 2019
     assert real["first_seen_at"].year >= 2026 and real["proof_available_at"] is None
     assert "2019-03-01" in json.dumps(alias_row["claimed"], default=str)  # the old claim is kept as a claim only
-
-
-def test_a_new_graph_package_may_not_cite_a_retired_source_and_an_old_one_still_reads(lpg, monkeypatch):
-    """N12: a package published now cites the real version a legacy one became; a package published before keeps
-    validating and reading."""
-    from integration_records import _publish_fixture_graph, _synthetic_graph_observation
-
-    observation = _synthetic_graph_observation()
-    old = _publish_fixture_graph(observation, "before-retirement")  # the bridge and its refusal are open (fixture)
-    assert old.version_ids
-    # the refusal is back in force; the writer stays open so the same documents are adopted again (idempotently)
-    from graph.publish import fabric_graph
-
-    monkeypatch.setattr(fabric_graph, "_refuse_retired_refs", legacy_bridge.REFUSE_RETIRED_REFS)
-    with pytest.raises(FabricError) as error:
-        _publish_fixture_graph(observation, "after-retirement")
-    assert error.value.code == "graph_evidence_retired_source" and "legacy_documents" in error.value.message
-    with store.fabric_engine().begin() as conn:
-        stored = conn.execute(text("SELECT count(*) FROM fabric_versions WHERE source_id='reviewed_graph'")).scalar_one()
-    assert stored == 1  # the old package is still there, the new one was not written
