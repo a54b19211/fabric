@@ -23,47 +23,6 @@ class _AppSettings(BaseSettings):
     # ======================== 云端 API 密钥 ========================
     MINERU_API_BASE: str = "http://100.121.201.73:8000"
 
-    # ── LLM（OpenAI 兼容协议，支持 Qwen / DeepSeek / GPT / 本地 Ollama 等）──
-    # 实体抽取阶段使用（图谱节点/关系抽取）
-    # 爬虫阶段不调用 LLM，只用 Trafilatura + MinerU
-    LLM_API_KEY: str = ""
-    LLM_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    LLM_MODEL_NAME: str = "qwen-plus"
-
-    # 实体抽取专用模型（可选，留空则复用 LLM_* 配置）
-    EXTRACTION_LLM_API_KEY: str = ""
-    EXTRACTION_LLM_API_BASE: str = ""
-    EXTRACTION_LLM_MODEL_NAME: str = ""
-
-    # 消歧精排服务地址（图谱用，可选，留空则复用 LLM_API_BASE）
-    RERANK_LLM_API_BASE: str = ""
-
-    # ── Embedding（DashScope text-embedding-v3，消歧向量检索用）──
-    EMBEDDING_API_KEY: str = ""          # 留空则复用 LLM_API_KEY
-    EMBEDDING_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    EMBEDDING_MODEL_NAME: str = "text-embedding-v3"
-    EMBEDDING_DIMENSIONS: int = 1024     # text-embedding-v3 输出维度
-
-    @property
-    def EMBEDDING_KEY(self) -> str:
-        return self.EMBEDDING_API_KEY or self.LLM_API_KEY
-
-    @property
-    def RERANK_API_BASE(self) -> str:
-        return self.RERANK_LLM_API_BASE or self.LLM_API_BASE
-
-    @property
-    def EXTRACTION_API_KEY(self) -> str:
-        return self.EXTRACTION_LLM_API_KEY or self.LLM_API_KEY
-
-    @property
-    def EXTRACTION_API_BASE(self) -> str:
-        return self.EXTRACTION_LLM_API_BASE or self.LLM_API_BASE
-
-    @property
-    def EXTRACTION_MODEL_NAME(self) -> str:
-        return self.EXTRACTION_LLM_MODEL_NAME or self.LLM_MODEL_NAME
-
     # ======================== 本地数据根目录 ========================
     DATA_ROOT: Path = Path("data")
 
@@ -76,21 +35,13 @@ class _AppSettings(BaseSettings):
     MAX_CONCURRENCY: int = 3                # 并发任务数，防封 IP
     TASK_RETRIES: int = 3
     TASK_RETRY_DELAY: int = 10              # 秒
-    EXTRACTION_CONCURRENCY: int = 3         # LLM 抽取 Worker 数量（并行文档数）
 
-    # ======================== 任务队列 ========================
-    TASK_QUEUE_BACKEND: str = "memory"      # "memory" | "redis" — 任务队列后端
-    REDIS_URL: str = "redis://localhost:6379/0"  # Redis 连接地址（backend=redis 时使用）
-
-    # ======================== 远程数据库 ========================
-    # 支持 PostgreSQL / MySQL，留空则不推送
+    # ======================== zk 文档库（只读：站点附件链接，fetch/site_crawler.py）========================
     DB_HOST: str = ""
     DB_PORT: int = 5432
     DB_NAME: str = ""
     DB_USER: str = ""
     DB_PASSWORD: str = ""
-    # 连接池大小（需容纳前端查询 + 抽取 worker 并发）
-    DB_POOL_SIZE: int = 20
 
     @property
     def DB_URL(self) -> str:
@@ -101,11 +52,6 @@ class _AppSettings(BaseSettings):
             f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
-
-    # ======================== WeKnora 同步配置 ========================
-    WEKNORA_BASE_URL: str = "http://localhost:8080"
-    WEKNORA_API_KEY: str = ""
-    WEKNORA_KB_ID: str = ""
 
 
 # 全局单例——整个项目统一用这个

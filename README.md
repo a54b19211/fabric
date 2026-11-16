@@ -16,11 +16,10 @@
 | `store/` 存 | 资料库：存版本和读版本 `records.py`、数据形状 `record_models.py`、送知识库 `index_publication.py`、检索 `retrieval.py`、迁移 `migrations/` |
 | `api/` 对外 | 雷达读的 HTTP 接口：`api/routers/fabric.py`（`/api/fabric/*`）和 `measurements.py` |
 | `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗和打分 `clean.py`、附件 `attachments.py`、索引 `index.py`、测量 `measure.py` |
-| `graph/` 图谱 | 对象库、模型抽取、消歧、人工审核、图发布（常驻 `graph/publish/publisher.py`）和审核页面（唐组维护，徐组不用读） |
 | `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`、对齐离线评估 `align_offline.py`、徐子雯论文评估的适配 `xu_eval_adapter.py`、服务文件 `systemd/`、代码门槛 |
 
 谁调谁：`run/`、`api/` → `fetch/`、`clean/` → `store/`。存（`store/records.py`）不调读取和清洗，只用来源目录、投影和数据形状
-这些不连库、不联网的东西。`graph/` 用上面这些；反过来只有存图包时的投影交给 `graph/`（图包只有图谱自己存）。抓洗存不用图谱的库。
+这些不连库、不联网的东西。图谱（抽取、消歧、审核、图发布）是另一个项目 Atlas，不在这里；资料库里旧的图包版本照常能读，不再能导入。
 
 ## 版本怎么定（`store/records.py` 的 `fingerprint`、`_publish`）
 
@@ -60,7 +59,6 @@ python main_etl.py --only index                           # 测量、送知识�
 | datafabric-index | `python -m run.index` | 清洗正文送进 WeKnora |
 | datafabric-measure | `python -m run.measure` | 从 WHO 通报正文读数字（未核的读数也带标记往下流） |
 | datafabric-api | `uvicorn api.main:app` | HTTP 接口 |
-| datafabric-graph-publisher | `python -m graph.publish.publisher` | 图谱的：原采集库里的待办发表进资料库（唐组，抓洗存不用它） |
 
 附件正文解析 `python -m run.attachments --loop` 没有服务文件，要用时手动起。环境变量：
 - 抓、洗、存都要：`DATAFABRIC_DATABASE_URL`（资料库）；定时刷新再要 `DATAFABRIC_REDIS_URL`（采集队列）、
@@ -69,13 +67,12 @@ python main_etl.py --only index                           # 测量、送知识�
 - 可选：`DATAFABRIC_GSRS_URL`（本地 GSRS，药名先问它）；`DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（NCCN 走 zktest 上的 mihomo，
   只有站点配置写了 `proxy_env` 的站点用代理）；`DATAFABRIC_FETCH_ENABLED=false`（这个实例不出网，只读已存的版本）；
   磁盘余量 `DATAFABRIC_PUBLICATION_DISK_PATH`（默认当前目录）低于 `DATAFABRIC_PUBLICATION_MIN_FREE_BYTES`（默认 15 GB）时不建新的采集任务。
-- 只有图发布要：`DATAFABRIC_PUBLICATION_DATABASE_URL`（原采集库）和其余 `DATAFABRIC_PUBLICATION_*`。
 
 来源能不能读看 `fabric_sources.read_enabled`。升级旧库：V042 加 `fingerprint`、`replaced_by`（再跑 `ops/backfill_fingerprint.py`
 补旧指纹，不补也能用）；V043、V044 质量分表和对齐表；V045 `fabric_source_watches`（刷新进度从原采集库挪来，从新周期开始）；V046 只改名：表 `history_*` → `fabric_*`。
 
 测试：`make test`（单元，不连库）、`make lint`、`make metrics`（函数 80 行、复杂度 20 的门槛）、`make test-integration`（起临时
-PostgreSQL/Redis 容器，跑完删掉）、`make check-lock`（要连 PyPI；zktest 上临时加 `HTTPS_PROXY=http://127.0.0.1:7890`）。
+PostgreSQL 容器，跑完删掉）、`make check-lock`（要连 PyPI；zktest 上临时加 `HTTPS_PROXY=http://127.0.0.1:7890`）。
 
 ## 读代码的顺序
 
