@@ -1,7 +1,8 @@
 """GET /api/fabric/sources: every fabric_sources row with its name, and the few capabilities the radar reads.
 
 Readable = read_enabled in fabric_sources. Readable sources go to `sources`; retired sources (readable or not) go to `retired_sources`; any other
-source that is not readable is left out (the radar treats a source it does not see as not readable).
+source that is not readable is left out (the radar treats a source it does not see as not readable). max_seq: the
+source's newest published_seq (kept on its fabric_sources row, demo and real versions share it), what /changes reads up to.
 """
 
 from __future__ import annotations
@@ -38,7 +39,8 @@ def listing(rows) -> dict:
     for row in rows:
         source_id, ok = row["source_id"], row["read_enabled"] is True
         name = (SOURCE_CATALOG.get(source_id) or row["catalog"]).get("name")
-        entry = {"source_id": source_id, "name": name, "capabilities": capabilities(source_id, ok, fetch_enabled)}
+        entry = {"source_id": source_id, "name": name, "max_seq": row["published_seq"],
+                 "capabilities": capabilities(source_id, ok, fetch_enabled)}
         if source_id in RETIRED:
             retired.append(entry)
         elif ok:

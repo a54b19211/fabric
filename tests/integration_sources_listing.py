@@ -1,5 +1,5 @@
 """GET /api/fabric/sources against a migrated fabric library: readable sources, retired ones, the radar's capabilities;
-the source switches (/admin/sources, V047)."""
+the source switches (/admin/sources, V047) and the batch version read (/versions)."""
 
 import json
 
@@ -14,6 +14,7 @@ from fetch.catalog import RETIRED
 from fetch.sources import SOURCE_CATALOG
 from store import records as store
 from store.migrations import runner
+from store.record_models import ArchiveImport, ArchiveRecord
 
 
 @pytest.fixture
@@ -81,7 +82,7 @@ def test_a_new_library_starts_with_the_default_closed_sources_unreadable(pg, mon
     rows = by_id(router.admin_sources()["sources"])
     assert rows["nccn"]["read_enabled"] is False and rows["pubmed"]["read_enabled"] is False
     assert rows["clinicaltrials"]["read_enabled"] is True and rows["nccn"]["fetch_enabled"] is True
-    assert rows["clinicaltrials"]["latest_run"] is None
+    assert rows["clinicaltrials"]["latest_run"] is None and rows["clinicaltrials"]["max_seq"] == 0
 
 
 def test_a_switch_change_is_logged_and_stops_the_scheduled_fetch(library, monkeypatch):
@@ -96,3 +97,16 @@ def test_a_switch_change_is_logged_and_stops_the_scheduled_fetch(library, monkey
         router.admin_source_switches("no_such_source", router.SourceSwitches(read_enabled=True))
     assert missing.value.status_code == 404
 
+
+def test_versions_by_id_lists_found_ones_like_changes_and_the_rest_as_missing(library):
+    raw = json.dumps({"record_kind": "document", "title": "synthetic"})
+    run = store.import_archive(ArchiveImport(
+        source_id="external_archive", is_demo=True, scope_description="synthetic", declared_count=1,
+        records=[ArchiveRecord(source_record_id="don-1", record_kind="document", raw_content=raw)],
+        proof={"available_at": {"value": "2026-10-29", "precision": "day"}}), "versions-a")
+    (version_id,) = run.version_ids
+    body = router.versions(version_id + "," + "0" * 64)
+    (item,) = body["items"]
+    assert body["missing"] == ["0" * 64]
+    assert item == store.list_changes("external_archive", True)["items"][0]
+    assert by_id(router.sources()["sources"])["external_archive"]["max_seq"] == 1

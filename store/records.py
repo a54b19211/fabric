@@ -96,7 +96,7 @@ def sources_receipt():
 
     with fabric_engine().begin() as conn:
         rows = list(conn.execute(text(
-            "SELECT source_id, read_enabled, catalog FROM fabric_sources ORDER BY source_id")).mappings())
+            "SELECT source_id, read_enabled, catalog, published_seq FROM fabric_sources ORDER BY source_id")).mappings())
     return source_listing.listing(rows)
 
 
@@ -639,6 +639,23 @@ def list_changes(source_id, is_demo, *, after=0, limit=25):
         return {"schema_version": "datafabric.history.changes.v1",
                 "items": [item.model_dump(mode="json") for item in items], "max_seq": max_seq,
                 "next_after": items[-1].published_seq if more else max_seq}
+
+
+def versions_by_id(version_ids):
+    """GET /api/fabric/versions?version_ids=a,b：按版本号批量取版本，条目和 /changes 的一样（带 source_id、source_record_id）。
+    不存在的、或来源 read_enabled 关着的，列在 missing 里。按主键查，一次最多 100 个。"""
+    if not 1 <= len(version_ids) <= 100 or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in version_ids):
+        raise FabricError("query_budget", "一次最多 100 个合法版本号", 422)
+    with fabric_engine().begin() as conn:
+        rows = conn.execute(text(
+            "SELECT v.payload FROM fabric_versions v JOIN fabric_sources s ON s.source_id=v.source_id "
+            "WHERE v.version_id=ANY(:ids) AND s.read_enabled"), {"ids": list(version_ids)}).mappings().all()
+    items, more = _page(rows, len(rows))
+    if more:
+        raise FabricError("response_budget", "这些版本合起来超过响应上限，分几次取", 413)
+    found = {item.version_id for item in items}
+    return {"schema_version": "datafabric.fabric.versions.v1", "items": [item.model_dump(mode="json") for item in items],
+            "missing": [v for v in dict.fromkeys(version_ids) if v not in found]}
 
 
 def version_differences(source_id, is_demo, version_ids, mode, cutoff):

@@ -13,7 +13,7 @@ from store import records
 from store.record_models import FabricError
 
 LATEST_RUN = """
-SELECT s.source_id, s.read_enabled, s.fetch_enabled,
+SELECT s.source_id, s.read_enabled, s.fetch_enabled, s.published_seq AS max_seq,
        r.id AS run_id, r.kind, r.state, r.created_at, r.completed_at,
        r.error->>'code' AS error_code,
        (SELECT jsonb_build_object('changed_by', l.changed_by, 'changed_at', l.changed_at) FROM fabric_source_switch_log l
@@ -56,7 +56,7 @@ def list_sources() -> dict:
             "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
             "error_code": row["error_code"]}
         sources.append({"source_id": row["source_id"], "read_enabled": row["read_enabled"],
-                        "fetch_enabled": row["fetch_enabled"], "latest_run": run,
+                        "fetch_enabled": row["fetch_enabled"], "max_seq": row["max_seq"], "latest_run": run,
                         "watches": watches.get(row["source_id"], []), "last_change": row["last_change"]})
     return {"sources": sources}
 

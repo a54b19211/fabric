@@ -185,6 +185,12 @@ def records(
     )
 
 
+@router.get("/versions", dependencies=[Depends(require_read)])
+def versions(version_ids: str = Query(min_length=64, max_length=6500)):
+    """按版本号批量取版本（逗号分隔，最多 100 个）：条目和 /changes 的一样，不存在或不可读的在 missing 里。"""
+    return _call(store.versions_by_id, [v for v in version_ids.split(",") if v])
+
+
 @router.get(
     "/versions/{version_id}",
     response_model=VersionRecord,
