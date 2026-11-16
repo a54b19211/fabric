@@ -222,11 +222,11 @@ def _project(source_id: str, item: ArchiveRecord) -> dict:
         from fetch.who_don import project_who
 
         return project_who(item, data)
-    if source_id in {"legacy_documents", "reviewed_graph", "primekg_graph"}:
-        from graph.publish.reviewed_graph import project_graph_record
+    if source_id == "legacy_documents":
+        from fetch.legacy_documents import project_legacy
 
         try:
-            return project_graph_record(source_id, item, data)
+            return project_legacy(item, data)
         except ValueError:
             raise FabricError("invalid_graph_fields", "图包或旧文档桥字段不符合固定格式") from None
     projector = {"clinicaltrials": _project_clinicaltrials, "fda_crl": _project_fda_crl,

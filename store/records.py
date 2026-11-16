@@ -29,7 +29,6 @@ from functools import lru_cache
 
 from sqlalchemy import create_engine, text
 
-from fetch.catalog import GRAPH_SOURCES
 from fetch.projection import project_record
 from store.record_models import (
     MAX_RESPONSE_BYTES,
@@ -301,13 +300,11 @@ def _new_run(conn, source_id, is_demo, kind, body, key, scope):
 LEGACY_RETIRED = ("legacy_retired", "旧文档冻结桥 legacy_documents 已退役：不再写入，旧版本按旧编号仍可读")
 
 
-def import_archive(request: ArchiveImport, key: str | None = None, *, graph_checked=False):
-    """导入一包原件（场景回放、图谱发布、本地文件），和抓取一样存成版本。proof.available_at 给了的，这批新版本在
-    public_history_reconstruction 模式下从那个时间起可见。图包在导入前由 graph/publish/fabric_graph.py 核对。"""
+def import_archive(request: ArchiveImport, key: str | None = None):
+    """导入一包原件（场景回放、本地文件），和抓取一样存成版本。proof.available_at 给了的，这批新版本在
+    public_history_reconstruction 模式下从那个时间起可见。图包来源没有投影函数，不能导入（unsupported_source）。"""
     if request.source_id == "legacy_documents":
         raise FabricError(*LEGACY_RETIRED, 410)
-    if request.source_id in GRAPH_SOURCES and not graph_checked:
-        raise FabricError("graph_import_unchecked", "图包要经 graph/publish/fabric_graph.py 的 import_graph 导入", 422)
     prepared = [(item, project_record(request.source_id, item)) for item in request.records]
     body = request.model_dump(mode="json")
     body["records"] = [{"source_record_id": r.source_record_id, "record_kind": r.record_kind}

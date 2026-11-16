@@ -1,15 +1,14 @@
 """Database migrations: run the versions/V*.sql files a database has not run yet, in order.
 
-    python -m store.migrations.runner --db {app|fabric|publication} --plan    # list the files still to run
-    python -m store.migrations.runner --db {app|fabric|publication} --apply   # run them
+    python -m store.migrations.runner --db fabric --plan    # list the files still to run
+    python -m store.migrations.runner --db fabric --apply   # run them
 
-app is the object library, fabric the fabric library (资料库), publication the original collection library with the
-publication outbox; files_for() says which file is whose. Each file runs in one transaction with its ledger row. The
-ledgers are the tables the earlier runners wrote, so nothing they ran is run again:
-- fabric, publication: fabric_schema_ledger_events; a version has run when its latest event is applied,
-  observed_baseline or compat_mapped (the last two: taken over by the former --adopt-baseline);
-- app: schema_migrations (+ schema_migrations_shared_slot); a file has run when a row has its description (the team
-  line ran today's V020 and V033-V035 under other numbers, with the same descriptions).
+fabric is the fabric library (资料库); files_for() says which file is its. Each file runs in one transaction with its
+ledger row. The ledger is fabric_schema_ledger_events, the table the earlier runners wrote, so nothing they ran is run
+again; a version has run when its latest event is applied, observed_baseline or compat_mapped (the last two: taken
+over by the former --adopt-baseline).
+V001-V016, V019, V026 and V033-V035 belonged to the graph's object library and the collection library's publication
+outbox (the graph is now its own project); they stay here as the record of what those databases ran.
 """
 
 from __future__ import annotations
@@ -27,11 +26,9 @@ from sqlalchemy import text
 VERSIONS = Path(__file__).parent / "versions"
 EVENTS = "fabric_schema_ledger_events"
 LOCK_KEY = 0x4661627269634D67  # the advisory lock the former runner took too: two runs never overlap
-ENGINES = {"app": ("graph.db.session", "get_engine"), "fabric": ("store.records", "fabric_engine"),
-           "publication": ("graph.publish.publication", "publication_engine")}
-# there while the role's ledger is empty: the database was built without this ledger (before it, or by the app role,
-# which runs V019 and V026 too); its files are not run again
-FIRST_TABLE = {"fabric": "fabric_sources", "publication": "publication_outbox"}
+ENGINES = {"fabric": ("store.records", "fabric_engine")}
+# there while the role's ledger is empty: the database was built without this ledger; its files are not run again
+FIRST_TABLE = {"fabric": "fabric_sources"}
 # Until V046 the fabric library was called "history": its ledger rows were written under db_role 'history' and its
 # first table was history_sources. A database that has not run V046 yet still has both; done() reads them as the
 # fabric role's, and V046 renames the tables and relabels the rows.
@@ -40,11 +37,6 @@ EVENT_LEDGER = (f"CREATE TABLE IF NOT EXISTS {EVENTS} (event_id bigserial PRIMAR
                 "version text NOT NULL, file text NOT NULL, event text NOT NULL, checksum_md5 text NOT NULL, "
                 "sha256 text NOT NULL, evidence jsonb NOT NULL DEFAULT '{}'::jsonb, actor text NOT NULL, "
                 "at timestamptz NOT NULL DEFAULT clock_timestamp())")
-APP_LEDGER = ("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, description TEXT DEFAULT '', "
-              "checksum TEXT DEFAULT '', applied_at TIMESTAMPTZ DEFAULT NOW())")
-SHARED_SLOT = ("CREATE TABLE IF NOT EXISTS schema_migrations_shared_slot (version TEXT PRIMARY KEY, description "
-               "TEXT NOT NULL, checksum TEXT NOT NULL, slot_held_by TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL "
-               "DEFAULT NOW())")
 # V008-V011 carry their own BEGIN; and COMMIT; lines: left out, so the file runs inside the runner's transaction
 OWN_TRANSACTION = re.compile(r"(?im)^[ \t]*(BEGIN|COMMIT)[ \t]*;[ \t]*$")
 
@@ -57,17 +49,9 @@ def version(path: Path) -> str:
     return path.name.split("__", 1)[0]
 
 
-def description(path: Path) -> str:
-    return path.stem.split("__", 1)[1].replace("_", " ")
-
-
 def files_for(role: str) -> list[Path]:
-    """app: V001-V035. publication: V019, V026. fabric: V017-V032 without those two, and every file after V035."""
+    """fabric: V017-V032 without V019 and V026, and every file after V035."""
     def belongs(n: int) -> bool:
-        if role == "app":
-            return n <= 35
-        if role == "publication":
-            return n in (19, 26)
         return n >= 17 and n not in (19, 26, 33, 34, 35)
 
     return sorted(p for p in VERSIONS.glob("V*.sql") if belongs(int(version(p)[1:])))
@@ -80,13 +64,6 @@ def has_table(conn, name: str) -> bool:
 def done(conn, role: str) -> set[str]:
     """The names of the role's files its ledger shows as run."""
     files = files_for(role)
-    if role == "app":
-        tables = [t for t in ("schema_migrations", "schema_migrations_shared_slot") if has_table(conn, t)]
-        recorded = {d for t in tables for d in conn.execute(text(f"SELECT description FROM {t}")).scalars()}
-        unknown = recorded - {description(p) for p in files}
-        if unknown:
-            raise MigrationError(f"schema_migrations has rows that no file today stands for: {sorted(unknown)}")
-        return {p.name for p in files if description(p) in recorded}
     old_role, old_first = BEFORE_V046.get(role, (role, FIRST_TABLE[role]))
     latest = {}  # version -> its latest event
     if has_table(conn, EVENTS):
@@ -114,21 +91,11 @@ def run_file(conn, role: str, path: Path) -> None:
     sql = path.read_text(encoding="utf-8")
     conn.exec_driver_sql("SET LOCAL lock_timeout = '3s'")  # give up rather than queue behind live readers
     conn.exec_driver_sql(OWN_TRANSACTION.sub("", sql))  # the whole file: PostgreSQL parses it itself
-    row = {"r": role, "v": version(path), "d": description(path), "f": path.name,
+    row = {"r": role, "v": version(path), "f": path.name,
            "md5": hashlib.md5(sql.encode()).hexdigest(), "sha": hashlib.sha256(sql.encode()).hexdigest()}
-    if role != "app":
-        conn.exec_driver_sql(EVENT_LEDGER)
-        conn.execute(text(f"INSERT INTO {EVENTS} (db_role, version, file, event, checksum_md5, sha256, actor) "
-                          "VALUES (:r, :v, :f, 'applied', :md5, :sha, 'runner')"), row)
-        return
-    conn.exec_driver_sql(APP_LEDGER)
-    held = conn.execute(text("SELECT description FROM schema_migrations WHERE version = :v"), row).scalar()
-    if held is None:
-        conn.execute(text("INSERT INTO schema_migrations (version, description, checksum) VALUES (:v, :d, :md5)"), row)
-    else:  # the team line's row holds this number (its V021 is today's V034): this file is recorded beside it
-        conn.exec_driver_sql(SHARED_SLOT)
-        conn.execute(text("INSERT INTO schema_migrations_shared_slot (version, description, checksum, slot_held_by) "
-                          "VALUES (:v, :d, :md5, :held)"), {**row, "held": held})
+    conn.exec_driver_sql(EVENT_LEDGER)
+    conn.execute(text(f"INSERT INTO {EVENTS} (db_role, version, file, event, checksum_md5, sha256, actor) "
+                      "VALUES (:r, :v, :f, 'applied', :md5, :sha, 'runner')"), row)
 
 
 def apply(role: str, engine) -> list[str]:

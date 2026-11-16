@@ -2,7 +2,6 @@
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["graph/frontend"]
 
 [tool.ruff.lint]
 # the base shared by every repository: pyflakes (F), the pycodestyle errors
@@ -19,7 +18,6 @@ paths = [
     "api",
     "clean",
     "fetch",
-    "graph",
     "main_etl.py",
     "ops",
     "run",

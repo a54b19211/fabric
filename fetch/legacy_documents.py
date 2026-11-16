@@ -1,4 +1,7 @@
-"""已清洗文档的自动发布原件；临床字段仍由冻结原文的确定解析取得。"""
+"""legacy_documents 的原件格式和投影（来源已退役，不再写入；旧版本照常读，fetch/legacy_migration.py 迁出）。
+
+两种格式：旧文档桥的 StoredDocument（datafabric.legacy.document.v1）和自动发布的 CollectedDocument
+（datafabric.collected.document.v1）；临床字段仍由冻结原文的确定解析取得（fetch/clinical_protocol.py）。"""
 
 from __future__ import annotations
 
@@ -9,9 +12,38 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from graph.extraction.clinical_research import ProtocolLocator, project_clinical_trial
-from graph.publish.reviewed_graph import DERIVED_SOURCES
+from fetch.clinical_protocol import ProtocolLocator, project_clinical_trial
 from store.record_models import FabricError, Model, sha256, source_time, utc
+
+# 派生来源：旧文档不能声称原站是它们
+DERIVED_SOURCES = {"reviewed_graph", "primekg_graph", "legacy_documents"}
+
+
+class StoredDocument(Model):
+    schema_version: Literal["datafabric.legacy.document.v1"] = (
+        "datafabric.legacy.document.v1"
+    )
+    source_doc_uuid: str = Field(min_length=1, max_length=400)
+    source_site: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=10000)
+    source_url: str | None = Field(default=None, max_length=4000)
+    original_raw_content: str = Field(min_length=1)
+    original_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    publish_date_raw: str | None = Field(default=None, max_length=200)
+    original_created_at: str | None = Field(default=None, max_length=200)
+    original_updated_at: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def raw_hash(self):
+        if sha256(self.original_raw_content) != self.original_raw_sha256:
+            raise ValueError("旧文档原文SHA不一致")
+        if self.source_site in DERIVED_SOURCES:
+            raise ValueError("旧文档必须指明原始站点，不能再套派生来源")
+        return self
+
+
+def document_native_id(document):
+    return "legacy:" + document.source_site + ":" + document.source_doc_uuid
 
 
 class CollectedDocument(Model):
@@ -236,4 +268,40 @@ def project_collected(item, data):
         "source_published_at": published.model_dump(mode="json") if published else None,
         "source_updated_at": updated.model_dump(mode="json") if updated else None,
         "event_time": event.model_dump(mode="json") if event else None,
+    }
+
+
+def project_legacy(item, data):
+    """legacy_documents 的一条原件 → 投影：自动发布格式走 project_collected，其余是旧文档桥格式。"""
+    from fetch.projection import _facts
+
+    if data.get("schema_version") == "datafabric.collected.document.v1":
+        return project_collected(item, data)
+    document = StoredDocument.model_validate(data)
+    if (
+        item.record_kind != "document"
+        or item.source_record_id != document_native_id(document)
+    ):
+        raise FabricError(
+            "legacy_document_identity", "旧文档UUID/原站点与采用ID不一致"
+        )
+    fields = {
+        "origin_doc_uuid": "/source_doc_uuid",
+        "source_site": "/source_site",
+        "original_raw_sha256": "/original_raw_sha256",
+        "source_url": "/source_url",
+        "publish_date_raw": "/publish_date_raw",
+    }
+    facts, locators = _facts(data, fields)
+    return {
+        "parser_version": "datafabric.legacy.document.projection.v0.2",
+        "record_kind": "document",
+        "title": document.title,
+        "source_url": document.source_url,
+        "clean_text": document.original_raw_content,
+        "facts": facts,
+        "field_locators": locators,
+        "event_time": None,
+        "source_published_at": None,
+        "source_updated_at": None,
     }

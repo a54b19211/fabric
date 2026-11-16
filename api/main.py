@@ -6,19 +6,13 @@ from fastapi.responses import JSONResponse
 
 from api.exception_logger import ExceptionLogger
 from api.routers import fabric, measurements
-from graph.api import agent, documents, extraction, fabric_graph, research, review, weknora
 
 app = FastAPI(
-    title="ZK Data Fabric 审核后台 API",
-    description="医药数据采集与知识图谱审核系统",
+    title="ZK Data Fabric API",
+    description="医药数据采集、清洗、存储和读接口",
     version="1.0.0",
 )
 
-
-@app.on_event("startup")
-def _register_review_listeners():
-    """API 重启时 Worker 可能仍在执行，不能清理队列或重置任务。"""
-    import graph.db.review_listeners  # noqa: F401
 
 @app.on_event("startup")
 def _validate_source_configuration():
@@ -39,14 +33,7 @@ app.add_middleware(
 )
 
 # ── 路由注册 ────────────────────────────────────────────────────────────
-app.include_router(documents.router)
-app.include_router(extraction.router)
-app.include_router(review.router)
-app.include_router(weknora.router)
-app.include_router(agent.router)
-app.include_router(research.router)
 app.include_router(fabric.router)
-app.include_router(fabric_graph.router)
 app.include_router(measurements.router)
 
 

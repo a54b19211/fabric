@@ -1,6 +1,6 @@
 """雷达读的资料库接口（/api/fabric/*）：来源、版本、变更、清洗正文、附件正文、登记差分、上一版、检索、
 采集任务。读接口要读凭据（DATAFABRIC_READ_TOKEN 或管理员凭据），写接口要管理员凭据。
-图谱的 /api/fabric/graph/* 在 graph/api/fabric_graph.py，测量在 api/routers/measurements.py。"""
+测量在 api/routers/measurements.py。"""
 
 import hmac
 import os
@@ -93,13 +93,8 @@ def _call(function, *args, **kwargs):
 
 
 def _read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff):
-    """一个固定版本；图版本另要核对它引用的原件此刻也看得到（graph/publish/fabric_graph.py）。"""
-    record = store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
-    if record.record_kind == "graph":
-        from graph.publish.fabric_graph import check_cited
-
-        check_cited(record, mode, cutoff)
-    return record
+    """一个固定版本（旧的图版本照常读出原件，不再核对引文）。"""
+    return store.read_version(version_id, source_id, source_record_id, is_demo, mode, cutoff)
 
 
 class SourceList(BaseModel):
@@ -115,11 +110,8 @@ def sources():
 
 @router.post("/archives", response_model=RunView, dependencies=[Depends(require_admin)])
 def archive(body: ArchiveImport, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
-    """导入一包原件。图包（reviewed_graph、primekg_graph）先核对引文再存（graph/publish/fabric_graph.py）。"""
-    from fetch.catalog import GRAPH_SOURCES
-    from graph.publish.fabric_graph import import_graph
-
-    return _call(import_graph if body.source_id in GRAPH_SOURCES else store.import_archive, body, idempotency_key)
+    """导入一包原件。图包来源（reviewed_graph、primekg_graph）不再能导入。"""
+    return _call(store.import_archive, body, idempotency_key)
 
 
 @router.post("/local-files", response_model=RunView, dependencies=[Depends(require_admin)])
