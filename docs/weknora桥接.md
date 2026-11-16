@@ -1,6 +1,6 @@
 # WeKnora 桥接服务（weknora/）
 
-原在 WeKnora 分叉仓库的 extensions/kdd（zktest 分支 r4/bridge-thin，提交 fd1bb1321：含 artifact_key、piece 分片和 /rerank），2026-11-16 移入 Fabric；WeKnora 本身改用官方镜像（ops/weknora/）。
+原在 WeKnora 分叉仓库的 extensions/kdd（zktest 分支 r4/bridge-thin，提交 fd1bb1321：含 artifact_key、piece 分片和 /rerank），2026-11-16 移入 Fabric；WeKnora 本身改用官方镜像（部署仓库 ZK-radar-deploy 的 weknora/）。
 
 本扩展把 Fabric 固定版本发布到现有 WeKnora，并提供明确名单的文档特征与检索回执。所有上传、元数据更新、解析取消和分块禁用调用现役 HTTP API；向量读取仅在 PostgreSQL 的强制只读事务中执行。它不启动 Go 主服务、消费原有队列或修改 Neo4j，Fabric 的既有持久发布程序负责重试。
 
@@ -16,7 +16,7 @@ python -m pytest tests/test_weknora_bridge.py tests/test_weknora_bridge_models.p
 
 开发服务只监听回环地址。上游 URL、API key、数据库连接和模型私有配置由运维填入 600 权限的配置文件，不放入 Git。数据库账户应限制为只读；连接还强制 `default_transaction_read_only`、只读事务和 15 秒语句超时。
 
-`runtime.json` 包含 `token`、`upstream_url`、`upstream_api_key`、`db`（psycopg 连接参数对象）、`models`（现役 embedding/rerank 的固定模型配置）、`journal_path`、`allowed_kb_ids` 和 `source_mappings`。每条映射是 `{source_instance, source_id, knowledge_base_id, scopes:[字符串]}`。每次授权重新读取映射，撤销即时生效。不要把客户端的 scope 字符串当作授权。生产使用独立配置和持久 `journal_path`，重启时保留 SQLite 回执库；不要运行多个副本或删回执后重发。 本机部署（ops/weknora/）里 `upstream_url` 指 WeKnora app（默认 `http://127.0.0.1:8080`），`db` 指 `127.0.0.1:15432` 上的 WeKnora 库；可选 `demo_kb_ids` 见下段。
+`runtime.json` 包含 `token`、`upstream_url`、`upstream_api_key`、`db`（psycopg 连接参数对象）、`models`（现役 embedding/rerank 的固定模型配置）、`journal_path`、`allowed_kb_ids` 和 `source_mappings`。每条映射是 `{source_instance, source_id, knowledge_base_id, scopes:[字符串]}`。每次授权重新读取映射，撤销即时生效。不要把客户端的 scope 字符串当作授权。生产使用独立配置和持久 `journal_path`，重启时保留 SQLite 回执库；不要运行多个副本或删回执后重发。 本机部署（部署仓库 ZK-radar-deploy 的 weknora/）里 `upstream_url` 指 WeKnora app（默认 `http://127.0.0.1:8080`），`db` 指 `127.0.0.1:15432` 上的 WeKnora 库；可选 `demo_kb_ids` 见下段。
 
 模拟实验使用新建的空 KB、独立回执库，并在配置 `demo_kb_ids` 中明确登记（同时仍须 `allowed_kb_ids` 与来源映射授权）。发布、特征、搜索请求传 `is_demo=true`，回执及命中保留该标记；模拟请求不能访问真实 KB，真实请求也不能访问模拟 KB。同一发布的真假标记不可改写，旧无标记回执仍算真实。结束后先禁用本轮发布，再删除本轮 KB 和回执库。不要把已有真实 KB 重新标成模拟。
 
