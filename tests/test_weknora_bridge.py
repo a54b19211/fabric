@@ -67,7 +67,7 @@ class ServiceTests(unittest.TestCase):
             self.uploads += 1
             kid="knowledge-"+str(self.uploads)
             self.store.docs[kid]=dict(id=kid,knowledge_base_id=KB,tenant_id=10000,embedding_model_id=MODEL["id"],
-                parse_status="completed",enable_status="enabled",metadata=meta,custom_metadata={},processed_at="now",updated_at="now")
+                parse_status="completed",enable_status="enabled",metadata=meta,processed_at="now",updated_at="now")
             self.store.chunks[kid]=[dict(id="chunk-"+kid,content="Actual fixed text.",chunk_index=0,chunk_type="text",is_enabled=True,
                 start_at=0,end_at=18,updated_at="now",dimension=2,embedding="[1,0]",
                 vector_enabled=True,vector_updated_at="now")]
@@ -82,7 +82,6 @@ class ServiceTests(unittest.TestCase):
             if path.endswith("/cancel-parse"):
                 self.store.docs[kid]["parse_status"]="cancelled"
             if method=="PUT":
-                self.store.docs[kid]["custom_metadata"]=kwargs["json"]["custom_metadata"]
                 self.store.docs[kid]["title"]=kwargs["json"]["title"]
             return {"data":copy.deepcopy(self.store.docs[kid])}
         if path.startswith("/api/v1/chunks/"):
@@ -183,8 +182,7 @@ class ServiceTests(unittest.TestCase):
         kid=receipt["knowledge_id"]
         self.assertEqual(receipt["binding_status"],"pending")
         self.assertEqual(receipt["source_status"],"active")
-        self.assertEqual(self.store.docs[kid]["custom_metadata"],{})
-        # Native parse completion writes its original empty custom_metadata.
+        self.assertNotIn("title",self.store.docs[kid])  # not set while the native parser may still overwrite it
         self.store.docs[kid]["parse_status"]="completed"
         final=self.s.publish(Publication(**payload(title=title)))
         self.assertEqual(final["index_status"],"ready")
@@ -192,11 +190,11 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(self.store.docs[kid]["title"]),255)
         self.assertEqual(self.s.features(self.member_request())["features"][0]["title"],title)
         self.assertTrue(final["display_title_truncated"])
-        self.store.docs[kid]["custom_metadata"]["raw_sha256"]="b"*64
+        self.store.docs[kid]["metadata"]["raw_sha256"]="b"*64
         with self.assertRaises(HTTPException) as e:
             self.s.publish(Publication(**payload(title=title)))
         self.assertEqual(e.exception.status_code,409)
-        self.assertEqual(self.store.docs[kid]["custom_metadata"]["raw_sha256"],"b"*64)
+        self.assertEqual(self.store.docs[kid]["metadata"]["raw_sha256"],"b"*64)
 
     def test_scope_is_not_authorization(self):
         with self.assertRaises(HTTPException) as e:
@@ -380,7 +378,6 @@ class ServiceTests(unittest.TestCase):
         doc=self.store.docs[receipt["knowledge_id"]]
         compact=json.loads(doc["metadata"]["fabric_metadata"])
         self.assertEqual(compact,{"doc_type":"article"})  # identifiers dropped to fit one native value
-        self.assertEqual(doc["custom_metadata"]["fabric_metadata"],doc["metadata"]["fabric_metadata"])
         # a replay with other metadata is the same publication: metadata takes no part in identity or conflicts
         again=self.s.publish(Publication(**payload(metadata={"doc_type":"other"})))
         self.assertEqual(again["publication_id"],receipt["publication_id"])

@@ -166,6 +166,8 @@ def aggregate(vectors):
         raise ValueError("zero aggregate")
     return [x / norm for x in total]
 
+# inspection reasons that leave the binding pending (Fabric replays the publication until it is bound)
+UNBOUND = frozenset({"source_binding_mismatch", "index_text_mismatch", "display_title_pending"})
 MAX_CANDIDATES = 60  # hits per channel from one whole-knowledge-base hybrid-search call
 
 
@@ -371,26 +373,19 @@ class Service:
             immutable_fields += ("is_demo",)
         if any(meta.get(k) != expected[k] for k in immutable_fields):
             raise HTTPException(409, "upstream fixed source metadata mismatch")
-        custom = doc.get("custom_metadata") or {}
-        if any(k in custom and custom[k] != expected[k] for k in immutable_fields):
-            raise HTTPException(409, "upstream source projection conflicts with the fixed version")
         if row["source_status"] == "active":
-            if meta.get("source_status") not in (None, "active") or custom.get("source_status") not in (None, "active"):
+            if meta.get("source_status") not in (None, "active"):
                 raise HTTPException(409, "upstream source was explicitly disabled")
             # The native parser saves a Knowledge snapshot after indexing and
-            # can overwrite a projection PUT while parsing. Fabric replays a
+            # can overwrite a PUT made while parsing. Fabric replays a
             # publication whose binding is pending; finalize only after that
-            # last native save, preserving the atomically uploaded identity.
+            # last native save.
             if doc["parse_status"] != "completed":
                 return
-        # Reserve the contract fields in custom_metadata, which native clients
-        # already receive. Original metadata was stored atomically at upload.
-        update = {**custom, **expected}
-        if len(update) > 20 or any(len(str(v)) > 1000 for v in update.values()):
-            raise HTTPException(409, "upstream custom metadata size limit exceeded")
-        if custom != update:
-            self.request("PUT", "/api/v1/knowledge/" + row["knowledge_id"],
-                         json={"title": value["title"][:255], "custom_metadata": update})
+        # The identity was stored atomically in metadata at upload (the official WeKnora API has no other
+        # metadata field). What is left to set is the display title: the upload names the document by its file.
+        if doc.get("title") != value["title"][:255]:
+            self.request("PUT", "/api/v1/knowledge/" + row["knowledge_id"], json={"title": value["title"][:255]})
 
     def row(self, pid, receipt_only=False):
         row = self.journal.get(pid, with_attempt=True)
@@ -434,22 +429,23 @@ class Service:
             return None, [], ["upstream_document_missing"], None
         expected = self.metadata(value, row["id"])
         meta = doc.get("metadata") or {}
-        custom = doc.get("custom_metadata") or {}
         reasons = []
         binding_fields = (*IDENTITY_FIELDS, "publication_id", "raw_locator", "source_scope", "content_sha256",
                           "indexed_text_sha256", *(k for k in ("artifact_key", "piece") if k in expected))
         if "is_demo" in value:
             binding_fields += ("is_demo",)
-        if any(meta.get(k) != expected[k] or custom.get(k) != expected[k] for k in binding_fields):
+        if any(meta.get(k) != expected[k] for k in binding_fields):
             reasons.append("source_binding_mismatch")
+        elif row["source_status"] == "active" and authorized_doc.get("title") != value["title"][:255]:
+            reasons.append("display_title_pending")  # ensure_binding sets it once parsing has completed
         if len({c["id"] for c in chunks}) != len(chunks):
             reasons.append("duplicate_chunk_vectors")
         if meta.get("content_sha256") != value["content_sha256"] or meta.get("indexed_text_sha256") != value["indexed_text_sha256"]:
             reasons.append("index_text_mismatch")
         if doc["embedding_model_id"] != value["embedding_provenance"]["model_id"]:
             reasons.append("embedding_model_binding_changed")
-        if (row["source_status"] != "active" or custom.get("source_status") not in (None, "active")
-                or meta.get("source_status") not in (None, "active") or doc["enable_status"] != "enabled"):
+        if (row["source_status"] != "active" or meta.get("source_status") not in (None, "active")
+                or doc["enable_status"] != "enabled"):
             reasons.append("source_disabled")
         return doc, chunks, reasons, authorized_doc
 
@@ -487,7 +483,7 @@ class Service:
                 # the latest physical upload attempt (append-only journal): which attempt this receipt speaks of
                 "last_attempt": row.get("last_attempt"),
                 "parse_status": parse, "vector_status": vector_status, "index_status": index_status,
-                "binding_status": "bound" if doc and not {"source_binding_mismatch", "index_text_mismatch"}.intersection(reasons) else "pending",
+                "binding_status": "bound" if doc and not UNBOUND.intersection(reasons) else "pending",
                 "source_status": "disabled" if disabled else "active", "source_change_type": row["source_status"] if row["source_status"] != "active" or not disabled else "disabled_upstream",
                 "disable_reason": row["disable_reason"], "display_title_truncated": len(value["title"]) > 255,
                 "chunk_count": len(chunks), "vector_count": len(vectors),
