@@ -165,3 +165,13 @@ def test_too_large_is_refused_before_hashing_or_parsing(tmp_path, tools, monkeyp
     monkeypatch.setenv("DATAFABRIC_ATTACHMENT_MAX_PARSE_BYTES", "4")
     out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
     assert out["status"] == "failed" and out["error"] == "too_large" and tools == []
+
+
+def test_cloud_mode_skips_self_hosted_mineru(monkeypatch):
+    from clean import attachment_parse as ap
+    monkeypatch.setenv("DATAFABRIC_MINERU_CLOUD_TOKEN", "t")
+    monkeypatch.setenv("DATAFABRIC_MINERU_MODE", "cloud")
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru_cloud"]
+    assert [m for m, _, _ in ap._plan(".docx")] == ["mineru_cloud"]
+    monkeypatch.delenv("DATAFABRIC_MINERU_MODE")
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru", "mineru_cloud"]

@@ -74,6 +74,11 @@ def _cloud_enabled() -> bool:
     return bool(os.environ.get("DATAFABRIC_MINERU_CLOUD_TOKEN"))
 
 
+def _cloud_only() -> bool:
+    """DATAFABRIC_MINERU_MODE=cloud: PDF / DOCX go straight to MinerU cloud (no self-hosted MinerU is deployed)."""
+    return os.environ.get("DATAFABRIC_MINERU_MODE", "") == "cloud" and _cloud_enabled()
+
+
 def _doc_to_pdf(path: str) -> str:
     from clean.docx_to_pdf import _doc_to_pdf
 
@@ -168,6 +173,8 @@ def _plan(ext):
     cloud = [("mineru_cloud", _mineru_cloud, cloud_kind)] if _cloud_enabled() else []
     if ext in EXCEL_EXTS:
         return [("excel", lambda p: {"success": True, "markdown": _excel(p), "error": ""}, None)]
+    if cloud and _cloud_only() and ext in (".pdf", ".docx"):
+        return cloud
     if ext == ".pdf":
         return [("mineru", _mineru, "pdf_page")] + cloud
     if ext == ".docx":
