@@ -20,9 +20,9 @@ from typing import Literal
 
 import httpx
 import openai
-from extraction_contract import normalize as norm
 from pydantic import BaseModel, Field, ValidationError
 
+from clean import numbers as norm
 from fetch import who_facts
 
 PROCESSOR_VERSION = "datafabric.measure_extract.v6"
