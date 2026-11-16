@@ -1,6 +1,6 @@
 # WeKnora 桥接服务（weknora/）
 
-原在 WeKnora 分叉仓库的 extensions/kdd（最后提交 d6e8aaba），2026-11-16 原样移入 Fabric；WeKnora 本身改用官方镜像（ops/weknora/）。
+原在 WeKnora 分叉仓库的 extensions/kdd（zktest 分支 r4/bridge-thin，提交 fd1bb1321：含 artifact_key、piece 分片和 /rerank），2026-11-16 移入 Fabric；WeKnora 本身改用官方镜像（ops/weknora/）。
 
 本扩展把 Fabric 固定版本发布到现有 WeKnora，并提供明确名单的文档特征与检索回执。所有上传、元数据更新、解析取消和分块禁用调用现役 HTTP API；向量读取仅在 PostgreSQL 的强制只读事务中执行。它不启动 Go 主服务、消费原有队列或修改 Neo4j，Fabric 的既有持久发布程序负责重试。
 
@@ -30,12 +30,12 @@ python -m pytest tests/test_weknora_bridge.py tests/test_weknora_bridge_models.p
 2. 同一固定版本重放返回同一 knowledge_id。正文、原件哈希、locator 或 scope 不一致返回 409。新 version_id 形成新知识条目；旧版通过明确 disable 操作撤回或标为 superseded，不原地覆盖。
 3. `GET /api/v1/kdd/publications/{publication_id}` 查询上传、解析、实际文本块向量覆盖、索引和原件绑定状态。只有解析完成/收尾且所有文本块确有启用向量、身份一致才返回 ready。知识库摘要计数不用于推断索引就绪。
 4. `POST /api/v1/kdd/features` 给定 1–100 个完整固定版本 members。响应列出每个文档特征与 excluded，返回实际清洗文本、版本、1024 维向量、模型配置版本、分块配置和聚合规则。单次总计最多 10 MB 文本、10000 块，单文档最多 2000 块；超过应拆分明确名单。它不通过 top-k 选择样本。
-5. `POST /api/v1/kdd/search` 调用同一套 embedding 模型，再分别使用现役关键词/向量召回、RRF 合并和现役 rerank 模型。响应说明每通道执行、失败降级、模型用量是否报告、模型与索引版本；全部召回失败返回 502。
+5. `POST /api/v1/kdd/search` 用同一套 embedding 模型做关键词/向量召回（`source_scopes` 最多 8 个，`top_k` ≤60；范围内发布多时按批召回再合并），只返回候选、不重排；全部召回失败返回 502。`POST /api/v1/kdd/rerank` 只给调用方已核过的 1–60 段文本重排（Fabric 核对可见版本后调用）。
 6. `POST /api/v1/kdd/publications/{publication_id}/disable` 先关闭扩展读取，再取消未完成解析、逐块调用原 API 禁用并从实际索引验证。撤销来源映射后仍允许对本服务既有绑定做无正文状态查询和清理；features/search 始终执行当前授权。
 
 ## 身份、向量与恢复
 
-publication_id 是 `[knowledge_base_id,source_instance,source_id,source_record_id,version_id]` 规范 JSON 数组的 SHA-256（UTF-8，ensure_ascii=False，separators=(',',':')）。原件身份原子写入上传 metadata。原生异步解析会保存上传时的 Knowledge 快照，因此解析 completed 后才复制到原生 API 可读的 custom_metadata；binding pending 时由 Fabric 用同一 publication 重放完成投影，不重新上传。原子身份或已有投影冲突仍报错，空投影不冒充撤权。chunk 以现有 knowledge_id 外键绑定，扩展逐块返回身份，不创建第二套权威来源表。
+publication_id 是 `[knowledge_base_id,source_instance,source_id,source_record_id,version_id]`（带 `artifact_key` 时追加它；长产物分片带 `piece` 时再追加 `[rule,index,start,end,sha256]`）规范 JSON 数组的 SHA-256（UTF-8，ensure_ascii=False，separators=(',',':')）。原件身份原子写入上传 metadata。原生异步解析会保存上传时的 Knowledge 快照，因此解析 completed 后才复制到原生 API 可读的 custom_metadata；binding pending 时由 Fabric 用同一 publication 重放完成投影，不重新上传。原子身份或已有投影冲突仍报错，空投影不冒充撤权。chunk 以现有 knowledge_id 外键绑定，扩展逐块返回身份，不创建第二套权威来源表。
 
 上传内容增加一行固定版本注释，使相同正文的两个版本不会被原生文件去重合并。content_sha256 对应清洗正文，indexed_text_sha256 对应实际上传内容。分块配置通过本次上传 process_config 固定；块向量可包含 WeKnora 的上下文标题。include_chunks 会同时返回实际 embeddings.content 的哈希。features 返回的正文去除扩展注释（取自不可变发布回执），原始原件仍回 Fabric 读取。真实登记的标题可能超过原生展示列 255 字符；接口接受最多 500 字符并在回执/特征中保留完整标题，只把原生展示列裁到 255，返回 display_title_truncated，身份和正文哈希保持不变。
 

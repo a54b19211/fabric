@@ -7,7 +7,7 @@ from fastapi import HTTPException
 
 from tests import test_weknora_bridge as base
 from tests.test_weknora_bridge import KB, MODEL, payload
-from weknora.models import Publication, Search
+from weknora.models import Publication, Rerank, Search
 from weknora.service import model_descriptor
 
 
@@ -98,8 +98,29 @@ class ModelIdentityTests(unittest.TestCase):
         self.s.request = upstream
         self.s.client = httpx.Client(transport=httpx.MockTransport(lambda request: self.fail('provider must not be called')))
         self.addCleanup(self.s.client.close)
-        execution = self.s.search(Search(knowledge_base_id=KB, source_scope='pipeline', query_text='local fixture'))['execution']
+        execution = self.s.search(Search(knowledge_base_id=KB, source_scopes=["pipeline"], query_text='local fixture'))['execution']
         self.assertEqual(execution['embedding_error_code'], 'model_configuration_changed')
-        self.assertEqual(execution['rerank_error_code'], 'model_configuration_changed')
         self.assertTrue(execution['degraded'])
         self.assertNotIn('changed.invalid', json.dumps(execution))
+        # search is recall only; reranking of verified texts refuses a drifted model configuration the same way
+        with self.assertRaises(HTTPException) as error:
+            self.s.rerank(Rerank(knowledge_base_id=KB, source_scope='pipeline', query_text='q', documents=['a']))
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertNotIn('changed.invalid', str(error.exception.detail))
+
+    def test_artifact_key_is_optional_identity_and_keeps_v1_ids(self):
+        from weknora.service import publication_id
+        base = payload()
+        plain = Publication(**base).model_dump(exclude_none=True)
+        self.assertNotIn('artifact_key', plain)
+        v1 = publication_id({**plain, 'knowledge_base_id': base['knowledge_base_id']})
+        a = publication_id({**plain, 'artifact_key': 'proc.v1:' + 'a' * 64})
+        b = publication_id({**plain, 'artifact_key': 'proc.v2:' + 'b' * 64})
+        self.assertEqual(len({v1, a, b}), 3)
+        # two artifacts of one fixed version are two publications, both accepted
+        first = self.s.publish(Publication(**{**base, 'artifact_key': 'proc.v1:' + 'a' * 64}))
+        second = self.s.publish(Publication(**{**base, 'content': 'reparsed text', 'content_sha256': None,
+                                                'artifact_key': 'proc.v2:' + 'b' * 64}))
+        self.assertNotEqual(first['publication_id'], second['publication_id'])
+        self.assertEqual(second['identity']['artifact_key'], 'proc.v2:' + 'b' * 64)
+

@@ -3,7 +3,6 @@ import hashlib
 import json
 import math
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
@@ -22,11 +21,77 @@ def digest(value):
         value = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     return hashlib.sha256(value).hexdigest()
 
+class UpstreamError(HTTPException):
+    """A WeKnora request that did not succeed: the upstream HTTP status (None when the outcome is unknown) and a
+    reason category (upstream code and message, or transport/invalid_response) - never content or credentials."""
+
+    def __init__(self, detail, upstream_status=None, reason=""):
+        super().__init__(502, detail)
+        self.upstream_status, self.reason = upstream_status, reason
+
+
+def wire(value):
+    """A metadata value as WeKnora stores it (map[string]string): structured values as one canonical JSON string."""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return value
+
+
+# Statuses that prove WeKnora refused an upload before creating anything; only these allow a second upload.
+# 408, 429, 5xx, gateway and any other status leave the outcome unknown.
+REFUSED_BEFORE_CREATION = frozenset({400, 401, 403, 404, 405, 411, 413, 414, 415, 422})
+KNOWN_UPSTREAM_MESSAGES = frozenset({"Invalid metadata format"})
+
+
+def upstream_reason(response):
+    """A bounded category: the upstream error code (flat or nested under "error") and only a known message.
+    Free text and details may carry source content and are never kept."""
+    reason = "http_" + str(response.status_code)
+    try:
+        body = response.json()
+    except ValueError:
+        return reason
+    err = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else body
+    if not isinstance(err, dict):
+        return reason
+    code, message = err.get("code"), err.get("message")
+    if isinstance(code, (int, str)) and not isinstance(code, bool) and str(code).isascii() \
+            and 0 < len(str(code)) <= 32 and all(c.isalnum() or c in "_.-" for c in str(code)):
+        reason = "code" + str(code)
+    if isinstance(message, str) and message in KNOWN_UPSTREAM_MESSAGES:
+        reason += " " + message
+    return reason
+
+
 def identity(value):
-    return {k: value[k] for k in IDENTITY_FIELDS}
+    out = {k: value[k] for k in IDENTITY_FIELDS}
+    if value.get("artifact_key"):
+        out["artifact_key"] = value["artifact_key"]
+    if value.get("piece"):
+        out["piece"] = value["piece"]
+    return out
 
 def publication_id(value):
-    return digest([value["knowledge_base_id"], *[value[k] for k in IDENTITY_FIELDS[:-1]]])
+    # artifact_key absent: exactly the weknora-kdd-v1 identity, so existing publications keep their IDs.
+    parts = [value["knowledge_base_id"], *[value[k] for k in IDENTITY_FIELDS[:-1]]]
+    if value.get("artifact_key"):
+        parts.append(value["artifact_key"])
+    if value.get("piece"):
+        piece = value["piece"]
+        parts.append([piece["rule"], piece["index"], piece["start"], piece["end"], piece["sha256"]])
+    return digest(parts)
+
+def compact_metadata(meta):
+    """Fabric retrieval metadata as one native metadata value (at most 1000 characters; identifiers are dropped
+    first when it does not fit). Descriptive only: not identity, not part of conflict checks; the full value
+    stays in the receipt journal and is returned with hits."""
+    if not meta:
+        return None
+    for value in (meta, {k: v for k, v in meta.items() if k != "identifiers"}):
+        text = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        if len(text) <= 1000:
+            return text
+    return None
 
 # These are credentials, not identities of embedding/rerank configuration.
 # Do not put them in a public descriptor or make rotation invalidate vectors.
@@ -101,8 +166,7 @@ def aggregate(vectors):
         raise ValueError("zero aggregate")
     return [x / norm for x in total]
 
-SCOPE_BATCH = 1000  # knowledge ids per hybrid-search call
-MAX_SCOPE_BATCHES = 20
+MAX_CANDIDATES = 60  # hits per channel from one whole-knowledge-base hybrid-search call
 
 
 class Service:
@@ -135,17 +199,18 @@ class Service:
             response = self.client.request(method, self.cfg["upstream_url"] + path,
                 headers={"X-API-Key": self.cfg["upstream_api_key"]}, **kwargs)
         except httpx.HTTPError:
-            raise HTTPException(502, "WeKnora request outcome unavailable") from None
+            raise UpstreamError("WeKnora request outcome unavailable", None, "transport") from None
         if response.status_code not in (200,201,202,204,409):
-            raise HTTPException(502, f"WeKnora returned HTTP {response.status_code}")
+            raise UpstreamError(f"WeKnora returned HTTP {response.status_code}", response.status_code,
+                                upstream_reason(response))
         try:
             result = response.json()
         except ValueError:
-            raise HTTPException(502, "WeKnora returned an invalid response") from None
+            raise UpstreamError("WeKnora returned an invalid response", None, "invalid_response") from None
         if response.status_code == 409:
             return result
         if result.get("success") is False:
-            raise HTTPException(502, "WeKnora rejected operation")
+            raise UpstreamError("WeKnora rejected operation", response.status_code, upstream_reason(response))
         return result
 
     def get_document(self, kid):
@@ -179,6 +244,8 @@ class Service:
         checksum = digest(value["content"].encode())
         if value.get("content_sha256") and checksum != value["content_sha256"]:
             raise HTTPException(400, "content_sha256 mismatch")
+        if value.get("piece") and (value["piece"]["sha256"] != checksum or value["piece"]["chars"] != len(value["content"])):
+            raise HTTPException(400, "piece does not match the uploaded content")
         value["content_sha256"] = checksum
         locator_text = json.dumps(value["raw_locator"], ensure_ascii=False, separators=(",", ":"))
         if len(locator_text.encode()) > 1000:
@@ -186,12 +253,14 @@ class Service:
         return value
 
     def metadata(self, value, pid):
-        return {**identity(value), **({"is_demo": str(value["is_demo"]).lower()} if "is_demo" in value else {}),
+        extra = compact_metadata(value.get("metadata"))
+        return {**{k: wire(v) for k, v in identity(value).items()},
+                **({"is_demo": str(value["is_demo"]).lower()} if "is_demo" in value else {}),
                 "source_scope": value["source_scope"],
                 "raw_locator": json.dumps(value["raw_locator"], ensure_ascii=False, separators=(",", ":")),
                 "publication_id": pid, "content_sha256": value["content_sha256"],
                 "indexed_text_sha256": value["indexed_text_sha256"], "source_status": "active",
-                "contract_version": CONTRACT}
+                "contract_version": CONTRACT, **({"fabric_metadata": extra} if extra else {})}
 
     def recover(self, row):
         value, pid = row["payload"], row["id"]
@@ -219,8 +288,15 @@ class Service:
                 for k in ("raw_sha256", "content_sha256", "source_scope", "raw_locator"):
                     if value[k] != prior[k]:
                         raise HTTPException(409, "fixed version already exists with different identity/content/scope")
-                if not row["knowledge_id"]:
-                    row = self.recover(row)
+                if row["knowledge_id"] and row["upload_status"] == "accepted":
+                    self.verify_accepted(pid)  # created upstream, not yet verified: verify, never upload
+                    row = self.journal.get(pid)
+                elif not row["knowledge_id"] and row["upload_status"] == "rejected":
+                    # the upstream refused the earlier upload before creating anything: uploading again is safe
+                    self.upload(pid, prior)
+                    row = self.journal.get(pid)
+                elif not row["knowledge_id"]:
+                    row = self.recover(row)  # outcome unknown: never re-sent blindly, only found back
                 self.ensure_binding(row)
                 return self.status(pid)
             kb = self.request("GET", "/api/v1/knowledge-bases/" + value["knowledge_base_id"])["data"]
@@ -233,28 +309,51 @@ class Service:
             value["indexed_text_sha256"] = digest(indexed.encode())
             if not self.journal.reserve(pid, value):
                 raise HTTPException(409, "publication is already being delivered")
-            metadata = self.metadata(value, pid)
-            try:
-                result = self.request("POST", "/api/v1/knowledge-bases/" + value["knowledge_base_id"] + "/knowledge/file",
-                    files={"file": ("fabric-" + pid + ".md", indexed.encode(), "text/markdown")},
-                    data={"metadata": json.dumps(metadata, ensure_ascii=False), "channel": "api",
-                          "process_config": json.dumps({"graph_enabled": False, "extract_config": {"enabled": False},
-                              "question_generation_config": {"enabled": False, "question_count": 0},
-                              "chunking_config": value["chunking"]})})
-                doc = result.get("data") or result.get("knowledge")
-                if not isinstance(doc, dict) or not doc.get("id"):
-                    raise HTTPException(502, "upload returned no knowledge ID")
-                kid = doc["id"]
-                check = self.get_document(kid)
-                if (check.get("metadata") or {}).get("publication_id") != pid:
-                    raise HTTPException(409, "upstream duplicate does not match the fixed source version")
-                self.journal.update(pid, knowledge_id=kid, upload_status="uploaded")
-            except HTTPException:
-                if not self.journal.get(pid)["knowledge_id"]:
-                    self.journal.update(pid, upload_status="unknown")
-                raise
+            self.upload(pid, value)
             self.ensure_binding(self.journal.get(pid))
             return self.status(pid)
+
+    def upload(self, pid, value):
+        """One physical upload of a reserved publication, recorded per attempt. Before the request the publication
+        is durably sending with an in-flight attempt, so a process lost mid-request is reconciled, never re-sent.
+        Only a response proving a refusal before creation makes it rejected (and re-uploadable)."""
+        indexed = "<!-- Fabric fixed version " + pid + " -->\n" + value["content"]
+        metadata = self.metadata(value, pid)
+        self.journal.update(pid, upload_status="sending")
+        attempt = self.journal.record_attempt(pid, "in_flight", None, "")
+        try:
+            result = self.request("POST", "/api/v1/knowledge-bases/" + value["knowledge_base_id"] + "/knowledge/file",
+                files={"file": ("fabric-" + pid + ".md", indexed.encode(), "text/markdown")},
+                data={"metadata": json.dumps(metadata, ensure_ascii=False), "channel": "api",
+                      "process_config": json.dumps({"graph_enabled": False, "extract_config": {"enabled": False},
+                          "question_generation_config": {"enabled": False, "question_count": 0},
+                          "chunking_config": value["chunking"]})})
+        except UpstreamError as exc:
+            refused = exc.upstream_status in REFUSED_BEFORE_CREATION
+            self.journal.finish_attempt(pid, attempt, "rejected" if refused else "unknown", exc.upstream_status, exc.reason)
+            self.journal.update(pid, upload_status="rejected" if refused else "unknown")
+            raise
+        except HTTPException:
+            self.journal.finish_attempt(pid, attempt, "unknown", None, "bridge_error")
+            self.journal.update(pid, upload_status="unknown")
+            raise
+        doc = result.get("data") or result.get("knowledge")
+        if not isinstance(doc, dict) or not doc.get("id"):
+            self.journal.finish_attempt(pid, attempt, "unknown", None, "no_knowledge_id")
+            self.journal.update(pid, upload_status="unknown")
+            raise HTTPException(502, "upload returned no knowledge ID")
+        # WeKnora accepted it: keep the ID before anything else can fail, so every later step only verifies
+        self.journal.update(pid, knowledge_id=doc["id"], upload_status="accepted")
+        self.journal.finish_attempt(pid, attempt, "uploaded", None, "knowledge_created")
+        self.verify_accepted(pid)
+
+    def verify_accepted(self, pid):
+        """The accepted document must carry this fixed version (a 409 duplicate may point at another one)."""
+        row = self.journal.get(pid)
+        check = self.get_document(row["knowledge_id"])
+        if (check.get("metadata") or {}).get("publication_id") != pid:
+            raise HTTPException(409, "upstream duplicate does not match the fixed source version")
+        self.journal.update(pid, upload_status="uploaded")
 
     def ensure_binding(self, row):
         if not row["knowledge_id"]:
@@ -266,7 +365,8 @@ class Service:
             expected["source_status"] = row["source_status"]
         meta = doc.get("metadata") or {}
         immutable_fields = (*IDENTITY_FIELDS, "source_scope", "raw_locator", "publication_id",
-                            "content_sha256", "indexed_text_sha256", "contract_version")
+                            "content_sha256", "indexed_text_sha256", "contract_version",
+                            *(k for k in ("artifact_key", "piece") if k in expected))
         if "is_demo" in value:
             immutable_fields += ("is_demo",)
         if any(meta.get(k) != expected[k] for k in immutable_fields):
@@ -293,7 +393,7 @@ class Service:
                          json={"title": value["title"][:255], "custom_metadata": update})
 
     def row(self, pid, receipt_only=False):
-        row = self.journal.get(pid)
+        row = self.journal.get(pid, with_attempt=True)
         if row is None:
             raise HTTPException(404, "publication not found")
         value = row["payload"]
@@ -305,27 +405,39 @@ class Service:
         return row
 
     def inspect(self, row):
+        """(document, chunks, reasons) - see inspect_with_upstream, which also returns the upstream document."""
+        doc, chunks, reasons, _ = self.inspect_with_upstream(row)
+        return doc, chunks, reasons
+
+    def inspect_with_upstream(self, row):
         value = row["payload"]
         if not row["knowledge_id"]:
-            return None, [], ["upload_not_confirmed"]
+            return None, [], ["upload_not_confirmed"], None
+        authorized_doc = None
         try:
             authorized_doc = self.get_document(row["knowledge_id"])
             if authorized_doc["knowledge_base_id"] != value["knowledge_base_id"]:
-                return None, [], ["source_binding_mismatch"]
+                return None, [], ["source_binding_mismatch"], None
             doc, chunks = self.store.document(value["knowledge_base_id"], row["knowledge_id"])
             if doc and doc["tenant_id"] != authorized_doc["tenant_id"]:
-                return None, [], ["source_binding_mismatch"]
+                return None, [], ["source_binding_mismatch"], None
         except HTTPException:
-            return None, [], ["upstream_access_unavailable"]
+            return None, [], ["upstream_access_unavailable"], None
+        except ValueError as exc:
+            if "chunk limit" in str(exc):
+                # more chunks than this service verifies: an explainable budget limit, not a passing outage
+                return None, [], ["chunk_budget_exceeded"], authorized_doc
+            return None, [], ["vector_store_unavailable"], authorized_doc
         except Exception:
-            return None, [], ["vector_store_unavailable"]
+            return None, [], ["vector_store_unavailable"], authorized_doc
         if doc is None:
-            return None, [], ["upstream_document_missing"]
+            return None, [], ["upstream_document_missing"], None
         expected = self.metadata(value, row["id"])
         meta = doc.get("metadata") or {}
         custom = doc.get("custom_metadata") or {}
         reasons = []
-        binding_fields = (*IDENTITY_FIELDS, "publication_id", "raw_locator", "source_scope", "content_sha256", "indexed_text_sha256")
+        binding_fields = (*IDENTITY_FIELDS, "publication_id", "raw_locator", "source_scope", "content_sha256",
+                          "indexed_text_sha256", *(k for k in ("artifact_key", "piece") if k in expected))
         if "is_demo" in value:
             binding_fields += ("is_demo",)
         if any(meta.get(k) != expected[k] or custom.get(k) != expected[k] for k in binding_fields):
@@ -341,21 +453,25 @@ class Service:
         if (row["source_status"] != "active" or custom.get("source_status") not in (None, "active")
                 or meta.get("source_status") not in (None, "active") or doc["enable_status"] != "enabled"):
             reasons.append("source_disabled")
-        return doc, chunks, reasons
+        return doc, chunks, reasons, authorized_doc
 
     def status(self, pid):
         row = self.row(pid, receipt_only=True)
         value = row["payload"]
-        doc, chunks, reasons = self.inspect(row)
+        doc, chunks, reasons, upstream = self.inspect_with_upstream(row)
         text_chunks = [c for c in chunks if c["chunk_type"] == "text"]
         vectors = [c for c in text_chunks if c["is_enabled"] and c["vector_enabled"] and c["embedding"]]
-        parse = doc["parse_status"] if doc else "unknown"
+        # the vector store could not be read: the parse status the upstream API confirmed stays (it is not
+        # "unparsed"); nothing is ready without the vectors checked
+        parse = doc["parse_status"] if doc else ((upstream or {}).get("parse_status") or "unknown")
         ready = bool(text_chunks) and len(vectors) == len(text_chunks) and parse in ("completed", "finalizing") and not reasons
         disabled = row["source_status"] != "active" or "source_disabled" in reasons
         confirmed_disabled = disabled and doc is not None and all(not c["is_enabled"] and not c["vector_enabled"] for c in chunks)
         vector_status = "ready" if ready else "pending"
         index_status = "ready" if ready else "pending"
-        if {"vector_store_unavailable", "upstream_access_unavailable"}.intersection(reasons):
+        if "chunk_budget_exceeded" in reasons:
+            vector_status = index_status = "budget_exceeded"
+        elif {"vector_store_unavailable", "upstream_access_unavailable"}.intersection(reasons):
             vector_status = index_status = "unavailable"
         elif confirmed_disabled:
             vector_status = index_status = "disabled"
@@ -370,6 +486,8 @@ class Service:
                 "knowledge_base_id": value["knowledge_base_id"], "identity": identity(value), "raw_locator": value["raw_locator"],
                 "source_scope": value["source_scope"], "content_sha256": value["content_sha256"],
                 "indexed_text_sha256": value["indexed_text_sha256"], "upload_status": row["upload_status"],
+                # the latest physical upload attempt (append-only journal): which attempt this receipt speaks of
+                "last_attempt": row.get("last_attempt"),
                 "parse_status": parse, "vector_status": vector_status, "index_status": index_status,
                 "binding_status": "bound" if doc and not {"source_binding_mismatch", "index_text_mismatch"}.intersection(reasons) else "pending",
                 "source_status": "disabled" if disabled else "active", "source_change_type": row["source_status"] if row["source_status"] != "active" or not disabled else "disabled_upstream",
@@ -496,27 +614,38 @@ class Service:
             raise HTTPException(502, kind + " model request failed") from None
         return result, model_descriptor(model)
 
+    def _searchable(self, kid, req, cache):
+        """The publication behind a hit, or why it is not returned (counted, never shown): not registered by this
+        service, disabled, another scope or simulation status, or outside the current source mapping."""
+        if kid not in cache:
+            row = self.journal.by_knowledge(kid)
+            if row is None:
+                cache[kid] = "not_registered"
+            elif row["source_status"] != "active":
+                cache[kid] = "disabled"
+            else:
+                value = row["payload"]
+                if (value["knowledge_base_id"], value.get("is_demo", False)) != (req.knowledge_base_id, req.is_demo)                         or value["source_scope"] not in req.source_scopes:
+                    cache[kid] = "other_scope"
+                else:
+                    try:
+                        self.authorize(req.knowledge_base_id, value["source_scope"], value, is_demo=req.is_demo)
+                        cache[kid] = row
+                    except HTTPException:
+                        cache[kid] = "not_authorized"
+        return cache[kid]
+
     def search(self, req):
-        self.authorize(req.knowledge_base_id, req.source_scope, is_demo=req.is_demo)
-        rows = {}
-        for pid in self.journal.all():
-            row = self.journal.get(pid)
-            value = row["payload"]
-            if row["knowledge_id"] and row["source_status"] == "active" and value["knowledge_base_id"] == req.knowledge_base_id and value["source_scope"] == req.source_scope and value.get("is_demo", False) == req.is_demo:
-                try:
-                    self.authorize(req.knowledge_base_id, req.source_scope, value, is_demo=req.is_demo)
-                except HTTPException:
-                    continue
-                rows[row["knowledge_id"]] = row
-        # WeKnora's hybrid search takes an explicit knowledge id list; a scope larger than one list is
-        # searched list by list and fused by rank like the two channels are
-        ids = sorted(rows)
-        batches = [ids[i:i + SCOPE_BATCH] for i in range(0, len(ids), SCOPE_BATCH)]
-        if len(batches) > MAX_SCOPE_BATCHES:
-            raise HTTPException(400, "search scope exceeds %d published documents; narrow server scope" % (SCOPE_BATCH * MAX_SCOPE_BATCHES))
-        execution = {"keyword": "not_run", "vector": "not_run", "embedding": "not_run", "rerank": "not_run", "degraded_reasons": []}
-        if not rows:
-            return {"contract_version": CONTRACT, "is_demo": req.is_demo, "results": [], "execution": {**execution, "degraded": False, "scope_document_count": 0}}
+        """Candidate recall over the whole knowledge base: one keyword and one vector hybrid-search call without a
+        knowledge-id list, reciprocal rank fusion, and only hits bound to an active publication of this service in
+        an authorized scope (the others are counted by reason, never shown). The cost follows the hits, not the
+        number of publications. This is recall only: the caller (Fabric) verifies the candidates first and
+        reranks the verified ones through /rerank, so no model reads text that has not been checked; there is
+        no reranking here to bypass that order. One call covers every requested scope of this knowledge base."""
+        for scope in req.source_scopes:
+            self.authorize(req.knowledge_base_id, scope, is_demo=req.is_demo)
+        execution = {"keyword": "not_run", "vector": "not_run", "embedding": "not_run", "degraded_reasons": [],
+                     "search_scope": "knowledge_base"}
         query_embedding = None
         try:
             embedded, descriptor = self.model_call("embedding", {"input": [req.query_text]})
@@ -530,107 +659,81 @@ class Service:
             if isinstance(exc, HTTPException) and exc.status_code == 409:
                 execution["embedding_error_code"] = "model_configuration_changed"
             execution["degraded_reasons"].append("query_embedding_failed")
-        merged = {}
-        execution["scope_batches"] = len(batches)
+        merged, cache, filtered = {}, {}, {}
         for mode in ("keyword", "vector"):
             if mode == "vector" and query_embedding is None:
                 execution[mode] = "skipped"
                 continue
-            done = 0
-            execution[mode + "_result_count"] = 0
-
-            def one(batch, mode=mode):
-                body = {"query_text": req.query_text, "match_count": min(60, req.top_k * 3),
-                        "knowledge_ids": batch, "disable_vector_match": mode == "keyword",
-                        "disable_keywords_match": mode == "vector", "vector_threshold": 0, "keyword_threshold": 0,
-                        "skip_context_enrichment": True}
-                if mode == "vector":
-                    body["query_embedding"] = query_embedding
-                try:
-                    return self.request("POST", "/api/v1/knowledge-bases/" + req.knowledge_base_id + "/hybrid-search", json=body)["data"] or []
-                except HTTPException:
-                    return None
-
-            with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
-                answers = list(pool.map(one, batches))
-            found = []
-            for data in answers:
-                if data is None:
-                    continue
-                done += 1
-                execution[mode + "_result_count"] += len(data)
-                found += [h for h in data if h.get("knowledge_id") in rows and (h.get("id") or h.get("chunk_id"))]
-            if len(batches) > 1:
-                # one global order per channel: the upstream score of a keyword or vector match does not
-                # depend on which other documents were in the request (checked on the live index), so the
-                # batches' hits are comparable; keep as many as one request would have returned
-                found.sort(key=lambda h: (-float(h.get("score") or 0), h.get("id") or h.get("chunk_id")))
-                found = found[:min(60, req.top_k * 3)]
-            for rank, hit in enumerate(found):
-                cid = hit.get("id") or hit.get("chunk_id")
-                if cid not in merged:
-                    merged[cid] = {**hit, "chunk_id": cid, "score": 0.0, "retrieval_modes": []}
-                merged[cid]["score"] += 1.0 / (60 + rank + 1)
-                if mode not in merged[cid]["retrieval_modes"]:
-                    merged[cid]["retrieval_modes"].append(mode)
-            if done == len(batches):
-                execution[mode] = "succeeded"
-            elif done:
-                execution[mode] = "partial"
-                execution["degraded_reasons"].append(mode + "_retrieval_partial")
-            else:
+            body = {"query_text": req.query_text, "match_count": min(MAX_CANDIDATES, req.top_k * 3),
+                    "disable_vector_match": mode == "keyword", "disable_keywords_match": mode == "vector",
+                    "vector_threshold": 0, "keyword_threshold": 0, "skip_context_enrichment": True}
+            if mode == "vector":
+                body["query_embedding"] = query_embedding
+            try:
+                data = self.request("POST", "/api/v1/knowledge-bases/" + req.knowledge_base_id + "/hybrid-search", json=body)["data"] or []
+            except HTTPException:
                 execution[mode] = "failed"
                 execution["degraded_reasons"].append(mode + "_retrieval_failed")
+                continue
+            execution[mode] = "succeeded"
+            execution[mode + "_result_count"] = len(data)
+            rank = 0
+            for hit in data:
+                cid, kid = hit.get("id") or hit.get("chunk_id"), hit.get("knowledge_id")
+                if not cid or not kid:
+                    continue
+                row = self._searchable(kid, req, cache)
+                if isinstance(row, str):
+                    filtered[row] = filtered.get(row, 0) + 1
+                    continue
+                if cid not in merged:
+                    merged[cid] = {**hit, "chunk_id": cid, "score": 0.0, "retrieval_modes": [], "_row": row}
+                merged[cid]["score"] += 1.0 / (60 + rank + 1)
+                rank += 1
+                if mode not in merged[cid]["retrieval_modes"]:
+                    merged[cid]["retrieval_modes"].append(mode)
         if execution["keyword"] == "failed" and execution["vector"] in ("failed", "skipped"):
             raise HTTPException(502, "all retrieval channels failed")
-        hits = sorted(merged.values(), key=lambda x: (-x["score"],x["chunk_id"]))
-        if req.rerank and hits:
-            try:
-                reranked, descriptor = self.model_call("rerank", {"query": req.query_text, "documents": [h["content"] for h in hits], "top_n": len(hits)})
-                scores = reranked.get("results") or reranked.get("data")
-                if len(scores) != len(hits) or {s["index"] for s in scores} != set(range(len(hits))):
-                    raise ValueError("incomplete rerank scores")
-                for item in scores:
-                    score = float(item["relevance_score"])
-                    if not math.isfinite(score):
-                        raise ValueError("bad rerank score")
-                    hits[item["index"]]["rerank_score"] = score
-                hits.sort(key=lambda h: (-h["rerank_score"],h["chunk_id"]))
-                execution.update(rerank="succeeded", rerank_model=descriptor,
-                                 rerank_usage=reranked.get("usage"), rerank_usage_status="reported" if reranked.get("usage") else "unknown")
-            except (HTTPException, KeyError, TypeError, ValueError) as exc:
-                execution["rerank"] = "failed"
-                if isinstance(exc, HTTPException) and exc.status_code == 409:
-                    execution["rerank_error_code"] = "model_configuration_changed"
-                execution["degraded_reasons"].append("rerank_failed_using_reciprocal_rank_fusion")
+        hits = sorted(merged.values(), key=lambda x: (-x["score"], x["chunk_id"]))
         results = []
-        statuses = {}
-        filtered_publications = {}
-        for hit in hits:
-            row = rows[hit["knowledge_id"]]
+        for hit in hits[:req.top_k]:
+            row = hit.pop("_row")
             value = row["payload"]
-            if row["id"] not in statuses:
-                statuses[row["id"]] = self.status(row["id"])
-            status = statuses[row["id"]]
-            if status["index_status"] != "ready":
-                reasons = status["degraded_reasons"] or ["index_not_ready"]
-                explicitly_disabled = status.get("source_status") == "disabled" or status["index_status"] == "disabled"
-                filtered_publications[row["id"]] = {"publication_id": row["id"], "knowledge_id": row["knowledge_id"],
-                    "index_status": status["index_status"], "reason_type": "disabled" if explicitly_disabled else "unverified",
-                    "reasons": reasons}
-                if not explicitly_disabled:
-                    execution["degraded_reasons"].extend(["result_index_unverified", *reasons])
-                continue
             results.append({**hit, "is_demo": value.get("is_demo", False), "publication_id": row["id"], "identity": identity(value),
                             "raw_locator": value["raw_locator"], "source_scope": value["source_scope"],
-                            "content_sha256": value["content_sha256"], "index_version": status["index_version"]})
-            if len(results) >= req.top_k:
-                break
+                            "content_sha256": value["content_sha256"], "metadata": value.get("metadata")})
+        for hit in hits[req.top_k:]:
+            hit.pop("_row", None)
         execution["degraded_reasons"] = sorted(set(execution["degraded_reasons"]))
-        execution.update(degraded=bool(execution["degraded_reasons"]), scope_document_count=len(rows),
-                         filtered_publications=list(filtered_publications.values()),
-                         coverage_status="verification_incomplete" if any(x["reason_type"] == "unverified" for x in filtered_publications.values()) else "verified_returned_candidates",
-                         index_version=digest(sorted((pid,s["index_version"]) for pid,s in statuses.items())),
-                         fusion="reciprocal_rank_fusion_k60", upstream_source_commit=self.cfg.get("upstream_source_commit"),
+        execution.update(degraded=bool(execution["degraded_reasons"]), filtered_counts=filtered,
+                         candidate_count=len(hits), fusion="reciprocal_rank_fusion_k60",
+                         upstream_source_commit=self.cfg.get("upstream_source_commit"),
                          upstream_image=self.cfg.get("upstream_image"))
         return {"contract_version": CONTRACT, "is_demo": req.is_demo, "results": results, "execution": execution}
+
+    @staticmethod
+    def _rerank_scores(result, count):
+        scores = result.get("results") or result.get("data")
+        if len(scores) != count or {s["index"] for s in scores} != set(range(count)):
+            raise ValueError("incomplete rerank scores")
+        out = {}
+        for item in scores:
+            score = float(item["relevance_score"])
+            if not math.isfinite(score):
+                raise ValueError("bad rerank score")
+            out[item["index"]] = score
+        return out
+
+    def rerank(self, req):
+        """Rerank texts the caller already verified, with the pinned rerank model; reports model and usage."""
+        self.authorize(req.knowledge_base_id, req.source_scope, is_demo=req.is_demo)
+        result, descriptor = self.model_call("rerank", {"query": req.query_text, "documents": req.documents,
+                                                        "top_n": len(req.documents)})
+        try:
+            scores = self._rerank_scores(result, len(req.documents))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(502, "rerank model returned incomplete scores") from None
+        return {"contract_version": CONTRACT, "is_demo": req.is_demo,
+                "scores": [{"index": i, "relevance_score": scores[i]} for i in range(len(req.documents))],
+                "rerank_model": descriptor, "usage": result.get("usage"),
+                "usage_status": "reported" if result.get("usage") else "unknown"}

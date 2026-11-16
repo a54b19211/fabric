@@ -22,6 +22,14 @@ class Journal:
                 id TEXT PRIMARY KEY, payload TEXT NOT NULL, knowledge_id TEXT,
                 upload_status TEXT NOT NULL, source_status TEXT NOT NULL DEFAULT 'active',
                 disable_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            # search maps a hit's knowledge id back to its publication
+            db.execute("CREATE INDEX IF NOT EXISTS publications_knowledge ON publications(knowledge_id)")
+            # every physical upload's outcome, append-only: an explicit upstream rejection (nothing created) is kept
+            # apart from a transport/unknown outcome and is never overwritten by a later recover. No content, no keys.
+            db.execute("""CREATE TABLE IF NOT EXISTS upload_attempts (
+                publication_id TEXT NOT NULL, attempt INTEGER NOT NULL, outcome TEXT NOT NULL,
+                http_status INTEGER, reason TEXT NOT NULL, at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (publication_id, attempt))""")
         Path(path).chmod(0o600)
 
     def connect(self):
@@ -29,12 +37,19 @@ class Journal:
         db.row_factory = sqlite3.Row
         return db
 
-    def get(self, pid):
+    def get(self, pid, with_attempt=False):
+        """The publication row; with_attempt adds its latest physical attempt as "last_attempt", read in the same
+        transaction (one snapshot: the row and the attempt agree). Only local reads inside it, no network."""
         with self.connect() as db:
+            db.execute("BEGIN")
             row = db.execute("SELECT * FROM publications WHERE id=?", (pid,)).fetchone()
+            last = db.execute("SELECT attempt,outcome FROM upload_attempts WHERE publication_id=? "
+                              "ORDER BY attempt DESC LIMIT 1", (pid,)).fetchone() if with_attempt and row else None
         if row:
             result = dict(row)
             result["payload"] = json.loads(result["payload"])
+            if with_attempt:
+                result["last_attempt"] = dict(last) if last else None
             return result
 
     def reserve(self, pid, payload):
@@ -50,6 +65,32 @@ class Journal:
         with self.connect() as db:
             db.execute("UPDATE publications SET " + ",".join(k + "=?" for k in values) + " WHERE id=?",
                        (*values.values(), pid))
+
+    def record_attempt(self, pid, outcome, http_status, reason):
+        """Append an attempt; returns its number."""
+        with self.connect() as db:
+            n = db.execute("SELECT count(*) FROM upload_attempts WHERE publication_id=?", (pid,)).fetchone()[0]
+            db.execute("INSERT INTO upload_attempts(publication_id,attempt,outcome,http_status,reason) VALUES(?,?,?,?,?)",
+                       (pid, n + 1, outcome, http_status, reason[:200]))
+        return n + 1
+
+    def finish_attempt(self, pid, attempt, outcome, http_status, reason):
+        """Settle an in-flight attempt once; a settled outcome is never rewritten."""
+        with self.connect() as db:
+            db.execute("UPDATE upload_attempts SET outcome=?,http_status=?,reason=? "
+                       "WHERE publication_id=? AND attempt=? AND outcome='in_flight'",
+                       (outcome, http_status, reason[:200], pid, attempt))
+
+    def attempts(self, pid):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT attempt,outcome,http_status,reason,at FROM upload_attempts WHERE publication_id=? ORDER BY attempt",
+                (pid,)).fetchall()]
+
+    def by_knowledge(self, kid):
+        with self.connect() as db:
+            row = db.execute("SELECT id FROM publications WHERE knowledge_id=?", (kid,)).fetchone()
+        return self.get(row[0]) if row else None
 
     def all(self):
         with self.connect() as db:
@@ -80,9 +121,11 @@ class IndexStore:
                 c.start_at,c.end_at,c.content_revision,c.index_status,c.updated_at,
                 e.dimension,e.content AS embedded_text,e.embedding::text AS embedding,e.is_enabled AS vector_enabled,
                 e.updated_at AS vector_updated_at
-                FROM chunks c LEFT JOIN embeddings e ON e.chunk_id=c.id
-                    AND e.knowledge_id=c.knowledge_id AND e.knowledge_base_id=c.knowledge_base_id
-                    AND e.source_type=0 AND e.source_id=c.id
+                FROM chunks c LEFT JOIN LATERAL (
+                    -- one lookup per chunk by its unique source key (embeddings_unique_source); OFFSET 0 keeps the
+                    -- planner from folding it back into a KB-wide vector scan. No LIMIT: a duplicate stays visible.
+                    SELECT v.* FROM embeddings v WHERE v.source_id=c.id AND v.source_type=0 OFFSET 0
+                ) e ON e.chunk_id=c.id AND e.knowledge_id=c.knowledge_id AND e.knowledge_base_id=c.knowledge_base_id
                 WHERE c.knowledge_id=%s AND c.knowledge_base_id=%s AND c.tenant_id=%s
                     AND c.deleted_at IS NULL
                 ORDER BY c.chunk_index,c.id LIMIT 2001""", (kid,kb,doc["tenant_id"])).fetchall()
