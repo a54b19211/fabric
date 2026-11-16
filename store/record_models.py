@@ -134,6 +134,8 @@ class VersionRecord(Model):
     raw_content: str
     raw_media_type: str = "application/json"
     raw_sha256: str
+    # 投影正文，存版本时就有，不是清洗正文：临床登记只是 briefSummary，文献是标题 + 摘要。清洗正文在
+    # /clean-text（derived_clean_text）；那里 state=not_processed 就是还没洗，读的人不要拿这个字段顶替
     clean_text: str
     parser_version: str = PARSER_VERSION
     facts: dict[str, Any]

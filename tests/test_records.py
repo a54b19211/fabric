@@ -85,7 +85,9 @@ def test_crl_multiple_letters_same_pdf_do_not_collide_or_infer_failure():
     )
     assert result["facts"]["letter_type"] == "APPROVAL"
     assert result["facts"]["application_numbers"] == ["NDA 001"]
-    assert result["source_published_at"] is None
+    # the letter date, named as such: openFDA does not give the date the letter was released
+    assert result["source_published_at"] == {"value": "2021-01-01", "precision": "day",
+                                             "meaning": "fda_letter_date_not_release_date"}
 
 
 def test_epmc_preserves_cross_source_ids_corrections_and_license_without_fulltext():
@@ -113,6 +115,12 @@ def test_epmc_preserves_cross_source_ids_corrections_and_license_without_fulltex
     assert result["facts"]["pmid"] == "123"
     assert result["facts"]["is_open_access"] == "N"
     assert "license" not in result["facts"]
+    assert "title_missing" not in result["facts"]
+    untitled = sources.project_record("europe_pmc", ArchiveRecord(
+        source_record_id="MED:123", record_kind="document",
+        raw_content=json.dumps({k: v for k, v in data.items() if k != "title"})))
+    # a record without a title (a table-of-contents entry): the record id stands in, and the facts say so
+    assert untitled["title"] == "MED:123" and untitled["facts"]["title_missing"] is True
     assert result["field_locators"]["correction_links"] == {
         "json_pointer": "/commentCorrectionList"
     }

@@ -185,7 +185,12 @@ def test_crl_title_names_the_company_the_letter_and_the_application_not_the_pdf_
     item = ArchiveRecord(source_record_id=sources.crl_id(letter), record_kind="document", raw_content=json.dumps(letter))
     projected = sources.project_record("fda_crl", item)
     assert projected["title"] == "AB Pharmaceuticals, LLC - COMPLETE RESPONSE (NDA 210649, 09/12/2018)"
-    assert projected["event_time"]["value"] == "2018-09-12"  # the letter's date: kept as the event time, not as a publication date
+    assert projected["event_time"] == {"value": "2018-09-12", "precision": "day", "meaning": "letter_signed"}
+    # openFDA gives neither the date FDA released the letter nor a link: the publication time is the letter's date and
+    # says so in its meaning; no address is made up
+    assert projected["source_published_at"] == {"value": "2018-09-12", "precision": "day",
+                                                "meaning": "fda_letter_date_not_release_date"}
+    assert projected["source_url"] is None
 
 
 def test_crl_rows_without_an_identity_do_not_stop_the_read(monkeypatch):

@@ -313,8 +313,10 @@ def _project_fda_crl(item, data) -> dict:
         event_time = source_time(datetime.strptime(date, "%m/%d/%Y").date().isoformat(), "letter_signed")
     except (TypeError, ValueError):
         event_time = source_time(date, "letter_signed")
-    # 信函签字日期不是网页公开日期，不填 source_published_at
-    return _record("document", title, clean_text, facts, locators, event_time=event_time)
+    # openFDA 不给 FDA 公开这封信的日期，也不给信函的网址（原件只有 file_name）：来源发布时间取信上的日期，meaning 写明
+    # 它是信函日期、不是公开日期；source_url 留空，不拼猜的链接
+    published = source_time(event_time.value, "fda_letter_date_not_release_date") if event_time else None
+    return _record("document", title, clean_text, facts, locators, event_time=event_time, published=published)
 
 
 EUROPE_PMC_FIELDS = {
@@ -357,6 +359,9 @@ def _project_europe_pmc(item, data) -> dict:
         raise FabricError("native_id_mismatch", "Europe PMC source:id与原件不一致")
     facts, locators = _facts(data, EUROPE_PMC_FIELDS)
     title = data.get("title") or native
+    if not data.get("title"):
+        # 没有标题的条目（pubType 为 toc 的目录页等）：标题位置放记录号，并写明标题缺失，不让人把记录号当成标题
+        facts["title_missing"] = True
     return _record(
         "document", title, str(title) + "\n\n" + str(data.get("abstractText") or ""), facts, locators,
         url="https://europepmc.org/article/" + str(data["source"]) + "/" + str(data["id"]),
