@@ -442,8 +442,6 @@ class Service:
             binding_fields += ("is_demo",)
         if any(meta.get(k) != expected[k] or custom.get(k) != expected[k] for k in binding_fields):
             reasons.append("source_binding_mismatch")
-        if any(c["content_revision"] != 0 for c in chunks):
-            reasons.append("indexed_chunk_content_changed")
         if len({c["id"] for c in chunks}) != len(chunks):
             reasons.append("duplicate_chunk_vectors")
         if meta.get("content_sha256") != value["content_sha256"] or meta.get("indexed_text_sha256") != value["indexed_text_sha256"]:
@@ -511,8 +509,6 @@ class Service:
                     or model_configuration_fingerprint(current_model) != model_configuration_fingerprint(configured_model)
                     or model_descriptor(configured_model) != value["embedding_provenance"]):
                 reasons.append("embedding_model_provenance_unverified")
-            if any(c["content_revision"] != 0 for c in text_chunks):
-                reasons.append("indexed_chunk_content_changed")
             for chunk in text_chunks:
                 if not chunk["embedding"] or not chunk["is_enabled"] or not chunk["vector_enabled"]:
                     reasons.append("incomplete_vector_coverage")

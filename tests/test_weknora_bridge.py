@@ -69,7 +69,7 @@ class ServiceTests(unittest.TestCase):
             self.store.docs[kid]=dict(id=kid,knowledge_base_id=KB,tenant_id=10000,embedding_model_id=MODEL["id"],
                 parse_status="completed",enable_status="enabled",metadata=meta,custom_metadata={},processed_at="now",updated_at="now")
             self.store.chunks[kid]=[dict(id="chunk-"+kid,content="Actual fixed text.",chunk_index=0,chunk_type="text",is_enabled=True,
-                start_at=0,end_at=18,content_revision=0,index_status="indexed",updated_at="now",dimension=2,embedding="[1,0]",
+                start_at=0,end_at=18,updated_at="now",dimension=2,embedding="[1,0]",
                 vector_enabled=True,vector_updated_at="now")]
             if self.fail_after_upload:
                 self.fail_after_upload=False
@@ -226,11 +226,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.s.status(receipt["publication_id"])["vector_status"],"missing")
         self.assertIsNone(self.s.features(self.member_request())["features"][0]["embedding"])
 
-    def test_edited_chunks_and_wrong_raw_hash_do_not_get_features(self):
-        receipt=self.s.publish(Publication(**payload()))
-        self.store.chunks[receipt["knowledge_id"]][0]["content_revision"]=1
-        f=self.s.features(self.member_request())["features"][0]
-        self.assertIsNone(f["embedding"])
+    def test_wrong_raw_hash_does_not_get_features(self):
+        self.s.publish(Publication(**payload()))
         mismatch=self.s.features(self.member_request(payload(raw_sha256="b"*64)))
         self.assertEqual(mismatch["returned_count"],0)
         self.assertEqual(mismatch["excluded"][0]["reason"],"fixed_version_identity_mismatch")

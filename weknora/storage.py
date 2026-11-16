@@ -111,14 +111,16 @@ class IndexStore:
                 yield db
 
     def document(self, kb, kid):
+        """The document and its chunks with their vectors, read with the official WeKnora image's columns only
+        (it has no knowledges.custom_metadata and no chunk revision counter)."""
         with self.connect() as db:
             doc = db.execute("""SELECT id,knowledge_base_id,tenant_id,embedding_model_id,
-                parse_status,enable_status,metadata,custom_metadata,processed_at,updated_at
+                parse_status,enable_status,metadata,processed_at,updated_at
                 FROM knowledges WHERE id=%s AND knowledge_base_id=%s AND deleted_at IS NULL""", (kid,kb)).fetchone()
             if not doc:
                 return None, []
             rows = db.execute("""SELECT c.id,c.content,c.chunk_index,c.chunk_type,c.is_enabled,
-                c.start_at,c.end_at,c.content_revision,c.index_status,c.updated_at,
+                c.start_at,c.end_at,c.updated_at,
                 e.dimension,e.content AS embedded_text,e.embedding::text AS embedding,e.is_enabled AS vector_enabled,
                 e.updated_at AS vector_updated_at
                 FROM chunks c LEFT JOIN LATERAL (
