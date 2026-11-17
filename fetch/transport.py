@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from urllib.parse import urlparse
+from urllib.request import getproxies, proxy_bypass
 
 import httpx
 
@@ -75,12 +76,19 @@ def wait(url):
     SENT["requests"] += 1
 
 
+def _env_proxy(url) -> bool:
+    """这个网址按环境变量（HTTP_PROXY / HTTPS_PROXY，除去 NO_PROXY 里的主机）要走代理：浏览器也读这些变量。"""
+    parts = urlparse(url)
+    return bool(getproxies().get(parts.scheme)) and not proxy_bypass(parts.hostname or "")
+
+
 def site_only(url, proxy=None) -> list[str]:
     """浏览器的启动参数（StealthyFetcher 的 extra_flags）：只解析这个站点自己的域名（url 的主机去掉开头的 www.，和它的
     子域），别的主机一律解析失败。页面上第三方的广告、统计脚本会拖住 load 事件：2026-11-13 实测 FiercePharma 的文章页不拦
     就 60 秒等不到 load（三次都超时），拦了 4 秒。经代理（NCCN）时域名由代理解析，这条不起作用，还会让浏览器连不上代理，
-    所以不加。"""
-    if proxy:
+    所以不加；环境变量里配了代理、这个站点又不在 NO_PROXY 里时也一样（2026-11-17：服务的环境里有 HTTPS_PROXY，
+    nmpa、cde、chictr 的浏览器读取全部 ERR_PROXY_CONNECTION_FAILED；国内站点另在 NO_PROXY 里写明直连）。"""
+    if proxy or _env_proxy(url):
         return []
     host = (urlparse(url).hostname or "").lower().removeprefix("www.")
     return [f"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE {host}, EXCLUDE *.{host}"]

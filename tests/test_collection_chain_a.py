@@ -458,3 +458,17 @@ def test_the_catalog_watches_are_valid_and_each_names_a_real_list_entry(monkeypa
             assert item.request.query in wanted, item.id
     monkeypatch.setenv("DATAFABRIC_WATCHES", "[]")  # 环境变量给了就用它的
     assert watches() == []
+
+
+def test_a_browser_read_through_the_environment_proxy_does_not_block_name_resolution(monkeypatch):
+    """site_only keeps third-party hosts from resolving; behind a proxy that would cut the browser off from the proxy
+    itself (2026-11-17: every nmpa / cde / chictr read failed with ERR_PROXY_CONNECTION_FAILED)."""
+    from fetch import transport
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    assert transport.site_only("https://www.nmpa.gov.cn/x")[0].endswith("EXCLUDE nmpa.gov.cn, EXCLUDE *.nmpa.gov.cn")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    assert transport.site_only("https://www.fiercepharma.com/x") == []
+    monkeypatch.setenv("NO_PROXY", "localhost,.gov.cn")
+    assert transport.site_only("https://www.nmpa.gov.cn/x") != []  # 直连的站点照旧只解析自己的域名
