@@ -80,12 +80,9 @@ def _artifact_rows(conn, triples):
     """(版本, 处理器版本, 摘要) → 那一份清洗产物的正文和段落定位（同一处理器版本下最新一次成功结果）。"""
     out = {}
     for version_id, processor, digest in triples:
-        row = conn.execute(text(
-            "SELECT text,segments,locator_kind FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv "
-            "AND status='parsed' AND text_sha256=:sha ORDER BY attempt DESC LIMIT 1"
-        ), {"v": version_id, "pv": processor, "sha": digest}).mappings().first()
+        row = index.artifact_row(conn, version_id, processor + ":" + digest)
         if row:
-            out[(version_id, processor, digest)] = dict(row)
+            out[(version_id, processor, digest)] = row
     return out
 
 

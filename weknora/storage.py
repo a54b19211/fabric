@@ -135,6 +135,12 @@ class IndexStore:
                 raise ValueError("document exceeds bounded chunk limit")
             return doc, rows
 
+    def publications(self, kb, pid):
+        """The documents of this knowledge base whose upload metadata carries this publication_id (at most 3)."""
+        with self.connect() as db:
+            return db.execute("""SELECT id,metadata FROM knowledges WHERE knowledge_base_id=%s
+                AND metadata->>'publication_id'=%s AND deleted_at IS NULL LIMIT 3""", (kb, pid)).fetchall()
+
     def model(self, model_id):
         with self.connect() as db:
             return db.execute("""SELECT id,name,type,source,parameters,parameters->>'provider' AS provider,

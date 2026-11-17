@@ -20,7 +20,7 @@ import re
 RULE = "datafabric.index_piece.v1"
 MAX_CHARS = 400_000
 MAX_BYTES = 1_200_000
-UPLOAD_OVERHEAD = 100  # 桥接上传时加的“<!-- Fabric fixed version … -->”一行（约 90 个字符/字节）
+UPLOAD_OVERHEAD = 100  # 余量：桥接 v1 上传时加过一行注释（约 90 字节），v2 起不加；数不改，分片计划不变
 _TABLE_RULE = re.compile(r"^\|?\s*:?-{3,}")
 
 

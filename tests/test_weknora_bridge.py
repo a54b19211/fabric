@@ -32,6 +32,9 @@ class FakeStore:
         self.current_model = copy.deepcopy(MODEL)
     def model(self, mid):
         return self.current_model if self.current_model and mid == self.current_model["id"] else None
+    def publications(self, kb, pid):
+        return [copy.deepcopy(d) for d in self.docs.values()
+                if d["knowledge_base_id"] == kb and d["metadata"].get("publication_id") == pid]
     def document(self,kb,kid):
         d = self.docs.get(kid)
         return (copy.deepcopy(d),copy.deepcopy(self.chunks.get(kid,[]))) if d and d["knowledge_base_id"] == kb else (None,[])
@@ -143,8 +146,36 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(e.exception.status_code,409)
         second=self.s.publish(Publication(**payload(version_id="v2")))
         self.assertNotEqual(first["knowledge_id"],second["knowledge_id"])
-        self.assertNotEqual(first["indexed_text_sha256"],second["indexed_text_sha256"])
+        # contract v2: the uploaded text is the content itself
+        self.assertEqual(first["indexed_text_sha256"],first["content_sha256"])
         self.assertEqual(first["content_sha256"],second["content_sha256"])
+
+    def test_upload_is_named_by_the_title_carries_only_the_content_and_asks_for_no_summary(self):
+        seen = {}
+        original = self.s.request
+        def spy(method, path, **kwargs):
+            if path.endswith("/knowledge/file"):
+                seen.update(kwargs)
+            return original(method, path, **kwargs)
+        self.s.request = spy
+        self.s.publish(Publication(**payload(title="A/B trial:\n phase 3 ")))
+        name, body, _ = seen["files"]["file"]
+        self.assertEqual((name, body), ("A B trial: phase 3.md", b"Actual fixed text."))
+        self.assertIs(json.loads(seen["data"]["process_config"])["summary_enabled"], False)
+
+    def test_identical_content_under_another_publication_is_a_duplicate_receipt_and_keeps_no_foreign_document(self):
+        first = self.s.publish(Publication(**payload()))
+        original = self.s.request
+        def duplicate(method, path, **kwargs):  # WeKnora answers bytes it already holds with the existing document
+            if path.endswith("/knowledge/file"):
+                return {"data": {"id": first["knowledge_id"]}}
+            return original(method, path, **kwargs)
+        self.s.request = duplicate
+        receipt = self.s.publish(Publication(**payload(source_record_id="NCT2", raw_locator=dict(
+            source_instance="fabric", source_id="clinicaltrials", source_record_id="NCT2", version_id="v1"))))
+        self.assertEqual((receipt["index_status"], receipt["knowledge_id"]), ("duplicate_content", None))
+        rows = [self.s.journal.get(pid) for pid in self.s.journal.all()]
+        self.assertEqual(sorted(str(r["knowledge_id"]) for r in rows), sorted(["None", first["knowledge_id"]]))
 
     def test_unknown_upload_reconciles_without_resending(self):
         self.fail_after_upload=True

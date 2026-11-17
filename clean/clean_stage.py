@@ -25,7 +25,8 @@ run/clean.py。
 
 每个还没有画像（derived_profiles，当前画像处理器版本）的版本，在一个事务里写：
 1. 清洗正文（derived_clean_text，processor_version 是 clean/clean_text.py 的 PROCESSOR_VERSION）：
-   - clinicaltrials：登记字段逐字段成段（JSON 路径定位），简介在前；
+   - clinicaltrials：“# 标题”、简介，登记字段一个字段一节（“## 字段名 field_key”，JSON 路径定位），地点和结果表在最后；
+   - openFDA 说明书 / 召回：接口记录一个字段一节（“## 字段名”）；
    - europe_pmc：原件 JSON 的标题 + 摘要（偏移回到原件 JSON）；
    - nmpa / cde / chictr 的网页版本：旧提取器解析出的 Markdown（偏移回到原件 JSON 里的 /parsed/markdown）；
    - 附件：不另清洗，正文用加工层 attachment_parse 的最新结果；还没解析完（没有成功/不支持、失败未满次数）
@@ -68,8 +69,8 @@ def _cleaner_input(row):
     source, facts = row["source_id"], row["facts"] or {}
     if source == "clinicaltrials":
         # 摘要直接取原件 briefSummary：投影在没有摘要时用标题顶替，拿它当摘要会把标题定位到摘要路径上
-        return {"facts": facts, "locators": row["locators"] or {}, "summary": row.get("brief_summary")}, \
-            "registry_fields"
+        return {"facts": facts, "locators": row["locators"] or {}, "summary": row.get("brief_summary"),
+                "title": row.get("title")}, "registry_fields"
     if source == "europe_pmc":
         # 只取清洗器用到的字段。定位用 JSON 路径（/title、/abstractText），不随其他字段变化移动，在每个版本上都能回指。
         try:
@@ -114,7 +115,8 @@ def _anchored(segments, basis):
 
 def _clean_by_basis(source, inp, basis):
     if basis == "registry_fields":
-        return clean_text.clean_registry(inp["facts"], inp["locators"], summary=inp["summary"])
+        return clean_text.clean_registry(inp["facts"], inp["locators"], summary=inp["summary"],
+                                         title=inp.get("title"))
     if basis == "raw_json":
         return clean_text.clean_literature(inp["raw"])
     if basis == "who_raw_json":

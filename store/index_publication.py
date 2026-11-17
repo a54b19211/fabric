@@ -39,6 +39,7 @@ HOLD_SECONDS = 300  # 等替代它的正文 ready：5 分钟后再看
 RECHECK_SECONDS = 86400  # ready 的每天复查一次（来源撤权、目标停用时撤下）
 PARSING = {"pending", "processing", "finalizing"}
 PARSE_ENDED = {"completed", "failed", "cancelled"}
+MAX_TARGETS = 32  # 索引目标（来源 → 知识库）的个数上限：十个知识库、二十几个来源
 
 
 class IndexTarget(Model):
@@ -47,15 +48,18 @@ class IndexTarget(Model):
     is_demo: bool
     knowledge_base_id: str = Field(min_length=1, max_length=64)
     source_scope: str = Field(min_length=1, max_length=128)
+    # 抽样：这个目标最多收这么多条记录（已经收了的记录出新版本照常更新）；不写 = 整个来源都收。不算进目标的身份：
+    # 以后去掉 limit 还是同一个目标，已收的留着；去掉后把 index_targets.scanned_seq 置 0，补扫当时没收的
+    limit: int | None = Field(default=None, ge=1)
 
     def key(self):
-        return sha256(canonical(self.model_dump()))
+        return sha256(canonical(self.model_dump(exclude={"limit"})))
 
 
 def targets():
     try:
         values = json.loads(os.environ.get("DATAFABRIC_INDEX_TARGETS") or "[]")
-        if not isinstance(values, list) or len(values) > 16:
+        if not isinstance(values, list) or len(values) > MAX_TARGETS:
             raise ValueError()
         result = [IndexTarget.model_validate(item) for item in values]
         if len({item.key() for item in result}) != len(result):
@@ -98,18 +102,45 @@ def current_artifacts(conn, version_ids):
 
     if not version_ids:
         return {}
-    return {row["version_id"]: dict(row) for row in conn.execute(text(_CURRENT), {
+    found = {row["version_id"]: dict(row) for row in conn.execute(text(_CURRENT), {
         "ids": list(version_ids), "profile": profile.PROCESSOR_VERSION, "texts": _text_processors()}).mappings()}
+    for artifact in found.values():
+        artifact["body"] = index_body(artifact["text"], artifact["segments"])
+        if artifact["body"] != artifact["text"]:
+            artifact["body_sha256"] = sha256(artifact["body"])
+    return found
+
+
+def index_body(text_, segments):
+    """进知识库的正文：清洗正文到第一个标了 index=False 的段为止（ClinicalTrials 排在最后的研究地点和结果表，
+    clean_text.REGISTRY_TAIL）；没有这样的段就是整份。它是清洗正文的开头一截，命中块照样能在清洗正文里定位。"""
+    cut = min((s["start"] for s in segments or [] if s.get("index") is False), default=None)
+    return text_ if cut is None else text_[:cut].rstrip()
 
 
 def artifact_key(artifact):
-    return artifact["processor_version"] + ":" + artifact["text_sha256"]
+    """处理器版本:正文摘要。摘要是进知识库的那一截（index_body）的：同一条记录里只在不进知识库的尾部（地点、结果表）
+    有差别的几个版本是同一份，只建一条、只上传一次；没有这种尾部的来源，它就是整份清洗正文的摘要。"""
+    return artifact["processor_version"] + ":" + artifact.get("body_sha256", artifact["text_sha256"])
+
+
+def artifact_row(conn, version_id, key):
+    """这个版本名下、摘要对得上 key 的那份清洗正文 {text, segments, locator_kind, body}；找不到返回 None。"""
+    processor, digest = key.rsplit(":", 1)
+    for row in conn.execute(text(
+        "SELECT text,segments,locator_kind,text_sha256 FROM derived_clean_text WHERE version_id=:v "
+        "AND processor_version=:pv AND status='parsed' ORDER BY attempt DESC"
+    ), {"v": version_id, "pv": processor}).mappings():
+        body = index_body(row["text"], row["segments"])
+        if digest == row["text_sha256"] or (body != row["text"] and digest == sha256(body)):
+            return {**row, "body": body}
+    return None
 
 
 def artifact_ready(conn, target_id, record_id, artifact):
     """这份产物整份可检索：按当前分片计划应有的每一片（不分片即整篇一条）都有 ready 条目。按完整的预期片集合
     判定，数据库里只有其中几片、而这几片都 ready 不算。worker 的交接和检索的交接用同一个判定。"""
-    expected = index_pieces.keys(artifact["text"], artifact.get("segments") or [])
+    expected = index_pieces.keys(artifact["body"], artifact.get("segments") or [])
     ready = {k for (k,) in conn.execute(text(
         "SELECT piece_key FROM index_publications WHERE target_id=:t AND source_record_id=:n AND artifact_key=:k "
         "AND state='ready'"
@@ -118,12 +149,9 @@ def artifact_ready(conn, target_id, record_id, artifact):
 
 
 def _artifact_text(conn, version_id, key):
-    """待办绑定的那一份正文（处理器版本:摘要）；找不到返回 None。"""
-    processor, digest = key.rsplit(":", 1)
-    return conn.execute(text(
-        "SELECT text FROM derived_clean_text WHERE version_id=:v AND processor_version=:pv AND status='parsed' "
-        "AND text_sha256=:sha ORDER BY attempt DESC LIMIT 1"
-    ), {"v": version_id, "pv": processor, "sha": digest}).scalar()
+    """待办绑定的那一份正文（处理器版本:摘要）里进知识库的部分（index_body）；找不到返回 None。"""
+    row = artifact_row(conn, version_id, key)
+    return row["body"] if row else None
 
 
 def _identifiers(conn, artifacts):
@@ -192,7 +220,7 @@ def _manifest(target, record, artifact, meta, piece=None):
         "knowledge_base_id": target.knowledge_base_id, "is_demo": target.is_demo, "source_scope": target.source_scope,
         "title": (record.title or record.source_record_id)[:255],
         # 实际上传的正文：不分片时就是整份产物；分片时是这一片（上下文前缀 + 全篇里的一段）
-        "content_sha256": piece["sha256"] if piece else artifact["text_sha256"],
+        "content_sha256": piece["sha256"] if piece else artifact.get("body_sha256", artifact["text_sha256"]),
         **({"piece": piece} if piece else {}),
         "artifact_key": artifact_key(artifact), "metadata": meta,
     }
@@ -250,7 +278,7 @@ def enqueue_versions(conn, version_ids, *, configured=None):
     wanted = [t for t in configured if t.key() in enabled]
     if not wanted:
         return 0
-    artifacts = {v: a for v, a in current_artifacts(conn, version_ids).items() if a["text"].strip()}
+    artifacts = {v: a for v, a in current_artifacts(conn, version_ids).items() if a["body"].strip()}
     if not artifacts:
         return 0
     found = _identifiers(conn, artifacts)
@@ -266,11 +294,28 @@ def enqueue_versions(conn, version_ids, *, configured=None):
             continue  # 撤回/删除的墓碑版本没有可检索的内容；检索时按模式和截止时间判 withdrawn
         artifact = artifacts[record.version_id]
         meta = metadata(record, row["proof_available_at"], artifact, found.get(record.version_id, []))
-        pieces = index_pieces.plan(artifact["text"], artifact.get("segments") or [])
+        pieces = index_pieces.plan(artifact["body"], artifact.get("segments") or [])
         for target in wanted:
-            if (target.source_id, target.is_demo) == (record.source_id, record.is_demo):
+            if (target.source_id, target.is_demo) == (record.source_id, record.is_demo) and _admitted(
+                    conn, target, record.source_record_id):
                 count += _enqueue(conn, target, record, artifact, meta, pieces)
     return count
+
+
+def _records(conn, target):
+    """这个目标现在收了几条记录（撤下的不算）。"""
+    return conn.execute(text("SELECT count(DISTINCT source_record_id) FROM index_publications WHERE target_id=:t "
+                             "AND state<>'disabled'"), {"t": target.key()}).scalar_one()
+
+
+def _admitted(conn, target, record_id):
+    """抽样上限（IndexTarget.limit）：没写上限、这条记录已经收了、或者还没收满，才收。"""
+    if target.limit is None:
+        return True
+    if conn.execute(text("SELECT 1 FROM index_publications WHERE target_id=:t AND source_record_id=:n "
+                         "AND state<>'disabled' LIMIT 1"), {"t": target.key(), "n": record_id}).first():
+        return True
+    return _records(conn, target) < target.limit
 
 
 def _readable(conn, source_id):
@@ -288,7 +333,7 @@ def _sync_targets(conn, configured):
     for target in configured:
         conn.execute(text("""
             INSERT INTO index_targets(id,config) VALUES (:id,CAST(:config AS jsonb))
-            ON CONFLICT(id) DO UPDATE SET enabled=true
+            ON CONFLICT(id) DO UPDATE SET enabled=true,config=EXCLUDED.config
         """), {"id": target.key(), "config": target.model_dump_json()})
     conn.execute(
         text("UPDATE index_targets SET enabled=false WHERE NOT(id=ANY(:ids))"),
@@ -312,6 +357,8 @@ def scan_committed(*, batch_size=100):
             ).mappings().first()
             if row is None or not _readable(conn, target.source_id):
                 continue
+            if target.limit is not None and _records(conn, target) >= target.limit:
+                continue  # 抽样收满了：不扫，水位也不动
             versions = conn.execute(text("""
                 SELECT version_id,published_seq FROM fabric_versions
                 WHERE source_id=:source AND is_demo=:demo AND published_seq>:seq
@@ -320,6 +367,8 @@ def scan_committed(*, batch_size=100):
                     "seq": row["scanned_seq"], "limit": batch_size}).mappings().all()
             if versions:
                 count += enqueue_versions(conn, [v["version_id"] for v in versions], configured=[target])
+                if target.limit is not None and _records(conn, target) >= target.limit:
+                    continue  # 这一批里收满了：水位不动（没收的那些以后去掉上限时还要扫到）
                 conn.execute(text("""
                     UPDATE index_targets SET scanned_seq=:seq,scanned_at=clock_timestamp() WHERE id=:id
                 """), {"seq": versions[-1]["published_seq"], "id": target.key()})
@@ -404,7 +453,7 @@ def _wanted(row):
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
         mine = current.get(row["artifact_key"])
-        if mine is not None and row["piece_key"] in index_pieces.keys(mine["text"], mine.get("segments") or []):
+        if mine is not None and row["piece_key"] in index_pieces.keys(mine["body"], mine.get("segments") or []):
             return "active"
         # 从没发出过的，或者产物还是当前的、只是分片计划换了而这一片没 ready 过的：直接替代
         if _never_sent(row) or (mine is not None and row["state"] != "ready"):
@@ -446,6 +495,8 @@ def _publish(row, client):
 
 def _settled(receipt):
     """桥接回执 → 结果。ready：上传、解析、向量、索引、绑定都完成；还在解析就过一会儿再查。"""
+    if receipt.get("index_status") == "duplicate_content":  # 这个知识库里已有内容一模一样的另一条：不重复收
+        return _stopped("index_duplicate_content", "知识库里已有内容完全相同的另一条记录，这一条没有重复收")
     if receipt.get("index_status") == "budget_exceeded":  # 上游分出的块超过桥接的核验预算：重试也不会好
         return _stopped("index_chunk_budget", "实际块数超过核验预算（%s 块），记为覆盖缺口" % receipt.get("chunk_count"))
     if receipt.get("source_status") != "active":

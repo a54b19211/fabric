@@ -9,10 +9,6 @@ def who(**sections):
     return json.dumps({"Title": "Mpox - Democratic Republic of the Congo", **sections})
 
 
-def test_the_version_is_v12():
-    assert clean_text.PROCESSOR_VERSION == "datafabric.clean_text.v12"
-
-
 def test_the_title_is_a_level_one_heading_and_points_at_the_raw_title():
     out = clean_text.clean_who(who(Summary="<p>Short.</p>"))
     assert out["text"].startswith("# Mpox - Democratic Republic of the Congo\n\nShort.")

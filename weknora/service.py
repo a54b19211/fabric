@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,9 @@ from fastapi import HTTPException
 
 from .storage import IndexStore, Journal
 
-CONTRACT = "weknora-kdd-v1"
+# v2 (2026-11-17): the uploaded text is the content itself (no "Fabric fixed version" first line, so
+# indexed_text_sha256 == content_sha256), the file is named by the real title, no per-document summary
+CONTRACT = "weknora-kdd-v2"
 IDENTITY_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id", "raw_sha256")
 AGGREGATION = "mean_l2_normalized_enabled_text_chunks_v1"
 
@@ -80,6 +83,15 @@ def publication_id(value):
         piece = value["piece"]
         parts.append([piece["rule"], piece["index"], piece["start"], piece["end"], piece["sha256"]])
     return digest(parts)
+
+def file_name(title):
+    """The upload's file name: WeKnora names the document by it and puts it in front of every embedded chunk, so it
+    is the real title (path separators and control characters out, at most 180 UTF-8 bytes) plus ".md"."""
+    stem = " ".join(re.sub(r"[\\/\x00-\x1f\x7f]", " ", title).split()).strip(". ")
+    while len(stem.encode()) > 180:
+        stem = stem[:-1]
+    return (stem or "untitled") + ".md"
+
 
 def compact_metadata(meta):
     """Fabric retrieval metadata as one native metadata value (at most 1000 characters; identifiers are dropped
@@ -265,14 +277,11 @@ class Service:
                 "contract_version": CONTRACT, **({"fabric_metadata": extra} if extra else {})}
 
     def recover(self, row):
+        """An upload whose outcome is unknown is found back by the publication_id WeKnora stored in the document's
+        metadata (read-only, in the WeKnora database) - the file name is the title now and identifies nothing."""
         value, pid = row["payload"], row["id"]
-        response = self.request("GET", "/api/v1/knowledge-bases/" + value["knowledge_base_id"] + "/knowledge",
-                                params={"keyword": "fabric-" + pid, "page": 1, "page_size": 10})
-        matches = []
-        for doc in response.get("data", []):
-            meta = doc.get("metadata") or {}
-            if meta.get("publication_id") == pid and meta.get("content_sha256") == value["content_sha256"]:
-                matches.append(doc)
+        matches = [doc for doc in self.store.publications(value["knowledge_base_id"], pid)
+                   if (doc.get("metadata") or {}).get("content_sha256") == value["content_sha256"]]
         if len(matches) == 1:
             self.journal.update(pid, knowledge_id=matches[0]["id"], upload_status="uploaded")
             return self.journal.get(pid)
@@ -293,41 +302,48 @@ class Service:
                 if row["knowledge_id"] and row["upload_status"] == "accepted":
                     self.verify_accepted(pid)  # created upstream, not yet verified: verify, never upload
                     row = self.journal.get(pid)
-                elif not row["knowledge_id"] and row["upload_status"] == "rejected":
+                elif not row["knowledge_id"] and row["upload_status"] in ("rejected", "duplicate"):
                     # the upstream refused the earlier upload before creating anything: uploading again is safe
                     self.upload(pid, prior)
                     row = self.journal.get(pid)
                 elif not row["knowledge_id"]:
                     row = self.recover(row)  # outcome unknown: never re-sent blindly, only found back
                 self.ensure_binding(row)
-                return self.status(pid)
+                return self.published(pid)
             kb = self.request("GET", "/api/v1/knowledge-bases/" + value["knowledge_base_id"])["data"]
             model = self.check_model("embedding")
             if kb["embedding_model_id"] != model["id"]:
                 raise HTTPException(409, "knowledge base embedding model differs from the pinned model")
             value["embedding_provenance"] = model_descriptor(model)
             value["chunking"] = kb["chunking_config"]
-            indexed = "<!-- Fabric fixed version " + pid + " -->\n" + value["content"]
-            value["indexed_text_sha256"] = digest(indexed.encode())
+            value["indexed_text_sha256"] = value["content_sha256"]  # v2: the uploaded text is the content
             if not self.journal.reserve(pid, value):
                 raise HTTPException(409, "publication is already being delivered")
             self.upload(pid, value)
             self.ensure_binding(self.journal.get(pid))
-            return self.status(pid)
+            return self.published(pid)
+
+    def published(self, pid):
+        """The receipt of a publish call: the status, and duplicate_content when WeKnora already holds these bytes
+        in this knowledge base under another publication (nothing was created for this one)."""
+        receipt = self.status(pid)
+        if self.journal.get(pid)["upload_status"] == "duplicate":
+            receipt["index_status"] = "duplicate_content"
+        return receipt
 
     def upload(self, pid, value):
         """One physical upload of a reserved publication, recorded per attempt. Before the request the publication
         is durably sending with an in-flight attempt, so a process lost mid-request is reconciled, never re-sent.
         Only a response proving a refusal before creation makes it rejected (and re-uploadable)."""
-        indexed = "<!-- Fabric fixed version " + pid + " -->\n" + value["content"]
         metadata = self.metadata(value, pid)
         self.journal.update(pid, upload_status="sending")
         attempt = self.journal.record_attempt(pid, "in_flight", None, "")
         try:
             result = self.request("POST", "/api/v1/knowledge-bases/" + value["knowledge_base_id"] + "/knowledge/file",
-                files={"file": ("fabric-" + pid + ".md", indexed.encode(), "text/markdown")},
+                files={"file": (file_name(value["title"]), value["content"].encode(), "text/markdown")},
                 data={"metadata": json.dumps(metadata, ensure_ascii=False), "channel": "api",
-                      "process_config": json.dumps({"graph_enabled": False, "extract_config": {"enabled": False},
+                      "process_config": json.dumps({"summary_enabled": False, "graph_enabled": False,
+                          "extract_config": {"enabled": False},
                           "question_generation_config": {"enabled": False, "question_count": 0},
                           "chunking_config": value["chunking"]})})
         except UpstreamError as exc:
@@ -354,7 +370,12 @@ class Service:
         row = self.journal.get(pid)
         check = self.get_document(row["knowledge_id"])
         if (check.get("metadata") or {}).get("publication_id") != pid:
-            raise HTTPException(409, "upstream duplicate does not match the fixed source version")
+            # WeKnora answers an upload of bytes it already holds in this knowledge base with that other document
+            # (there is no first line making every upload unique any more): this publication created nothing.
+            # Not an error to retry: the receipt says duplicate_content; a later replay uploads again and is bound
+            # if the other document is gone by then
+            self.journal.update(pid, knowledge_id=None, upload_status="duplicate")
+            return
         self.journal.update(pid, upload_status="uploaded")
 
     def ensure_binding(self, row):

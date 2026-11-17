@@ -512,6 +512,22 @@ def test_profile_enqueues_in_the_same_transaction_with_search_metadata(pg):
     assert job(pg, version)["ready_at"] is not None
 
 
+def test_a_target_with_a_limit_takes_that_many_records_and_keeps_updating_them(pg, monkeypatch):
+    config = set_targets(monkeypatch)
+    monkeypatch.setenv("DATAFABRIC_INDEX_TARGETS", canonical([{**config[0], "limit": 1}]))
+    assert index.targets()[0].key() == index.IndexTarget(**config[0]).key()  # the limit is not part of the identity
+    add_document("SYNTHETIC-first")
+    add_document("SYNTHETIC-second")
+    scan()
+    taken = {row["source_record_id"] for row in rows(pg, "SELECT source_record_id FROM index_publications")}
+    assert len(taken) == 1
+    add_document(taken.pop(), summary="Corrected text.", available="2019-02-01")  # a new version of the record already taken
+    add_document("SYNTHETIC-third")
+    scan()
+    counts = rows(pg, "SELECT source_record_id, count(*) AS n FROM index_publications GROUP BY 1")
+    assert [row["n"] for row in counts] == [2]
+
+
 def test_enqueue_failure_rolls_back_the_profile_and_retries_cleanly(pg):
     index.scan_committed()
     add_document("SYNTHETIC-rollback")

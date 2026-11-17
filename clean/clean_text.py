@@ -28,7 +28,11 @@ from json.decoder import scanstring
 
 # Any rule change is a new version: results are stored per processor version and earlier artifacts are kept
 # (what each version changed: git log -p clean/clean_text.py).
-PROCESSOR_VERSION = "datafabric.clean_text.v12"
+# v13 (2026-11-17): the texts Fabric assembles from fields carry Markdown headings, so the knowledge base can split
+# them by section: ClinicalTrials ("# title", one "## label key" per field, site list and result tables last and
+# marked index=False), openFDA label / enforcement records ("## field" per field, empty fields left out); ChiCTR
+# pages lose the pure contact lines (CONTACT_RULE). Texts that have no headings of their own get none.
+PROCESSOR_VERSION = "datafabric.clean_text.v13"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -243,14 +247,73 @@ def clean_markdown(text: str, *, source_id: str | None = None) -> dict:
     source_id 是站点（documents 库存按原站）：SITE_TEMPLATES 里有它的，再按站点模板整块删导航和页尾。
     documents 库存里被旧采集器“改写成叙述段落 + 原文附录”的登记页，只保留“原始注册信息”之后的原文部分。
     """
+    if source_id in FIELD_RECORD_SOURCES:
+        return clean_field_record(text or "")
     scanner = _MarkdownBlocks()
+    contacts = 0
     for line, offset in _lines_with_offsets(text or ""):
+        if source_id == "chictr" and _CHICTR_CONTACT.match(line.strip()):
+            contacts += 1
+            line = ""  # 和模板行一样：删掉这行，并在此处断段
         scanner.feed(line, offset)
     scanner.flush()  # 没有闭合的 <table> 也照样整块保留到结尾，不丢内容
     blocks, dropped = _apply_templates(scanner.blocks, source_id)
     body, segments = _markdown_segments(blocks)
     warnings = [] if body else ["no_body"]
-    return _result(body, segments, detect_language(body), scanner.removed + dropped, warnings)
+    if contacts:
+        warnings.append("excluded_by_rule:" + CONTACT_RULE)
+    return _result(body, segments, detect_language(body), scanner.removed + dropped + contacts, warnings)
+
+
+# ChiCTR 登记页里纯联络用途的行（和 ClinicalTrials 的 CONTACT_RULE 同一个意思）：申请注册联系人和伦理委员会联系人的
+# 姓名、电话、邮件、地址、邮编、传真，申请单位网址。研究负责人、申办单位、实施地点照留。原件保留
+_CHICTR_CONTACT = re.compile(
+    r"(?:申请注册联系人|伦理委员会联系|申请单位网址|Applicant(?: address)?\s*[：:]"
+    r"|Contact (?:Name|Address) of the ethic committee)")
+
+# 接口站点把一条记录写成“# 标题”加每个字段一行“**字段名**: 值”（fetch/api_fields.py · _record_to_markdown）。这两个来源
+# 的正文就是这些字段：每个字段写成一节“## 字段名”，值是 JSON 的还原成文字（字符串列表一项一段，对象逐行），空字段不写
+FIELD_RECORD_SOURCES = frozenset({"fda_api_drug_label", "fda_api_enforcement"})
+_FIELD_LINE = re.compile(r"\*\*([A-Za-z0-9_.]+)\*\*:(.*)")
+
+
+def _field_value(raw: str) -> str:
+    raw = raw.strip()
+    if raw[:1] in "[{":
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return raw
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return "\n\n".join(v.strip() for v in value if v.strip())
+        return "\n".join(_readable(value))
+    return raw
+
+
+def clean_field_record(text: str) -> dict:
+    """接口记录的 Markdown → “# 标题”加每个字段一节“## 字段名”。每节的 source 是原文里那一行的区间。"""
+    parts, segments, cursor = [], [], 0
+    for line, offset in _lines_with_offsets(text):
+        start, end = _content_span(line, offset)
+        norm = line.strip()
+        if not norm:
+            continue
+        found = _FIELD_LINE.fullmatch(norm)
+        if found:
+            value = _field_value(found.group(2))
+            if not value:
+                continue
+            block, kind = "## " + found.group(1) + "\n\n" + value, "field"
+        else:
+            block, kind = norm, "heading" if _HEADING.match(norm) else "paragraph"
+        if parts:
+            cursor += 2
+        segments.append({"start": cursor, "end": cursor + len(block), "kind": kind,
+                         "source": {"start": start, "end": end}})
+        parts.append(block)
+        cursor += len(block)
+    body = "\n\n".join(parts)
+    return _result(body, segments, detect_language(body), 0, [] if body else ["no_body"])
 
 
 class _MarkdownBlocks:
@@ -373,7 +436,15 @@ REGISTRY_ORDER = [
     "has_results", "results_first_posted",
 ]
 
-# 字段的中文名只用于阅读；不得含空格（段文本按“字段名 field_key: value”解析）。
+# 排在最后、不进知识库的字段（段上标 index=False，store.index_publication.index_body 在第一个这样的段前截住）：
+# 研究地点名单和登记结果表。它们一条登记能有几十万字，检索时全是地点名和数字；清洗正文里照样完整保留
+REGISTRY_TAIL = ["locations", "results_participant_flow", "results_baseline", "results_outcome_measures",
+                 "results_adverse_events"]
+# Fabric 自己加的迁入说明，不是来源的字段，不写进正文
+_NOT_SOURCE_FIELDS = frozenset({"legacy_migration", "publication_role"})
+TITLE_POINTER = "/protocolSection/identificationModule/briefTitle"
+
+# 字段的中文名只用于阅读；不得含空格（每节的标题是“## 字段名 field_key”）。
 REGISTRY_LABELS = {
     "trial_id": "登记号",
     "status": "状态",
@@ -509,13 +580,21 @@ def _render_field(key, value):
     return (lines[0] if len(lines) == 1 else "\n" + "\n".join(lines)), removed
 
 
-def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -> dict:
-    """临床登记（ClinicalTrials.gov）已投影的字段 → 逐字段的正文。
+def _registry_order(facts):
+    """写哪些字段、什么顺序：固定阅读顺序在前，其余按键名，地点和结果表（REGISTRY_TAIL）最后；None 和迁入说明不写。"""
+    present = [k for k, v in facts.items() if v is not None and k not in _NOT_SOURCE_FIELDS]
+    ordered = [k for k in REGISTRY_ORDER if k in present]
+    ordered += sorted(k for k in present if k not in REGISTRY_ORDER and k not in REGISTRY_TAIL)
+    return ordered + [k for k in REGISTRY_TAIL if k in present]
 
-    每个存在的字段一段，以“字段名 field_key:”开头：标量写在同一行；结构化的值写成可读的逐行文本
-    （见 _readable，v7 起不再写 JSON）。值为 None 视同字段缺失，直接不写（不写 0 / null）。
+
+def clean_registry(facts: dict, locators: dict, *, summary: str | None = None, title: str | None = None) -> dict:
+    """临床登记（ClinicalTrials.gov）已投影的字段 → 逐字段的正文（Markdown）。
+
+    “# 标题”、简介，然后每个存在的字段一节：“## 字段名 field_key”，下面是值（结构化的值写成可读的逐行文本，
+    见 _readable，不写 JSON）。值为 None 视同字段缺失，直接不写（不写 0 / null）。
     字段一律完整保留，不截断；只有研究地点联系人里纯联络用途的信息不进正文（CONTACT_RULE），
-    用到时 warnings 记 excluded_by_rule:<规则版本>。
+    用到时 warnings 记 excluded_by_rule:<规则版本>。研究地点和结果表排在最后（REGISTRY_TAIL），段上标 index=False。
     """
     facts = facts or {}
     locators = locators or {}
@@ -523,15 +602,17 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
     parts, segments, cursor = [], [], 0
     lang_texts = []
 
-    def add(line, kind, pointer):
+    def add(line, kind, pointer, **marks):
         nonlocal cursor
         if parts:
-            cursor += 1
+            cursor += 2
         segments.append({"start": cursor, "end": cursor + len(line), "kind": kind,
-                         "source": {"json_pointer": pointer}})
+                         "source": {"json_pointer": pointer}, **marks})
         parts.append(line)
         cursor += len(line)
 
+    if isinstance(title, str) and title.strip():
+        add("# " + normalize_whitespace(title), "heading", TITLE_POINTER)
     summary_text = normalize_whitespace(summary) if isinstance(summary, str) else ""
     if summary_text:
         add(summary_text, "paragraph", SUMMARY_POINTER)
@@ -539,10 +620,7 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
     else:
         warnings.append("summary_missing")
 
-    present = [k for k, v in facts.items() if v is not None]
-    ordered = [k for k in REGISTRY_ORDER if k in present]
-    ordered += sorted(k for k in present if k not in REGISTRY_ORDER)
-    for key in ordered:
+    for key in _registry_order(facts):
         value = facts[key]
         rendered, removed = _render_field(key, value)
         if removed and "excluded_by_rule:" + CONTACT_RULE not in warnings:
@@ -551,11 +629,11 @@ def clean_registry(facts: dict, locators: dict, *, summary: str | None = None) -
             continue
         locator = locators.get(key)
         pointer = locator.get("json_pointer") if isinstance(locator, dict) else None
-        add(REGISTRY_LABELS.get(key, _DEFAULT_LABEL) + " " + key + ":" + ("" if rendered.startswith("\n") else " ")
-            + rendered, "field", pointer)
+        add("## " + REGISTRY_LABELS.get(key, _DEFAULT_LABEL) + " " + key + "\n\n" + rendered.lstrip("\n"), "field",
+            pointer, **({"index": False} if key in REGISTRY_TAIL else {}))
         lang_texts.extend(_strings_in(value))
 
-    body = "\n".join(parts)
+    body = "\n\n".join(parts)
     if not body:
         warnings.append("no_body")
     return _result(body, segments, detect_language("\n".join(lang_texts)), 0, warnings)

@@ -204,21 +204,25 @@ LOCATORS = {k: {"json_pointer": "/p/" + k} for k in FACTS if k != "zz_extra"}
 
 
 def test_registry_order_format_and_pointers():
-    out = ct.clean_registry(FACTS, LOCATORS, summary="Corrected: no significant difference (p = 0.21).")
+    out = ct.clean_registry(FACTS, LOCATORS, summary="Corrected: no significant difference (p = 0.21).",
+                            title="Drug X in Y")
     assert_shape(out)
     segs = out["segments"]
-    assert segs[0]["kind"] == "paragraph"
-    assert segs[0]["source"] == {"json_pointer": "/protocolSection/descriptionModule/briefSummary"}
-    assert seg_text(out, segs[0]) == "Corrected: no significant difference (p = 0.21)."
-    keys = [seg_text(out, s).split(" ", 1)[1].split(":", 1)[0] for s in segs[1:]]
+    assert seg_text(out, segs[0]) == "# Drug X in Y" and segs[0]["kind"] == "heading"
+    assert segs[1]["kind"] == "paragraph"
+    assert segs[1]["source"] == {"json_pointer": "/protocolSection/descriptionModule/briefSummary"}
+    assert seg_text(out, segs[1]) == "Corrected: no significant difference (p = 0.21)."
+    segs = segs[1:]
+    # v13：每个字段一节，“## 字段名 field_key”，值在下面
+    keys = [seg_text(out, s).split("\n", 1)[0].split(" ")[2] for s in segs[1:]]
     assert keys == ["status", "why_stopped", "phase", "enrollment", "completion_date", "interventions",
                     "eligibility", "has_results", "trial_id", "zz_extra"]
     assert all(s["kind"] == "field" for s in segs[1:])
-    lines = out["text"].split("\n")
-    assert lines[1] == "状态 status: TERMINATED"
-    assert lines[3] == "分期 phase: PHASE2; PHASE3"
-    assert "干预措施 interventions: [1] description: 10 mg/kg IV q3w; name: Drug X" in out["text"]
-    assert lines[-1] == "其他字段 zz_extra: a: 不; b: 2"
+    blocks = out["text"].split("\n\n")
+    assert blocks[2:4] == ["## 状态 status", "TERMINATED"]
+    assert "## 分期 phase\n\nPHASE2; PHASE3" in out["text"]
+    assert "## 干预措施 interventions\n\n[1] description: 10 mg/kg IV q3w; name: Drug X" in out["text"]
+    assert out["text"].endswith("## 其他字段 zz_extra\n\na: 不; b: 2")
     assert '{"' not in out["text"] and '":' not in out["text"]  # v7：不写 JSON
     assert segs[1]["source"] == {"json_pointer": "/p/status"}
     assert segs[-1]["source"] == {"json_pointer": None}
@@ -229,7 +233,7 @@ def test_registry_order_format_and_pointers():
 
 def test_registry_missing_fields_not_invented_and_summary_missing():
     out = ct.clean_registry({"status": "RECRUITING", "why_stopped": None}, {})
-    assert out["text"] == "状态 status: RECRUITING"
+    assert out["text"] == "## 状态 status\n\nRECRUITING"
     assert "why_stopped" not in out["text"] and "null" not in out["text"]
     assert "enrollment" not in out["text"]
     assert out["warnings"] == ["summary_missing"]
@@ -247,7 +251,7 @@ def test_registry_very_long_value_is_still_kept_whole():
     """清洗层不截断（Codex 448）：长度预算只用在索引分片、展示摘要和模型阅读窗口上。"""
     long = "未见异常；" * 50000
     out = ct.clean_registry({"eligibility": long}, {"eligibility": {"json_pointer": "/e"}}, summary="s")
-    assert seg_text(out, out["segments"][1]) == "入选标准 eligibility: " + long
+    assert seg_text(out, out["segments"][1]) == "## 入选标准 eligibility\n\n" + long
     assert out["warnings"] == []
 
 
@@ -270,11 +274,11 @@ def test_registry_v9_renders_structure_readably_and_keeps_every_value():
                             {"results_adverse_events": {"json_pointer": "/resultsSection/adverseEventsModule"}},
                             summary="s")
     text = out["text"]
-    assert ("主要终点 primary_outcomes: [1] description: OS per RECIST; measure: Overall survival; "
+    assert ("## 主要终点 primary_outcomes\n\n[1] description: OS per RECIST; measure: Overall survival; "
             "timeFrame: up to 5 years") in text
     # 地点：先写全部国家及地点数，再逐个地点写全部字段；联系人只去掉纯联络信息（Codex 451）：电话、邮件、
     # 联络人（CONTACT）的姓名。研究者、角色不明的姓名和角色保留
-    assert ("研究地点 locations:\ncountries: China (3); United States (1)\n"
+    assert ("## 研究地点 locations\n\ncountries: China (3); United States (1)\n"
             "sites[1] city: Beijing; country: China; facility: Site 0; status: RECRUITING\n"
             "sites[1].contacts[1] name: Dr Lead; role: PRINCIPAL_INVESTIGATOR\n"
             "sites[1].contacts[2] name: Dr Unknown\n"
@@ -283,7 +287,10 @@ def test_registry_v9_renders_structure_readably_and_keeps_every_value():
         assert gone not in text, gone
     block = seg_text(out, next(s for s in out["segments"]
                                if s["source"]["json_pointer"] == "/resultsSection/adverseEventsModule"))
-    assert block.startswith("结果-不良事件 results_adverse_events:\neventGroups[1] id: EG000; seriousNumAffected: 0")
+    assert block.startswith("## 结果-不良事件 results_adverse_events\n\neventGroups[1] id: EG000; seriousNumAffected: 0")
+    # v13：地点和结果表排在最后、标 index=False（不进知识库），其余字段在它们前面
+    tail = [s.get("index") is False for s in out["segments"]]
+    assert tail == [False, False, True, True, True]
     assert "eventGroups[500] id: EG499; seriousNumAffected: 499; title: Arm 499" in block  # 一条不少
     for value in ("14.2", "11.8", "16.9", "months", "95% Confidence Interval", "355", "Participants", "OG000"):
         assert value in text, value
@@ -294,6 +301,27 @@ def test_registry_empty():
     out = ct.clean_registry({}, {})
     assert out["text"] == "" and out["segments"] == []
     assert out["warnings"] == ["summary_missing", "no_body"]
+
+
+def test_field_record_writes_one_heading_per_field_and_leaves_empty_fields_out():
+    """v13：openFDA 接口记录（“**字段**: 值”一行一个）→ 每个字段一节“## 字段名”；JSON 值还原成文字，空字段不写。"""
+    md = ('# Drug A\n\n**indications_and_usage**: ["1 INDICATIONS Drug A is for X.", "1.1 Limits"]\n'
+          '**openfda**: {"brand_name": ["Drug A"], "route": ["ORAL"]}\n**address_2**: \n**empty**: {}\n**status**: Ongoing')
+    out = ct.clean_markdown(md, source_id="fda_api_drug_label")
+    assert_shape(out)
+    assert out["text"] == ("# Drug A\n\n## indications_and_usage\n\n1 INDICATIONS Drug A is for X.\n\n1.1 Limits\n\n"
+                           "## openfda\n\nbrand_name: Drug A\nroute: ORAL\n\n## status\n\nOngoing")
+    field = out["segments"][1]
+    assert md[field["source"]["start"]:field["source"]["end"]].startswith("**indications_and_usage**")
+
+
+def test_chictr_contact_lines_are_left_out():
+    md = "# 试验\n\n注册号：ChiCTR1\n申请注册联系人电话：+86 1\nApplicant：Zhan\nApplicant's institution：Hospital\n研究负责人：王"
+    out = ct.clean_markdown(md, source_id="chictr")
+    assert "+86" not in out["text"] and "Zhan" not in out["text"]
+    assert "Applicant's institution：Hospital" in out["text"] and "研究负责人：王" in out["text"]
+    assert out["warnings"] == ["excluded_by_rule:" + ct.CONTACT_RULE]
+    assert "+86" in ct.clean_markdown(md, source_id="nmpa")["text"]  # 只有 ChiCTR 用这条规则
 
 
 # ---------------------------------------------------------------- literature

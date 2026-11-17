@@ -1,5 +1,5 @@
 {
-  "contract_version": "weknora-kdd-v1",
+  "contract_version": "weknora-kdd-v2",
   "base_url": "http://127.0.0.1:18563",
   "auth": {
     "header": "Authorization",
@@ -88,7 +88,7 @@
         "is_demo": "boolean default false; must match server KB classification"
       },
       "response": {
-        "contract_version": "weknora-kdd-v1",
+        "contract_version": "weknora-kdd-v2",
         "scope_fingerprint": "sha256 of fixed members and scope",
         "requested_count": "member count, not total corpus",
         "returned_count": "document features count",
@@ -140,7 +140,7 @@
       "response": {
         "results": "list of content,chunk_id,knowledge_id,score,identity,raw_locator,source_scope,content_sha256,index_version",
         "execution": "actual keyword/vector/embedding/rerank executed states, safe model descriptors, index version, degraded bool and degraded_reasons",
-        "contract_version": "weknora-kdd-v1",
+        "contract_version": "weknora-kdd-v2",
         "is_demo": "boolean; also preserved per returned feature/search hit"
       }
     }

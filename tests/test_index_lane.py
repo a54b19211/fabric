@@ -20,3 +20,24 @@ def test_a_freshly_fetched_version_is_new_and_an_old_one_is_backfill():
 
 def test_a_migrated_version_is_backfill_whenever_it_was_imported():
     assert _lane(version(0, publication_role="migrated_record"), NOW) == "backfill"
+
+
+def test_the_index_body_stops_before_the_first_segment_marked_not_for_the_index():
+    from store.index_publication import index_body
+
+    text_ = "# T\n\n## a\n\nkept\n\n## locations\n\nsite list"
+    cut = text_.index("## locations")
+    segments = [{"start": 0, "end": 3}, {"start": 5, "end": 15}, {"start": cut, "end": len(text_), "index": False}]
+    assert index_body(text_, segments) == "# T\n\n## a\n\nkept"
+    assert index_body(text_, segments[:2]) == text_
+
+
+def test_versions_that_differ_only_in_the_tail_left_out_of_the_index_are_one_artifact():
+    from store.index_publication import _settled, artifact_key
+
+    head = {"processor_version": "clean.v", "text_sha256": "a" * 64, "body_sha256": "c" * 64}
+    older = {"processor_version": "clean.v", "text_sha256": "b" * 64, "body_sha256": "c" * 64}
+    assert artifact_key(head) == artifact_key(older) == "clean.v:" + "c" * 64
+    assert artifact_key({"processor_version": "clean.v", "text_sha256": "a" * 64}) == "clean.v:" + "a" * 64
+    # the bridge's duplicate receipt stops the entry with its reason instead of retrying
+    assert _settled({"index_status": "duplicate_content"})["error"]["code"] == "index_duplicate_content"
