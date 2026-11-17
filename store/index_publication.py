@@ -2,7 +2,8 @@
 
 从哪读起：run_worker() 是常驻循环，一轮做两件事：scan_committed() 补扫待办，work_once() 领一批到期待办逐条处理。
 - 待办：一条 = (索引目标, 记录, 一份清洗正文[, 太长时的一片])。同一记录里清洗正文相同的版本只建一条，代表版本是最先
-  产出这份正文的版本。入队只有 enqueue_versions：清洗段写画像时同一事务调用；scan_committed 按 published_seq 水位
+  产出这份正文的版本；处理器升级后正文没变的也还是这一条（same_text），不重复上传。进知识库的是 index_body：
+  清洗正文去掉标了 index=False 的尾部。目标可以带 limit（抽样上限）；LIST_ROW_SOURCES 的列表行不进。入队只有 enqueue_versions：清洗段写画像时同一事务调用；scan_committed 按 published_seq 水位
   补扫已画像而还没有待办的版本（回填、新加的目标）。ON CONFLICT 去重，两条路不会重复。
 - 处理（_handle）：先判这条该不该在（_wanted）。该在：桥接还没绑定就上传，按回执记下 knowledge_id、是否 ready；
   不该在：请桥接撤下。出错记下原因、退避重试，连续 MAX_ATTEMPTS 次后停在 blocked（管理页可以放回重试）。
