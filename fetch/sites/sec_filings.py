@@ -12,7 +12,7 @@ import os
 import re
 import warnings
 
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from bs4 import BeautifulSoup, Comment, XMLParsedAsHTMLWarning
 
 from fetch import transport
 from fetch.api_fields import record
@@ -20,7 +20,9 @@ from store.record_models import MAX_RECORD_BYTES, GroupStart, ItemUnreadable
 
 SITE_KEY = "sec_filings"
 ARCHIVES = "https://www.sec.gov/Archives/edgar/data/"
-_BLOCKS = ["p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6"]
+_BLOCKS = ["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table"]  # 单元格里有这些的行，不当一行写
+_CONTAINERS = _BLOCKS + ["tr", "td", "th", "tbody", "thead", "tfoot", "ul", "ol", "body", "html", "section", "center",
+                         "blockquote", "pre"]
 # filing 自己的章节行（“PART II”“Item 1A. Risk Factors”）写成二级标题；目录表格里的同名行（带 | ）不算
 _SECTION = re.compile(r"(?i)(?:PART\s+[IV]+(?:\s|$)|Item\s+\d+[A-Z]?\.\s+\S)")  # 只有“Item 1.”没有名字的是目录格子
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)  # inline XBRL 的 filing 带 XML 声明，照 HTML 读
@@ -39,22 +41,45 @@ def _get(url, cap=48 * 1024 * 1024):
 
 
 def html_text(html) -> str:
-    """HTML → 一块一段的文字：不含别的块的 p / div / li / 标题各一段，表格一行一段（单元格用 | 隔开）。"""
+    """HTML → 一块一段的文字，一个字不丢：块（p / div / li / 标题 / 单元格…）各成段，块里直接写的文字也成段；
+    单元格里没有别的块的表格行写成一段，单元格用 | 隔开。"""
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "head", "ix:header"]):
         tag.decompose()
     lines = []
-    for block in soup.find_all(_BLOCKS):
-        if block.find(_BLOCKS):
-            continue
-        if block.name == "tr":
-            cells = [" ".join(cell.get_text(" ").split()) for cell in block.find_all(["td", "th"])]
-            line = " | ".join(cell for cell in cells if cell)
-        else:
-            line = " ".join(block.get_text(" ").split())
+    _blocks(soup, lines)
+    return "\n\n".join("## " + line if len(line) < 150 and " | " not in line and _SECTION.match(line) else line
+                         for line in lines)
+
+
+def _blocks(node, lines):
+    """node 里的文字按文档顺序放进 lines：遇到块就先把攒着的行内文字收成一段，再进块里读。"""
+    inline = []
+
+    def flush():
+        line = " ".join(" ".join(inline).split())
+        inline.clear()
         if line:
-            lines.append("## " + line if len(line) < 150 and " | " not in line and _SECTION.match(line) else line)
-    return "\n\n".join(lines)
+            lines.append(line)
+
+    for child in node.children:
+        name = getattr(child, "name", None)
+        if name is None:
+            if not isinstance(child, Comment):
+                inline.append(str(child))
+        elif name == "tr" and not child.find(_BLOCKS):
+            flush()
+            cells = [" ".join(cell.get_text(" ").split()) for cell in child.find_all(["td", "th"])]
+            inline.append(" | ".join(cell for cell in cells if cell))
+            flush()
+        elif name == "br":
+            flush()
+        elif name in _CONTAINERS or child.find(_CONTAINERS):
+            flush()
+            _blocks(child, lines)
+        else:
+            inline.append(child.get_text(" "))
+    flush()
 
 
 def _filing(api, company, cik, row):

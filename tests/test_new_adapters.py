@@ -40,6 +40,9 @@ def test_sec_filing_text_keeps_section_headings_and_an_oversized_filing_is_unrea
     html = (b"<html><body><div><p>Item 1. | Business | 5</p></div><p>Item 1. Business</p><p>We make drugs.</p>"
             b"<table><tr><td>Revenue</td><td>10</td></tr></table></body></html>")
     assert sec_filings.html_text(html) == "Item 1. | Business | 5\n\n## Item 1. Business\n\nWe make drugs.\n\nRevenue | 10"
+    # text written straight into a block beside other blocks is kept (2026-11-17: 3.6% of a 10-Q was lost)
+    mixed = b"<div>Lead in <b>bold</b><p>Para.</p>tail text<table><tr><td><div>cell block</div></td><td>x</td></tr></table></div>"
+    assert sec_filings.html_text(mixed) == "Lead in bold\n\nPara.\n\ntail text\n\ncell block\n\nx"
     recent = {"form": ["10-Q", "4", "10-K"], "filingDate": ["2026-11-03", "2026-11-02", "2026-02-20"],
               "reportDate": ["2026-09-27", "", "2025-12-31"], "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3"],
               "primaryDocument": ["q.htm", "x.xml", "k.htm"], "items": ["", "", ""]}
