@@ -125,6 +125,21 @@ def _record_to_markdown(record: dict, title: str) -> str:
     return "\n".join(lines)
 
 
+def record(site, key, title, publish_date, markdown, url, *, category="", summary="", extra=None) -> dict:
+    """一条标准记录：读取函数（站点配置里的 api_fetcher）每读到一条就 yield 一个这样的字典。
+    site 来源编号；key 这条记录在来源里不变的编号（DOI、公告号、链接…），记录号是 uuid5(site:key)，同一个 key 再读到
+    就是同一条记录（内容变了存成新版本）；title 标题；publish_date 来源写的发布日期（认不出就是空）；markdown 正文
+    （“# 标题”开头，原文有小节的写“## 小节名”，没有的不加）；url 原文链接；category 一个词的类别；summary 摘要
+    （只留前 500 字，给画像分类用）；extra 来源特有的字段（原样进 facts.extra）。读不到的一条 yield ItemUnreadable。"""
+    return {
+        "uuid": make_uuid(f"{site}:{key}"), "title": title, "publish_date": normalize_date(publish_date),
+        "markdown": markdown, "source_url": url, "source_site": site, "parse_method": "api",
+        "structured_data": {"title": title, "publish_date": normalize_date(publish_date), "category": category,
+                            "summary": (summary or "")[:500], "drug_name": "", "manufacturer": ""},
+        "attachment_links": [], "sniffed_meta": {}, "extra": extra or {},
+    }
+
+
 def to_result(site_key: str, profile: dict, record: dict) -> tuple[dict, dict | None]:
     """接口原始记录 → (标准解析结果, 保留的接口原始字段)。拉取函数已经给出标准解析结果的，原样用它，
     此时没有另外的原始字段（返回 None）。"""

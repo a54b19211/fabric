@@ -32,6 +32,8 @@ STOP_AT_KNOWN = {
     "pubmed", "chictr", "nmpa", "cde", "cde_xxgk", "cde_zdyz", "phirda_industry", "phirda_policy", "phirda_rd",
     "phirda_healthcare_reform", "fda_press", "fda_drug_safety", "fda_api_drug_label", "fda_api_enforcement",
     "fiercepharma", "roche", "hkex", "nccn",  # 最后两个分组读：一家公司、一份指南一组
+    # 2026-11-17 接通：预印本、SEC filing（一家公司一组）、港交所定期报告（一家公司一组）、RSS 新闻稿、EMA 新闻
+    "biorxiv", "medrxiv", "arxiv", "sec_filings", "sec_8k", "hkex_reports", "rss_press", "ema",
 }
 
 
@@ -42,13 +44,14 @@ def test_watchable_set_is_the_earlier_five_and_the_newest_first_lists():
     assert catalog.WATCHABLE == earlier | STOP_AT_KNOWN | {"fda_crl"}
     assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.kind == "stop_at_known"} == STOP_AT_KNOWN
     assert catalog.spec("fda_crl").incremental.kind == "full_reread"  # 成批公布的旧信会排在读过的新信后面：整份重读
-    assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.by_group} == {"hkex", "nccn"}
+    assert {s for s in catalog.WATCHABLE if catalog.spec(s).incremental.by_group} == {
+        "hkex", "nccn", "hkex_reports", "sec_filings", "sec_8k"}
     assert "local_files" in catalog.FETCHABLE and "local_files" not in catalog.WATCHABLE
 
 
 def test_blocked_and_declared_sources_are_visible_gaps_not_fetchable():
     gaps = {g["source_id"]: g for g in catalog.gaps()}
-    for source in ("cde_ctr", "cninfo", "biorxiv", "drugs_fda"):
+    for source in ("cde_ctr", "cninfo", "patents", "drugs_fda"):
         assert source in gaps and source not in catalog.FETCHABLE
     assert "脚本挑战" in gaps["cde_ctr"]["reason"]
     # 站点插件采集的来源：可按需读取，但不进固定刷新、标为未经本系统实测
@@ -437,3 +440,21 @@ def test_change_id_is_stable_and_versioned():
     assert rd.PROCESSOR_VERSION.endswith(".v3")
     a = rd.change_id("a" * 64, "b" * 64, "status")
     assert a == rd.change_id("a" * 64, "b" * 64, "status") and a != rd.change_id("a" * 64, "c" * 64, "status")
+
+
+def test_the_catalog_watches_are_valid_and_each_names_a_real_list_entry(monkeypatch):
+    """定时刷新计划写在来源目录里（原来在环境变量 DATAFABRIC_WATCHES）：每条都合法、编号不重复，网页站点的 query 是
+    站点配置里的列表入口，接口站点是 records。"""
+    from fetch.site_profiles import SITE_PROFILES
+    from fetch.source_refresh import watches
+
+    monkeypatch.delenv("DATAFABRIC_WATCHES", raising=False)
+    found = watches()
+    assert len(found) == len(catalog.WATCHES) > 30
+    for item in found:
+        profile = SITE_PROFILES.get(item.request.source_id)
+        if profile is not None:
+            wanted = ["records"] if profile.get("source_type") == "api" else profile["start_urls"]
+            assert item.request.query in wanted, item.id
+    monkeypatch.setenv("DATAFABRIC_WATCHES", "[]")  # 环境变量给了就用它的
+    assert watches() == []

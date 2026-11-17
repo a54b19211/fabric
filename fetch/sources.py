@@ -274,7 +274,8 @@ class _PublicApiRead:
         # openFDA 用 skip 翻页：位置就是已读过的条数（续读时从 continuation.read_count 接上）
         self.consumed += len(page_items)
         self.exhausted = isinstance(self.source_total, int) and self.consumed >= self.source_total
-        return "skip"
+        # 续读位置带上已读条数：定时刷新靠它变没变判断“有没有往前读”（原来一直是 "skip"，第二段就被判成没有前进）
+        return "skip:%d" % self.consumed
 
     def _clinicaltrials_cursor(self, data, page_items):
         next_cursor = data.get("nextPageToken")

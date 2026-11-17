@@ -59,16 +59,18 @@ python main_etl.py --only index                           # 送知识库处理�
 | datafabric-api | `uvicorn api.main:app` | HTTP 接口 |
 
 附件正文解析 `python -m run.attachments --loop` 没有服务文件，要用时手动起。环境变量：
-- 抓、洗、存都要：`DATAFABRIC_DATABASE_URL`（资料库）；定时刷新再要 `DATAFABRIC_REDIS_URL`（采集队列）、
-  `DATAFABRIC_WATCHES`（刷新哪些来源，进度存在资料库的 `fabric_source_watches`）。
-- 接口：`DATAFABRIC_READ_TOKEN` / `DATAFABRIC_ADMIN_TOKEN`；知识库：`DATAFABRIC_INDEX_TARGETS`、`WEKNORA_KDD_URL`、`WEKNORA_KDD_TOKEN`。
-- 可选：`DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（NCCN 走服务器上的 mihomo，
-  只有站点配置写了 `proxy_env` 的站点用代理）；`DATAFABRIC_FETCH_ENABLED=false`（这个实例不出网，只读已存的版本）；
+- 抓、洗、存都要：`DATAFABRIC_DATABASE_URL`（资料库）；定时刷新再要 `DATAFABRIC_REDIS_URL`（采集队列）。刷新哪些来源、多久一轮
+  写在来源目录 `fetch/catalog.py · WATCHES`（进度存在资料库的 `fabric_source_watches`）；环境变量 `DATAFABRIC_WATCHES` 给了就用它的。
+- 接口：`DATAFABRIC_READ_TOKEN` / `DATAFABRIC_ADMIN_TOKEN`；知识库：`WEKNORA_KDD_URL`、`WEKNORA_KDD_TOKEN`、`DATAFABRIC_INDEX_TARGETS`
+  （JSON 数组，一项 = 一个来源进哪个知识库：`source_instance, source_id, is_demo, knowledge_base_id, source_scope`，可加
+  `limit`＝最多收几条记录，抽样用；去掉 `limit` 后把 `index_targets.scanned_seq` 置 0 补扫。最多 32 项）。知识库按资料类型分
+  （试验登记、说明书、监管公告、论文……），分块方式配在 WeKnora 的知识库上；ClinicalTrials 的地点名单和结果表不进知识库。
+- 可选：`DATAFABRIC_PROXY_NCCN=http://127.0.0.1:7890`（只有站点配置写了 `proxy_env` 的站点用它）；`DATAFABRIC_FETCH_ENABLED=false`（这个实例不出网）；
   磁盘余量 `DATAFABRIC_PUBLICATION_DISK_PATH`（默认当前目录）低于 `DATAFABRIC_PUBLICATION_MIN_FREE_BYTES`（默认 15 GB）时不建新的采集任务。
 
-来源开关在库里：`fabric_sources.read_enabled`（能不能读）、`fetch_enabled`（定时刷新抓不抓），管理员用 `GET /api/fabric/admin/sources` 看、
+来源开关在库里（定时抓 = 目录里有计划 + 两个开关都开）：`fabric_sources.read_enabled`（能不能读）、`fetch_enabled`（定时刷新抓不抓），管理员用 `GET /api/fabric/admin/sources` 看、
 `PATCH /api/fabric/admin/sources/{source_id}`（`{"read_enabled":..,"fetch_enabled":..,"changed_by":..}`）改，每次改记进 `fabric_source_switch_log`。升级旧库：V042 加 `fingerprint`、`replaced_by`（再跑 `ops/backfill_fingerprint.py`
-补旧指纹，不补也能用）；V043、V044 质量分表和对齐表；V045 `fabric_source_watches`（刷新进度从原采集库挪来，从新周期开始）；V046 只改名：表 `history_*` → `fabric_*`；V047 加 `fetch_enabled` 和改开关的记录，并关掉 `fetch/catalog.py · DEFAULT_CLOSED` 里来源的可读开关。
+补旧指纹，不补也能用）；V043、V044 质量分表和对齐表；V045 `fabric_source_watches`（刷新进度从原采集库挪来，从新周期开始）；V046 只改名：表 `history_*` → `fabric_*`；V047 加 `fetch_enabled` 和改开关的记录；V052 打开 `DEFAULT_CLOSED` 里要进知识库的来源、关掉退役来源的定时抓取、清掉旧知识库的索引待办。
 
 测试：`make test`（单元，不连库）、`make lint`、`make metrics`（函数 80 行、复杂度 20 的门槛）、`make test-integration`（起临时
 PostgreSQL 容器，跑完删掉）、`make check-lock`（要连 PyPI；服务器上临时加 `HTTPS_PROXY=http://127.0.0.1:7890`）。
@@ -82,17 +84,17 @@ PostgreSQL 容器，跑完删掉）、`make check-lock`（要连 PyPI；服务�
 4. 洗：`clean/clean_stage.py` 的 `process` → `clean_text.py`、`identifiers.py`、`profile.py`；
    送知识库 `store/index_publication.py`；对外 `api/routers/fabric.py`。
 
-经过哪些文件、函数和表见 [docs/代码地图.md](docs/代码地图.md)（学生不用读 `tests/`）。出网只走 `fetch/transport.py` 的 `get`（限速、超时、429 重试），不要自己 `sleep`。
+经过哪些文件、函数和表见 [docs/代码地图.md](docs/代码地图.md)（学生不用读 `tests/`）。
 
-## 怎么加一个站点
+## 怎么加一个来源：一个文件 + 目录里一行
 
-1. `fetch/sites/` 加一个文件，写 `SITE_KEY` 和 `CONFIG`（列表入口 `start_urls`、选择器、翻页；接口站点写 `"source_type": "api"`
-   和 `api_fetcher`），照最像的站点抄（网页看 `nmpa.py`，接口看 `fda/`）；通用解析读不好详情页时在 `fetch/extractors/` 写提取函数。
-2. `fetch/catalog.py` 的 `SPECS` 加一行 `_site(...)`：编号、名称、证据类型、业务判断、限速组和间隔、覆盖说明（有附件写
-   `attachments`）；列表不是从新到旧的写 `incremental=_FULL_REREAD`。临时库上跑一次迁移给 `fabric_sources` 补一行。
-3. `make test`；真抓 `python main_etl.py --source <站点> --max 5`，再 `python ops/check_sources.py <站点> --rounds 3 --incremental`
-   （第二、三轮应停在 reached_known）；照 `tests/test_site_pages.py` 存一页夹具，补一个提取测试；要定时刷新的写进 WATCHES。
-
-## 现状
-
-Python 3.12。图谱（抽取、消歧、审核、图发布）已移到 Atlas；测量子系统已删除（V048 删表）；WeKnora 桥接服务在本仓 `weknora/`，WeKnora 本身用官方镜像，由部署仓库 a54b19211/ZK-radar-deploy 部署；查询规划在 a54b19211/Bio-Planner。
+1. `fetch/sites/` 加一个文件，写 `SITE_KEY` 和 `CONFIG`。网页站点写列表入口 `start_urls`、选择器、翻页（照 `nmpa.py`）；接口、RSS
+   写 `"source_type": "api"` 和读取函数 `api_fetcher`（照 `arxiv.py`、`rss_press.py`；一家公司一组的照 `sec_filings.py`）。
+2. 读取函数是一个生成器，从新到旧每读到一条 `yield fetch.api_fields.record(...)`，就是这样一个字典：
+   - `site` 来源编号，`key` 这条记录在来源里不变的编号（DOI、公告号、链接）：记录号 = uuid5(site:key)，同一个 key 再读到
+     是同一条记录，内容变了自动存成新版本；
+   - `title` 标题，`publish_date` 来源写的发布日期，`url` 原文链接，`category` / `summary` 类别和摘要（画像分类用）；
+   - `markdown` 正文：`# 标题` 开头，原文有小节的写 `## 小节名`，没有的不加；`extra` 来源特有的字段（进 `facts.extra`）。
+   读不到的一条 `yield ItemUnreadable(网址, 原因)`，不要抛异常、不要拿摘要充数；出网只用 `fetch.transport.get`（限速在目录里）。
+3. `fetch/catalog.py` 的 `SPECS` 加一行 `_site(...)`（编号、名称、证据类型、限速组和间隔、覆盖说明），要定时抓的在 `WATCHES`
+   加一行 `_watch(...)`；跑一次迁移 runner 给 `fabric_sources` 补一行。`make test`，真抓 `python main_etl.py --source <编号> --max 5`。

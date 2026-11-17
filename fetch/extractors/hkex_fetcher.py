@@ -78,7 +78,7 @@ def _read_company(api_config: Dict, company: Dict) -> list[Dict]:
         "toDate": api_config.get("to_date") or date.today().strftime("%Y%m%d"),  # 不填 = 今天；接口不接受空的 to
         "title": "",
         "searchType": api_config.get("searchType", 0),
-        "t1code": -2,
+        "t1code": api_config.get("t1code", -2),  # 标题类别；-2 = 全部，40000 = 财务报表/ESG（要配 searchType 1）
         "t2Gcode": -2,
         "t2code": -2,
         "rowRange": ROW_RANGE,

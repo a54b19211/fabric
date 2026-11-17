@@ -199,8 +199,28 @@ SPECS: tuple[CollectionSpec, ...] = (
     # query=records；企业披露，不是独立无偏来源
     _site("roche", "Roche Media Releases", evidence=("company_disclosure",), decisions=("A",), group="roche.com",
           coverage={"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}),
+    _site("hkex_reports", "港交所披露易·定期报告", evidence=("corporate_filing",), decisions=("C",), group="hkexnews.hk",
+          coverage={"metadata": "公告列表接口", "fulltext": "报告 PDF（附件）"}, incremental=_BY_GROUP, backfill=True),
     _declared("cninfo", "巨潮资讯（沪深北公告与财报）", ("corporate_filing",), ("A", "C"), "cninfo.com.cn", 2.0),
-    _declared("biorxiv", "bioRxiv", ("preprint",), ("B",), "biorxiv.org"),
+    # openRxiv 官方接口（api.biorxiv.org），两个站一个读法；只存标题和摘要
+    _site("biorxiv", "bioRxiv", evidence=("preprint",), decisions=("B",), group="biorxiv.org", interval=1.0,
+          coverage={"metadata": "接口记录", "abstract": "摘要", "fulltext": "不抓"}),
+    _site("medrxiv", "medRxiv", evidence=("preprint",), decisions=("B",), group="biorxiv.org", interval=1.0,
+          coverage={"metadata": "接口记录", "abstract": "摘要", "fulltext": "不抓"}),
+    # 官方接口 export.arxiv.org；使用条款：两次请求至少隔 3 秒
+    _site("arxiv", "arXiv q-bio", evidence=("preprint",), decisions=("B",), group="arxiv.org", interval=3.0,
+          coverage={"metadata": "接口记录", "abstract": "摘要", "fulltext": "不抓"}),
+    # SEC EDGAR filing 原文（官方 Archives；User-Agent 写明身份）。一家公司一组
+    _site("sec_filings", "SEC EDGAR 定期报告（10-K / 10-Q / 20-F）", evidence=("corporate_filing",), decisions=("C",),
+          group="sec.gov", interval=1.0, coverage={"metadata": "filing 清单", "fulltext": "主文件转文字"},
+          incremental=_BY_GROUP),
+    _site("sec_8k", "SEC EDGAR 临时公告（8-K）", evidence=("corporate_filing",), decisions=("A", "C"), group="sec.gov",
+          interval=1.0, coverage={"metadata": "filing 清单", "fulltext": "主文件和 EX-99 转文字"}, incremental=_BY_GROUP),
+    # 通用 RSS：企业新闻稿（企业披露，不是独立无偏来源）；只用订阅源里的内容
+    _site("rss_press", "企业新闻稿（RSS）", evidence=("company_disclosure",), decisions=("A",), group="rss_press",
+          interval=1.0, coverage={"metadata": "订阅源条目", "fulltext": "订阅源给的正文或摘要"}),
+    _site("ema", "EMA News", evidence=("regulatory_notice",), decisions=("A",), group="ema.europa.eu", interval=5.0,
+          coverage={"metadata": "订阅源条目", "fulltext": "新闻正文；审评文件（EPAR）没接"}),
     # 新闻索引线索，不是独立证据。增量键 seendate（GDELT 观察到的时间，不是发布时间）；没有续页，固定刷新按整点 UTC 小时读，
     # 满额的对半拆开再读（fetch.gdelt_news），每小时只读一次（overlap 0）。对方要求每 5 秒最多一个请求，间隔留 6 秒。
     # 2026-11-13 实测限流是对方的：直连和代理、各种间隔和查询词成功率都约 17%，429 没有 Retry-After；所以不走代理、
@@ -217,14 +237,10 @@ SPECS: tuple[CollectionSpec, ...] = (
     _declared("drugbank", "DrugBank", ("drug_database",), ("A", "B"), "drugbank.com",
               blocked_reason="不在线抓：主持人 2026-11-14 决定退出采集，以后下载 DrugBank 数据库文件（学术许可）离线导入"),
     # ——业务验收和 v3 缺口清单点名需要、还没有插件的——
-    _declared("ema", "EMA", ("regulatory_approval",), ("A",), "ema.europa.eu"),
     _declared("company_ir", "企业 IR 管线页和财报演示（不是独立无偏来源）", ("company_disclosure",), ("A", "C"), "company_ir"),
     _declared("conference_abstracts", "会议摘要", ("conference_abstract",), ("A", "B"), "conference_abstracts"),
     _declared("patents", "专利", ("patent",), ("A", "B"), "patents"),
-    _declared("medrxiv", "medRxiv", ("preprint",), ("B",), "medrxiv.org"),  # 与 bioRxiv 同一 openRxiv 接口
-    _declared("arxiv", "arXiv 相关类别（AI 制药等不限于 q-bio）", ("preprint",), ("B",), "arxiv.org"),
     _declared("guidelines", "指南（NCCN、CDE 指导原则以外）", ("guideline",), ("B",), "guidelines"),
-    _declared("sec_filings", "SEC filing 原文与交易披露", ("corporate_filing",), ("C",), "sec.gov"),
     _declared("nhsa", "国家医保局", ("policy",), ("C",), "nhsa.gov.cn"),
     _declared("procurement_prices", "采购与价格资料", ("measurement",), ("C",), "procurement_prices"),
     _declared("industry_media", "行业媒体（FiercePharma、药促会以外）", ("industry_media",), ("C",), "industry_media"),
@@ -234,7 +250,8 @@ SPECS: tuple[CollectionSpec, ...] = (
     _declared("us_cdc", "US CDC", ("official_notice",), ("D",), "cdc.gov"),
     _declared("promed", "ProMED", ("media",), ("D",), "promedmail.org"),
     _declared("news_media", "媒体线索", ("media",), ("D",), "news_media"),
-    _declared("social_media", "社媒线索", ("social",), ("D",), "social_media"),
+    _declared("social_media", "社媒线索", ("social",), ("D",), "social_media",
+              blocked_reason="X/Twitter 不抓（没有付费接口，使用条款不许爬）；微信公众号等主持人定读取账号"),
     _declared("national_supply_stats", "全国统一口径供需/产能/采购/贸易数据", ("measurement",), ("C",),
               "national_supply_stats"),
     _declared("policy_execution_data", "政策执行和结果数据", ("measurement",), ("C",), "policy_execution_data"),
@@ -257,11 +274,78 @@ RETIRED = {
     "reviewed_graph": "人工审核图谱发布（已移交 Atlas）",
     "primekg_graph": "PrimeKG 背景图（已移交 Atlas）",
 }
-# 可读开关默认关的来源（V047）：去掉环境许可名单后多开放的来源，原名单找不回，先关上，由管理员逐个打开。NCCN 一定关
-DEFAULT_CLOSED = frozenset({
-    "cde_zdyz", "fda_drug_safety", "fda_press", "fiercepharma", "gdelt_doc", "hkex", "local_files", "nccn",
-    "phirda_industry", "phirda_policy", "phirda_rd", "phirda_healthcare_reform", "pubmed", "roche", "sec_companyfacts",
-})
+# 可读开关默认关的来源：NCCN（许可未核实）一定关；本地导入和 SEC 公司概念事实由管理员按需打开。V047 关上的其余来源
+# 2026-11-17 随十个知识库打开（V052）
+DEFAULT_CLOSED = frozenset({"local_files", "nccn", "sec_companyfacts"})
+
+
+def _watch(watch_id, source_id, query="records", *, records=100, pages=1, seconds=120, cadence=86400, lookback=7):
+    return {"id": watch_id, "request": {"source_id": source_id, "query": query, "max_records": records,
+                                        "max_pages": pages, "deadline_seconds": seconds},
+            "cadence_seconds": cadence, "lookback_days": lookback}
+
+
+_H = 3600
+_EPMC = {"records": 100, "seconds": 30, "cadence": _H}
+_CT_DRUGS = "AREA[StudyType]INTERVENTIONAL AND AREA[InterventionType](DRUG OR BIOLOGICAL OR GENETIC OR COMBINATION_PRODUCT)"
+_PUBMED = '("clinical trial"[Publication Type] OR "drug approval"[MeSH Terms] OR "drug therapy"[MeSH Subheading])'
+# 定时刷新计划：哪个来源、读什么、多久一轮（fetch/source_refresh.py 读这里；环境变量 DATAFABRIC_WATCHES 给了就用它的）。
+# 一个来源抓不抓 = 这里有它的计划 + 库里两个开关（fabric_sources.read_enabled / fetch_enabled）都开着。
+# 接口站点 query 写 records，网页站点写列表入口（站点配置的 start_urls 之一，一个入口一条计划）。
+WATCHES = (
+    _watch("who-recent", "who_don", "*", records=5, seconds=30, cadence=_H, lookback=30),
+    _watch("epmc-bcma-updates", "europe_pmc", "BCMA AND myeloma", records=50, seconds=30, cadence=_H, lookback=30),
+    _watch("epmc-phase3", "europe_pmc", '("phase 3" OR "phase III") AND (randomized OR randomised)', **_EPMC),
+    _watch("epmc-outbreak", "europe_pmc",
+           'TITLE:(outbreak OR epidemic OR "case cluster" OR "novel virus" OR "emerging infection")', **_EPMC),
+    _watch("epmc-metabolic", "europe_pmc", "GLP-1 OR semaglutide OR tirzepatide OR incretin", **_EPMC),
+    _watch("epmc-modalities", "europe_pmc", '"antibody-drug conjugate" OR "CAR-T" OR "bispecific antibody"', **_EPMC),
+    _watch("epmc-regulatory", "europe_pmc",
+           '"FDA approval" OR "accelerated approval" OR "breakthrough therapy" OR NMPA', **_EPMC),
+    # 临床登记：全部分期的药物 / 生物制品 / 基因治疗的干预性试验（原来只有三期）
+    _watch("ct-drug-trials", "clinicaltrials", _CT_DRUGS, seconds=60, cadence=6 * _H, lookback=3),
+    _watch("fda-crl", "fda_crl", "*", seconds=30, cadence=_H),
+    _watch("pubmed-drug-trials", "pubmed", _PUBMED, records=50, cadence=6 * _H),
+    _watch("gdelt-fda-approval", "gdelt_doc", "FDA approval", seconds=60, cadence=_H, lookback=1),
+    _watch("fda-drug-label", "fda_api_drug_label"),
+    _watch("fda-enforcement", "fda_api_enforcement"),
+    _watch("fda-press", "fda_press", "https://www.fda.gov/news-events/fda-newsroom/press-announcements", records=30,
+           cadence=6 * _H),
+    _watch("fda-drug-safety", "fda_drug_safety",
+           "https://www.fda.gov/drugs/drug-safety-and-availability/drug-safety-communications", records=30),
+    _watch("ema-news", "ema", records=20, cadence=6 * _H),
+    _watch("nmpa-ggtg", "nmpa", "https://www.nmpa.gov.cn/xxgk/ggtg/index.html", records=30, cadence=6 * _H),
+    _watch("nmpa-fgwj", "nmpa", "https://www.nmpa.gov.cn/xxgk/fgwj/index.html", records=30),
+    _watch("nmpa-zhcjd", "nmpa", "https://www.nmpa.gov.cn/xxgk/zhcjd/index.html", records=30),
+    _watch("nmpa-zhqyi", "nmpa", "https://www.nmpa.gov.cn/xxgk/zhqyi/index.html", records=30),
+    _watch("nmpa-fxjzh", "nmpa", "https://www.nmpa.gov.cn/xxgk/fxjzh/index.html", records=30),
+    _watch("nmpa-ypggtg", "nmpa", "https://www.nmpa.gov.cn/yaopin/ypggtg/index.html", records=30, cadence=6 * _H),
+    _watch("nmpa-ypzhcjd", "nmpa", "https://www.nmpa.gov.cn/yaopin/ypzhcjd/index.html", records=30),
+    _watch("cde-news", "cde", "https://www.cde.org.cn/main/news/listpage/545cf855a50574699b46b26bcb165f32", records=30,
+           cadence=6 * _H),
+    _watch("cde-policy", "cde", "https://www.cde.org.cn/main/policy/listpage/9f9c74c73e0f8f56a8bfbc646055026d",
+           records=30),
+    _watch("cde-xxgk-1", "cde_xxgk", "https://www.cde.org.cn/main/xxgk/listpage/9f9c74c73e0f8f56a8bfbc646055026d",
+           records=30),
+    _watch("cde-xxgk-2", "cde_xxgk", "https://www.cde.org.cn/main/xxgk/listpage/4b5255eb0a84820cef4ca3e8b6bbe20c",
+           records=30),
+    _watch("cde-zdyz", "cde_zdyz", "https://www.cde.org.cn/zdyz/listpage/9cd8db3b7530c6fa0c86485e563f93c7", records=30),
+    _watch("chictr-list", "chictr", "https://www.chictr.org.cn/searchproj.html", records=30),
+    _watch("phirda-industry", "phirda_industry", "https://www.phirda.com/news_9.html", records=30, cadence=12 * _H),
+    _watch("phirda-policy", "phirda_policy", "https://www.phirda.com/news_10.html", records=30),
+    _watch("phirda-rd", "phirda_rd", "https://www.phirda.com/news_11.html", records=30, cadence=12 * _H),
+    _watch("phirda-reform", "phirda_healthcare_reform", "https://www.phirda.com/news_12.html", records=30),
+    _watch("fiercepharma", "fiercepharma", records=30, cadence=6 * _H),
+    _watch("roche-releases", "roche", records=30),
+    _watch("rss-press", "rss_press", records=50, cadence=6 * _H),
+    _watch("hkex", "hkex"),
+    _watch("hkex-reports", "hkex_reports", records=50),
+    _watch("sec-filings", "sec_filings", records=30),
+    _watch("sec-8k", "sec_8k", records=30, cadence=12 * _H),
+    _watch("biorxiv", "biorxiv", cadence=12 * _H),
+    _watch("medrxiv", "medrxiv", cadence=12 * _H),
+    _watch("arxiv-qbio", "arxiv", cadence=12 * _H),
+)
 
 CATALOG: dict[str, CollectionSpec] = {s.source_id: s for s in SPECS}
 FETCHABLE = frozenset(s.source_id for s in SPECS if s.fetchable)

@@ -80,7 +80,8 @@ def test_a_new_library_starts_with_the_default_closed_sources_unreadable(pg, mon
     monkeypatch.setattr(store, "fabric_engine", lambda: engine)
     runner.apply("fabric", engine)
     rows = by_id(router.admin_sources()["sources"])
-    assert rows["nccn"]["read_enabled"] is False and rows["pubmed"]["read_enabled"] is False
+    # NCCN, local import and SEC company facts start closed; the rest of the V047 list was opened with V052
+    assert rows["nccn"]["read_enabled"] is False and rows["pubmed"]["read_enabled"] is True
     assert rows["clinicaltrials"]["read_enabled"] is True and rows["nccn"]["fetch_enabled"] is True
     assert rows["clinicaltrials"]["latest_run"] is None and rows["clinicaltrials"]["max_seq"] == 0
 

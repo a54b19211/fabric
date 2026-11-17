@@ -1,4 +1,5 @@
-"""定时刷新：DATAFABRIC_WATCHES 里配置的每个固定刷新（watch）到点就去抓，一段一段读完一个周期。
+"""定时刷新：来源目录（fetch/catalog.py · WATCHES）里的每个固定刷新（watch）到点就去抓，一段一段读完一个周期。
+环境变量 DATAFABRIC_WATCHES 给了（哪怕是 []）就用它的，测试和不抓的实例用。
 
 常驻派活程序 run/scheduler.py 每隔几秒调一次 refresh_once()，每个到点的 watch 走一步（_step）：
   1. 没有进行中的周期：按 fetch/windows.py 的 cycle_request 定这一周期的请求（更新时间窗口，或"遇到已存的就停"）。
@@ -22,7 +23,7 @@ from pydantic import Field, model_validator
 from sqlalchemy import text
 
 from fetch import fetch_job, transport
-from fetch.catalog import WATCHABLE, spec
+from fetch.catalog import WATCHABLE, WATCHES, spec
 from fetch.windows import SEGMENTS_PER_CYCLE, cycle_request, first_unread
 from store import records
 from store.record_models import FabricError, FetchRequest, Model, canonical, sha256
@@ -56,9 +57,10 @@ class SourceWatch(Model):
 
 
 def watches():
-    """配置里的固定刷新。配置不对报错，一个也不刷新。"""
+    """固定刷新的计划。配置不对报错，一个也不刷新。"""
     try:
-        config = json.loads(os.environ.get("DATAFABRIC_WATCHES", "[]"))
+        given = os.environ.get("DATAFABRIC_WATCHES")  # 没给：用来源目录里的计划（fetch/catalog.py · WATCHES）
+        config = json.loads(given) if given is not None else WATCHES
         values = [SourceWatch.model_validate(value) for value in config]
     except (ValueError, TypeError):
         raise FabricError("source_watch_configuration", "固定刷新配置无效") from None

@@ -171,6 +171,9 @@ def test_crl_is_read_newest_first_and_goes_on_at_the_count_it_has_read(monkeypat
     first = sources._read_public_api(FetchRequest(source_id="fda_crl", query="*", max_records=2))
     assert seen[0]["sort"] == "letter_date:desc" and seen[0]["skip"] == "0"
     assert first["stop_reason"] == "record_budget" and first["next_continuation"]["read_count"] == 2
+    # the place to go on from changes with every segment: the scheduled refresh takes an unchanged cursor for "no progress"
+    # (2026-11-17: the fda-crl watch failed at its second segment, the cursor was the constant "skip")
+    assert first["next_continuation"]["cursor"] == "skip:2"
     second = sources._read_public_api(FetchRequest(source_id="fda_crl", query="*", max_records=2,
                                                    continuation=first["next_continuation"]))
     assert seen[1]["skip"] == "2" and len(second["records"]) == 1

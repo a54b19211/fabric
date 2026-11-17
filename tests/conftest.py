@@ -47,4 +47,5 @@ def _own_rate_dir(monkeypatch, tmp_path):
     """The rate gate keeps its state in DATAFABRIC_RATE_DIR. A test gets an empty one, so it does not wait for
     another test's last request."""
     monkeypatch.setenv("DATAFABRIC_RATE_DIR", str(tmp_path / "rate"))
+    monkeypatch.setenv("DATAFABRIC_WATCHES", "[]")  # 测试不用来源目录里的定时刷新计划；要的自己设
 
