@@ -313,6 +313,11 @@ def test_field_record_writes_one_heading_per_field_and_leaves_empty_fields_out()
                            "## openfda\n\nbrand_name: Drug A\nroute: ORAL\n\n## status\n\nOngoing")
     field = out["segments"][1]
     assert md[field["source"]["start"]:field["source"]["end"]].startswith("**indications_and_usage**")
+    # v14：字段里的 HTML 表格写成 Markdown 表格（表题在前）
+    table = ('**adverse_reactions_table**: ["<table><caption>Table 1</caption><tr><th>Event</th><th>n</th></tr>'
+             '<tr><td>Nausea</td><td>5</td></tr></table>"]')
+    assert ct.clean_markdown(table, source_id="fda_api_drug_label")["text"] == (
+        "## adverse_reactions_table\n\nTable 1\n\n| Event | n |\n| --- | --- |\n| Nausea | 5 |")
 
 
 def test_chictr_contact_lines_are_left_out():

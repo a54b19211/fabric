@@ -32,7 +32,10 @@ from json.decoder import scanstring
 # them by section: ClinicalTrials ("# title", one "## label key" per field, site list and result tables last and
 # marked index=False), openFDA label / enforcement records ("## field" per field, empty fields left out); ChiCTR
 # pages lose the pure contact lines (CONTACT_RULE). Texts that have no headings of their own get none.
-PROCESSOR_VERSION = "datafabric.clean_text.v13"
+# v14 (2026-11-17): openFDA label fields that hold an HTML table (the *_table fields) are written as Markdown tables
+# (same converter as the WHO notices): an HTML table is one unsplittable block for the knowledge base, and the long
+# ones got no vector at all.
+PROCESSOR_VERSION = "datafabric.clean_text.v14"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -285,9 +288,16 @@ def _field_value(raw: str) -> str:
         except ValueError:
             return raw
         if isinstance(value, list) and all(isinstance(v, str) for v in value):
-            return "\n\n".join(v.strip() for v in value if v.strip())
+            return "\n\n".join(_field_text(v) for v in value if v.strip())
         return "\n".join(_readable(value))
     return raw
+
+
+def _field_text(value: str) -> str:
+    """字段里的一项。带 HTML 表格的（说明书的 *_table 字段）按块转写：表题一段，表格写成 Markdown 管道表格。"""
+    if "<table" not in value.lower():
+        return value.strip()
+    return "\n\n".join(block[1] for block in _who_blocks(value))
 
 
 def clean_field_record(text: str) -> dict:

@@ -192,6 +192,16 @@ class JournalClient:
         pass
 
 
+def upgrade_cleaner(monkeypatch):
+    """A cleaner upgrade that changes the text (one that leaves the text as it was keeps the entry it has: see
+    test_a_clean_upgrade_with_the_same_text_keeps_the_one_entry_and_search_still_finds_it)."""
+    from clean import clean_text
+
+    real = clean_text.clean_markdown
+    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    monkeypatch.setattr(clean_text, "clean_markdown", lambda value, **kw: real(value + "\n\nCleaned again.", **kw))
+
+
 def ready_job(pg):
     version = add_document()
     scan()
@@ -528,6 +538,29 @@ def test_a_target_with_a_limit_takes_that_many_records_and_keeps_updating_them(p
     assert [row["n"] for row in counts] == [2]
 
 
+def test_a_list_row_of_a_source_whose_content_is_in_attachments_is_not_indexed(pg, monkeypatch):
+    add_document()
+    monkeypatch.setattr(index, "LIST_ROW_SOURCES", frozenset({"external_archive"}))
+    scan()
+    assert rows(pg, "SELECT 1 FROM index_publications") == []  # this record is not an attachment
+
+
+def test_a_clean_upgrade_with_the_same_text_keeps_the_one_entry_and_search_still_finds_it(pg, monkeypatch):
+    version, client = ready_job(pg)
+    before = job(pg)
+    monkeypatch.setattr(clean_stage.clean_text, "PROCESSOR_VERSION", "datafabric.clean_text.synthetic2")
+    scan()  # cleaned again by the new processor: the text is the same
+    due(pg)
+    assert process_one(client) == "ready"
+    after = job(pg)  # still one entry, never sent again
+    assert (after["id"], after["artifact_key"], after["desired_state"]) == (before["id"], before["artifact_key"], "active")
+    hit = {"identity": {"source_instance": "synthetic.index.pg", "source_id": "external_archive",
+                        "source_record_id": "SYNTHETIC-index", "version_id": version,
+                        "artifact_key": before["artifact_key"]}, "content": "SYNTHETIC-index", "is_demo": True}
+    verified, excluded = retrieval.verify([hit], "operational_replay", datetime.now(timezone.utc))
+    assert len(verified) == 1 and not excluded and verified[0]["artifact"]["handover"] is False
+
+
 def test_enqueue_failure_rolls_back_the_profile_and_retries_cleanly(pg):
     index.scan_committed()
     add_document("SYNTHETIC-rollback")
@@ -548,11 +581,10 @@ def test_enqueue_failure_rolls_back_the_profile_and_retries_cleanly(pg):
 
 def test_clean_processor_upgrade_hands_over_only_after_the_new_entry_is_ready(pg, monkeypatch):
     """Codex 429/431：新产物能检索后才停旧条目，不撤掉最后的入口；旧记录保留。"""
-    from clean import clean_text
 
     version, client = ready_job(pg)
     old = job(pg)
-    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    upgrade_cleaner(monkeypatch)
     profile()
     new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
     assert new["artifact_key"].startswith("synthetic.clean_text.v99:") and new["version_id"] == version
@@ -764,7 +796,6 @@ def test_literal_search_over_a_huge_source_returns_query_budget(pg):
 def test_search_stays_available_until_the_replacement_is_ready(pg, monkeypatch):
     """Codex 441：处理器交接期，检索选用的产物与 worker 的交接状态一致——新产物的条目 ready 之前，
     仍在服务的旧条目照样能检索到；新条目 ready 之后只认新产物。"""
-    from clean import clean_text
 
     version, journal = ready_job(pg)
     old = job(pg)
@@ -772,7 +803,7 @@ def test_search_stays_available_until_the_replacement_is_ready(pg, monkeypatch):
     client = SearchClient(pg)
     client.hit(old, body[:40])
     assert [r["artifact"]["handover"] for r in search(client)["results"]] == [False]
-    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    upgrade_cleaner(monkeypatch)
     profile()
     new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
     due_job(pg, old["id"])
@@ -859,7 +890,6 @@ def test_a_long_artifact_is_indexed_in_pieces_and_is_searchable_only_when_every_
 
 
 def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
-    from clean import clean_text
 
     small_pieces(monkeypatch, chars=100000)
     long_document()
@@ -869,7 +899,7 @@ def test_handover_waits_for_every_piece_of_the_new_artifact(pg, monkeypatch):
     old = job(pg)
     # 处理器升级，同时分片上限变小：新产物要分几片进索引
     small_pieces(monkeypatch)
-    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    upgrade_cleaner(monkeypatch)
     profile()
     new = [r for r in rows(pg, "SELECT * FROM index_publications WHERE id<>:i ORDER BY piece_index", {"i": old["id"]})]
     assert len(new) >= 2
@@ -1112,12 +1142,11 @@ def test_an_index_target_naming_a_retired_source_is_a_configuration_error_found_
 def test_a_new_artifact_still_parsing_or_failed_never_replaces_the_old_entry(pg, monkeypatch):
     """T-26（Codex 708）：同一 raw version 升级清洗处理器。新产物在 WeKnora 还在解析或解析失败时，旧条目照常服务
     （handover），新条目不算可检索；新产物 ready 后旧条目才停用，旧条目的知识编号保留，旧命中不再采用。"""
-    from clean import clean_text
 
     version, journal = ready_job(pg)
     old = job(pg)
     body = fixed_text(pg, version)
-    monkeypatch.setattr(clean_text, "PROCESSOR_VERSION", "synthetic.clean_text.v99")
+    upgrade_cleaner(monkeypatch)
     profile()
     new = next(r for r in rows(pg, "SELECT * FROM index_publications") if r["id"] != old["id"])
     assert new["version_id"] == old["version_id"] == version and new["artifact_key"] != old["artifact_key"]

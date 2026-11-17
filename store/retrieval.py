@@ -150,12 +150,13 @@ def _needed_artifacts(conn, source_id, is_demo, hits, visible, current, target_i
             continue
         current_key = index.artifact_key(current[vid])
         hit_piece = index_pieces.key(hit["identity"].get("piece"))
-        if key == current_key or (target_ids.get((source_id, is_demo)) and _serving_old(
+        unchanged = index.same_text(key, current_key)  # 处理器升级后正文没变：还是当前这一份
+        if unchanged or (target_ids.get((source_id, is_demo)) and _serving_old(
                 conn, target_ids[(source_id, is_demo)], record_id, current[vid], key, hit_piece)):
             # 旧条目只有在它的正文也是这个可见版本自己产出的（同一版本、旧处理器）时才认；
             # 读取的正文取那一份产物本身，确认不了就剔除
             needed.add((vid, *key.rsplit(":", 1)))
-            if key != current_key:
+            if not unchanged:
                 serving.add((vid, key))
     return needed, serving
 

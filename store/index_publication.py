@@ -40,6 +40,8 @@ RECHECK_SECONDS = 86400  # ready 的每天复查一次（来源撤权、目标�
 PARSING = {"pending", "processing", "finalizing"}
 PARSE_ENDED = {"completed", "failed", "cancelled"}
 MAX_TARGETS = 32  # 索引目标（来源 → 知识库）的个数上限：十个知识库、二十几个来源
+# 这些来源的记录本身只是列表里的一行（标题、日期、文件链接），内容全在附件 PDF 里：只有附件的正文进知识库
+LIST_ROW_SOURCES = frozenset({"hkex", "hkex_reports"})
 
 
 class IndexTarget(Model):
@@ -124,12 +126,19 @@ def artifact_key(artifact):
     return artifact["processor_version"] + ":" + artifact.get("body_sha256", artifact["text_sha256"])
 
 
+def same_text(key, other):
+    """两个产物键是不是同一份正文（摘要相同）。处理器升级后正文没变的，键里的处理器版本不同，正文还是那一份：
+    它们共用一条索引条目，不再上传第二遍（内容一模一样的文件 WeKnora 也不收）。"""
+    return bool(key) and bool(other) and key.rsplit(":", 1)[-1] == other.rsplit(":", 1)[-1]
+
+
 def artifact_row(conn, version_id, key):
-    """这个版本名下、摘要对得上 key 的那份清洗正文 {text, segments, locator_kind, body}；找不到返回 None。"""
+    """这个版本名下、摘要对得上 key 的那份清洗正文 {text, segments, locator_kind, body}；找不到返回 None。
+    先看 key 写的那个处理器版本产出的，再看这个版本别的处理器版本产出的（正文相同就是同一份）。"""
     processor, digest = key.rsplit(":", 1)
     for row in conn.execute(text(
         "SELECT text,segments,locator_kind,text_sha256 FROM derived_clean_text WHERE version_id=:v "
-        "AND processor_version=:pv AND status='parsed' ORDER BY attempt DESC"
+        "AND status='parsed' ORDER BY (processor_version=:pv) DESC, created_at DESC, attempt DESC"
     ), {"v": version_id, "pv": processor}).mappings():
         body = index_body(row["text"], row["segments"])
         if digest == row["text_sha256"] or (body != row["text"] and digest == sha256(body)):
@@ -142,9 +151,9 @@ def artifact_ready(conn, target_id, record_id, artifact):
     判定，数据库里只有其中几片、而这几片都 ready 不算。worker 的交接和检索的交接用同一个判定。"""
     expected = index_pieces.keys(artifact["body"], artifact.get("segments") or [])
     ready = {k for (k,) in conn.execute(text(
-        "SELECT piece_key FROM index_publications WHERE target_id=:t AND source_record_id=:n AND artifact_key=:k "
-        "AND state='ready'"
-    ), {"t": target_id, "n": record_id, "k": artifact_key(artifact)})}
+        "SELECT piece_key FROM index_publications WHERE target_id=:t AND source_record_id=:n "
+        "AND right(artifact_key,64)=:d AND state='ready'"
+    ), {"t": target_id, "n": record_id, "d": artifact_key(artifact).rsplit(":", 1)[-1]})}
     return expected <= ready
 
 
@@ -248,6 +257,11 @@ def _enqueue(conn, target, record, artifact, meta, pieces):
     for piece in pieces or [None]:
         manifest = _manifest(target, record, artifact, meta, piece)
         piece_key = index_pieces.key(piece)
+        if conn.execute(text(  # 这条记录的这份正文（这一片）已经有条目了，哪怕是别的处理器版本产出的：不再建
+            "SELECT 1 FROM index_publications WHERE target_id=:t AND source_record_id=:n AND piece_key=:p "
+            "AND right(artifact_key,64)=:d AND state<>'disabled' LIMIT 1"
+        ), {"t": target.key(), "n": record.source_record_id, "p": piece_key, "d": key.rsplit(":", 1)[-1]}).first():
+            continue
         ident = [target.key(), record.version_id, key] + ([piece_key] if piece else [])
         inserted += conn.execute(text("""
             INSERT INTO index_publications
@@ -290,8 +304,8 @@ def enqueue_versions(conn, version_ids, *, configured=None):
         "AND record_kind<>'graph' AND payload->>'parser_version' IS DISTINCT FROM :observation ORDER BY published_seq"
     ), {"ids": list(artifacts), "observation": OBSERVATION_PARSER}).mappings():
         record = VersionRecord.model_validate(row["payload"])
-        if (record.facts or {}).get("publication_state") in TOMBSTONES:
-            continue  # 撤回/删除的墓碑版本没有可检索的内容；检索时按模式和截止时间判 withdrawn
+        if not _indexable(record):
+            continue
         artifact = artifacts[record.version_id]
         meta = metadata(record, row["proof_available_at"], artifact, found.get(record.version_id, []))
         pieces = index_pieces.plan(artifact["body"], artifact.get("segments") or [])
@@ -300,6 +314,15 @@ def enqueue_versions(conn, version_ids, *, configured=None):
                     conn, target, record.source_record_id):
                 count += _enqueue(conn, target, record, artifact, meta, pieces)
     return count
+
+
+def _indexable(record):
+    """这个版本有没有该进知识库的正文。撤回/删除的墓碑版本没有可检索的内容（检索时按模式和截止时间判 withdrawn）；
+    LIST_ROW_SOURCES 的列表行没有正文，不占知识库的位置，它的附件（公告、报告的 PDF）解析出正文后照常进。"""
+    facts = record.facts or {}
+    if facts.get("publication_state") in TOMBSTONES:
+        return False
+    return record.source_id not in LIST_ROW_SOURCES or facts.get("role") == "attachment"
 
 
 def _records(conn, target):
@@ -452,7 +475,7 @@ def _wanted(row):
             "AND source_record_id=:native AND " + records._ROLE + "!='context_reference'"
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
-        mine = current.get(row["artifact_key"])
+        mine = next((a for k, a in current.items() if same_text(k, row["artifact_key"])), None)
         if mine is not None and row["piece_key"] in index_pieces.keys(mine["body"], mine.get("segments") or []):
             return "active"
         # 从没发出过的，或者产物还是当前的、只是分片计划换了而这一片没 ready 过的：直接替代

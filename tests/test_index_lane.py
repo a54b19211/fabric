@@ -41,3 +41,11 @@ def test_versions_that_differ_only_in_the_tail_left_out_of_the_index_are_one_art
     assert artifact_key({"processor_version": "clean.v", "text_sha256": "a" * 64}) == "clean.v:" + "a" * 64
     # the bridge's duplicate receipt stops the entry with its reason instead of retrying
     assert _settled({"index_status": "duplicate_content"})["error"]["code"] == "index_duplicate_content"
+
+
+def test_a_processor_upgrade_that_leaves_the_text_unchanged_is_the_same_text():
+    from store.index_publication import same_text
+
+    assert same_text("datafabric.clean_text.v13:" + "a" * 64, "datafabric.clean_text.v14:" + "a" * 64)
+    assert not same_text("datafabric.clean_text.v13:" + "a" * 64, "datafabric.clean_text.v14:" + "b" * 64)
+    assert not same_text("", "")  # entries from before artifact keys have none
