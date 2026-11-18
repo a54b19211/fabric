@@ -61,9 +61,8 @@ def test_blocked_and_declared_sources_are_visible_gaps_not_fetchable():
         FetchRequest.model_validate({"source_id": "cde_ctr", "query": "x"})
 
 
-def test_every_spec_declares_decision_and_rate_group():
+def test_every_spec_declares_rate_group():
     for spec in catalog.SPECS:
-        assert spec.decisions and set(spec.decisions) <= set("ABCDE")
         assert spec.rate_group and spec.min_interval_seconds > 0
 
 

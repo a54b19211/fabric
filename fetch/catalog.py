@@ -50,7 +50,6 @@ class CollectionSpec:
     status: Literal["active", "declared", "blocked"]
     plugin: str | None  # 读取插件（fetch.sources.PLUGINS 的键）；没接通的是 None
     evidence_types: tuple[str, ...]  # 证据细类，fetch.evidence_types.FINE_TYPES 的键（元数据/全文是覆盖层级，不写这里）
-    decisions: tuple[str, ...]  # 服务的业务判断（v3 第一部分）：A 管线跟进 B 突破 C 产业结构 D 公卫威胁 E 判断更新
     incremental: Incremental
     rate_group: str  # 限速组：主机名后缀（fetch.rate 按最长后缀找）
     min_interval_seconds: float  # 同一限速组里两次请求的最短间隔（秒）
@@ -84,24 +83,24 @@ _BY_GROUP = Incremental("stop_at_known", by_group=True)
 _SITE_MODES: tuple[ReadMode, ...] = ("ids", "list_pages")
 
 
-def _site(source_id, name, *, evidence, decisions, group, coverage, interval=2.0, incremental=_NEWEST_FIRST,
+def _site(source_id, name, *, evidence, group, coverage, interval=2.0, incremental=_NEWEST_FIRST,
           backfill=False):
     """站点插件（site_crawler，站点配置在 fetch/sites/*）的来源：已接通、未经本系统对原站实测（verified=False）。"""
-    return CollectionSpec(source_id, name, "active", "site_crawler", evidence, decisions, incremental, group, interval,
+    return CollectionSpec(source_id, name, "active", "site_crawler", evidence, incremental, group, interval,
                           _SITE_MODES, coverage, backfill=backfill)
 
 
-def _declared(source_id, name, evidence, decisions, group, interval=1.0, blocked_reason=None):
+def _declared(source_id, name, evidence, group, interval=1.0, blocked_reason=None):
     """业务需要、还没有插件的来源：登记在目录里，gaps() 把它们列成缺口，不宣称已覆盖。"""
     status = "blocked" if blocked_reason else "declared"
-    return CollectionSpec(source_id, name, status, None, evidence, decisions, _NO_INCREMENT, group, interval,
+    return CollectionSpec(source_id, name, status, None, evidence, _NO_INCREMENT, group, interval,
                           blocked_reason=blocked_reason)
 
 
 SPECS: tuple[CollectionSpec, ...] = (
     # 增量键 LastUpdatePostDate：登记方更新被 CT.gov 公布的日期（天精度），不是方案生效或状态实际改变的日期
     CollectionSpec(
-        "clinicaltrials", "ClinicalTrials.gov", "active", "public_api_reader", ("registry_record",), ("A", "B", "E"),
+        "clinicaltrials", "ClinicalTrials.gov", "active", "public_api_reader", ("registry_record",),
         Incremental("source_updated_window"), "clinicaltrials.gov", 0.4, ("query", "ids"),
         {"metadata": "全部公开登记字段", "results": "登记结果表", "fulltext": "无（登记无正文）"},
         license_url="https://clinicaltrials.gov/data-api/about-api", backfill=True, verified=True,
@@ -109,28 +108,28 @@ SPECS: tuple[CollectionSpec, ...] = (
     # 增量键 UPDATE_DATE：元数据更正也会更新，不等于发表日期。官方收录 PubMed/MEDLINE，同一 PMID 不算独立证据
     CollectionSpec(
         "europe_pmc", "Europe PMC", "active", "public_api_reader", ("primary_research", "review", "preprint"),
-        ("B", "E"), Incremental("source_updated_window"), "ebi.ac.uk", 0.4, ("query", "ids"),
+        Incremental("source_updated_window"), "ebi.ac.uk", 0.4, ("query", "ids"),
         {"metadata": "core", "abstract": "有则取", "fulltext": "不自动抓，另核许可"},
         license_url="https://europepmc.org/Copyright", verified=True,
     ),
     # 增量键 LastModified（公告最后修改时间，不是暴发开始时间）；每 15 分钟一轮，一天 96 次请求。
     # DON 是选择性公告，零公告不证明没有暴发
     CollectionSpec(
-        "who_don", "WHO Disease Outbreak News", "active", "who_don", ("official_notice",), ("D", "E"),
+        "who_don", "WHO Disease Outbreak News", "active", "who_don", ("official_notice",),
         Incremental("modified_window", min_cadence_seconds=900), "who.int", 30.0, ("query", "ids", "window"),
         {"metadata": "全部", "fulltext": "公告原文"},
         license_url="https://www.who.int/about/policies/publishing/copyright", verified=True,
     ),
     # 明确的 CIK/概念清单，每次读完整的单概念 JSON；每秒一请求沿用原读取循环
     CollectionSpec(
-        "sec_companyfacts", "SEC XBRL 公司概念事实", "active", "sec_xbrl", ("filing_fact",), ("C",),
+        "sec_companyfacts", "SEC XBRL 公司概念事实", "active", "sec_xbrl", ("filing_fact",),
         Incremental("fixed_ids"), "sec.gov", 1.0, ("ids",),
         {"metadata": "XBRL 标准事实", "fulltext": "无（filing 原文另接）"},
         license_url="https://www.sec.gov/search-filings/edgar-application-programming-interfaces", verified=True,
     ),
     # ESearch 不指定排序时新入库的 PMID 在前（实测），所以按“遇到已存的就停”增量读；全文只存许可明确的
     CollectionSpec(
-        "pubmed", "PubMed", "active", "public_api_reader", ("primary_research", "review", "preprint"), ("B",),
+        "pubmed", "PubMed", "active", "public_api_reader", ("primary_research", "review", "preprint"),
         _NEWEST_FIRST, "ncbi.nlm.nih.gov", 0.4, ("query", "ids"),
         {"metadata": "EFetch", "abstract": "有则取",
          "fulltext": "PMC efetch 的 JATS 声明 CC/公共领域许可时保存；否则 Unpaywall 许可明确的 OA PDF"
@@ -140,7 +139,7 @@ SPECS: tuple[CollectionSpec, ...] = (
     ),
     # openFDA 无变更流，FDA 成批公布信函：每轮整份重读（约 460 封，5 次请求）。复合键有歧义，不支持按编号重采（只有 query）
     CollectionSpec(
-        "fda_crl", "FDA Complete Response Letters", "active", "public_api_reader", ("regulatory_letter",), ("A",),
+        "fda_crl", "FDA Complete Response Letters", "active", "public_api_reader", ("regulatory_letter",),
         _FULL_REREAD, "api.fda.gov", 0.4, ("query",), {"metadata": "原生字段", "fulltext": "信函文本"},
         license_url="https://open.fda.gov/license/",
     ),
@@ -148,118 +147,113 @@ SPECS: tuple[CollectionSpec, ...] = (
     # 不发对外请求，限速组只是因为每个来源都要有一个
     CollectionSpec(
         "local_files", "本地文件原件导入（PDF / Office）", "active", "local_file_import", ("uploaded_document",),
-        ("A", "B", "C", "E"), _NO_INCREMENT, "local_files", 0.1, ("upload",),
+        _NO_INCREMENT, "local_files", 0.1, ("upload",),
         {"metadata": "文件名、大小、sha256", "fulltext": "加工层附件解析（MinerU / Excel 直读）",
          "attachments": "原件本身（按 sha256 固定版本）"},
     ),
-    _declared("cde_ctr", "CDE 药物临床试验登记与信息公示平台", ("registry_record",), ("A", "E"),
+    _declared("cde_ctr", "CDE 药物临床试验登记与信息公示平台", ("registry_record",),
               "chinadrugtrials.org.cn", 10.0,
               blocked_reason="2026-11-04 实测：首页 200，检索列表返回 202 脚本挑战页；普通无头浏览器同样只得到 39 字节"
               "空页。旧 ETL 没有这个站的采集代码；等官方数据渠道或授权。"),
     # ——站点插件 site_crawler：用 ops/check_sources.py 对原站真抓过多轮，verified 要不要改 True 由主持人定。
     # 详情页附件各成独立版本，正文由加工层 attachment_parse（自部署 MinerU）产出。——
-    _site("chictr", "中国临床试验注册中心", evidence=("registry_record",), decisions=("A", "E"), group="chictr.org.cn",
+    _site("chictr", "中国临床试验注册中心", evidence=("registry_record",), group="chictr.org.cn",
           coverage={"metadata": "登记详情页", "fulltext": "详情页正文", "attachments": "详情页附件"}),
-    _site("nmpa", "国家药品监督管理局", evidence=("regulatory_notice",), decisions=("A", "C"), group="nmpa.gov.cn",
+    _site("nmpa", "国家药品监督管理局", evidence=("regulatory_notice",), group="nmpa.gov.cn",
           interval=1.0, coverage={"metadata": "公告页", "fulltext": "公告正文", "attachments": "公告附件（直链 11-04 实测 200）"}),
-    _site("cde", "国家药品审评中心", evidence=("regulatory_notice",), decisions=("A",), group="cde.org.cn",
+    _site("cde", "国家药品审评中心", evidence=("regulatory_notice",), group="cde.org.cn",
           coverage={"metadata": "新闻/政策页", "fulltext": "正文", "attachments": "附件（需页面会话 cookies）"}),
     # query=列表入口；每张表一条 site_record
-    _site("cde_xxgk", "国家药品审评中心·信息公开（表格页）", evidence=("regulatory_notice",), decisions=("A",),
-          group="cde.org.cn", coverage={"metadata": "表格页每张表", "fulltext": "表格转 Markdown"}),
-    _site("cde_zdyz", "国家药品审评中心·指导原则", evidence=("guideline",), decisions=("A", "B"), group="cde.org.cn",
+    _site("cde_xxgk", "国家药品审评中心·信息公开（表格页）", evidence=("regulatory_notice",), group="cde.org.cn", coverage={"metadata": "表格页每张表", "fulltext": "表格转 Markdown"}),
+    _site("cde_zdyz", "国家药品审评中心·指导原则", evidence=("guideline",), group="cde.org.cn",
           coverage={"metadata": "指导原则页", "fulltext": "正文", "attachments": "附件"}),
-    _site("phirda_industry", "中国药促会·产业资讯", evidence=("industry_media",), decisions=("C",), group="phirda.com",
+    _site("phirda_industry", "中国药促会·产业资讯", evidence=("industry_media",), group="phirda.com",
           coverage={"metadata": "资讯页", "fulltext": "正文"}),
-    _site("phirda_policy", "中国药促会·政策法规", evidence=("policy",), decisions=("C",), group="phirda.com",
+    _site("phirda_policy", "中国药促会·政策法规", evidence=("policy",), group="phirda.com",
           coverage={"metadata": "政策页", "fulltext": "正文"}),
-    _site("phirda_rd", "中国药促会·研发追踪", evidence=("industry_media",), decisions=("A",), group="phirda.com",
+    _site("phirda_rd", "中国药促会·研发追踪", evidence=("industry_media",), group="phirda.com",
           coverage={"metadata": "资讯页", "fulltext": "正文"}),
-    _site("phirda_healthcare_reform", "中国药促会·医改专题", evidence=("policy",), decisions=("C",), group="phirda.com",
+    _site("phirda_healthcare_reform", "中国药促会·医改专题", evidence=("policy",), group="phirda.com",
           coverage={"metadata": "专题页", "fulltext": "正文"}),
-    _site("fda_press", "FDA Press Announcements", evidence=("regulatory_notice",), decisions=("A",), group="fda.gov",
+    _site("fda_press", "FDA Press Announcements", evidence=("regulatory_notice",), group="fda.gov",
           coverage={"metadata": "新闻稿页", "fulltext": "正文"}),
-    _site("fda_drug_safety", "FDA Drug Safety Communications", evidence=("regulatory_notice",), decisions=("A",),
-          group="fda.gov", coverage={"metadata": "安全通讯页", "fulltext": "正文"}),
+    _site("fda_drug_safety", "FDA Drug Safety Communications", evidence=("regulatory_notice",), group="fda.gov", coverage={"metadata": "安全通讯页", "fulltext": "正文"}),
     # openFDA 的两个接口（query=records）：与 fda_crl 同属 openFDA，不能仅凭端点不同算两份独立证实
-    _site("fda_api_drug_label", "openFDA 药品说明书（drug/label）", evidence=("regulatory_label",), decisions=("A",),
-          group="api.fda.gov", interval=0.5, coverage={"metadata": "说明书接口记录", "fulltext": "接口字段"}),
+    _site("fda_api_drug_label", "openFDA 药品说明书（drug/label）", evidence=("regulatory_label",), group="api.fda.gov", interval=0.5, coverage={"metadata": "说明书接口记录", "fulltext": "接口字段"}),
     _site("fda_api_enforcement", "openFDA 药品召回执行报告（drug/enforcement）", evidence=("regulatory_notice",),
-          decisions=("A",), group="api.fda.gov", interval=0.5, coverage={"metadata": "召回接口记录", "fulltext": "接口字段"}),
+          group="api.fda.gov", interval=0.5, coverage={"metadata": "召回接口记录", "fulltext": "接口字段"}),
     # query=records；医药公司清单见站点配置。每个周期读完全部公司，每家最多最新 GROUP_LIMIT 条（fetch.windows），
     # 更老的用 ops/backfill_source.py hkex 补
-    _site("hkex", "港交所披露易", evidence=("corporate_filing",), decisions=("A", "C"), group="hkexnews.hk",
+    _site("hkex", "港交所披露易", evidence=("corporate_filing",), group="hkexnews.hk",
           coverage={"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, incremental=_BY_GROUP, backfill=True),
     # query=records；行业媒体，不是独立证实来源
-    _site("fiercepharma", "Fierce Pharma（RSS）", evidence=("industry_media",), decisions=("A", "C"),
-          group="fiercepharma.com", coverage={"metadata": "RSS 条目", "fulltext": "文章页"}),
+    _site("fiercepharma", "Fierce Pharma（RSS）", evidence=("industry_media",), group="fiercepharma.com", coverage={"metadata": "RSS 条目", "fulltext": "文章页"}),
     # query=records；许可未核实
-    _site("nccn", "NCCN 临床实践指南", evidence=("guideline",), decisions=("B",), group="nccn.org",
+    _site("nccn", "NCCN 临床实践指南", evidence=("guideline",), group="nccn.org",
           coverage={"metadata": "指南列表", "fulltext": "指南 PDF（附件）"}, incremental=_BY_GROUP, backfill=True),
     # query=records；企业披露，不是独立无偏来源
-    _site("roche", "Roche Media Releases", evidence=("company_disclosure",), decisions=("A",), group="roche.com",
+    _site("roche", "Roche Media Releases", evidence=("company_disclosure",), group="roche.com",
           coverage={"metadata": "新闻稿列表", "fulltext": "新闻稿正文"}),
-    _site("hkex_reports", "港交所披露易·定期报告", evidence=("corporate_filing",), decisions=("C",), group="hkexnews.hk",
+    _site("hkex_reports", "港交所披露易·定期报告", evidence=("corporate_filing",), group="hkexnews.hk",
           coverage={"metadata": "公告列表接口", "fulltext": "报告 PDF（附件）"}, incremental=_BY_GROUP, backfill=True),
-    _declared("cninfo", "巨潮资讯（沪深北公告与财报）", ("corporate_filing",), ("A", "C"), "cninfo.com.cn", 2.0),
+    _declared("cninfo", "巨潮资讯（沪深北公告与财报）", ("corporate_filing",), "cninfo.com.cn", 2.0),
     # openRxiv 官方接口（api.biorxiv.org），两个站一个读法；只存标题和摘要
-    _site("biorxiv", "bioRxiv", evidence=("preprint",), decisions=("B",), group="biorxiv.org", interval=1.0,
+    _site("biorxiv", "bioRxiv", evidence=("preprint",), group="biorxiv.org", interval=1.0,
           coverage={"metadata": "接口记录", "abstract": "摘要", "fulltext": "不抓"}),
-    _site("medrxiv", "medRxiv", evidence=("preprint",), decisions=("B",), group="biorxiv.org", interval=1.0,
+    _site("medrxiv", "medRxiv", evidence=("preprint",), group="biorxiv.org", interval=1.0,
           coverage={"metadata": "接口记录", "abstract": "摘要", "fulltext": "不抓"}),
     # 官方接口 export.arxiv.org；使用条款：两次请求至少隔 3 秒
-    _site("arxiv", "arXiv q-bio", evidence=("preprint",), decisions=("B",), group="arxiv.org", interval=3.0,
+    _site("arxiv", "arXiv q-bio", evidence=("preprint",), group="arxiv.org", interval=3.0,
           coverage={"metadata": "接口记录", "abstract": "摘要", "fulltext": "不抓"}),
     # SEC EDGAR filing 原文（官方 Archives；User-Agent 写明身份）。一家公司一组
-    _site("sec_filings", "SEC EDGAR 定期报告（10-K / 10-Q / 20-F）", evidence=("corporate_filing",), decisions=("C",),
-          group="sec.gov", interval=1.0, coverage={"metadata": "filing 清单", "fulltext": "主文件转文字"},
+    _site("sec_filings", "SEC EDGAR 定期报告（10-K / 10-Q / 20-F）", evidence=("corporate_filing",), group="sec.gov", interval=1.0, coverage={"metadata": "filing 清单", "fulltext": "主文件转文字"},
           incremental=_BY_GROUP),
-    _site("sec_8k", "SEC EDGAR 临时公告（8-K）", evidence=("corporate_filing",), decisions=("A", "C"), group="sec.gov",
+    _site("sec_8k", "SEC EDGAR 临时公告（8-K）", evidence=("corporate_filing",), group="sec.gov",
           interval=1.0, coverage={"metadata": "filing 清单", "fulltext": "主文件和 EX-99 转文字"}, incremental=_BY_GROUP),
     # 通用 RSS：企业新闻稿（企业披露，不是独立无偏来源）；只用订阅源里的内容
-    _site("rss_press", "企业新闻稿（RSS）", evidence=("company_disclosure",), decisions=("A",), group="rss_press",
+    _site("rss_press", "企业新闻稿（RSS）", evidence=("company_disclosure",), group="rss_press",
           interval=1.0, coverage={"metadata": "订阅源条目", "fulltext": "订阅源给的正文或摘要"}),
-    _site("ema", "EMA News", evidence=("regulatory_notice",), decisions=("A",), group="ema.europa.eu", interval=5.0,
+    _site("ema", "EMA News", evidence=("regulatory_notice",), group="ema.europa.eu", interval=5.0,
           coverage={"metadata": "订阅源条目", "fulltext": "新闻正文；审评文件（EPAR）没接"}),
     # 新闻索引线索，不是独立证据。增量键 seendate（GDELT 观察到的时间，不是发布时间）；没有续页，固定刷新按整点 UTC 小时读，
     # 满额的对半拆开再读（fetch.gdelt_news），每小时只读一次（overlap 0）。对方要求每 5 秒最多一个请求，间隔留 6 秒。
     # 2026-11-13 实测限流是对方的：直连和代理、各种间隔和查询词成功率都约 17%，429 没有 Retry-After；所以不走代理、
     # 间隔不再调，每个请求最多发 6 次（fetch.gdelt_news.TRIES），还是 429 就记为对方限流，下个周期接着读
     CollectionSpec(
-        "gdelt_doc", "GDELT DOC 新闻索引", "active", "gdelt_doc", ("media",), ("D",),
+        "gdelt_doc", "GDELT DOC 新闻索引", "active", "gdelt_doc", ("media",),
         Incremental("source_updated_window", overlap_days=0), "gdeltproject.org", 6.0, ("query", "window"),
         {"metadata": "标题、原网址、域名、语言、来源国家", "fulltext": "无（不追抓第三方新闻全文）"},
         license_url="https://www.gdeltproject.org/about.html#termsofuse",
     ),
     # 批准资料看 Drugs@FDA；说明书/召回覆盖数不能冒充批准覆盖
-    _declared("drugs_fda", "Drugs@FDA", ("regulatory_approval",), ("A",), "fda.gov"),
+    _declared("drugs_fda", "Drugs@FDA", ("regulatory_approval",), "fda.gov"),
     # 原采集层有 DrugBank 的站点配置和抓取器（config/sites/drugbank.py、drugbank_fetcher.py），主线不搬
-    _declared("drugbank", "DrugBank", ("drug_database",), ("A", "B"), "drugbank.com",
+    _declared("drugbank", "DrugBank", ("drug_database",), "drugbank.com",
               blocked_reason="不在线抓：主持人 2026-11-14 决定退出采集，以后下载 DrugBank 数据库文件（学术许可）离线导入"),
     # ——业务验收和 v3 缺口清单点名需要、还没有插件的——
-    _declared("company_ir", "企业 IR 管线页和财报演示（不是独立无偏来源）", ("company_disclosure",), ("A", "C"), "company_ir"),
-    _declared("conference_abstracts", "会议摘要", ("conference_abstract",), ("A", "B"), "conference_abstracts"),
-    _declared("patents", "专利", ("patent",), ("A", "B"), "patents"),
-    _declared("guidelines", "指南（NCCN、CDE 指导原则以外）", ("guideline",), ("B",), "guidelines"),
-    _declared("nhsa", "国家医保局", ("policy",), ("C",), "nhsa.gov.cn"),
-    _declared("procurement_prices", "采购与价格资料", ("measurement",), ("C",), "procurement_prices"),
-    _declared("industry_media", "行业媒体（FiercePharma、药促会以外）", ("industry_media",), ("C",), "industry_media"),
-    _declared("china_cdc", "中国疾控", ("official_notice",), ("D",), "chinacdc.cn"),
-    _declared("health_commissions", "国家和地方卫健委通报", ("official_notice",), ("D",), "nhc.gov.cn"),
-    _declared("ecdc", "ECDC", ("official_notice",), ("D",), "ecdc.europa.eu"),
-    _declared("us_cdc", "US CDC", ("official_notice",), ("D",), "cdc.gov"),
-    _declared("promed", "ProMED", ("media",), ("D",), "promedmail.org"),
-    _declared("news_media", "媒体线索", ("media",), ("D",), "news_media"),
-    _declared("social_media", "社媒线索", ("social",), ("D",), "social_media",
+    _declared("company_ir", "企业 IR 管线页和财报演示（不是独立无偏来源）", ("company_disclosure",), "company_ir"),
+    _declared("conference_abstracts", "会议摘要", ("conference_abstract",), "conference_abstracts"),
+    _declared("patents", "专利", ("patent",), "patents"),
+    _declared("guidelines", "指南（NCCN、CDE 指导原则以外）", ("guideline",), "guidelines"),
+    _declared("nhsa", "国家医保局", ("policy",), "nhsa.gov.cn"),
+    _declared("procurement_prices", "采购与价格资料", ("measurement",), "procurement_prices"),
+    _declared("industry_media", "行业媒体（FiercePharma、药促会以外）", ("industry_media",), "industry_media"),
+    _declared("china_cdc", "中国疾控", ("official_notice",), "chinacdc.cn"),
+    _declared("health_commissions", "国家和地方卫健委通报", ("official_notice",), "nhc.gov.cn"),
+    _declared("ecdc", "ECDC", ("official_notice",), "ecdc.europa.eu"),
+    _declared("us_cdc", "US CDC", ("official_notice",), "cdc.gov"),
+    _declared("promed", "ProMED", ("media",), "promedmail.org"),
+    _declared("news_media", "媒体线索", ("media",), "news_media"),
+    _declared("social_media", "社媒线索", ("social",), "social_media",
               blocked_reason="X/Twitter 不抓（没有付费接口，使用条款不许爬）；微信公众号等主持人定读取账号"),
-    _declared("national_supply_stats", "全国统一口径供需/产能/采购/贸易数据", ("measurement",), ("C",),
+    _declared("national_supply_stats", "全国统一口径供需/产能/采购/贸易数据", ("measurement",),
               "national_supply_stats"),
-    _declared("policy_execution_data", "政策执行和结果数据", ("measurement",), ("C",), "policy_execution_data"),
-    _declared("local_industry_ledger", "辖区企业/园区/产线底册（授权内部台账）", ("internal_ledger",), ("C",),
+    _declared("policy_execution_data", "政策执行和结果数据", ("measurement",), "policy_execution_data"),
+    _declared("local_industry_ledger", "辖区企业/园区/产线底册（授权内部台账）", ("internal_ledger",),
               "local_industry_ledger"),
-    _declared("research_institution_ledger", "项目/经费/设备/队伍/成果授权台账", ("internal_ledger",), ("B",),
+    _declared("research_institution_ledger", "项目/经费/设备/队伍/成果授权台账", ("internal_ledger",),
               "research_institution_ledger"),
-    _declared("grants", "公开的基金资助信息", ("funding",), ("B",), "grants"),
+    _declared("grants", "公开的基金资助信息", ("funding",), "grants"),
 )
 
 # 不从外面采集、在 Fabric 里派生或受控导入的来源：在 fabric_sources 里有一行（管理员的可读开关），不进采集目录
@@ -374,7 +368,6 @@ def gaps() -> list[dict]:
             "source_id": s.source_id,
             "name": s.name,
             "status": s.status,
-            "decisions": list(s.decisions),
             "reason": s.blocked_reason or "已登记，尚无插件",
         }
         for s in SPECS

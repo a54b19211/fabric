@@ -149,7 +149,6 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
 
     spec = CATALOG.get(source_id)
     evidence = list(spec.evidence_types) if spec else []
-    decisions = list(spec.decisions) if spec else []
 
     flags = [w for w in warnings if w.startswith(BREAKING)]
     degraded = [w for w in warnings if w.startswith(DEGRADING)]
@@ -194,7 +193,6 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
         "evidence_types": evidence,
         # 来源目录细类覆盖的大类（一个来源可以覆盖多类；unmapped/unknown 照样列出）
         "evidence_categories": categories_of(evidence),
-        "decisions": decisions,
         "quality": quality,
         "route": route,
         "route_reasons": reasons,

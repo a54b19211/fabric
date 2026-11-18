@@ -25,7 +25,6 @@ def test_four_dimensions_are_separate_and_unassessed_ones_say_so():
 def test_classification_comes_from_the_catalog_and_the_record_itself():
     ct = run("clinicaltrials")
     assert ct["doc_type"] == "registry_record" and ct["evidence_types"] == ["registry_record"]
-    assert set(ct["decisions"]) == {"A", "B", "E"}
     review = run("europe_pmc", raw_types=["review", "Journal Article"])
     assert review["doc_type"] == "review"
     research = run("europe_pmc", raw_types=["research-article", "Journal Article"])
@@ -61,7 +60,7 @@ def test_truncation_and_flattened_markup_are_degraded_not_broken():
 def test_unknown_source_is_honest():
     p = run("some_future_source")
     assert p["quality"]["source_credibility"]["state"] == "unknown"
-    assert p["evidence_types"] == [] and p["decisions"] == []
+    assert p["evidence_types"] == []
 
 
 def test_experiment_types_are_candidates_with_their_basis_and_place_in_the_text():
