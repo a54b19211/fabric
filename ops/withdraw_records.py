@@ -70,8 +70,8 @@ def main():
         run = import_archive(ArchiveImport(
             source_id=args.source, is_demo=False, declared_count=len(records), declared_complete=False,
             scope_description=f"撤下 {len(records)} 条记录（{args.reason}），ops/withdraw_records.py", records=records))
-        print(json.dumps({"run": run.get("id"), "state": run.get("state"), "records": len(records)},
-                         ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"run": run.id, "state": run.state, "records": len(records)}, ensure_ascii=False),
+              file=sys.stderr)
 
 
 if __name__ == "__main__":

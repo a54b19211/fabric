@@ -500,3 +500,19 @@ def test_chictr_placeholder_registration_date_falls_back_to_last_update():
             "<tr><td><p class='cn'>注册号：</p></td><td>ChiCTR-IIR-16007986</td></tr>")
     got = extract_chictr_detail(Selector(f"<html><body><table>{rows}</table></body></html>"))
     assert got["publish_date"] == "2016-02-24"
+
+
+def test_nmpa_old_layout_table_is_a_compact_markdown_table_and_an_image_page_has_no_text():
+    from fetch.extractors.nmpa import extract_nmpa_detail
+    from fetch.page_parser import route_webpage
+
+    table = ("<html><head><meta name='ArticleTitle' content='飞行检查通报'></head><body><div class='wenzhang'>"
+             "<div class='text'><table><tr><td>企业名称</td><td>甲公司</td></tr>"
+             "<tr><td>检查发现</td><td>一大段文字 | 含竖线</td></tr></table></div></div></body></html>")
+    assert extract_nmpa_detail(Selector(table))["body_text"].splitlines() == [
+        "| 企业名称 | 甲公司 |", "| --- | --- |", "| 检查发现 | 一大段文字 ｜ 含竖线 |"]
+    images = ("<html><head><meta name='ArticleTitle' content='图解政策'></head><body><div>中 En 无障碍</div>"
+              "<div class='wenzhang'><div class='date'>发布时间：2017-09-06</div><div class='text'>"
+              "<p><img src='/1.jpg'></p></div></div></body></html>")
+    parsed = route_webpage({"url": "https://www.nmpa.gov.cn/x.html", "page": Selector(images), "uuid": "u"}, "nmpa")
+    assert parsed["parse_method"] == "css_extract" and parsed["markdown"] == "" and parsed["title"] == "图解政策"

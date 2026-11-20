@@ -62,8 +62,8 @@ def route_webpage(page_data: dict, site_key: str = None) -> dict:
         body_text = extracted.get("body_text", "")
         attachment_links = extracted.get("attachment_links", [])
         has_body = bool(body_text and body_text.strip())
-        has_attachment = bool(attachment_links)
-        if has_body or has_attachment:
+        # page_has_no_text：提取器认得这个页面、正文就是没有字（整页是图片）——照实给空正文，不交通用兜底
+        if any((has_body, attachment_links, extracted.get("page_has_no_text"))):
             result["title"] = clean_title(extracted.get("title", ""))
             result["publish_date"] = extracted.get("publish_date", "")
             result["markdown"] = f"# {result['title']}\n\n{remove_extra_whitespace(body_text)}" if has_body else ""

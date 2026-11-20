@@ -13,7 +13,6 @@ import re
 
 from lxml import html as lxml_html
 
-from clean.excel_parser import _rows_to_markdown
 from fetch.extractors.dates import normalize_date
 from fetch.extractors.text_tools import block_text
 
@@ -70,6 +69,8 @@ def extract_nmpa_detail(page) -> dict:
                                                "url": href})
 
     result["body_text"] = _body_text(box)
+    # 正文框在、却没有字（“图解政策”这类整页是图片）：如实是空正文，不交通用兜底——兜底会把整页导航当正文
+    result["page_has_no_text"] = not result["body_text"]
     return result
 
 
@@ -106,13 +107,25 @@ def _body_text(box) -> str:
     return "\n".join(lines)
 
 
+def _cell(cell) -> str:
+    return " ".join(cell.text_content().replace("​", "").split()).replace("|", "｜")
+
+
+def _markdown_table(rows) -> str:
+    """Markdown 表格，格子不补空格：飞行检查通报这类一格一大段的表，补齐列宽会多出几百个空格和横线。"""
+    width = max(len(row) for row in rows)
+    rows = [row + [""] * (width - len(row)) for row in rows]
+    lines = ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join(lines[:1] + ["|" + " --- |" * width] + lines[1:])
+
+
 def _tables_to_markdown(part):
     """把 part 里最外层的表格换成 Markdown 表格（每行一个 <p>，block_text 按行取）。"""
     for table in part.xpath(".//table[not(ancestor::table)]"):
-        rows = [[" ".join(cell.text_content().split()) for cell in tr.xpath("./td|./th")] for tr in table.xpath(".//tr")]
+        rows = [[_cell(cell) for cell in tr.xpath("./td|./th")] for tr in table.xpath(".//tr")]
         rows = [row for row in rows if any(row)]
         holder = lxml_html.Element("div")
-        for line in _rows_to_markdown(rows).split("\n") if rows else []:
+        for line in _markdown_table(rows).split("\n") if rows else []:
             p = lxml_html.Element("p")
             p.text = line
             holder.append(p)
