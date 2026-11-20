@@ -330,7 +330,8 @@ def _read_public_api(request: FetchRequest) -> dict:
     if request.source_id == "pubmed":
         return _read_pubmed(request)
     read = _PublicApiRead(request)
-    with httpx.Client(timeout=20, follow_redirects=False) as client:
+    # Europe PMC 的 core 检索一页常要 20-30 秒（2026-11-20 实测 25 秒），读超时 20 秒会整段失败；读超时放到 60 秒，总时长仍受 deadline 约束
+    with httpx.Client(timeout=httpx.Timeout(20, read=60), follow_redirects=False) as client:
         try:
             for _ in range(request.max_pages):
                 if read.read_page(client):
