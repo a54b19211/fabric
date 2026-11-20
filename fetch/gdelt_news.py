@@ -30,6 +30,10 @@ RESPONSE_SECONDS = 45  # GDELT needs 12-20 s to answer a query; a 20 s limit cut
 DEFAULT_429_INTERVAL = 5  # what GDELT asks for when its 429 does not name an interval
 TRIES = 6  # how many times a request is sent when GDELT keeps answering 429 (about 18 s each: they fit a 120 s read)
 RETRY_MARGIN = 1  # seconds added to the interval GDELT names
+# One request per 6-hour piece, not per hour: with one-hour pieces a 120 s read (12-20 s per answer, most answers 429)
+# got through 3-4 windows and the watch fell three days behind (2026-11-19: 23 reads, 0 new articles). A piece that
+# comes back full is still halved down to FINEST_WINDOW, so nothing is lost by the larger pieces.
+PIECE_HOURS = 6
 
 
 def article_id(value):
@@ -115,15 +119,17 @@ def _params(request, window):
 
 
 def _pieces(request):
-    """(window, the range after it) pairs: the requested range cut at UTC hour marks, the first and the last piece
-    may be shorter. A request without both bounds is one piece, which cannot be cut."""
+    """(window, the range after it) pairs: the requested range cut at UTC marks every PIECE_HOURS hours, the first and
+    the last piece may be shorter (a full piece is split in halves when read). A request without both bounds is one
+    piece, which cannot be cut."""
     since, until = request.updated_since, request.updated_until
     if since is None or until is None:
         yield Window(since, until), None
         return
     cursor, until = since.astimezone(timezone.utc), until.astimezone(timezone.utc)
     while True:
-        end = min(until, cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        mark = cursor.replace(hour=cursor.hour - cursor.hour % PIECE_HOURS, minute=0, second=0, microsecond=0)
+        end = min(until, mark + timedelta(hours=PIECE_HOURS))
         yield Window(cursor, end), (Window(end, until) if end < until else None)
         if end >= until:
             return

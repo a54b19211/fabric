@@ -115,16 +115,37 @@ UNCOMPARED_KEYS = {"web_capture": ("html", "html_sha256", "html_store_path"), "a
 # （媒体文件的版本号）相同：这类链接只比 sfvrsn。2024-DON503 因此来回出了 14 个版本（2026-10-23 至 11-15）。
 REWRITTEN = {"who_don": (re.compile(r'https://cdn\.who\.int/media/[^\s"\\?<>]*\?sfvrsn=([0-9A-Za-z_]+)'),
                          r"https://cdn.who.int/media/?sfvrsn=\1")}
+# PubMed EFetch 每次给的 <History> 里各个 <PubMedPubDate> 顺序不固定（2026-11-19 一天 111 个“新版本”只差这个）：
+# 比较前按原文排序
+_PUBMED_HISTORY = re.compile(r"<History>(.*?)</History>", re.S)
+_PUBMED_DATE = re.compile(r"<PubMedPubDate\b.*?</PubMedPubDate>", re.S)
+# ClinicalTrials.gov 自动给一部分登记挂上 NIH 类型的次要编号，编号只是一个年份（如 2025，链接 reporter.nih.gov/
+# quickSearch/2025），隔几天出现、消失一次，登记方没改、LastUpdatePostDate 不变（2026-11-19 一天约 100 个“新版本”）
+_YEAR_ONLY = re.compile(r"\d{4}")
+
+
+def _sorted_history(match) -> str:
+    return "<History>" + "".join(sorted(_PUBMED_DATE.findall(match.group(1)))) + "</History>"
+
+
+def _drop_ct_year_ids(data) -> None:
+    module = (data.get("protocolSection") or {}).get("identificationModule")
+    ids = module.get("secondaryIdInfos") if isinstance(module, dict) else None
+    if isinstance(ids, list):
+        module["secondaryIdInfos"] = [x for x in ids if not (
+            isinstance(x, dict) and x.get("type") == "NIH" and _YEAR_ONLY.fullmatch(str(x.get("id", ""))))]
 
 
 def normalized_raw(source_id: str, raw: str) -> str:
     """比较两份原件用的文本：JSON 原件去掉上面两类字段后按键排序重新写出（Europe PMC 同一条记录每次返回的键顺序
-    不同，曾让 8444 条记录出了 23927 个版本），再把 REWRITTEN 里的写法统一；不是 JSON 的原件（PubMed XML）就是原文。
-    规则改了以后，已存版本的指纹用 ops/backfill_fingerprint.py --recompute <来源> 重算。"""
+    不同，曾让 8444 条记录出了 23927 个版本），再把 REWRITTEN 里的写法统一；不是 JSON 的原件（PubMed XML）是原文，
+    只把 <History> 里的日期排好序。规则改了以后，已存的指纹不用重算：存版本时指纹对不上会按原件再算一次（_same）。"""
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
-        return raw
+        return _PUBMED_HISTORY.sub(_sorted_history, raw) if source_id == "pubmed" and isinstance(raw, str) else raw
+    if isinstance(data, dict) and source_id == "clinicaltrials":
+        _drop_ct_year_ids(data)
     if isinstance(data, dict):
         for key in UNCOMPARED_KEYS.get(data.get("role"), ()):
             data.pop(key, None)
@@ -172,11 +193,23 @@ def _fingerprint_of(source_id, current) -> str:
     return current["fingerprint"] or fingerprint(source_id, current["raw_content"])
 
 
+def _same(conn, source_id, current, fp) -> bool:
+    """当前版本和新原件（指纹 fp）一样吗。存下的指纹是当时的规则算的：对不上时按现在的规则从当前版本的原件再算一次，
+    规则改了（normalized_raw）不用先重算整个来源的指纹；只有真的变了的条目多读一次原件。"""
+    if current is None:
+        return False
+    if _fingerprint_of(source_id, current) == fp:
+        return True
+    raw = current["raw_content"] or conn.execute(text(
+        "SELECT payload->>'raw_content' FROM fabric_versions WHERE version_id=:id"), {"id": current["version_id"]}).scalar()
+    return fingerprint(source_id, raw) == fp
+
+
 def stored_unchanged(source_id, item) -> bool:
     """增量读取用（fetch/transport.py 的 Budget.known）：这条原件库里已经有了、而且没变？"""
     with fabric_engine().begin() as conn:
         current = _current(conn, source_id, False, item.source_record_id)
-    return current is not None and _fingerprint_of(source_id, current) == fingerprint(source_id, item.raw_content)
+        return _same(conn, source_id, current, fingerprint(source_id, item.raw_content))
 
 
 def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=None):
@@ -188,7 +221,7 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
     for item, projected in prepared:
         fp = fingerprint(source_id, item.raw_content)
         current = _current(conn, source_id, is_demo, item.source_record_id, _role(projected))
-        if current is not None and _fingerprint_of(source_id, current) == fp:
+        if _same(conn, source_id, current, fp):
             version_ids.append(current["version_id"])  # 没变：不存
             continue
         seq += 1

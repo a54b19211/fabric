@@ -235,6 +235,7 @@ def deadline_before_request(monkeypatch, n):
 def test_a_deadline_stop_reports_the_windows_not_reached(monkeypatch, open_gate):
     """A stop in the middle of a read (here the deadline, which falls before the 11th request) lists the windows it did
     not reach; the read has no limit on the number of requests of its own, two full hours need 14."""
+    monkeypatch.setattr(gdelt_news, "PIECE_HOURS", 1)  # 按小时切段时的停法
     deadline_before_request(monkeypatch, 11)
     sent = stand_in(monkeypatch, lambda start, end: 3)
     result = read_public(FetchRequest(source_id="gdelt_doc", query="outbreak", max_records=3,
@@ -272,6 +273,7 @@ def test_cycle_with_windows_cut_short_ends_with_the_gaps_and_moves_the_checkpoin
 
 
 def test_cycle_stopped_by_the_deadline_resumes_at_the_first_window_it_did_not_read(monkeypatch, open_gate):
+    monkeypatch.setattr(gdelt_news, "PIECE_HOURS", 1)  # 按小时切段时的停法
     stand_in(monkeypatch, lambda start, end: 3)  # the first hour takes 7 requests, every window full down to 15 minutes
     deadline_before_request(monkeypatch, 8)
     watch, state, request = watch_cycle("2026-11-04T10:00:00+00:00")

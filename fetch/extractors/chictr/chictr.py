@@ -5,6 +5,7 @@ DownloadTest?path=<令牌>，令牌每次打开页面都不同，path 为空表�
 伦理批件的“查看附件”没有链接（抓不到），DownloadXml 是登记记录本身的 XML。
 """
 
+import re
 from urllib.parse import urljoin
 
 from fetch.extractors.text_tools import normalize_whitespace
@@ -43,6 +44,11 @@ _FIELD_MAP = {
     "经费或物资来源":   "funding_source",
     "研究实施地点":     "study_sites",
 }
+
+
+# 站点在题目前面加的提示（没上传伦理批件的登记都有，标题 div 和注册题目字段里都是），如
+# “请于伦理委员会批准后才开始征募参试者，并与我们联系上传伦理批件。”“请与我们联系上传伦理批件”
+_TITLE_PROMPT = re.compile(r"^请[^。]*?上传伦理批件。?\s*")
 
 
 def _clean(text: str) -> str:
@@ -107,6 +113,9 @@ def extract_chictr_detail(page) -> dict:
     # 标题兜底
     if not result["title"]:
         result["title"] = extra.get("title", "")
+    result["title"] = _TITLE_PROMPT.sub("", result["title"])
+    if "title" in extra:
+        extra["title"] = _TITLE_PROMPT.sub("", extra["title"])
     if not result["title"] and regno:
         result["title"] = regno
 

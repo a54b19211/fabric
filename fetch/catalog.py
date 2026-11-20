@@ -215,8 +215,8 @@ SPECS: tuple[CollectionSpec, ...] = (
           interval=1.0, coverage={"metadata": "订阅源条目", "fulltext": "订阅源给的正文或摘要"}),
     _site("ema", "EMA News", evidence=("regulatory_notice",), group="ema.europa.eu", interval=5.0,
           coverage={"metadata": "订阅源条目", "fulltext": "新闻正文；审评文件（EPAR）没接"}),
-    # 新闻索引线索，不是独立证据。增量键 seendate（GDELT 观察到的时间，不是发布时间）；没有续页，固定刷新按整点 UTC 小时读，
-    # 满额的对半拆开再读（fetch.gdelt_news），每小时只读一次（overlap 0）。对方要求每 5 秒最多一个请求，间隔留 6 秒。
+    # 新闻索引线索，不是独立证据。增量键 seendate（GDELT 观察到的时间，不是发布时间）；没有续页，固定刷新按 UTC 6 小时一段读，
+    # 满额的对半拆开再读（fetch.gdelt_news），3 小时一轮（overlap 0）。对方要求每 5 秒最多一个请求，间隔留 6 秒。
     # 2026-11-13 实测限流是对方的：直连和代理、各种间隔和查询词成功率都约 17%，429 没有 Retry-After；所以不走代理、
     # 间隔不再调，每个请求最多发 6 次（fetch.gdelt_news.TRIES），还是 429 就记为对方限流，下个周期接着读
     CollectionSpec(
@@ -280,7 +280,9 @@ def _watch(watch_id, source_id, query="records", *, records=100, pages=1, second
 
 
 _H = 3600
-_EPMC = {"records": 100, "seconds": 30, "cadence": _H}
+# Europe PMC 的 UPDATE_DATE 是天精度、窗口回看 2 天：每小时读一次只是把同一窗口重读 6 遍（2026-11-19 六个计划 339 次）。
+# 一页 core 结果要 17-32 秒，30 秒期限常常一页都读不完；改成 6 小时一轮、期限 120 秒
+_EPMC = {"records": 100, "seconds": 120, "cadence": 6 * _H}
 _CT_DRUGS = "AREA[StudyType]INTERVENTIONAL AND AREA[InterventionType](DRUG OR BIOLOGICAL OR GENETIC OR COMBINATION_PRODUCT)"
 _PUBMED = '("clinical trial"[Publication Type] OR "drug approval"[MeSH Terms] OR "drug therapy"[MeSH Subheading])'
 # 定时刷新计划：哪个来源、读什么、多久一轮（fetch/source_refresh.py 读这里；环境变量 DATAFABRIC_WATCHES 给了就用它的）。
@@ -288,7 +290,8 @@ _PUBMED = '("clinical trial"[Publication Type] OR "drug approval"[MeSH Terms] OR
 # 接口站点 query 写 records，网页站点写列表入口（站点配置的 start_urls 之一，一个入口一条计划）。
 WATCHES = (
     _watch("who-recent", "who_don", "*", records=5, seconds=30, cadence=_H, lookback=30),
-    _watch("epmc-bcma-updates", "europe_pmc", "BCMA AND myeloma", records=50, seconds=30, cadence=_H, lookback=30),
+    _watch("epmc-bcma-updates", "europe_pmc", "BCMA AND myeloma", records=50, seconds=120, cadence=6 * _H,
+           lookback=30),
     _watch("epmc-phase3", "europe_pmc", '("phase 3" OR "phase III") AND (randomized OR randomised)', **_EPMC),
     _watch("epmc-outbreak", "europe_pmc",
            'TITLE:(outbreak OR epidemic OR "case cluster" OR "novel virus" OR "emerging infection")', **_EPMC),
@@ -298,9 +301,10 @@ WATCHES = (
            '"FDA approval" OR "accelerated approval" OR "breakthrough therapy" OR NMPA', **_EPMC),
     # 临床登记：全部分期的药物 / 生物制品 / 基因治疗的干预性试验（原来只有三期）
     _watch("ct-drug-trials", "clinicaltrials", _CT_DRUGS, seconds=60, cadence=6 * _H, lookback=3),
-    _watch("fda-crl", "fda_crl", "*", seconds=30, cadence=_H),
+    # 整份重读约 460 封；FDA 成批公布，一天读一次就够（原来每小时一次，2026-11-19 读了 102 次、0 个新版本）
+    _watch("fda-crl", "fda_crl", "*", seconds=60),
     _watch("pubmed-drug-trials", "pubmed", _PUBMED, records=50, cadence=6 * _H),
-    _watch("gdelt-fda-approval", "gdelt_doc", "FDA approval", seconds=60, cadence=_H, lookback=1),
+    _watch("gdelt-fda-approval", "gdelt_doc", "FDA approval", seconds=120, cadence=3 * _H, lookback=1),
     _watch("fda-drug-label", "fda_api_drug_label"),
     _watch("fda-enforcement", "fda_api_enforcement"),
     _watch("fda-press", "fda_press", "https://www.fda.gov/news-events/fda-newsroom/press-announcements", records=30,
@@ -311,7 +315,7 @@ WATCHES = (
     _watch("nmpa-ggtg", "nmpa", "https://www.nmpa.gov.cn/xxgk/ggtg/index.html", records=30, cadence=6 * _H),
     _watch("nmpa-fgwj", "nmpa", "https://www.nmpa.gov.cn/xxgk/fgwj/index.html", records=30),
     _watch("nmpa-zhcjd", "nmpa", "https://www.nmpa.gov.cn/xxgk/zhcjd/index.html", records=30),
-    _watch("nmpa-zhqyi", "nmpa", "https://www.nmpa.gov.cn/xxgk/zhqyi/index.html", records=30),
+    _watch("nmpa-zhqyi", "nmpa", "https://www.nmpa.gov.cn/xxgk/zhqyj/index.html", records=30),
     _watch("nmpa-fxjzh", "nmpa", "https://www.nmpa.gov.cn/xxgk/fxjzh/index.html", records=30),
     _watch("nmpa-ypggtg", "nmpa", "https://www.nmpa.gov.cn/yaopin/ypggtg/index.html", records=30, cadence=6 * _H),
     _watch("nmpa-ypzhcjd", "nmpa", "https://www.nmpa.gov.cn/yaopin/ypzhcjd/index.html", records=30),

@@ -10,7 +10,7 @@ CONFIG = {
         "https://www.nmpa.gov.cn/xxgk/ggtg/index.html",          # 公告通告
         "https://www.nmpa.gov.cn/xxgk/fgwj/index.html",          # 法规文件
         "https://www.nmpa.gov.cn/xxgk/zhcjd/index.html",         # 政策解读
-        "https://www.nmpa.gov.cn/xxgk/zhqyi/index.html",         # 征求意见
+        "https://www.nmpa.gov.cn/xxgk/zhqyj/index.html",         # 征求意见（栏目路径是 zhqyj；原来写的 zhqyi 不存在，会跳回首页）
         "https://www.nmpa.gov.cn/xxgk/fxjzh/index.html",         # 飞行检查
         "https://www.nmpa.gov.cn/yaopin/ypggtg/index.html",      # 药品公告通告
         "https://www.nmpa.gov.cn/yaopin/ypzhcjd/index.html",     # 药品政策解读

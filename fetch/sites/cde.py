@@ -14,7 +14,9 @@ CONFIG = {
 
     # ── 列表页解析 ──
     "wait_selector": "div.news_item",
-    "list_item_selector": "div.news_item a[href*='viewInfoCommon']",
+    # 新闻中心的条目链到 viewInfoCommon；政策法规的条目链到 /main/policy/view/…（还有 regulatview、zcjdview），
+    # 有的条目直接链到药监局、市场监管总局的网站，不是本站页面，不取
+    "list_item_selector": "div.news_item a[href*='viewInfoCommon'], div.news_item a.right_default[href^='/main/policy/']",
 
     # ── 翻页配置 ──
     "pagination": {

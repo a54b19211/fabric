@@ -1,6 +1,6 @@
 """对外请求和一次读取的额度。
 
-- get(url)：先等这个站点的限速间隔（fetch.rate），再发 GET；超时和 429 有界重试，每次重发前重新等限速；
+- get(url)：先等这个站点的限速间隔（fetch.rate），再发 GET；超时和 429 有界重试（retry_5xx=True 时 5xx 也重发），每次重发前重新等限速；
   单个响应超过 cap 字节就放弃（防内存）。返回普通的 httpx.Response（正文已读完）。
 - wait(url)：用浏览器或 scrapling 打开页面之前调一次：只等限速、记一个请求。site_only(url) 是开浏览器时加的参数：
   页面上只有这个站点自己的请求发得出去。
@@ -22,6 +22,9 @@ from fetch import rate
 
 KNOWN = "reached_known"  # stop_reason：增量读取读到了已存且没变的原件
 SENT = {"requests": 0, "bytes": 0}
+# retry_5xx 时也重发的状态码：网关/服务暂时不可用（Europe PMC 的慢检索偶尔回一个 190 字节的非 200 错误页，
+# 2026-11-19 一天 16 次，重发一般就好）。默认不重发 5xx：SEC 等来源的 5xx 原样交回
+SERVER_ERRORS = frozenset({500, 502, 503, 504})
 
 
 class Stop(BaseException):
@@ -95,8 +98,8 @@ def site_only(url, proxy=None) -> list[str]:
 
 
 def get(url, params=None, *, client=None, headers=None, cap=8 * 1024 * 1024, timeout=20.0, tries=None,
-        deadline=None) -> httpx.Response:
-    """GET url。每次发之前等限速；超时或 429 最多发 tries 次（默认 1 + APP.TASK_RETRIES），429 之后先等
+        deadline=None, retry_5xx=False) -> httpx.Response:
+    """GET url。每次发之前等限速；超时或 429（retry_5xx 时还有 5xx）最多发 tries 次（默认 1 + APP.TASK_RETRIES），之后先等
     APP.TASK_RETRY_DELAY 秒（每次翻倍）。deadline（time.monotonic() 的值）到了就不再发，抛 Stop("deadline")；
     429 之后等不到下一次了，就把这个 429 交回去。响应超过 cap 字节抛 ValueError("response_too_large")。
     client 不给就临时开一个（跟随重定向）。"""
@@ -119,7 +122,8 @@ def get(url, params=None, *, client=None, headers=None, cap=8 * 1024 * 1024, tim
                     raise
                 continue  # 超时多半是这条连接没通（个别 CDN 节点会卡住）：换一条马上重发，间隔由限速保证
             late = deadline is not None and time.monotonic() + delay >= deadline
-            if response.status_code != 429 or attempt == tries or late:
+            retried = response.status_code == 429 or (retry_5xx and response.status_code in SERVER_ERRORS)
+            if not retried or attempt == tries or late:
                 return response
             time.sleep(delay)
             delay = min(delay * 2, 60.0)

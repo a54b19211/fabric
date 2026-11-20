@@ -199,7 +199,8 @@ class _PublicApiRead:
         if remaining <= 0:
             return True
         url, params, path = _api_page(request, self.cursor, min(remaining, 100), self.consumed)
-        response = transport.get(url, params, client=client, cap=PAGE_BYTES, deadline=self.budget.deadline)
+        response = transport.get(url, params, client=client, cap=PAGE_BYTES, deadline=self.budget.deadline,
+                                 retry_5xx=source == "europe_pmc")  # Europe PMC 慢检索偶尔回 5xx，重发一般就好
         status, text = response.status_code, response.content.decode("utf-8")
         # openFDA的确定NO_MATCH只表示本查询零命中，不等于API失效。
         if status == 404 and source == "fda_crl":

@@ -61,3 +61,19 @@ def test_a_web_capture_is_compared_by_what_was_parsed_and_its_attachment_list_no
 def test_an_original_that_is_not_json_is_compared_as_it_is():
     assert fingerprint("pubmed", "<PubmedArticle/>") == fingerprint("pubmed", "<PubmedArticle/>")
     assert fingerprint("pubmed", "<PubmedArticle/>") != fingerprint("pubmed", "<PubmedArticle />")
+
+
+def test_pubmed_history_order_and_ct_year_only_nih_ids_are_not_changes():
+    """PubMed 每次给的 <History> 日期顺序不固定；CT.gov 自动挂的“编号只是年份”的 NIH 次要编号时有时无：都不算新版本。"""
+    a = ('<PubmedArticle><History><PubMedPubDate PubStatus="received"><Year>2025</Year></PubMedPubDate>'
+         '<PubMedPubDate PubStatus="medline"><Year>2026</Year></PubMedPubDate></History></PubmedArticle>')
+    b = ('<PubmedArticle><History><PubMedPubDate PubStatus="medline"><Year>2026</Year></PubMedPubDate>'
+         '<PubMedPubDate PubStatus="received"><Year>2025</Year></PubMedPubDate></History></PubmedArticle>')
+    assert fingerprint("pubmed", a) == fingerprint("pubmed", b)
+    assert fingerprint("pubmed", a) != fingerprint("pubmed", a.replace("2025", "2024"))
+    real = {"id": "R01CA1", "type": "NIH", "link": "x"}
+    year = {"id": "2025", "type": "NIH", "link": "https://reporter.nih.gov/quickSearch/2025"}
+    def ct(ids):
+        return json.dumps({"protocolSection": {"identificationModule": {"nctId": "NCT1", "secondaryIdInfos": ids}}})
+    assert fingerprint("clinicaltrials", ct([real, year])) == fingerprint("clinicaltrials", ct([real]))
+    assert fingerprint("clinicaltrials", ct([real])) != fingerprint("clinicaltrials", ct([]))

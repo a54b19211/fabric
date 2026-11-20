@@ -1,6 +1,9 @@
 """国家药品监督管理局（NMPA）详情页特解"""
 import re
 
+from lxml import html as lxml_html
+
+from clean.excel_parser import _rows_to_markdown
 from fetch.extractors import extract_approval_number, extract_labeled_field
 from fetch.extractors.dates import normalize_date
 
@@ -33,7 +36,7 @@ def extract_nmpa_detail(page) -> dict:
     body_els = page.css("div.wenzhang")
     body_el = body_els[0] if body_els else None
     if body_el:
-        result["body_text"] = body_el.get_all_text(strip=True)
+        result["body_text"] = _body_text(body_el)
 
     # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
     body_text = result["body_text"]
@@ -58,3 +61,20 @@ def extract_nmpa_detail(page) -> dict:
                 result["attachment_links"].append({"name": name, "url": href})
 
     return result
+
+
+def _body_text(body_el) -> str:
+    """正文文字：和 get_all_text(strip=True) 一样逐段取字、一段一行；正文里的表格（旧版页面常见）改成 Markdown 表格，
+    一行一条记录，不再一格一行。"""
+    if not body_el.css("table"):
+        return body_el.get_all_text(strip=True)
+    root = lxml_html.fromstring(body_el.html_content)
+    for table in root.xpath(".//table[not(ancestor::table)]"):
+        rows = [[" ".join(cell.text_content().split()) for cell in tr.xpath("./td|./th")] for tr in table.xpath(".//tr")]
+        rows = [row for row in rows if any(row)]
+        holder = lxml_html.Element("div")
+        holder.text = _rows_to_markdown(rows)
+        holder.tail = table.tail
+        table.getparent().replace(table, holder)
+    parts = (part.strip() for part in root.xpath(".//text()[not(ancestor::script) and not(ancestor::style)]"))
+    return "\n".join(part for part in parts if part)
