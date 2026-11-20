@@ -186,7 +186,7 @@ SPECS: tuple[CollectionSpec, ...] = (
     # 更老的用 ops/backfill_source.py hkex 补
     _site("hkex", "港交所披露易", evidence=("corporate_filing",), group="hkexnews.hk",
           coverage={"metadata": "公告列表接口", "fulltext": "公告附件（PDF）"}, incremental=_BY_GROUP, backfill=True),
-    # query=records；行业媒体，不是独立证实来源
+    # query=records；行业媒体，不是独立证实来源。已关（DEFAULT_CLOSED、V054）：文章页 403 人机验证，不绕过
     _site("fiercepharma", "Fierce Pharma（RSS）", evidence=("industry_media",), group="fiercepharma.com", coverage={"metadata": "RSS 条目", "fulltext": "文章页"}),
     # query=records；许可未核实
     _site("nccn", "NCCN 临床实践指南", evidence=("guideline",), group="nccn.org",
@@ -270,7 +270,8 @@ RETIRED = {
 }
 # 可读开关默认关的来源：NCCN（许可未核实）一定关；本地导入和 SEC 公司概念事实由管理员按需打开。V047 关上的其余来源
 # 2026-11-17 随十个知识库打开（V052）
-DEFAULT_CLOSED = frozenset({"local_files", "nccn", "sec_companyfacts"})
+# Fierce Pharma 2026-11-20 关掉（主持人批准，V054）：文章页每次 403（Cloudflare 人机验证），不绕过；没有定时计划
+DEFAULT_CLOSED = frozenset({"local_files", "nccn", "sec_companyfacts", "fiercepharma"})
 
 
 def _watch(watch_id, source_id, query="records", *, records=100, pages=1, seconds=120, cadence=86400, lookback=7):
@@ -333,7 +334,6 @@ WATCHES = (
     _watch("phirda-policy", "phirda_policy", "https://www.phirda.com/news_10.html", records=30),
     _watch("phirda-rd", "phirda_rd", "https://www.phirda.com/news_11.html", records=30, cadence=12 * _H),
     _watch("phirda-reform", "phirda_healthcare_reform", "https://www.phirda.com/news_12.html", records=30),
-    _watch("fiercepharma", "fiercepharma", records=30, cadence=6 * _H),
     _watch("roche-releases", "roche", records=30),
     _watch("rss-press", "rss_press", records=50, cadence=6 * _H),
     _watch("hkex", "hkex"),

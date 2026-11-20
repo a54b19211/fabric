@@ -195,15 +195,37 @@ def _plan(ext):
     cloud = [("mineru_cloud", _mineru_cloud, cloud_kind)] if _cloud_enabled() else []
     if ext in EXCEL_EXTS:
         return [("excel", lambda p: {"success": True, "markdown": _excel(p), "error": ""}, None)]
+    text_layer = [("pypdf_text", _pdf_text_layer, "pdf_page")]  # 只在前面的都失败时用，已解析成功的结果不变
     if cloud and _cloud_only() and ext in (".pdf", ".docx"):
-        return cloud
+        return cloud + (text_layer if ext == ".pdf" else [])
     if ext == ".pdf":
-        return [("mineru", _mineru, "pdf_page")] + cloud
+        return [("mineru", _mineru, "pdf_page")] + cloud + text_layer
     if ext == ".docx":
         return [("mineru", _mineru, None)] + cloud
     if cloud:
         return cloud
     return [("libreoffice_pdf+mineru", lambda p: _mineru(_doc_to_pdf(p)), "converted_page")]
+
+
+# 文字层里字体编码表缺失的页，读出来是一串别的文字（希腊、泰卢固、古木基等字母，港交所年报常见）：
+# 拉丁字母、数字、标点、中日韩文字以外的字超过两成的页当作读不出，不收乱码
+_ODD = re.compile(r"[^\s\u0000-\u024f\u2000-\u206f\u2460-\u24ff\u3000-\u9fff\uff00-\uffef]")
+
+
+def _readable(text: str) -> str:
+    chars = sum(1 for c in text if not c.isspace())
+    return text if chars and len(_ODD.findall(text)) <= 0.2 * chars else ""
+
+
+def _pdf_text_layer(path: str) -> dict:
+    """PDF 自带的文字层（pypdf），一页一块：MinerU 都失败以后才用（例如港交所年报超过云端 200 页上限）。
+    扫描件和乱码页读不出字，交回空正文，由 without_text_layer 记成 text_layer_missing。"""
+    from pypdf import PdfReader
+
+    blocks = [{"type": "text", "text": _readable(page.extract_text() or ""), "page_idx": index}
+              for index, page in enumerate(PdfReader(path).pages)]
+    markdown = "\n\n".join(block["text"] for block in blocks if block["text"])
+    return {"success": True, "markdown": markdown, "content_list": blocks, "error": ""}
 
 
 def _jats(path: Path, ext: str) -> dict:
@@ -269,8 +291,10 @@ def _parse_copy(copy, ext):
         answer = _call_parser(call, copy)
         markdown = (answer.get("markdown") or "") if answer.get("success") else ""
         if not markdown.strip():
-            error = "empty_text" if answer.get("success") else "parser_failed"
-            attempts.append(method + ":" + error)
+            failed = "empty_text" if answer.get("success") else "parser_failed"
+            attempts.append(method + ":" + failed)
+            if method != "pypdf_text":  # 文字层兜底也没读到：结果仍按 MinerU 的失败原因记
+                error = failed
             continue
         attempts.append(method + ":ok")
         return _parsed(answer, markdown, method, page_kind, ext, attempts)

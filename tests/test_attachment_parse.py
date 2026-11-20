@@ -196,7 +196,7 @@ def test_cloud_mode_skips_self_hosted_mineru(monkeypatch):
     from clean import attachment_parse as ap
     monkeypatch.setenv("DATAFABRIC_MINERU_CLOUD_TOKEN", "t")
     monkeypatch.setenv("DATAFABRIC_MINERU_MODE", "cloud")
-    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru_cloud"]
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru_cloud", "pypdf_text"]
     assert [m for m, _, _ in ap._plan(".docx")] == ["mineru_cloud"]
     monkeypatch.delenv("DATAFABRIC_MINERU_MODE")
-    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru", "mineru_cloud"]
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru", "mineru_cloud", "pypdf_text"]

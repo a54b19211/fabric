@@ -222,7 +222,8 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
     max_pages_per_year = api_cfg.get("max_pages_per_year", 100)
 
     collected_urls: Set[str] = set()
-    total_yielded = 0
+    resume_at = api_cfg.get("resume_at") or 0  # 续读：前 resume_at 条上一段读过了，读取方会丢掉，只给占位不读详情页
+    total_yielded = position = 0
 
     for year in range(year_start, year_end - 1, -1):
         logger.info(f"[Roche] 开始处理年份: {year}")
@@ -256,6 +257,10 @@ def iter_roche_web(api_cfg: dict) -> Iterator[dict]:
 
             # 列表页抓完立即逐条抓详情页并 yield
             for art in page_articles:
+                position += 1
+                if position <= resume_at:
+                    yield _article_record(art, "")
+                    continue
                 logger.info(f"[Roche] 详情页 {art['source_url']}")
                 try:
                     body = _fetch_detail(art["source_url"])

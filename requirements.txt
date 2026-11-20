@@ -27,6 +27,7 @@ python-dotenv>=1.0           # .env 文件加载
 
 # --- 文档解析 ---
 openpyxl==3.1.5              # 读取 .xlsx（纯 Python，跨平台）
+pypdf==5.4.0                 # PDF 文字层兜底（MinerU 失败、超过 200 页时读文字层）
 xlrd==2.0.1                  # 读取 .xls 旧版二进制格式（纯 Python，跨平台）
 
 # --- 后端 API ---

@@ -357,7 +357,7 @@ class _Reader:
         self.attachments(links, url, cookies, "detail_page", skip_attachments)
 
 
-def _site_results(reader, query):
+def _site_results(reader, query, resume_at=0):
     """接口站点（query="records"）逐条给出（解析结果, 接口原始字段）；表格页站点（query=start_url）逐张表给出
     （解析结果, None）。续读时从头重放到续读位置（拉取函数没有可恢复的游标）。"""
     profile = reader.profile
@@ -368,6 +368,8 @@ def _site_results(reader, query):
 
         fetch = profile["api_fetcher"]
         api = {**profile.get("api", {}), "proxy": site_proxy(reader.site)}  # 拉取函数自己开浏览器时用它（nccn）
+        # 续读时前 resume_at 条是重放、读取方会丢掉：拉取函数可以只给占位、不读详情页（roche）
+        api["resume_at"] = 0 if profile.get("by_group") else resume_at  # 分组读取不重放
         for raw in fetch(api, reader.group) if profile.get("by_group") else fetch(api):
             if isinstance(raw, ItemUnreadable | GroupStart):  # 读不到这一条、接着往下读了 / 新的一组：原样传下去
                 yield raw, None
@@ -423,7 +425,7 @@ def _read_site_records(request, reader, start):
     start_i, start_a, start_recorded, group = start
     by_group = reader.profile.get("by_group")
     position, skipping, yielded = -1, False, False  # position：这一组（不分组的站点是整个结果）里第几条
-    with closing(_site_results(reader, request.query)) as results:
+    with closing(_site_results(reader, request.query, start_i)) as results:
         for parsed, raw in results:
             if isinstance(parsed, GroupStart):
                 reader.group, position, skipping = parsed.index, -1, False
