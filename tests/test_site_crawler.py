@@ -1033,3 +1033,21 @@ def test_a_grouped_site_that_gives_no_item_at_all_is_the_empty_list_alarm_but_an
     cont = {"cursor": json.dumps({"i": 0, "a": 0, "p": 0, "g": 1}), "read_count": 1}
     tail = read_public(FetchRequest(source_id="fda_api_enforcement", query="records", continuation=cont))
     assert tail["error"] is None and tail["upstream_pagination_exhausted"]
+
+
+def test_a_withdrawn_record_projects_as_a_tombstone():
+    """ops/withdraw_records.py 的墓碑原件：网址和契约字段照旧，正文、附件空，facts 带 publication_state。"""
+    from ops.withdraw_records import tombstone
+
+    current = {"schema_version": site_crawler.WEB_SCHEMA, "role": "web_capture", "site": "phirda_policy",
+               "url": "https://www.phirda.com/artilce_44033.html?module=trackingCodeGenerator",
+               "parsed": {"title": "AI制药公司也焦虑", "publish_date": "2026-10-26", "markdown": "# AI制药公司也焦虑\n\n正文",
+                          "parse_method": "css_extract"},
+               "attachments": [{"record_id": "x", "url": "u", "text": ""}], "html": "<html/>"}
+    raw = tombstone(current, "not_in_column")
+    record = ArchiveRecord(source_record_id=current["url"], record_kind="document", raw_content=json.dumps(raw))
+    projected = site_crawler.project_capture("phirda_policy", record)
+    assert projected["facts"]["publication_state"] == "withdrawn"
+    assert projected["facts"]["withdraw_reason"] == "not_in_column"
+    assert projected["clean_text"] == "" and projected["facts"]["attachment_record_ids"] == []
+    assert "html" not in raw and projected["title"] == "AI制药公司也焦虑"

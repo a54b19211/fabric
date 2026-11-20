@@ -17,7 +17,7 @@
 | `api/` 对外 | 雷达读的 HTTP 接口：`api/routers/fabric.py`（`/api/fabric/*`） |
 | `run/` 运行 | 常驻程序的入口：派活 `scheduler.py`、清洗 `clean.py`、附件 `attachments.py`、索引 `index.py` |
 | `weknora/` 桥接 | WeKnora 桥接服务（独立进程 18564，`ops/systemd/datafabric-weknora.service`）：上传、停用、特征、检索、重排，见代码地图 |
-| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`（规则改了以后 `--recompute <来源>` 重算）、补编号 `backfill_identifiers.py`、删重复版本 `dedupe_versions.py`、服务文件 `systemd/`、代码门槛 |
+| `ops/` 运维 | 体检 `check_sources.py`、补抓存量 `backfill_source.py`、补指纹 `backfill_fingerprint.py`（规则改了以后 `--recompute <来源>` 重算）、补编号 `backfill_identifiers.py`、删重复版本 `dedupe_versions.py`、撤下不该有的站点记录（存墓碑版本，不删历史）`withdraw_records.py`、服务文件 `systemd/`、代码门槛 |
 
 谁调谁：`run/`、`api/` → `fetch/`、`clean/` → `store/`。存（`store/records.py`）不调读取和清洗，只用来源目录、投影和数据形状
 这些不连库、不联网的东西。图谱（抽取、消歧、审核、图发布）是另一个项目 Atlas，不在这里；资料库里旧的图包版本照常能读，不再能导入。

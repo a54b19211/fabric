@@ -377,14 +377,6 @@ def test_labeled_registration_numbers_need_the_label():
     assert ids.extract("批准文号：国药准字Ｈ２０２３０００１")[0]["value"] == "国药准字H20230001"
 
 
-def test_site_extractor_uses_the_one_rule():
-    from fetch.extractors import extract_approval_number
-
-    assert extract_approval_number("批准文号：国药准字 T20230001") == "国药准字T20230001"  # 旧正则漏了 T 类
-    assert extract_approval_number("国药准字H123456789") == ""  # 9 位不是批准文号（旧正则会截成前 8 位）
-    assert extract_approval_number("注册证号：S20150002") == "S20150002"
-
-
 def test_native_nct_format_is_ascii_only():
     import re
 

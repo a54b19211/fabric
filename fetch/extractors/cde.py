@@ -1,8 +1,8 @@
 """国家药品审评中心（CDE）详情页特解"""
 import re
 
-from fetch.extractors import extract_approval_number, extract_labeled_field
 from fetch.extractors.dates import normalize_date
+from fetch.extractors.text_tools import block_text
 
 # 文件下载链接：/main/att/download/<id>、/zdyz/downloadAtt?idCODE=…，或者网址直接以文件后缀结尾
 _FILE_LINK = re.compile(r"/att/download/|downloadAtt|\.(?:pdf|docx?|xlsx?|zip|rar|wps)(?:\?|$)", re.I)
@@ -37,24 +37,15 @@ def extract_cde_detail(page) -> dict:
     body_els = page.css("div.new_detail_content") or page.css("div.new_detail_content_old")
     body_el = body_els[0] if body_els else None
     if body_el:
-        result["body_text"] = body_el.get_all_text(strip=True)
+        result["body_text"] = block_text(body_el.html_content)  # 按段落分行，行内的加粗、链接不断句
     else:
         info_table = page.css("table.layui-table")
         if info_table:
             rows = info_table[0].css("tr:not(.adviceInput)")
             result["body_text"] = "\n".join(row.get_all_text(separator=" ", strip=True) for row in rows)
 
-    # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
-    body_text = result["body_text"]
-    result["extra"] = {
-        "drug_name": extract_labeled_field(
-            body_text, ("药品名称", "通用名称", "商品名称", "品种名称")
-        ),
-        "approval_number": extract_approval_number(body_text),
-        "manufacturer": extract_labeled_field(
-            body_text, ("生产企业", "生产单位", "企业名称", "申请人", "申办方")
-        ),
-    }
+    # 以前这里在正文里找“申请人”“企业名称”后面的几个字当 drug_name / manufacturer，抽出来的多是半句话
+    # （“(以下简称申请人)可以在提交……”），不再抽：extra 为空
 
     # 附件：div.relatedNews 里的文件下载链接；指导原则专栏是信息表里指向 /zdyz/downloadAtt 的链接。
     # relatedNews 里还有“相关新闻”的页面链接（/main/news/viewInfoCommon/…、/main/newspic/view/…）：那是别的页面，不是附件

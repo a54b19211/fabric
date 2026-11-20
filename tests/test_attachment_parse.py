@@ -28,6 +28,10 @@ def tools(monkeypatch):
     monkeypatch.setattr(ap, "_mineru", mineru)
     monkeypatch.setattr(ap, "_doc_to_pdf", lambda path: calls.append(("convert", path)) or path + ".pdf")
     monkeypatch.setattr(ap, "_excel", lambda path: calls.append(("excel", path)) or "| a | b |\n|---|---|\n| 1 | 2 |")
+    # 本机 Word 读法（v3 先试它）：这里的合成文件不是真的 Word 文件，读不出来，往下交 MinerU；真文件见 test_office_text
+    unreadable = {"success": False, "markdown": "", "error": "not_a_docx"}
+    monkeypatch.setattr(ap, "_office", lambda path: unreadable)
+    monkeypatch.setattr(ap, "_office_doc", lambda path: unreadable)
     return calls
 
 
@@ -197,6 +201,24 @@ def test_cloud_mode_skips_self_hosted_mineru(monkeypatch):
     monkeypatch.setenv("DATAFABRIC_MINERU_CLOUD_TOKEN", "t")
     monkeypatch.setenv("DATAFABRIC_MINERU_MODE", "cloud")
     assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru_cloud", "pypdf_text"]
-    assert [m for m, _, _ in ap._plan(".docx")] == ["mineru_cloud"]
+    assert [m for m, _, _ in ap._plan(".docx")] == ["office_docx", "mineru_cloud"]
+    assert [m for m, _, _ in ap._plan(".doc")] == ["libreoffice_docx", "mineru_cloud"]
     monkeypatch.delenv("DATAFABRIC_MINERU_MODE")
     assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru", "mineru_cloud", "pypdf_text"]
+
+
+def test_mineru_off_reads_word_locally_and_pdf_text_layer_only(monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_MINERU_CLOUD_TOKEN", "t")
+    monkeypatch.setenv("DATAFABRIC_MINERU_MODE", "off")
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["pypdf_text"]
+    assert [m for m, _, _ in ap._plan(".docx")] == ["office_docx"]
+    assert [m for m, _, _ in ap._plan(".doc")] == ["libreoffice_docx"]
+    assert [m for m, _, _ in ap._plan(".xls")] == ["excel"]
+
+
+def test_word_read_locally_wins_before_mineru(tmp_path, tools, monkeypatch):
+    monkeypatch.setattr(ap, "_office", lambda path: {"success": True, "markdown": "正文", "error": "",
+                                                     "content_list": [{"type": "text", "text": "正文"}]})
+    out = ap.parse_file(**stored(tmp_path, "x.docx", b"PK synthetic docx"))
+    assert out["status"] == "parsed" and out["parse_method"] == "office_docx" and out["locator_kind"] == "block"
+    assert tools == []  # MinerU 没被调用

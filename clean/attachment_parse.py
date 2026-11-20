@@ -23,6 +23,10 @@
 
 大小与耗时：原件超过 MAX_PARSE_BYTES 直接记 too_large，不送解析；每种解析方式各有超时。
 v2：加了定位与大小上限，结果与 v1 不同，所以升处理器版本。
+v3（2026-11-20）：Word 先在本机读（clean.office_text）：.docx 直读 document.xml，.doc 用 LibreOffice 转 .docx 再读；
+读不出字才交 MinerU。原因：MinerU 云端排队以后 .docx/.doc 没有别的路，NMPA 200 个 .docx、73 个 .doc 三次都失败。
+DATAFABRIC_MINERU_MODE=off 时完全不调 MinerU（PDF 只读文字层）。v2 已解析成功的同一文件（sha256 相同）直接沿用 v2 的
+正文（clean.derived_text._parse），不重新解析，所以 v2 的成功结果不变；变的只有 v2 失败的那些。
 """
 
 from __future__ import annotations
@@ -34,7 +38,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v2"
+PROCESSOR_VERSION = "datafabric.attachment_parse.v3"
+# 这些旧版本已解析成功的结果，同一文件（sha256）在新版本下照用：v3 只给 v2 没读出来的文件加了读法
+REUSABLE_VERSIONS = ("datafabric.attachment_parse.v2",)
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
 CLOUD_NATIVE = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
 CONVERTIBLE = {".doc", ".ppt", ".pptx"}
@@ -72,6 +78,23 @@ def _mineru_cloud(path: str) -> dict:
 
 def _cloud_enabled() -> bool:
     return bool(os.environ.get("DATAFABRIC_MINERU_CLOUD_TOKEN"))
+
+
+def _mineru_off() -> bool:
+    """DATAFABRIC_MINERU_MODE=off：不调 MinerU（自部署和云端都不调），PDF 只读文字层，Word 只用本机读法。"""
+    return os.environ.get("DATAFABRIC_MINERU_MODE", "") == "off"
+
+
+def _office(path: str) -> dict:
+    from clean import office_text
+
+    return office_text.parse_docx(path)
+
+
+def _office_doc(path: str) -> dict:
+    from clean import office_text
+
+    return office_text.parse_doc(path)
 
 
 def _cloud_only() -> bool:
@@ -196,15 +219,18 @@ def _plan(ext):
     if ext in EXCEL_EXTS:
         return [("excel", lambda p: {"success": True, "markdown": _excel(p), "error": ""}, None)]
     text_layer = [("pypdf_text", _pdf_text_layer, "pdf_page")]  # 只在前面的都失败时用，已解析成功的结果不变
+    local = {".docx": [("office_docx", _office, None)], ".doc": [("libreoffice_docx", _office_doc, None)]}.get(ext, [])
+    if _mineru_off():
+        return local + (text_layer if ext == ".pdf" else [])
     if cloud and _cloud_only() and ext in (".pdf", ".docx"):
-        return cloud + (text_layer if ext == ".pdf" else [])
+        return local + cloud + (text_layer if ext == ".pdf" else [])
     if ext == ".pdf":
         return [("mineru", _mineru, "pdf_page")] + cloud + text_layer
     if ext == ".docx":
-        return [("mineru", _mineru, None)] + cloud
+        return local + [("mineru", _mineru, None)] + cloud
     if cloud:
-        return cloud
-    return [("libreoffice_pdf+mineru", lambda p: _mineru(_doc_to_pdf(p)), "converted_page")]
+        return local + cloud
+    return local + [("libreoffice_pdf+mineru", lambda p: _mineru(_doc_to_pdf(p)), "converted_page")]
 
 
 # 文字层里字体编码表缺失的页，读出来是一串别的文字（希腊、泰卢固、古木基等字母，港交所年报常见）：

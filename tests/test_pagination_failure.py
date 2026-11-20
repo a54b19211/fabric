@@ -219,10 +219,27 @@ def test_detail_url_dedup_keeps_distinct_record_ids(links, expected):
     assert driver._extract_detail_urls(page) == expected
 
 
-def test_a_table_page_takes_its_date_from_the_newest_date_in_the_table(monkeypatch):
-    """CDE's accepted-products tables have no publication date of their own: the newest "承办日期" in the table is the page's."""
+def test_a_table_with_acceptance_numbers_is_one_record_per_row(monkeypatch):
+    """CDE 信息公开的表（受理品种、默示许可）一行一条记录，身份是受理号，不随页号变；日期是这一行的承办日期；
+    “序号”每次翻页都变，不进记录。"""
     driver, page = driver_for(monkeypatch, advance=True)
-    driver._extract_table_rows = lambda _table: [["受理号", "承办日期"], ["A1", "2026-11-10"], ["A2", "2026-11-12"], ["A3", ""]]
+    rows = [["序号", "受理号", "药品名称", "承办日期"], ["1", "A1", "甲片", "2026-11-10"], ["2", "A2", "乙片", "2026-11-12"],
+            ["3", "", "空号", ""]]
+    driver._extract_table_rows = lambda _table: rows
+    first = driver._tables_on_page(page, 0)
+    assert [p["title"] for p in first] == ["SYNTHETIC：甲片（A1）", "SYNTHETIC：乙片（A2）"]
+    assert [p["publish_date"] for p in first] == ["2026-11-10", "2026-11-12"]
+    assert first[0]["markdown"] == "# SYNTHETIC：甲片（A1）\n\n受理号：A1\n药品名称：甲片\n承办日期：2026-11-10"
+    assert first[0]["structured_data"]["fields"] == {"受理号": "A1", "药品名称": "甲片", "承办日期": "2026-11-10"}
+    rows[1][0], rows[2][0] = "11", "12"  # 新数据进来，同一行到了第 2 页、序号也变了
+    later = driver._tables_on_page(page, 1)
+    assert [(p["uuid"], p["markdown"]) for p in later] == [(p["uuid"], p["markdown"]) for p in first]
+
+
+def test_a_table_without_acceptance_numbers_is_still_one_record_per_page(monkeypatch):
+    """CDE's accepted-products tables have no publication date of their own: the newest date in the table is the page's."""
+    driver, page = driver_for(monkeypatch, advance=True)
+    driver._extract_table_rows = lambda _table: [["名称", "日期"], ["x", "2026-11-10"], ["y", "2026-11-12"]]
     [parsed] = driver._tables_on_page(page, 0)
     assert parsed["publish_date"] == "2026-11-12" == parsed["structured_data"]["publish_date"]
     driver._extract_table_rows = lambda _table: [["序号", "名称"], ["1", "x"]]  # a table with no date in it

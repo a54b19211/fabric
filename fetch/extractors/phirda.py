@@ -2,6 +2,7 @@
 import re
 
 from fetch.extractors.dates import normalize_date
+from fetch.extractors.text_tools import block_text
 
 
 def extract_phirda_detail(page) -> dict:
@@ -31,7 +32,8 @@ def extract_phirda_detail(page) -> dict:
     body_el = body_els[0] if body_els else None
 
     if body_el:
-        result["body_text"] = body_el.get_all_text(strip=True)
+        # 按段落取字：get_all_text(strip=True) 按文本节点分行，加粗的词、链接都会把一句话断开（“云端按语”一行、“：脉流……”另一行）
+        result["body_text"] = block_text(body_el.html_content)
 
     # 附件：正文内的文件链接
     search_el = body_el or page

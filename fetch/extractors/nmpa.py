@@ -1,11 +1,27 @@
-"""国家药品监督管理局（NMPA）详情页特解"""
+"""国家药品监督管理局（NMPA）详情页特解
+
+详情页的正文框 div.wenzhang 里依次是：信息表 div.wenzhang-table（索引号、主题分类、标题、发布日期）、h2.title（标题）、
+h3.two-title（副标题或文号，常为空）、div.share（分享按钮）、div.date（“发布时间：…”）、div.text-bottom（法规的
+“历史沿革”导航）、div.text（正文和附件链接）、div.about（【相关链接】）、div.page（翻页样式）。2026-11-20 对库里 448 个
+本站页面逐个看过，都是这个结构（有的没有信息表或相关链接）。
+正文只取副标题和 div.text：标题、日期另有字段；信息表里的索引号放进 extra.index_number；分享、历史沿革、相关链接
+是站点导航，不是这篇文件的内容。h2.title 里的状态标记（如“【废止】”）是文件状态，写在正文第一行。
+以前 extra 里的 drug_name / manufacturer / approval_number 是在正文里找“申请人”“企业名称”后面的几个字，
+抽出来的多是半句话（manufacturer=“自检工作”“受理日期”），不再抽。
+"""
 import re
 
 from lxml import html as lxml_html
 
 from clean.excel_parser import _rows_to_markdown
-from fetch.extractors import extract_approval_number, extract_labeled_field
 from fetch.extractors.dates import normalize_date
+from fetch.extractors.text_tools import block_text
+
+_INDEX_NUMBER = re.compile(r"[A-Z]{2,6}-\d{4}-\d{3,6}")
+_STATUS = re.compile(r"【[^】]{1,8}】")
+_PUBLISHED = re.compile(r"发布时间\s*[:：]\s*[\d\-]*")
+_FILE_LINK = re.compile(r"\.(pdf|doc|docx|xls|xlsx|zip|wps)$", re.I)
+_NAV = ("wenzhang-table", "share", "date", "about", "page", "text-bottom")
 
 
 def extract_nmpa_detail(page) -> dict:
@@ -32,49 +48,73 @@ def extract_nmpa_detail(page) -> dict:
         raw = date_els[0].attrib.get("content", "").strip()
         result["publish_date"] = normalize_date(raw)
 
-    # 正文：div.wenzhang
     body_els = page.css("div.wenzhang")
-    body_el = body_els[0] if body_els else None
-    if body_el:
-        result["body_text"] = _body_text(body_el)
+    if not body_els:
+        return result
+    box = lxml_html.fromstring(body_els[0].html_content)
 
-    # 来源特有字段：drug_name / approval_number / manufacturer（供 doc_extra 与血缘追踪）
-    body_text = result["body_text"]
-    result["extra"] = {
-        "drug_name": extract_labeled_field(
-            body_text, ("药品名称", "通用名称", "商品名称", "品种名称")
-        ),
-        "approval_number": extract_approval_number(body_text),
-        "manufacturer": extract_labeled_field(
-            body_text, ("生产企业", "生产单位", "企业名称", "申请人")
-        ),
-    }
+    # 索引号：信息表里“索引号”后面那一格（政府信息公开的固定编号）。没有信息表就不写，不从正文里猜
+    texts = [" ".join(td.text_content().split()) for td in box.xpath(".//div[contains(@class,'wenzhang-table')]//td")]
+    for label, value in zip(texts, texts[1:]):
+        if label == "索引号" and _INDEX_NUMBER.fullmatch(value):
+            result["extra"] = {"index_number": value}
+            break
 
-    # 附件：正文区域内的文件链接
-    if body_el:
-        for a in body_el.css("a"):
-            href = a.attrib.get("href", "")
-            name = a.get_all_text(strip=True) or "未命名附件"
-            if href and re.search(r'\.(pdf|doc|docx|xls|xlsx|zip|wps)$', href, re.I):
-                if href.startswith("/"):
-                    href = "https://www.nmpa.gov.cn" + href
-                result["attachment_links"].append({"name": name, "url": href})
+    # 附件：正文框内的文件链接
+    for a in box.xpath(".//a[@href]"):
+        href = a.get("href", "")
+        if _FILE_LINK.search(href):
+            if href.startswith("/"):
+                href = "https://www.nmpa.gov.cn" + href
+            result["attachment_links"].append({"name": " ".join(a.text_content().split()) or "未命名附件",
+                                               "url": href})
 
+    result["body_text"] = _body_text(box)
     return result
 
 
-def _body_text(body_el) -> str:
-    """正文文字：和 get_all_text(strip=True) 一样逐段取字、一段一行；正文里的表格（旧版页面常见）改成 Markdown 表格，
-    一行一条记录，不再一格一行。"""
-    if not body_el.css("table"):
-        return body_el.get_all_text(strip=True)
-    root = lxml_html.fromstring(body_el.html_content)
-    for table in root.xpath(".//table[not(ancestor::table)]"):
+def _has_class(name):
+    return f"contains(concat(' ',normalize-space(@class),' '),' {name} ')"
+
+
+def _body_text(box) -> str:
+    """正文：状态标记、副标题、正文区 div.text（没有 div.text 的页面取整个正文框，去掉上面列的导航块）。
+    正文里的表格（旧版页面常见）写成 Markdown 表格，一行一条记录，不再一格一行。"""
+    lines = []
+    for title in box.xpath(".//h2[" + _has_class("title") + "]"):
+        lines.extend(_STATUS.findall(title.text_content()))
+    for sub in box.xpath(".//h3[" + _has_class("two-title") + "]"):
+        text = " ".join(sub.text_content().split())
+        if text:
+            lines.append(text)
+    for date in box.xpath(".//div[" + _has_class("date") + "]"):  # 日期栏里转载的“文章来源：…”留下，日期本身不留
+        text = " ".join(_PUBLISHED.sub(" ", date.text_content()).split())
+        if text:
+            lines.append(text)
+    parts = box.xpath(".//div[" + _has_class("text") + "]")
+    if not parts:
+        nav = " or ".join(_has_class(name) for name in _NAV)
+        for junk in box.xpath(".//div[" + nav + "] | .//h2[" + _has_class("title") + "] | .//h3["
+                              + _has_class("two-title") + "]"):
+            junk.drop_tree()
+        parts = [box]
+    for part in parts:
+        _tables_to_markdown(part)
+        text = block_text(lxml_html.tostring(part, encoding="unicode"))
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _tables_to_markdown(part):
+    """把 part 里最外层的表格换成 Markdown 表格（每行一个 <p>，block_text 按行取）。"""
+    for table in part.xpath(".//table[not(ancestor::table)]"):
         rows = [[" ".join(cell.text_content().split()) for cell in tr.xpath("./td|./th")] for tr in table.xpath(".//tr")]
         rows = [row for row in rows if any(row)]
         holder = lxml_html.Element("div")
-        holder.text = _rows_to_markdown(rows)
+        for line in _rows_to_markdown(rows).split("\n") if rows else []:
+            p = lxml_html.Element("p")
+            p.text = line
+            holder.append(p)
         holder.tail = table.tail
         table.getparent().replace(table, holder)
-    parts = (part.strip() for part in root.xpath(".//text()[not(ancestor::script) and not(ancestor::style)]"))
-    return "\n".join(part for part in parts if part)

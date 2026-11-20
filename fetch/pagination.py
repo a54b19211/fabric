@@ -407,6 +407,9 @@ class JsClickDriver(BasePaginationDriver):
                 continue
 
             doc_title = tab_title or page_title or self.profile.get("name", "")
+            if "受理号" in rows_data[0]:  # 一行一条记录的表，见 _table_rows
+                page_parsed.extend(self._table_rows(doc_title, rows_data))
+                continue
             if page_count > 0:
                 doc_title = f"{doc_title} - 第{page_count + 1}页"
 
@@ -430,6 +433,37 @@ class JsClickDriver(BasePaginationDriver):
             }
             page_parsed.append(parsed)
         return page_parsed
+
+    def _table_rows(self, table_title: str, rows_data: list[list[str]]) -> list[dict]:
+        """有“受理号”列的表（CDE 信息公开的受理品种、默示许可）：一行一条记录，身份是受理号。
+        以前一页一条（“临床试验默示许可 - 第10页”）：新数据进来整页后移，同一条记录的每个版本是另一批行，第几页这个身份
+        对不上任何一份文件。“序号”列随翻页变，不进记录；日期取这一行里的日期格（受理品种表的承办日期；默示许可表没有）。"""
+        key_name, unstable = "受理号", {"序号"}  # 记录身份列；每次翻页都会变、不进记录的列
+        header, out = rows_data[0], []
+        key = header.index(key_name)
+        for row in rows_data[1:]:
+            fields = {name: (row[i] if i < len(row) else "") for i, name in enumerate(header)
+                      if name and name not in unstable}
+            acceptance = fields.get(key_name, "")
+            if not acceptance or key >= len(row):
+                continue
+            name = fields.get("药品名称", "")
+            title = f"{table_title}：{name}（{acceptance}）" if name else f"{table_title}：{acceptance}"
+            date = next((v for v in fields.values() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v)), "")
+            body = "\n".join(f"{k}：{v}" for k, v in fields.items() if v)
+            out.append({
+                "uuid": make_uuid(f"{self.start_url}#{acceptance}"),
+                "title": title,
+                "publish_date": date,
+                "markdown": f"# {title}\n\n{body}",
+                "structured_data": {"title": title, "publish_date": date, "category": table_title, "summary": "",
+                                    "fields": fields},
+                "parse_method": "table_row",
+                "attachment_links": [],
+                "source_url": self.start_url,
+                "source_site": self.site_key,
+            })
+        return out
 
     @staticmethod
     def _extract_table_rows(table_el) -> list[list[str]]:

@@ -52,15 +52,16 @@ def _claim(conn, sources, retry_after_seconds, seen):
 
 
 def _parse(conn, facts):
-    """同 sha256 的文件已有成功结果就复用，否则解析这个文件。"""
+    """同 sha256 的文件已有成功结果就复用（当前处理器版本的，或 REUSABLE_VERSIONS 里旧版本的），否则解析这个文件。"""
     reused = conn.execute(
         text("""
           SELECT d.text, d.parse_method, d.file_ext, d.locator_kind, d.segments FROM derived_clean_text d
           JOIN fabric_versions v ON v.version_id=d.version_id
-          WHERE d.processor_version=:pv AND d.status='parsed' AND v.payload->'facts'->>'sha256'=:sha
-          ORDER BY d.created_at LIMIT 1
+          WHERE d.processor_version=ANY(:pvs) AND d.status='parsed' AND v.payload->'facts'->>'sha256'=:sha
+          ORDER BY d.processor_version=:pv DESC, d.created_at LIMIT 1
         """),
-        {"pv": attachment_parse.PROCESSOR_VERSION, "sha": facts.get("sha256") or ""},
+        {"pv": attachment_parse.PROCESSOR_VERSION, "sha": facts.get("sha256") or "",
+         "pvs": [attachment_parse.PROCESSOR_VERSION, *attachment_parse.REUSABLE_VERSIONS]},
     ).mappings().first()
     if reused:
         # 复用的旧结果也过一遍“大文件几乎没字”的判断：扫描件以前记成了只有几个字的 parsed

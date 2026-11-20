@@ -119,8 +119,9 @@ def extract_chictr_detail(page) -> dict:
     if not result["title"] and regno:
         result["title"] = regno
 
-    # 日期：优先注册时间
-    result["publish_date"] = extra.get("publish_date", "")
+    # 日期：优先注册时间。早年的登记页注册时间写的是占位值 1990-01-01（ChiCTR 2007 年才建立），这时用最近更新日期
+    registered = extra.get("publish_date", "")
+    result["publish_date"] = {"1990-01-01": ""}.get(registered, registered)
     if not result["publish_date"]:
         result["publish_date"] = extra.get("last_updated", "")
 

@@ -194,6 +194,9 @@ class _Reader:
         # 本次读取里读不到的条目（网址 + 原因），同样只记在读取结果里，不存版本
         self.unread: list[dict] = []
         self.unread_in_a_row = 0  # 连续读不到的条数；读到一条就清零
+        # 列表里指向别的网站的条目（NMPA 栏目里转链到药审中心、医保局、市场监管总局的文件）：不读不存，记在读取结果里。
+        # 用本站的提取器读别站页面读不出正文，以前存下来的是通用兜底抽出的整页文字
+        self.skipped: list[dict] = []
         self.position = 0  # 读到第几个父项了（分组读取：这一组里第几条）；停下时的续读位置指向它
         self.group = 0  # 分组读取：读到第几组了；不分组的站点一直是 0
 
@@ -468,6 +471,10 @@ def _read_detail_pages(request, reader, start):
                 continue
             reader.position = seen
             first = seen == start_i
+            if not _on_site(reader.site, url):
+                reader.skipped.append({"url": url, "reason": "off_site_link"})
+                reader.position = seen + 1
+                continue
             try:
                 reader.page(url, skip_attachments=start_a if first else 0,
                             record_page=not (first and start_recorded))
@@ -548,6 +555,7 @@ def _site_read_result(request, reader, exhausted, stop, error, resume) -> dict:
         "next_continuation": next_continuation,
         "attachment_coverage": reader.coverage,
         "unread_items": reader.unread,
+        "skipped_items": reader.skipped,
     }
 
 
@@ -557,27 +565,35 @@ def _parsed_text(parsed):
     return title, clean_text, source_time(parsed.get("publish_date") or None, "site_publish_date")
 
 
+def _withdrawal(data, facts):
+    """撤下的记录（ops/withdraw_records.py 写的墓碑原件）：facts 带 publication_state 和原因，检索读成 withdrawn，
+    知识库撤下（store.index_publication.TOMBSTONES）。"""
+    if data.get("publication_state") == "withdrawn":
+        facts.update(publication_state="withdrawn", withdraw_reason=data.get("withdraw_reason") or "")
+    return facts
+
+
 def _web_capture_fields(data):
     parsed = data.get("parsed") or {}
-    facts = {
+    facts = _withdrawal(data, {
         "role": "web_capture",
         "parse_method": parsed.get("parse_method"),
         "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
         "extra": parsed.get("extra") or {},
-    }
+    })
     return (facts, *_parsed_text(parsed))
 
 
 def _site_record_fields(data):
     parsed = data.get("parsed") or {}
-    facts = {
+    facts = _withdrawal(data, {
         "role": "site_record",
         "parse_method": parsed.get("parse_method"),
         "structured": parsed.get("structured_data") or {},
         "extra": parsed.get("extra") or {},
         "attachment_record_ids": [a.get("record_id") for a in data.get("attachments", [])],
         "source_fields_kept": data.get("raw") is not None,
-    }
+    })
     return (facts, *_parsed_text(parsed))
 
 

@@ -449,3 +449,54 @@ def test_chictr_upload_link_is_the_only_attachment_and_is_named_by_its_field():
     assert got["title"].startswith("基于叙事教学法的死亡教育项目") and got["extra"]["regno"] == "ChiCTR2600136516"
     no_file = html.replace(href, "bin/chictr/DownloadTest?path=")
     assert extract(Selector(no_file))["attachment_links"] == []
+
+
+# ── NMPA / PhIRDA（2026-11-20 从库里存的原页面截取：nmpa_detail、phirda_detail、phirda_list）──────────────
+
+def test_nmpa_body_is_the_document_not_the_info_table_share_bar_or_related_links():
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    got = extract_nmpa_detail(page("nmpa_detail.html"))
+    body = got["body_text"]
+    assert got["title"] == "国家药监局关于发布医疗器械出口销售证明管理规定的公告（2025年第126号）"
+    assert got["publish_date"] == "2025-12-25"
+    assert body.startswith("为支持医疗器械出口贸易")
+    assert "索引号" not in body and "发布时间" not in body and "相关链接" not in body and "分享" not in body
+    assert body.rstrip().endswith("国家药品监督管理局2025年第126号公告附件.doc")
+    assert got["extra"] == {"index_number": "FGWJ-2025-10097"}  # 不再从正文里猜药名、企业、批准文号
+    assert got["attachment_links"] == [{"name": "国家药品监督管理局2025年第126号公告附件.doc",
+                                        "url": "https://www.nmpa.gov.cn/directory/web/nmpa/images/1766628495442076887.doc"}]
+
+
+def test_phirda_list_takes_the_column_items_not_the_hot_news_sidebar():
+    for site in ("phirda_industry", "phirda_policy", "phirda_rd", "phirda_healthcare_reform"):
+        links = page("phirda_list.html").css(SITE_PROFILES[site]["list_item_selector"])
+        hrefs = [a.attrib["href"] for a in links]
+        assert len(hrefs) == len(set(hrefs)) == 8  # 左栏 8 篇，每篇一个标题链接
+        assert "/artilce_43268.html?module=trackingCodeGenerator" in hrefs
+        assert not any("artilce_44033" in h for h in hrefs)  # 右栏“热门资讯”的第一篇
+
+
+def test_phirda_body_keeps_a_sentence_on_one_line_across_bold_and_links():
+    from fetch.extractors.phirda import extract_phirda_detail
+
+    body = extract_phirda_detail(page("phirda_detail.html"))["body_text"]
+    assert "云端按语：脉流科技" in body.replace(" ", "")
+    assert not any(line.startswith("：") for line in body.split("\n"))
+
+
+def test_block_text_breaks_lines_at_blocks_only():
+    from fetch.extractors.text_tools import block_text
+
+    html = "<div><p>甲<b>乙</b><a href='#'>丙</a>。</p><p>第二段<br>换行</p><script>x()</script><!-- 注释 -->尾</div>"
+    assert block_text(html) == "甲乙丙。\n第二段\n换行\n尾"
+
+
+def test_chictr_placeholder_registration_date_falls_back_to_last_update():
+    from fetch.extractors.chictr.chictr import extract_chictr_detail
+
+    rows = ("<tr><td><p class='cn'>注册时间：</p></td><td>1990-01-01</td></tr>"
+            "<tr><td><p class='cn'>最近更新日期：</p></td><td>2016-02-24</td></tr>"
+            "<tr><td><p class='cn'>注册号：</p></td><td>ChiCTR-IIR-16007986</td></tr>")
+    got = extract_chictr_detail(Selector(f"<html><body><table>{rows}</table></body></html>"))
+    assert got["publish_date"] == "2016-02-24"
