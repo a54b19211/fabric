@@ -35,7 +35,7 @@ def test_docx_paragraphs_and_tables_in_document_order(tmp_path):
     kinds = [b["type"] for b in out["content_list"]]
     assert kinds == ["text", "text", "table", "text"]
     assert out["content_list"][1]["text"] == "医疗器械注册自检指南"  # 一段里的几个 run 接在一起
-    assert out["content_list"][2]["table_body"].splitlines()[2].split("|")[2].strip() == "甲 乙"
+    assert out["content_list"][2]["table_body"].splitlines()[2].split("|")[2].strip() == "甲乙"  # 格子里分行的中文接起来不加空格
     assert out["content_list"][3]["text"] == "第一行\n第二行"
 
 

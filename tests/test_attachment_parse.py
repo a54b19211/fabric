@@ -69,7 +69,7 @@ def test_self_hosted_failure_falls_back_to_cloud(tmp_path, tools, monkeypatch):
     monkeypatch.setattr(ap, "_mineru", lambda path: {"success": False, "markdown": "", "error": "busy"})
     monkeypatch.setattr(ap, "_mineru_cloud", lambda path: {"success": True, "markdown": "# 云端", "error": ""})
     out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
-    assert out["parse_method"] == "mineru_cloud" and out["attempts"] == ["mineru:parser_failed", "mineru_cloud:ok"]
+    assert out["parse_method"] == "mineru_cloud" and out["attempts"] == ["pypdf_text:parser_failed:exception", "mineru:parser_failed", "mineru_cloud:ok"]
 
 
 def test_cloud_reason_is_recorded_and_quota_defers(tmp_path, tools, monkeypatch):
@@ -146,7 +146,7 @@ def test_a_large_file_with_next_to_no_text_is_a_scan_that_needs_ocr(tmp_path, mo
         "content_list": [{"type": "text", "text": "附件", "page_idx": 0}, {"type": "image", "page_idx": 0}]})
     scan = ap.parse_file(**stored(tmp_path, "scan.pdf", PDF + b"\x00" * 60_000))
     assert (scan["status"], scan["error"], scan["text"]) == ("unsupported", "text_layer_missing", "")
-    assert scan["attempts"] == ["mineru:ok", "text_layer_missing"] and scan["parse_method"] == "mineru"
+    assert scan["attempts"] == ["pypdf_text:parser_failed:exception", "mineru:ok", "text_layer_missing"] and scan["parse_method"] == "mineru"
     small = ap.parse_file(**stored(tmp_path, "note.pdf", PDF))  # a short note in a small file is just short
     assert small["status"] == "parsed" and "附件" in small["text"]
 
@@ -159,7 +159,7 @@ def test_mineru_endpoint_is_configurable(monkeypatch):
 # ——v2：定位与大小上限（Codex r59）——
 
 
-def test_pdf_blocks_become_text_with_page_markers_and_offsets(tmp_path, monkeypatch):
+def test_pdf_blocks_become_text_with_offsets_and_pages_only_in_segments(tmp_path, monkeypatch):
     blocks = [
         {"type": "text", "text": "附件1", "page_idx": 0},
         {"type": "page_number", "text": "1", "page_idx": 0},
@@ -169,8 +169,8 @@ def test_pdf_blocks_become_text_with_page_markers_and_offsets(tmp_path, monkeypa
     monkeypatch.setattr(ap, "_mineru", lambda p: {"success": True, "markdown": "md", "error": "", "content_list": blocks})
     out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
     assert out["locator_kind"] == "pdf_page"
-    assert out["text"].startswith("〔第1页〕") and "〔第2页〕" in out["text"]
-    assert "页码" not in out["text"] and out["text"].count("1") == out["text"].count("附件1") + 1  # 页码块已跳过
+    assert "〔第" not in out["text"] and "<table" not in out["text"]  # v4：正文不插页码标记，HTML 表格转成字
+    assert "页码" not in out["text"] and out["text"].count("1") == out["text"].count("附件1")  # 页码块已跳过
     for seg in out["segments"]:
         piece = out["text"][seg["start"]:seg["end"]]
         assert piece and ("附件1" in piece or "阿莫西林" in piece)
@@ -214,11 +214,11 @@ def test_cloud_mode_skips_self_hosted_mineru(monkeypatch):
     from clean import attachment_parse as ap
     monkeypatch.setenv("DATAFABRIC_MINERU_CLOUD_TOKEN", "t")
     monkeypatch.setenv("DATAFABRIC_MINERU_MODE", "cloud")
-    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru_cloud", "pypdf_text"]
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["pypdf_text", "mineru_cloud"]
     assert [m for m, _, _ in ap._plan(".docx")] == ["office_docx", "mineru_cloud"]
     assert [m for m, _, _ in ap._plan(".doc")] == ["libreoffice_docx", "mineru_cloud"]
     monkeypatch.delenv("DATAFABRIC_MINERU_MODE")
-    assert [m for m, _, _ in ap._plan(".pdf")] == ["mineru", "mineru_cloud", "pypdf_text"]
+    assert [m for m, _, _ in ap._plan(".pdf")] == ["pypdf_text", "mineru", "mineru_cloud"]
 
 
 def test_mineru_off_reads_word_locally_and_pdf_text_layer_only(monkeypatch):

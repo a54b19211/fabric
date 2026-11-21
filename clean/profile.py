@@ -152,7 +152,7 @@ def profile(*, source_id, role=None, chars, warnings, identifiers, pub_types=Non
 
     flags = [w for w in warnings if w.startswith(BREAKING)]
     degraded = [w for w in warnings if w.startswith(DEGRADING)]
-    if parse_status in ("failed", "unsupported"):
+    if parse_status in ("failed", "unsupported", "incomplete"):
         flags.append("attachment_" + parse_status)
     if chars == 0 and not flags:
         flags.append("no_body")

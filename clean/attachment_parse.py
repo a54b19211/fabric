@@ -18,8 +18,8 @@
 - Excel → sheet；
 - JATS → jats_section（节路径 + JATS 路径，没有页码）；
 - 解析服务没给 content_list → locator_kind=unavailable，正文仍可用，但不能回指页码。
-正文由 content_list 的块按顺序拼成，换页处插入“〔第N页〕”（只在有真实页码时），segments 记每块在正文里的
-起止偏移和定位。
+正文由 content_list 的块按顺序拼成，segments 记每块在正文里的起止偏移和定位（页码只记在 segments 里，正文里
+不插页码标记，见 v4）。
 
 大小与耗时：原件超过 MAX_PARSE_BYTES 直接记 too_large，不送解析；每种解析方式各有超时。
 v2：加了定位与大小上限，结果与 v1 不同，所以升处理器版本。
@@ -27,6 +27,18 @@ v3（2026-11-20）：Word 先在本机读（clean.office_text）：.docx 直读 
 读不出字才交 MinerU。原因：MinerU 云端排队以后 .docx/.doc 没有别的路，NMPA 200 个 .docx、73 个 .doc 三次都失败。
 DATAFABRIC_MINERU_MODE=off 时完全不调 MinerU（PDF 只读文字层）。v2 已解析成功的同一文件（sha256 相同）直接沿用 v2 的
 正文（clean.derived_text._parse），不重新解析，所以 v2 的成功结果不变；变的只有 v2 失败的那些。
+v4（2026-11-21，NMPA 审计 A1–A11）：
+- PDF 先读文字层（pypdf），文字层可用才用（_usable_text_layer：每页平均不少于 PDF_MIN_CHARS_PER_PAGE 个字、
+  读不出字的页不超过 PDF_MAX_EMPTY_PAGE_SHARE，乱码页算读不出）；不可用（扫描件）才交 MinerU（A1）；
+- 正文里不再插“〔第N页〕”：以前页码标记缺页、docx 里也有（A11）；页码只记在 segments 里；
+- Excel / Word 表格不补空格、只取用到的范围、合并格往下往右带值、格内换行不拆行（A2/A3/A4/A10，clean.excel_parser、
+  clean.office_text）；Word 补回自动编号和标题、文本框单独成块不重复（A5/A8）；
+- 完整性（A6）：解析器给了独立对照字数（reference_chars：docx 的 XML 全文、.doc 的 LibreOffice 纯文本导出）时，
+  正文字数不到对照的 COMPLETE_SHARE 记 incomplete（不是 parsed），并换下一个解析器；MinerU 读 PDF 时有内容的页数
+  不到 PDF 页数的 COMPLETE_SHARE 也记 incomplete；
+- 所有正文过 tidy（A7）：HTML 表格转 Markdown 表格（合并格带值），去掉私用区项目符号（U+F000–U+F0FF），
+  MinerU 的标题级别（text_level）写成 Markdown 标题；
+- 不再沿用旧版本的结果（A9）：v2/v3 复用来的正文里有原始 HTML 表格、页码标记；同一文件（sha256）只复用 v4 自己的结果。
 """
 
 from __future__ import annotations
@@ -38,9 +50,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v3"
-# 这些旧版本已解析成功的结果，同一文件（sha256）在新版本下照用：v3 只给 v2 没读出来的文件加了读法
-REUSABLE_VERSIONS = ("datafabric.attachment_parse.v2",)
+PROCESSOR_VERSION = "datafabric.attachment_parse.v4"
+# 旧版本的结果不再沿用（v4 改了所有格式的输出，见模块说明）
+REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
 CLOUD_NATIVE = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
 CONVERTIBLE = {".doc", ".ppt", ".pptx"}
@@ -176,24 +188,23 @@ def _block_text(block: dict) -> str:
         return " ".join(block.get("image_caption") or [])
     if kind == "list":
         return "\n".join(str(x) for x in (block.get("list_items") or []))
-    return str(block.get("text") or "")
+    body = str(block.get("text") or "")
+    level = block.get("text_level")
+    if isinstance(level, int) and 1 <= level <= 6 and body.strip() and not body.lstrip().startswith("#"):
+        return "#" * level + " " + body.strip()
+    return body
 
 
 def from_blocks(blocks, page_kind) -> tuple[str, list, str]:
     """content_list → (正文, segments, locator_kind)。page_kind 为 None 表示没有可信页码，按块定位。"""
-    parts, segments, offset, page_seen = [], [], 0, None
+    parts, segments, offset = [], [], 0
     for index, block in enumerate(blocks):
         if not isinstance(block, dict) or block.get("type") in SKIP_BLOCKS:
             continue
-        body = _block_text(block).strip()
+        body = tidy(_block_text(block)).strip()
         if not body:
             continue
         page = block.get("page_idx")
-        if page_kind and isinstance(page, int) and page != page_seen:
-            marker = f"〔第{page + 1}页〕"
-            parts.append(marker)
-            offset += len(marker) + 2
-            page_seen = page
         locator = {"block": index}
         if page_kind and isinstance(page, int):
             locator["page"] = page + 1
@@ -218,14 +229,15 @@ def _plan(ext):
     cloud = [("mineru_cloud", _mineru_cloud, cloud_kind)] if _cloud_enabled() else []
     if ext in EXCEL_EXTS:
         return [("excel", lambda p: {"success": True, "markdown": _excel(p), "error": ""}, None)]
-    text_layer = [("pypdf_text", _pdf_text_layer, "pdf_page")]  # 只在前面的都失败时用，已解析成功的结果不变
-    local = {".docx": [("office_docx", _office, None)], ".doc": [("libreoffice_docx", _office_doc, None)]}.get(ext, [])
+    # PDF 先读文字层：可用（_usable_text_layer）就用，扫描件才交 MinerU
+    local = {".docx": [("office_docx", _office, None)], ".doc": [("libreoffice_docx", _office_doc, None)],
+             ".pdf": [("pypdf_text", _pdf_text_layer, "pdf_page")]}.get(ext, [])
     if _mineru_off():
-        return local + (text_layer if ext == ".pdf" else [])
+        return local
     if cloud and _cloud_only() and ext in (".pdf", ".docx"):
-        return local + cloud + (text_layer if ext == ".pdf" else [])
+        return local + cloud
     if ext == ".pdf":
-        return [("mineru", _mineru, "pdf_page")] + cloud + text_layer
+        return local + [("mineru", _mineru, "pdf_page")] + cloud
     if ext == ".docx":
         return local + [("mineru", _mineru, None)] + cloud
     if cloud:
@@ -243,15 +255,118 @@ def _readable(text: str) -> str:
     return text if chars and len(_ODD.findall(text)) <= 0.2 * chars else ""
 
 
+# 文字层可用的标准（A1）：每页平均不少于 30 个字，读不出字（少于 10 个字或乱码）的页不超过两成。
+# 扫描件（安徽局印章式样 PDF：没有文字层）、一部分页是图片的 PDF 交 MinerU；NMPA 文字版 PDF 每页几百字
+PDF_MIN_CHARS_PER_PAGE = 30
+PDF_EMPTY_PAGE_CHARS = 10
+PDF_MAX_EMPTY_PAGE_SHARE = 0.2
+
+
+def _usable_text_layer(page_texts: list[str]) -> bool:
+    counts = [len("".join(t.split())) for t in page_texts]
+    if not counts:
+        return False
+    empty = sum(1 for c in counts if c < PDF_EMPTY_PAGE_CHARS)
+    return sum(counts) / len(counts) >= PDF_MIN_CHARS_PER_PAGE and empty <= PDF_MAX_EMPTY_PAGE_SHARE * len(counts)
+
+
 def _pdf_text_layer(path: str) -> dict:
-    """PDF 自带的文字层（pypdf），一页一块：MinerU 都失败以后才用（例如港交所年报超过云端 200 页上限）。
-    扫描件和乱码页读不出字，交回空正文，由 without_text_layer 记成 text_layer_missing。"""
+    """PDF 自带的文字层（pypdf），一页一块。文字层不可用（扫描件、乱码、大半是图片页）时交回失败，换 MinerU。"""
     from pypdf import PdfReader
 
-    blocks = [{"type": "text", "text": _readable(page.extract_text() or ""), "page_idx": index}
-              for index, page in enumerate(PdfReader(path).pages)]
-    markdown = "\n\n".join(block["text"] for block in blocks if block["text"])
+    from clean.pdf_text import page_text
+
+    pages = PdfReader(path).pages
+    if not _usable_text_layer([_readable(page.extract_text() or "") for page in pages]):
+        return {"success": False, "markdown": "", "error": "no_usable_text_layer"}
+    texts = [_readable(page_text(page)) for page in pages]  # 表格按格读成 Markdown 表格（clean.pdf_text）
+    blocks = [{"type": "text", "text": t, "page_idx": index} for index, t in enumerate(texts)]
+    markdown = "\n\n".join(t for t in texts if t)
     return {"success": True, "markdown": markdown, "content_list": blocks, "error": ""}
+
+
+def _pdf_pages(path) -> int:
+    from pypdf import PdfReader
+
+    try:
+        return len(PdfReader(str(path)).pages)
+    except Exception:  # noqa: BLE001 -- 读不出页数：不做页数对照
+        return 0
+
+
+# tidy（A7）：HTML 表格 → Markdown，去掉私用区项目符号
+_HTML_TABLE = re.compile(r"<table\b.*?</table>", re.S | re.I)
+_PRIVATE_BULLET = re.compile(r"[\uf000-\uf0ff][ \t]*")
+
+
+def html_table_to_markdown(html: str) -> str:
+    """一张 HTML 表格 → Markdown 表格；rowspan/colspan 的值填进它跨的每一格。"""
+    from lxml import html as lxml_html
+
+    from clean.excel_parser import markdown_table
+
+    try:
+        root = lxml_html.fragment_fromstring(html, create_parent="div")
+    except Exception:  # noqa: BLE001 -- 读不出的片段：去掉标签留字
+        return " ".join(re.sub(r"<[^>]+>", " ", html).split())
+    grid: dict[tuple[int, int], str] = {}
+    for r, tr in enumerate(root.iter("tr")):
+        c = 0
+        for cell in tr:
+            if cell.tag not in ("td", "th"):
+                continue
+            while (r, c) in grid:
+                c += 1
+            value = " ".join(" ".join(cell.itertext()).split()).replace("|", "\\|")
+            rows = max(1, _span(cell.get("rowspan")))
+            cols = max(1, _span(cell.get("colspan")))
+            for dr in range(rows):
+                for dc in range(cols):
+                    grid.setdefault((r + dr, c + dc), value)
+            c += cols
+    if not grid:
+        return ""
+    height, width = max(r for r, _ in grid) + 1, max(c for _, c in grid) + 1
+    return markdown_table([[grid.get((r, c), "") for c in range(width)] for r in range(height)])
+
+
+def _span(value) -> int:
+    try:
+        return min(int(value or 1), 1000)
+    except ValueError:
+        return 1
+
+
+def tidy(text: str) -> str:
+    """解析结果的统一整理：HTML 表格转 Markdown 表格；<br> 记成换行；去掉 Word 项目符号留下的私用区字符。"""
+    if not text:
+        return text
+    text = _HTML_TABLE.sub(lambda m: "\n\n" + html_table_to_markdown(m.group(0)) + "\n\n", text)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = _PRIVATE_BULLET.sub("", text)
+    lines = [line.rstrip() for line in text.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+# 完整性（A6）
+COMPLETE_SHARE = 0.9
+_MARKUP = re.compile(r"[\s|#\-]")
+
+
+def incomplete(answer: dict, text: str, method: str, page_kind, copy) -> str | None:
+    """解析结果明显不全时返回原因（"chars:实得/对照" 或 "pages:有内容页/总页"），否则 None。"""
+    reference = answer.get("reference_chars")
+    got = len(_MARKUP.sub("", text))
+    if isinstance(reference, int) and reference > 0 and got < COMPLETE_SHARE * reference:
+        return f"chars:{got}/{reference}"
+    blocks = answer.get("content_list")
+    if page_kind == "pdf_page" and method != "pypdf_text" and isinstance(blocks, list):
+        total = _pdf_pages(copy)
+        seen = {b.get("page_idx") for b in blocks if isinstance(b, dict) and b.get("type") not in SKIP_BLOCKS
+                and _block_text(b).strip()}
+        if total and len(seen) < COMPLETE_SHARE * total:
+            return f"pages:{len(seen)}/{total}"
+    return None
 
 
 def _jats(path: Path, ext: str) -> dict:
@@ -312,8 +427,9 @@ def _call_parser(call, copy):
 
 def _parse_copy(copy, ext):
     """Each parser of the plan in turn on the working copy; the first one with text wins."""
-    attempts, method, error = [], None, "parser_failed"
-    for method, call, page_kind in _plan(ext):
+    attempts, method, error, partial = [], None, "parser_failed", None
+    plan = _plan(ext)
+    for method, call, page_kind in plan:
         answer = _call_parser(call, copy)
         markdown = (answer.get("markdown") or "") if answer.get("success") else ""
         if answer.get("deferred"):  # 云端额度/限频：不是这个文件的失败，整份留到 retry_at 以后再做
@@ -322,19 +438,30 @@ def _parse_copy(copy, ext):
                     "retry_at": answer.get("retry_at")}
         if not markdown.strip():
             failed = "empty_text" if answer.get("success") else "parser_failed"
-            detail = answer.get("error") if method == "mineru_cloud" and not answer.get("success") else ""
+            detail = answer.get("error") if method in ("mineru_cloud", "pypdf_text") and not answer.get("success") \
+                else ""
             attempts.append(method + ":" + failed + (":" + str(detail) if detail else ""))
-            if method != "pypdf_text":  # 文字层兜底也没读到：结果仍按 MinerU 的失败原因记
+            if method != "pypdf_text":  # 文字层不可用不算失败原因：结果按后面 MinerU 的失败原因记
                 error = failed
             continue
-        attempts.append(method + ":ok")
-        return _parsed(answer, markdown, method, page_kind, ext, attempts)
+        result = _parsed(answer, markdown, method, page_kind, ext, [*attempts, method + ":ok"])
+        short = incomplete(answer, result["text"], method, page_kind, copy)
+        if short is None:
+            return result
+        attempts.append(method + ":incomplete:" + short)  # 不全：不当成功，换下一个解析器
+        partial = partial or {**result, "status": "incomplete", "error": "incomplete:" + short}
+    if partial is not None:
+        return {**partial, "attempts": attempts}
+    if ext == ".pdf" and attempts == ["pypdf_text:parser_failed:no_usable_text_layer"]:
+        # 扫描件、又不调 MinerU：要 OCR
+        return _result("unsupported", method="pypdf_text", error="text_layer_missing", ext=ext, attempts=attempts)
     return _result("failed", method=method, error=error, ext=ext, attempts=attempts)
 
 
 def _parsed(answer, markdown, method, page_kind, ext, attempts):
     blocks = answer.get("content_list")
     if method == "excel":
+        markdown = tidy(markdown)
         return _result("parsed", text=markdown, method=method, ext=ext, attempts=attempts,
                        segments=_sheets(markdown), locator_kind="sheet")
     if isinstance(blocks, list) and blocks:
@@ -342,5 +469,5 @@ def _parsed(answer, markdown, method, page_kind, ext, attempts):
         if text.strip():
             return _result("parsed", text=text, method=method, ext=ext, attempts=attempts,
                            segments=segments, locator_kind=kind)
-    return _result("parsed", text=markdown, method=method, ext=ext, attempts=attempts,
+    return _result("parsed", text=tidy(markdown), method=method, ext=ext, attempts=attempts,
                    locator_kind="unavailable")

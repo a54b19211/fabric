@@ -52,7 +52,8 @@ def _claim(conn, sources, retry_after_seconds, seen):
 
 
 def _parse(conn, facts):
-    """同 sha256 的文件已有成功结果就复用（当前处理器版本的，或 REUSABLE_VERSIONS 里旧版本的），否则解析这个文件。"""
+    """同 sha256 的文件已有成功结果就复用（只复用当前处理器版本的；REUSABLE_VERSIONS 现在为空，见 attachment_parse v4），
+    否则解析这个文件。"""
     reused = conn.execute(
         text("""
           SELECT d.text, d.parse_method, d.file_ext, d.locator_kind, d.segments FROM derived_clean_text d
@@ -117,7 +118,7 @@ def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, t
 
     engine = fabric_engine()
     began = time.monotonic()
-    counts, seen = {"parsed": 0, "failed": 0, "unsupported": 0}, []
+    counts, seen = {"parsed": 0, "failed": 0, "unsupported": 0, "incomplete": 0}, []
     while len(seen) < batch and time.monotonic() - began < time_budget_seconds:
         with engine.begin() as conn:
             conn.execute(text("SET LOCAL statement_timeout='30000ms'"))
@@ -197,7 +198,7 @@ def for_versions(source_id, is_demo, version_ids, mode, cutoff):
             "派生正文由解析器从原件生成；表格、扫描件的识别可能有误，引用时以原件为准",
             "locator_kind=converted_page 的页码是转换后 PDF 的页码，不是原文件页码；block/sheet 没有页码；"
             "jats_section（PMC 全文 XML）按节路径和 JATS 路径定位，也没有页码；unavailable 表示解析服务没给定位",
-            "failed / unsupported 表示附件内容没有进入正文，不表示附件为空",
+            "failed / unsupported / incomplete 表示附件内容没有进入正文（incomplete：解析出来明显不全，不当成功），不表示附件为空",
             "parent_version_id 为空表示父页面的固定版本未知（例如按旧库链接补抓）",
         ],
     }

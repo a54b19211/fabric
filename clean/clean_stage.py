@@ -164,7 +164,7 @@ def _final_attachment_texts(conn, version_ids):
         "WHERE version_id=ANY(:ids) AND processor_version=:pv ORDER BY version_id, attempt DESC"
     ), {"ids": list(version_ids), "pv": attachment_parse.PROCESSOR_VERSION}).mappings().all()
     return {r["version_id"]: dict(r) for r in rows
-            if r["status"] in ("parsed", "unsupported") or r["attempt"] >= MAX_ATTEMPTS}
+            if r["status"] in ("parsed", "unsupported", "incomplete") or r["attempt"] >= MAX_ATTEMPTS}
 
 
 # 只取清洗需要的字段；原件只在 EPMC、WHO 和站点页面/记录版本上取，CT 只取原件里的 briefSummary（省 IO）
@@ -354,7 +354,7 @@ def _process_waiting(engine, key, counts, limit=500):
             SELECT w.version_id FROM derived_stage_waiting w
             WHERE w.stage_key=:k AND EXISTS (
               SELECT 1 FROM derived_clean_text d WHERE d.version_id=w.version_id AND d.processor_version=:pv
-                AND (d.status IN ('parsed','unsupported') OR d.attempt >= :max))
+                AND (d.status IN ('parsed','unsupported','incomplete') OR d.attempt >= :max))
             ORDER BY w.created_at, w.version_id LIMIT :n FOR UPDATE OF w SKIP LOCKED
         """), {"k": key, "n": limit, "pv": attachment_parse.PROCESSOR_VERSION, "max": MAX_ATTEMPTS}).scalars().all()
         finals = _final_attachment_texts(conn, ready)
