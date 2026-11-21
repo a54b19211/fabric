@@ -311,14 +311,21 @@ def _title_level(items):
             items[i][1] = "sep"
     out = []
     for item in items:
-        prev = out[-1] if out else None
-        if item[1] == "u" and prev and prev[1] == "sep" and _SEPARATOR.fullmatch(prev[0]) \
-                and not (_SEPARATOR.fullmatch(prev[0]).group(1) or "") \
-                and len(prev[0]) + len(item[0]) < MAX_CHARS:
-            prev[0] = prev[0] + " " + item[0]
+        bare = [i for i, x in enumerate(out[-2:]) if x[1] == "sep" and _bare_label(x[0])]
+        # 题名紧跟“附件N”，或中间只隔一行短字（“申请编号：（自动带入）”）：并进分隔行，短字放到标题后面（第五轮 E2）
+        if item[1] == "u" and bare and len(item[0]) <= MAX_CHARS \
+                and (bare[-1] == len(out[-2:]) - 1 or (not out[-1][1] and len(out[-1][0]) <= 30)):
+            label = out[-1] if bare[-1] == len(out[-2:]) - 1 else out[-2]
+            label[0] = label[0] + " " + item[0]
             continue
         out.append(item)
     return out
+
+
+def _bare_label(text) -> bool:
+    """只有“附件N”几个字的分隔行（后面没有题名）。"""
+    found = _SEPARATOR.fullmatch(text)
+    return bool(found) and not (found.group(1) or "")
 
 
 _TOC_LEADER = re.compile(r"\s*(?:…{2,}|\.{4,}|·{4,}|-{4,})\s*\d{1,3}$")

@@ -118,8 +118,9 @@ def markdown_table(rows: list[list[str]], header: bool | None = None, titles: st
         return "\n\n".join(lead + [_real(r[0]) for r in rows])
     width = len(rows[0])
     above, rows = _with_header(rows, header)
-    lead += [_row_line(r) for r in above]
+    lead += [_row_line(r) for r in above if not _group_row(r)]
     rows = [[_real(c) for c in r] for r in rows]
+    rows[0] = _with_groups(rows[0], [r for r in above if _group_row(r)])
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width]
     # 整行合并成一格的行（表中间的小标题“总体意见建议”）：值只写在第一格，不重复整行
     lines += ["| " + " | ".join(r if len(set(r)) > 1 else [r[0]] + [""] * (width - 1)) + " |" for r in rows[1:]]
@@ -156,6 +157,25 @@ def _row_line(row) -> str:
 
 
 HEADER_SEARCH_ROWS = 4
+
+
+def _group_row(row) -> bool:
+    """表头上面的分组行（“第一类医疗器械产品目录 | 新医疗器械分类目录”“6801 基础外科手术器械 | 对应关系 | 备注”）：
+    两个以上不同的值、有横向合并、每格是短名称（没有分行、不超过 30 字）。表单的填写行（一整格）、带说明的行不算。"""
+    values = [c for c in row if _real(c).strip()]
+    return SPAN in row and len(set(values)) >= 2 and all(len(c) <= 30 and "<br>" not in c for c in values)
+
+
+def _with_groups(header, groups):
+    """分组行写进表头：每个分组值加在它横跨的第一列的栏目名前面（和栏目名相同的不重复），分块后每块的表头都带着
+    类别名（第五轮 E3）。"""
+    header = list(header)
+    for row in reversed(groups):  # 上层在前：“第一类医疗器械产品目录 6801 基础外科手术器械 序号”
+        for i, c in enumerate(row[:len(header)]):
+            value = _real(c).strip()
+            if value and value != header[i]:
+                header[i] = (value + " " + header[i]).strip()
+    return header
 
 
 def _label_row(row) -> bool:

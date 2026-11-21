@@ -42,7 +42,7 @@ _LIST_START = re.compile(r"^(?:[一二三四五六七八九十]+[、．.]|[（(]
                          r"第[一二三四五六七八九十\d]+[章节条](?![）)，,、。；;]))")
 _LISTING = re.compile(r"附\s*[件表]?\s*[：:]")  # “附件：1.……”清单，折下来的行对齐在编号后面
 _NUMBER_GAP = re.compile(r"^\S{1,5}? {2,}")  # 行首编号或项目符号后面的缩进
-_BULLETS = "•◆-" + "".join(map(chr, (0xF0B7, 0xF06C, 0xF0A7, 0xF0D8, 0xF076)))  # 项目符号（含 Word 符号字体的私用区字符）
+_BULLETS = "•●○◆◇■□▪▫►▶➢➤★☆√✓-" + "".join(map(chr, (0xF0B7, 0xF06C, 0xF0A7, 0xF0D8, 0xF076)))  # 项目符号（含 Word 符号字体的私用区字符）
 _PAGE_NUMBER = re.compile(r"^[-—–]\s*\d+\s*[-—–]$")
 _CJK_FONT = re.compile(r"GB2312|GBK|SimSun|SimHei|NSimSun|FangSong|KaiTi|Kai|Song|Hei|YaHei|STXihei|DengXian|"
                        r"[\u4e00-\u9fff]", re.I)
@@ -489,8 +489,9 @@ def _paragraphs(lines) -> list[str]:
     for _, x0, x1, text, size in lines:
         limit = _wrap_limit(current, first, left, size)
         tail = nearly and len(text) <= 4  # 折下来只剩一两个字（“……未满足的临床需”“求”），上一行差一点写满
-        if current and (joinable or tail or _reference_wrap(current, text)) and x0 <= limit \
-                and not _LIST_START.match(text) and text[:1] not in _BULLETS:
+        lone = current.strip() in _BULLETS  # 只有一个项目符号的行（“●”，字在下一行）：和下一行接成一条（第五轮 E1）
+        if current and (lone or (joinable or tail or _reference_wrap(current, text)) and x0 <= limit
+                        and not _LIST_START.match(text) and text[:1] not in _BULLETS):
             current = join_cjk(current, text)
         else:
             if current:

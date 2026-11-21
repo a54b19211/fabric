@@ -263,6 +263,10 @@ INDENT_CENTER = 12  # 行首缩进至少这么多字宽、整行又到不了右�
 LINE_WIDTH = 34
 
 
+# 不显示的元素：FrontPage 留在正文里的 <title>新建网页 1</title> 等（第五轮 N4；display:none、hidden 的块 _drop_hidden 已去掉）
+_HIDDEN_TAGS = ("script", "style", "noscript", "template", "title", "head", "meta", "link")
+
+
 class _LineWalker:
     """正文区按行（块、<br> 分行，同 text_tools.block_text）：lines = [(字, 整行加粗, 居中, 所在块的序号)]。
     上标下标按 headings.scripted 写。"""
@@ -283,7 +287,7 @@ class _LineWalker:
 
     def walk(self, node, bold, center):
         tag = node.tag.lower() if isinstance(node.tag, str) else ""
-        if tag and tag not in ("script", "style", "noscript", "template"):
+        if tag and tag not in _HIDDEN_TAGS:
             self.element(node, tag, bold or _is_bold(node), center)
         if node.tail:
             self.current.append((node.tail, bold))

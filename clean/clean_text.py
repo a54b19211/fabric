@@ -52,7 +52,9 @@ from json.decoder import scanstring
 # them is at the separators' level and a separator absorbs the title right below it ("附件1 严重缺陷(举例)"); TOC dot
 # leaders and page numbers are removed; "目录" is never a heading. The attachment title skips a leading "附件N" and stops
 # after a title that is a heading.
-PROCESSOR_VERSION = "datafabric.clean_text.v20"
+# v21 (2026-11-21, NMPA round-5 audit): follows attachment_parse v9; a bare "附件N" separator absorbs the title right
+# below it even when the two are longer than 40 chars, or when one short line ("申请编号：（自动带入）") sits between them.
+PROCESSOR_VERSION = "datafabric.clean_text.v21"
 
 # ---------------------------------------------------------------- 空白与语言
 

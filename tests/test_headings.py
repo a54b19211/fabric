@@ -99,12 +99,12 @@ def test_round3_tables_form_rows_stay_and_headerless_tables_get_column_names():
     assert markdown_table([["名单", SPAN, SPAN], ["序号", "名称", "备注"], ["1", "甲", ""]]).startswith("名单\n\n| 序号")
     labelled = markdown_table([["已发布的产品信息", SPAN, SPAN, "对应关系"], ["序号", "产品名称", "产品描述", "备注"],
                                ["1", "甲", "乙", "/"]])
-    assert labelled.splitlines()[:4] == ["已发布的产品信息 | 对应关系", "",
-                                         "| 序号 | 产品名称 | 产品描述 | 备注 |", "| --- | --- | --- | --- |"]
-    # 栏目名行当表头，上面的分组行照原顺序写在表前（第四轮 D-D）
+    assert labelled.splitlines()[:2] == ["| 已发布的产品信息 序号 | 产品名称 | 产品描述 | 对应关系 备注 |",
+                                         "| --- | --- | --- | --- |"]
+    # 栏目名行当表头，上面的分组行写进表头（第五轮 E3，第四轮 D-D 是写在表前）
     merged = markdown_table([["目录", SPAN, SPAN, SPAN, "新目录"], ["序号", "品名举例", SPAN, "对应位置", "备注"],
                              ["1", "刀", "刀", "02-01", "/"]])
-    assert merged.splitlines()[2] == "| 序号 | 品名举例 |  | 对应位置 | 备注 |"  # 栏目名行里有横跨两列的格
+    assert merged.splitlines()[0] == "| 目录 序号 | 品名举例 |  | 对应位置 | 新目录 备注 |"  # 栏目名行里有横跨两列的格
 
 
 def test_round3_word_cell_soft_breaks_and_subscripts(tmp_path):
@@ -224,3 +224,28 @@ def test_round4_pdf_reference_wrap_and_table_cell_across_pages():
     assert out[1] == "（表格中斜体内容提交时删除）"
     main = {"x": 90, "y": 405.24, "size": 16.08, "text": "如 C"}
     assert pdf_text._script_place({"x": 121, "y": 403.8, "size": 10.56, "text": "max"}, main, 122.0) == "sub"
+
+
+def test_round5_hidden_title_bullets_attachment_label_and_group_rows_in_header():
+    from clean import pdf_text
+    from clean.excel_parser import SPAN, markdown_table
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    page = ("<html><body><div class='wenzhang'><div class='text'><meta name='GENERATOR' content='FrontPage'>"
+            "<title>新建网页 1</title><p style='display: none'>看不见</p><p hidden>也看不见</p>"
+            "<p>正文第一段。</p></div></div></body></html>")
+    body = extract_nmpa_detail(Selector(page))["body_text"]
+    assert body == "正文第一段。"  # N4：<title>、display:none、hidden 的字不进正文
+    lines = [(700, 90, 100, "●", 16), (700, 110, 500, "研究目的：说明纳入主要和次要目的/终点的 PK 参数和", 16),
+             (680, 110, 300, "/或 PD 生物标志物；", 16), (660, 90, 100, "■", 16), (660, 110, 300, "研究编号；", 16)]
+    assert pdf_text._paragraphs(lines) == ["●研究目的：说明纳入主要和次要目的/终点的 PK 参数和/或 PD 生物标志物；",
+                                           "■研究编号；"]  # E1：● ■ 和 • 一样，单独一个符号的行接下一行
+    body_text = "正文" * 120
+    title = "国家药品监督管理局医疗器械标准管理中心医疗器械产品分类界定申请告知书（格式）"
+    md = headings.relevel("\n\n".join(["# 附件5", "## 附件5", "### " + title, body_text]))
+    assert "## 附件5 " + title in md  # E2：标签加题名超过 40 字也并
+    md = headings.relevel("\n\n".join(["# 附件4", "## 附件4", "申请编号：（自动带入）", "### 申请表（格式）", body_text]))
+    assert "## 附件4 申请表（格式）\n\n申请编号：（自动带入）" in md  # E2：中间隔一行短字
+    table = markdown_table([["第一类目录", SPAN, "新目录"], ["6801 基础外科", SPAN, "备注"],
+                            ["序号", "产品类别", "备注"], ["1", "刀", "/"]])
+    assert table.splitlines()[0] == "| 第一类目录 6801 基础外科 序号 | 产品类别 | 新目录 备注 |"  # E3

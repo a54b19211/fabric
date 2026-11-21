@@ -67,6 +67,9 @@ v8（2026-11-21，NMPA 第四轮审计）：
 - 表格：表头上面的填写行、分组行照原顺序写在表前，不挪到表头下面（D-D）；没有栏目名行时第一行当表头，不补原文没有的
   “列1 | 列2”（N2）（clean.excel_parser）。
 同一文件只复用 v8 自己的结果。
+v9（2026-11-21，NMPA 第五轮审计）：PDF 的 ● ■ ◆ ▪ ○ ➢ ★ 等项目符号和 • 一样认，只有一个项目符号的行和下一行接成
+一条（E1，clean.pdf_text）；表头上面的分组行（“6801 基础外科手术器械 | 对应关系 | 备注”）写进表头，分块后每块都带
+类别名（E3，clean.excel_parser）。同一文件只复用 v9 自己的结果。
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v8"
+PROCESSOR_VERSION = "datafabric.attachment_parse.v9"
 # 旧版本的结果不再沿用（v4–v7 改了输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
