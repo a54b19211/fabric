@@ -98,6 +98,7 @@ def record_versions(conn, rows):
         "SELECT n.version_id AS to_version_id, n.payload->>'raw_content' AS raw, p.version_id AS from_version_id, "
         "p.payload->'facts' AS facts, p.payload->>'clean_text' AS clean_text, p.payload->>'raw_content' AS raw_content "
         "FROM fabric_versions n LEFT JOIN fabric_versions p ON p.replaced_by = n.version_id "
+        "AND p.source_record_id = n.source_record_id "
         "WHERE n.version_id = ANY(:ids)"), {"ids": [r["version_id"] for r in todo]}).mappings()}
     for r in todo:
         mine = found[r["version_id"]]

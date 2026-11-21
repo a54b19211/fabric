@@ -237,6 +237,7 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
         version_ids.append(version_id)
         new_ids.append(version_id)
     _link_attachments(conn, run, prepared, version_ids)
+    _retire_unlisted_attachments(conn, source_id, is_demo, prepared, version_ids)
     conn.execute(text("UPDATE fabric_sources SET published_seq=:seq WHERE source_id=:id"),
                  {"seq": seq, "id": source_id})
     _close_run(conn, run, version_ids, new_ids, coverage, error, now)
@@ -251,6 +252,29 @@ def _retire_migrated(conn, source_id, is_demo, record_id, version_id):
         "AND source_record_id=:record AND replaced_by IS NULL AND version_id<>:new "
         "AND payload->'facts'->>'publication_role'='migrated_record'"),
         {"new": version_id, "source": source_id, "demo": is_demo, "record": record_id})
+
+
+def _retire_unlisted_attachments(conn, source_id, is_demo, prepared, version_ids):
+    """网页（web_capture）现在列出的附件以外、挂在这一页下面的现行附件记录：页面已经不再列它（站点换了文件、
+    以前收进来的隐藏下载按钮），不再是现行版本，replaced_by 指向不再列它的这个页面版本（第二轮审计：同一页下
+    新旧两份附件都现行）。只补 replaced_by，不删原件。"""
+    for (item, projected), version_id in zip(prepared, version_ids):
+        if (projected.get("facts") or {}).get("role") != "web_capture":
+            continue
+        try:
+            listed = {a.get("record_id") for a in json.loads(item.raw_content).get("attachments") or []}
+        except (TypeError, ValueError, AttributeError):
+            continue
+        prefix = item.source_record_id + "#attachment"
+        for (stale,) in conn.execute(text(
+                "SELECT source_record_id FROM fabric_versions WHERE source_id=:source AND is_demo=:demo "
+                "AND source_record_id>=:lo AND source_record_id<:hi AND replaced_by IS NULL"),
+                {"source": source_id, "demo": is_demo, "lo": prefix, "hi": prefix[:-1] + "u"}).all():
+            if stale not in listed:
+                conn.execute(text(
+                    "UPDATE fabric_versions SET replaced_by=:page WHERE source_id=:source AND is_demo=:demo "
+                    "AND source_record_id=:record AND replaced_by IS NULL"),
+                    {"page": version_id, "source": source_id, "demo": is_demo, "record": stale})
 
 
 def _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at):
@@ -734,7 +758,8 @@ def version_differences(source_id, is_demo, version_ids, mode, cutoff):
             "first_seen_at", "p.first_seen_at")
         rows = conn.execute(text(
             "SELECT v.version_id, v.source_record_id, p.version_id AS previous FROM fabric_versions v "
-            "LEFT JOIN fabric_versions p ON p.replaced_by=v.version_id AND " + previous + " "
+            "LEFT JOIN fabric_versions p ON p.replaced_by=v.version_id AND p.source_record_id=v.source_record_id AND "
+            + previous + " "
             "WHERE v.version_id=ANY(:ids) AND v.source_id=:source AND v.is_demo=:demo AND " + visible),
             {"ids": list(version_ids), "source": source_id, "demo": is_demo, "cutoff": cutoff}).mappings().all()
     found = {row["version_id"]: row for row in rows}
