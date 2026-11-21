@@ -44,6 +44,7 @@ _TOC = re.compile(r"(?:…{2,}|\.{4,}|·{4,}|-{4,})\s*\d{1,3}$")
 _QUESTION_START = re.compile(r"问\s*[：:]")
 MAX_CHARS = 40
 MAX_QUESTION = 80
+MAX_EMPHASIZED = 120  # 整行加粗的编号标题（“十一、出口和接受委托生产出口麻醉药品……的说明”有 96 字）
 MAX_PLAIN = 30
 
 
@@ -67,7 +68,7 @@ def rank(line: str, *, emphasized: bool = False, styled: bool = False) -> str | 
     kind = numbered_kind(s)
     if kind == "tiao":
         return "tiao" if ARTICLE_ONLY.fullmatch(s) else None
-    if len(s) > (MAX_QUESTION if (question or emphasized) else MAX_CHARS):
+    if len(s) > (MAX_EMPHASIZED if emphasized else MAX_QUESTION if question else MAX_CHARS):
         return None
     if kind:
         return kind if not _COMMA.search(s) or question or emphasized else None
@@ -139,6 +140,11 @@ def strip_private_use(text: str) -> str:
 
 
 _MD_SPECIAL = re.compile(r"(?<!\\)\*")
+
+
+def escape_stars(text: str) -> str:
+    """只转义星号（已转义的不再转义）：表格、PDF 正文里的“**ml”“*”不当加粗。"""
+    return _MD_SPECIAL.sub(r"\\*", text or "")
 
 
 def escape_markdown(text: str) -> str:

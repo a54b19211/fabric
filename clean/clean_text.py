@@ -42,7 +42,8 @@ from json.decoder import scanstring
 # attachment name and the parent notice's title, document number and date, so the knowledge base's heading breadcrumb
 # brings that context into every chunk; its sub-headings follow clean/headings.py (the same rule as the pages, levels by
 # numbering pattern), private-use characters are removed or mapped to visible symbols.
-PROCESSOR_VERSION = "datafabric.clean_text.v16"
+# v17 (2026-11-21): stars in NMPA attachment text (Excel cells, PDF lines) are escaped too, not only Word text.
+PROCESSOR_VERSION = "datafabric.clean_text.v17"
 
 # ---------------------------------------------------------------- 空白与语言
 

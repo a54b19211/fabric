@@ -182,7 +182,8 @@ def attachment_with_parent(file_name, facts, body, *, promote=True):
     about = "，".join(x for x in ("所属公告：" + parent if parent else "",
                                   "发布日期：" + facts["parent_publish_date"] if facts.get("parent_publish_date")
                                   else "") if x)
-    body = headings.relevel(headings.strip_private_use(body or ""), promote=promote, base=2)
+    body = headings.escape_stars(headings.strip_private_use(body or ""))  # 来源里的 * 不当加粗（A-D8）
+    body = headings.relevel(body, promote=promote, base=2)
     head = "# " + attachment_name(file_name, body) + ("（" + about + "）" if about else "")
     return _continued(head, clean_text.group_pipe_tables(body))
 
