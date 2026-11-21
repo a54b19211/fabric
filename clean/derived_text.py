@@ -126,6 +126,9 @@ def process(*, batch=20, sources=ATTACHMENT_SOURCES, retry_after_seconds=3600, t
                 break
             seen.append(row["version_id"])
             result = _parse(conn, row["facts"] or {})
+            if result["status"] == "deferred":  # 云端额度/限频：不写结果、不占尝试次数；暂停期内别的文件也做不了
+                counts["deferred"] = counts.get("deferred", 0) + 1
+                break
             _write(conn, row, result)
         counts[result["status"]] += 1
     return counts

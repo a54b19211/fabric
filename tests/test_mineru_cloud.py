@@ -2,6 +2,7 @@
 
 import io
 import json
+import time
 import zipfile
 
 import httpx
@@ -62,15 +63,94 @@ def test_failed_state_and_rejected_token_are_errors_not_exceptions(tmp_path):
     mock, _ = transport(["failed"])
     with httpx.Client(transport=mock) as client:
         out = mineru_cloud.parse(write_doc(tmp_path), token="T", client=client, poll_seconds=0, timeout_seconds=30)
-    assert out["success"] is False and out["error"] == "cloud_failed"
+    assert out["success"] is False and out["error"] == "cloud_failed:bad file"
     mock, _ = transport([], apply_code=-1)
     with httpx.Client(transport=mock) as client:
         out = mineru_cloud.parse(write_doc(tmp_path), token="bad", client=client, poll_seconds=0, timeout_seconds=30)
-    assert out["success"] is False and out["error"] == "cloud_rejected"
+    assert out["success"] is False and out["error"] == "cloud_rejected:200:-1:A0202"
 
 
 def test_timeout_is_reported(tmp_path):
     mock, _ = transport(["running"] * 50)
     with httpx.Client(transport=mock) as client:
         out = mineru_cloud.parse(write_doc(tmp_path), token="T", client=client, poll_seconds=0, timeout_seconds=0)
-    assert out["success"] is False and out["error"] == "cloud_timeout"
+    assert out["success"] is False and out["error"] == "cloud_timeout:running"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _state_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_MINERU_STATE", str(tmp_path / "state" / "mineru.json"))
+
+
+def respond(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_rejection_keeps_code_and_msg(tmp_path):
+    client = respond(lambda r: httpx.Response(200, json={"code": -60005, "msg": "文件大小超出限制"}))
+    out = mineru_cloud.parse(write_doc(tmp_path), token="SECRET", client=client)
+    assert out["error"] == "cloud_rejected:200:-60005:文件大小超出限制" and "deferred" not in out
+    assert "SECRET" not in json.dumps(out)
+
+
+def test_daily_quota_defers_and_pauses_all_submissions(tmp_path):
+    calls = []
+    client = respond(lambda r: calls.append(r) or httpx.Response(200, json={"code": -60018, "msg": "每日解析任务数量已达上限"}))
+    out = mineru_cloud.parse(write_doc(tmp_path), token="T", client=client)
+    assert out["deferred"] is True and out["retry_at"] > time.time() + 3600 * 0
+    again = mineru_cloud.parse(write_doc(tmp_path), token="T", client=client)
+    assert again["deferred"] is True and len(calls) == 1  # 暂停期内不再提交
+
+
+def test_429_is_deferred_not_failed(tmp_path):
+    out = mineru_cloud.parse(write_doc(tmp_path), token="T", client=respond(lambda r: httpx.Response(429, text="slow")))
+    assert out["deferred"] is True and out["error"].startswith("cloud_rejected:429")
+
+
+def test_transient_poll_errors_are_retried(tmp_path):
+    mock, seen = transport(["running", "done"])
+    flaky = iter([httpx.Response(200, text="<html>busy</html>"), httpx.Response(502), None, None])
+
+    def handle(request):
+        if request.url.path.startswith("/api/v4/extract-results"):
+            nxt = next(flaky)
+            if nxt is not None:
+                return nxt
+        return mock.handle_request(request)
+
+    out = mineru_cloud.parse(write_doc(tmp_path), token="T", client=respond(handle), poll_seconds=0, timeout_seconds=30)
+    assert out["success"] is True
+
+
+def test_failed_state_records_err_msg(tmp_path):
+    mock, _ = transport(["failed"])
+    with httpx.Client(transport=mock) as client:
+        out = mineru_cloud.parse(write_doc(tmp_path), token="T", client=client, poll_seconds=0, timeout_seconds=30)
+    assert out["error"] == "cloud_failed:bad file"
+
+
+def test_rate_limit_waits_for_minute_slot_and_daily_cap_defers():
+    clock = [1_800_000_000.0]
+    waits = []
+
+    def sleep(s):
+        waits.append(s)
+        clock[0] += s
+
+    for _ in range(mineru_cloud.PER_MINUTE):
+        assert mineru_cloud._reserve(False, now=lambda: clock[0], sleep=sleep) is None
+    assert mineru_cloud._reserve(False, now=lambda: clock[0], sleep=sleep) is None and waits and waits[0] >= 59
+    with mineru_cloud._state() as state:
+        state["count"] = mineru_cloud.PER_DAY
+    assert mineru_cloud._reserve(False, now=lambda: clock[0], sleep=sleep)["deferred"] is True
+
+
+def test_html_cap_only_blocks_html():
+    with mineru_cloud._state() as state:
+        state.update(day=__import__("datetime").datetime.now(mineru_cloud.BEIJING).date().isoformat(),
+                     count=0, html=mineru_cloud.HTML_PER_DAY)
+    assert mineru_cloud._reserve(True)["deferred"] is True
+    assert mineru_cloud._reserve(False) is None

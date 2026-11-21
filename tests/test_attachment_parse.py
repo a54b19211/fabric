@@ -72,6 +72,20 @@ def test_self_hosted_failure_falls_back_to_cloud(tmp_path, tools, monkeypatch):
     assert out["parse_method"] == "mineru_cloud" and out["attempts"] == ["mineru:parser_failed", "mineru_cloud:ok"]
 
 
+def test_cloud_reason_is_recorded_and_quota_defers(tmp_path, tools, monkeypatch):
+    monkeypatch.setenv("DATAFABRIC_MINERU_CLOUD_TOKEN", "synthetic")
+    monkeypatch.setattr(ap, "_mineru", lambda path: {"success": False, "markdown": "", "error": "busy"})
+    monkeypatch.setattr(ap, "_mineru_cloud",
+                        lambda path: {"success": False, "markdown": "", "error": "cloud_failed:-60010:解析失败"})
+    monkeypatch.setattr(ap, "_pdf_text_layer", lambda path: {"success": True, "markdown": "", "error": ""})
+    out = ap.parse_file(**stored(tmp_path, "x.pdf", PDF))
+    assert "mineru_cloud:parser_failed:cloud_failed:-60010:解析失败" in out["attempts"]
+    monkeypatch.setattr(ap, "_mineru_cloud", lambda path: {"success": False, "markdown": "", "deferred": True,
+                                                            "retry_at": 1.0, "error": "cloud_rejected:200:-60018:x"})
+    out = ap.parse_file(**stored(tmp_path, "y.pdf", PDF))
+    assert out["status"] == "deferred" and out["retry_at"] == 1.0
+
+
 def test_excel_is_read_directly(tmp_path, tools):
     out = ap.parse_file(**stored(tmp_path, "x.xlsx", b"PK\x03\x04 synthetic"))
     assert out["status"] == "parsed" and out["parse_method"] == "excel" and "| 1 | 2 |" in out["text"]

@@ -316,9 +316,14 @@ def _parse_copy(copy, ext):
     for method, call, page_kind in _plan(ext):
         answer = _call_parser(call, copy)
         markdown = (answer.get("markdown") or "") if answer.get("success") else ""
+        if answer.get("deferred"):  # 云端额度/限频：不是这个文件的失败，整份留到 retry_at 以后再做
+            return {**_result("deferred", method=method, error=answer.get("error"), ext=ext,
+                              attempts=[*attempts, method + ":" + str(answer.get("error"))]),
+                    "retry_at": answer.get("retry_at")}
         if not markdown.strip():
             failed = "empty_text" if answer.get("success") else "parser_failed"
-            attempts.append(method + ":" + failed)
+            detail = answer.get("error") if method == "mineru_cloud" and not answer.get("success") else ""
+            attempts.append(method + ":" + failed + (":" + str(detail) if detail else ""))
             if method != "pypdf_text":  # 文字层兜底也没读到：结果仍按 MinerU 的失败原因记
                 error = failed
             continue
