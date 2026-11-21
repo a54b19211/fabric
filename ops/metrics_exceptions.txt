@@ -14,7 +14,7 @@
 
 weknora/service.py:Service.inspect_with_upstream  45/29  bridge code moved in from the WeKnora fork unchanged; split the per-chunk checks out
 weknora/service.py:Service.search  75/26  bridge code moved in from the WeKnora fork unchanged; split channels, batching and fusion
-weknora/service.py:Service.status  39/34  bridge code moved in from the WeKnora fork unchanged; split the state derivation out
+weknora/service.py:Service.live_status  39/34  bridge code moved in from the WeKnora fork unchanged; split the state derivation out
 
 # ---- (b) The team's older shared code ----
 # Code the team wrote before this round: under 40% of each function's lines come from the rebuild line (under

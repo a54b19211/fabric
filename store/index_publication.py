@@ -313,7 +313,7 @@ def enqueue_versions(conn, version_ids, *, configured=None, sampling=False):
     # 图谱和观测投影不进正文索引（观测另有依据可见性检查）；按版本先后入队：同一记录正文相同的几个版本，
     # 代表版本是最早的那个
     for row in conn.execute(text(
-        "SELECT payload,proof_available_at FROM fabric_versions WHERE version_id=ANY(:ids) "
+        "SELECT payload,proof_available_at FROM fabric_versions WHERE version_id=ANY(:ids) AND replaced_by IS NULL "
         "AND record_kind<>'graph' AND payload->>'parser_version' IS DISTINCT FROM :observation ORDER BY published_seq"
     ), {"ids": list(artifacts), "observation": OBSERVATION_PARSER}).mappings():
         record = VersionRecord.model_validate(row["payload"])
@@ -512,7 +512,7 @@ def _wanted(row):
             return "revoked"
         versions = [v for (v,) in conn.execute(text(
             "SELECT version_id FROM " + records._VERSIONS + " WHERE source_id=:source AND is_demo=:demo "
-            "AND source_record_id=:native AND " + records._ROLE + "!='context_reference'"
+            "AND source_record_id=:native AND replaced_by IS NULL AND " + records._ROLE + "!='context_reference'"
         ), {"source": target["source_id"], "demo": target["is_demo"], "native": row["source_record_id"]})]
         current = {artifact_key(a): a for a in current_artifacts(conn, versions).values()}
         mine = next((a for k, a in current.items() if same_text(k, row["artifact_key"])), None)
@@ -529,14 +529,19 @@ def _wanted(row):
 
 
 def _withdraw(row, client, reason):
-    """撤下一条：从没发出过的只在本地停用；发出过的请桥接逐块停用，桥接确认停完才算 disabled。"""
-    if _never_sent(row):
+    """撤下一条＝在 WeKnora 里删掉这条知识（Fabric 自己留历史）。从没发出过的、因内容重复被挡住而从没建成知识的，
+    只在本地停用；发出过的请桥接删除，桥接确认知识、块、向量都没了才算 disabled，没删完就 disabling 过一会儿再查。"""
+    if _never_sent(row) or _never_created(row):
         return {"state": "disabled", "delay": RECHECK_SECONDS}
     receipt = client.disable(row["remote_id"], reason)
     done = (receipt.get("source_status") == "disabled" and receipt.get("vector_count") == 0
-            and receipt.get("index_status") == receipt.get("vector_status") == "disabled"
-            and receipt.get("parse_status") in PARSE_ENDED)
+            and receipt.get("index_status") == receipt.get("vector_status") == "disabled")
     return {"state": "disabled" if done else "disabling", "delay": POLL_SECONDS}
+
+
+def _never_created(row):
+    # 桥接回执 duplicate_content：库里已有同样内容的另一条，这一条在 WeKnora 里什么也没建
+    return not row["knowledge_id"] and (row.get("error") or {}).get("code") == "index_duplicate_content"
 
 
 def _publish(row, client):

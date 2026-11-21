@@ -99,7 +99,7 @@ class WeKnoraIndexClient:
         return self._request("POST", "/rerank", body, seconds=30, wait=25)
 
     def disable(self, pid, reason):
-        """桥接逐块停用（每块一次上游调用），长文档要几十秒：给足时间，超时仍按结果待核对处理。"""
+        """撤下：桥接通过 WeKnora 官方接口删除这条知识（块和向量随之删除，上游异步执行）；超时按结果待核对处理。"""
         return self._request(
             "POST", "/publications/" + pid + "/disable",
             {"reason": "Fabric current state: " + reason, "state": reason}, seconds=180, wait=170,

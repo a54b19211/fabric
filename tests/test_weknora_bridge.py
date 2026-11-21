@@ -35,6 +35,11 @@ class FakeStore:
     def publications(self, kb, pid):
         return [copy.deepcopy(d) for d in self.docs.values()
                 if d["knowledge_base_id"] == kb and d["metadata"].get("publication_id") == pid]
+    def remnants(self,kb,kid):
+        d = self.docs.get(kid)
+        chunks = self.chunks.get(kid,[]) if d and d["knowledge_base_id"] == kb else []
+        return {"knowledge": int(bool(d and d["knowledge_base_id"] == kb)), "chunks": len(chunks),
+                "embeddings": sum(1 for c in chunks if c.get("embedding"))}
     def document(self,kb,kid):
         d = self.docs.get(kid)
         return (copy.deepcopy(d),copy.deepcopy(self.chunks.get(kid,[]))) if d and d["knowledge_base_id"] == kb else (None,[])
@@ -55,6 +60,8 @@ class ServiceTests(unittest.TestCase):
         self.reject_next = False
         self.fail_after_upload = False
         self.fail_disable = False
+        self.async_delete = False
+        self.deletes = []
         self.s.request = self.upstream
 
     def upstream(self,method,path,**kwargs):
@@ -80,6 +87,17 @@ class ServiceTests(unittest.TestCase):
             return {"data":{"id":kid}}
         if path.endswith("/knowledge"):
             return {"data":list(self.store.docs.values())}
+        if path.startswith("/api/v1/knowledge/") and method=="DELETE":
+            if self.fail_disable:
+                raise HTTPException(502,"delete failed")
+            kid=path.split("/")[4]
+            self.deletes.append(kid)
+            if kid not in self.store.docs:
+                raise UpstreamError("WeKnora returned HTTP 404",404,"not found")
+            if not self.async_delete:
+                self.store.docs.pop(kid)
+                self.store.chunks.pop(kid,None)
+            return {"success":True}
         if path.startswith("/api/v1/knowledge/"):
             kid=path.split("/")[4]
             if path.endswith("/cancel-parse"):
@@ -271,6 +289,34 @@ class ServiceTests(unittest.TestCase):
         final=self.s.disable(receipt["publication_id"],Disable(reason="withdrawn",state="withdrawn"))
         self.assertEqual(final["index_status"],"disabled")
         self.assertEqual(final["vector_count"],0)
+
+    def test_withdraw_deletes_the_knowledge_and_waits_for_the_upstream_deletion(self):
+        receipt=self.s.publish(Publication(**payload()))
+        kid,pid=receipt["knowledge_id"],receipt["publication_id"]
+        self.async_delete=True
+        pending=self.s.disable(pid,Disable(reason="superseded",state="superseded"))
+        self.assertEqual((pending["index_status"],pending["vector_count"]),("pending",1))
+        self.store.docs.pop(kid); self.store.chunks.pop(kid)  # WeKnora finishes its asynchronous delete
+        final=self.s.disable(pid,Disable(reason="superseded",state="superseded"))
+        self.assertEqual((final["index_status"],final["vector_status"],final["source_status"]),("disabled","disabled","disabled"))
+        self.assertEqual((final["vector_count"],final["chunk_count"],final["knowledge_id"]),(0,0,kid))
+        self.assertEqual(self.deletes,[kid])  # deleted once; the retry only reads what is left
+        with self.assertRaises(HTTPException) as e:
+            self.s.publish(Publication(**payload()))
+        self.assertEqual(e.exception.status_code,409)
+
+    def test_withdraw_of_a_document_already_gone_upstream_is_done(self):
+        receipt=self.s.publish(Publication(**payload()))
+        self.store.docs.pop(receipt["knowledge_id"]); self.store.chunks.pop(receipt["knowledge_id"])
+        final=self.s.disable(receipt["publication_id"],Disable(reason="revoked",state="revoked"))
+        self.assertEqual(final["index_status"],"disabled")
+
+    def test_withdraw_of_a_duplicate_upload_makes_no_upstream_call(self):
+        receipt=self.s.publish(Publication(**payload()))
+        self.s.journal.update(receipt["publication_id"],knowledge_id=None,upload_status="duplicate")
+        self.s.request=lambda *a,**k: self.fail("no upstream call expected")
+        final=self.s.disable(receipt["publication_id"],Disable(reason="revoked",state="revoked"))
+        self.assertEqual((final["index_status"],final["vector_count"],final["parse_status"]),("disabled",0,"not_created"))
 
     def test_permission_removal_is_immediate(self):
         receipt=self.s.publish(Publication(**payload()))

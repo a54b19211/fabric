@@ -135,6 +135,18 @@ class IndexStore:
                 raise ValueError("document exceeds bounded chunk limit")
             return doc, rows
 
+    def remnants(self, kb, kid):
+        """What WeKnora still holds of one document: live knowledge row, live chunks, embeddings (any state)."""
+        with self.connect() as db:
+            return {
+                "knowledge": db.execute("SELECT count(*) AS n FROM knowledges WHERE id=%s AND knowledge_base_id=%s "
+                                        "AND deleted_at IS NULL", (kid, kb)).fetchone()["n"],
+                "chunks": db.execute("SELECT count(*) AS n FROM chunks WHERE knowledge_id=%s AND knowledge_base_id=%s "
+                                     "AND deleted_at IS NULL", (kid, kb)).fetchone()["n"],
+                "embeddings": db.execute("SELECT count(*) AS n FROM embeddings WHERE knowledge_base_id=%s "
+                                         "AND knowledge_id=%s", (kb, kid)).fetchone()["n"],
+            }
+
     def publications(self, kb, pid):
         """The documents of this knowledge base whose upload metadata carries this publication_id (at most 3)."""
         with self.connect() as db:

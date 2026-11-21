@@ -299,6 +299,8 @@ class Service:
                 for k in ("raw_sha256", "content_sha256", "source_scope", "raw_locator"):
                     if value[k] != prior[k]:
                         raise HTTPException(409, "fixed version already exists with different identity/content/scope")
+                if row["upload_status"] == "deleted":
+                    raise HTTPException(409, "publication was withdrawn and its document deleted; publish a new version")
                 if row["knowledge_id"] and row["upload_status"] == "accepted":
                     self.verify_accepted(pid)  # created upstream, not yet verified: verify, never upload
                     row = self.journal.get(pid)
@@ -472,7 +474,12 @@ class Service:
 
     def status(self, pid):
         row = self.row(pid, receipt_only=True)
-        value = row["payload"]
+        if row["source_status"] != "active" and (row["upload_status"] == "deleted" or not row["knowledge_id"]):
+            return self.removed(row)
+        return self.live_status(row)
+
+    def live_status(self, row):
+        pid, value = row["id"], row["payload"]
         doc, chunks, reasons, upstream = self.inspect_with_upstream(row)
         text_chunks = [c for c in chunks if c["chunk_type"] == "text"]
         vectors = [c for c in text_chunks if c["is_enabled"] and c["vector_enabled"] and c["embedding"]]
@@ -594,21 +601,55 @@ class Service:
                 "population": "explicit_members_only", "statistical_unit": "document_version", "aggregation": AGGREGATION}
 
     def disable(self, pid, req):
+        """Withdraw a publication: the WeKnora document is deleted through the official API (DELETE /knowledge/{id},
+        which removes its chunks and embeddings); Fabric keeps the history. A publication WeKnora never held
+        (duplicate or rejected upload) is only marked here. Repeating it is safe: an already deleted document
+        is not deleted again, the receipt reports what is still left upstream until nothing is."""
         with self.write_lock:
             row = self.row(pid, receipt_only=True)
-            if not row["knowledge_id"]:
+            if not row["knowledge_id"] and row["upload_status"] not in ("duplicate", "rejected"):
                 row = self.recover(row)
             self.journal.update(pid, source_status=req.state, disable_reason=req.reason)
-            row = self.row(pid, receipt_only=True)
-            self.ensure_binding(row)
-            doc = self.get_document(row["knowledge_id"])
-            if doc["parse_status"] in ("pending", "processing", "finalizing"):
-                self.request("POST", "/api/v1/knowledge/" + row["knowledge_id"] + "/cancel-parse", json={})
-            _, chunks, _ = self.inspect(row)
-            for chunk in chunks:
-                if chunk["is_enabled"] or chunk["vector_enabled"]:
-                    self.request("PUT", "/api/v1/chunks/" + row["knowledge_id"] + "/" + chunk["id"], json={"is_enabled": False})
+            if row["knowledge_id"] and row["upload_status"] != "deleted":
+                self.delete_document(row["knowledge_id"])
+                self.journal.update(pid, upload_status="deleted")
             return self.status(pid)
+
+    def delete_document(self, kid):
+        try:
+            self.request("DELETE", "/api/v1/knowledge/" + quote(kid, safe=""))
+        except UpstreamError as exc:
+            if exc.upstream_status != 404:  # already gone upstream is what was asked for
+                raise
+
+    def removed(self, row):
+        """Receipt of a withdrawn publication whose document was deleted (or never existed): disabled once
+        WeKnora holds no live document, chunk or embedding for it (the deletion runs asynchronously upstream)."""
+        value = row["payload"]
+        left = {"knowledge": 0, "chunks": 0, "embeddings": 0}
+        reasons = []
+        if row["knowledge_id"]:
+            try:
+                left = self.store.remnants(value["knowledge_base_id"], row["knowledge_id"])
+            except Exception:
+                reasons.append("vector_store_unavailable")
+        gone = not reasons and not any(left.values())
+        if not gone and not reasons:
+            reasons.append("deletion_pending")
+        status = "disabled" if gone else ("unavailable" if reasons == ["vector_store_unavailable"] else "pending")
+        return {"contract_version": CONTRACT, "is_demo": value.get("is_demo", False),
+                "publication_id": row["id"], "knowledge_id": row["knowledge_id"],
+                "knowledge_base_id": value["knowledge_base_id"], "identity": identity(value), "raw_locator": value["raw_locator"],
+                "source_scope": value["source_scope"], "content_sha256": value["content_sha256"],
+                "indexed_text_sha256": value["indexed_text_sha256"], "upload_status": row["upload_status"],
+                "last_attempt": row.get("last_attempt"),
+                "parse_status": "deleted" if row["knowledge_id"] else "not_created",
+                "vector_status": status, "index_status": status, "binding_status": "pending",
+                "source_status": "disabled", "source_change_type": row["source_status"],
+                "disable_reason": row["disable_reason"], "display_title_truncated": len(value["title"]) > 255,
+                "chunk_count": left["chunks"], "vector_count": left["embeddings"],
+                "index_version": digest([row["knowledge_id"], value["indexed_text_sha256"], "removed", left]),
+                "graph_status": "not_requested", "degraded_reasons": reasons}
 
     def model_call(self, kind, payload):
         model = self.check_model(kind)

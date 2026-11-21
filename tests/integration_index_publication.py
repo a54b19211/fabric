@@ -184,8 +184,11 @@ class JournalClient:
         self.disable_count += 1
         if pid not in self.journal:
             raise IndexServiceError("index_http_404", "synthetic: the bridge does not know this publication", 404)
-        self.journal[pid].update(source_status="disabled", index_status="disabled", vector_status="disabled", vector_count=0,
-                                 parse_status=self.disable_parse)
+        # the bridge deletes the knowledge; while the upstream deletion is still running the receipt says pending
+        done = self.disable_parse != "processing"
+        self.journal[pid].update(source_status="disabled", index_status="disabled" if done else "pending",
+                                 vector_status="disabled" if done else "pending", vector_count=0 if done else 1,
+                                 parse_status="deleted")
         return copy.deepcopy(self.journal[pid])
 
     def close(self):
