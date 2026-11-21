@@ -1,5 +1,6 @@
 import re
 
+from clean.headings import relevel
 from fetch.extractors.nmpa import continuation_links, extract_nmpa_continuation, extract_nmpa_detail
 
 SITE_KEY = "nmpa"
@@ -61,6 +62,8 @@ CONFIG = {
     "detail_extractor": extract_nmpa_detail,
     "continuation_links": continuation_links,  # 多页文章的子页 <编号>_N.html
     "continuation_extractor": extract_nmpa_continuation,
+    # 整篇（多页文章拼好以后）的小标题按编号样式统一定级（clean/headings.py · relevel）
+    "markdown_finish": relevel,
     "detail_wait_selector": None,
     "attachments_inherit_parent": True,  # 附件记录带所属公告的标题、日期、文号
     "single_clean_text": True,  # 正文只在清洗段产出一份，投影不放提取器原样输出

@@ -223,6 +223,8 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
         current = _current(conn, source_id, is_demo, item.source_record_id, _role(projected))
         if _same(conn, source_id, current, fp):
             version_ids.append(current["version_id"])  # 没变：不存
+            if _role(projected) == "source_record":
+                _retire_migrated(conn, source_id, is_demo, item.source_record_id, current["version_id"])
             continue
         seq += 1
         version_id = sha256(f"{source_id}|{item.source_record_id}|{fp}|{seq}")
@@ -230,12 +232,25 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
         if current is not None:
             conn.execute(text("UPDATE fabric_versions SET replaced_by=:new WHERE version_id=:old"),
                          {"new": version_id, "old": current["version_id"]})
+        if _role(projected) == "source_record":
+            _retire_migrated(conn, source_id, is_demo, item.source_record_id, version_id)
         version_ids.append(version_id)
         new_ids.append(version_id)
     _link_attachments(conn, run, prepared, version_ids)
     conn.execute(text("UPDATE fabric_sources SET published_seq=:seq WHERE source_id=:id"),
                  {"seq": seq, "id": source_id})
     _close_run(conn, run, version_ids, new_ids, coverage, error, now)
+
+
+def _retire_migrated(conn, source_id, is_demo, record_id, version_id):
+    """来源自己抓到了这条记录（source_record 版本）：旧库迁入的版本（migrated_record，如 NMPA 的 legacy_capture）
+    不再是现行版本，replaced_by 指向来源自己的现版（只补 replaced_by，不删不改原件）。以前两类各比各的，
+    同一记录号两个现行版本，检索出两份（第二轮审计 A-D5、C-P3）。"""
+    conn.execute(text(
+        "UPDATE fabric_versions SET replaced_by=:new WHERE source_id=:source AND is_demo=:demo "
+        "AND source_record_id=:record AND replaced_by IS NULL AND version_id<>:new "
+        "AND payload->'facts'->>'publication_role'='migrated_record'"),
+        {"new": version_id, "source": source_id, "demo": is_demo, "record": record_id})
 
 
 def _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at):

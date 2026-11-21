@@ -365,6 +365,8 @@ class _Reader:
         )
         parsed = route_webpage(page_data, site_key=self.site)
         subpages = self.continuation(url, page_data["page"], parsed)
+        if cfg.get("markdown_finish") and parsed.get("markdown"):  # 站点对整篇正文的收尾（NMPA：小标题统一定级）
+            parsed["markdown"] = cfg["markdown_finish"](parsed["markdown"])
         html = getattr(page_data["page"], "html_content", "") or ""
         raw = html.encode("utf-8")
         html_sha = hashlib.sha256(raw).hexdigest()

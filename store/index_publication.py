@@ -221,6 +221,16 @@ BRIDGE_FIELDS = ("source_instance", "source_id", "source_record_id", "version_id
                  "title")
 
 
+def knowledge_title(record, artifact) -> str:
+    """知识库里的文档名（WeKnora 把它放在每一块前面）。带所属公告的附件（NMPA）用清洗正文的第 1 级标题：
+    附件的真实名字加所属公告，不是“附件1.docx”（第二轮审计 B-D3）。其余是记录标题。"""
+    facts = getattr(record, "facts", None) or {}
+    first = (artifact.get("text") or "").split(chr(10), 1)[0]
+    if facts.get("role") == "attachment" and facts.get("parent_title") and first.startswith("# "):
+        return first[2:].strip()
+    return record.title or record.source_record_id
+
+
 def _manifest(target, record, artifact, meta, piece=None):
     """发给桥接的请求体（正文 content 发送时再加），入队时冻结在 index_publications.manifest。"""
     locator = {"source_instance": target.source_instance, "source_id": record.source_id,
@@ -228,7 +238,7 @@ def _manifest(target, record, artifact, meta, piece=None):
     return {
         **locator, "raw_sha256": record.raw_sha256, "raw_locator": dict(locator),
         "knowledge_base_id": target.knowledge_base_id, "is_demo": target.is_demo, "source_scope": target.source_scope,
-        "title": (record.title or record.source_record_id)[:255],
+        "title": knowledge_title(record, artifact)[:255],
         # 实际上传的正文：不分片时就是整份产物；分片时是这一片（上下文前缀 + 全篇里的一段）
         "content_sha256": piece["sha256"] if piece else artifact.get("body_sha256", artifact["text_sha256"]),
         **({"piece": piece} if piece else {}),

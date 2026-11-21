@@ -441,11 +441,30 @@ def test_nmpa_attachment_text_starts_with_its_notice_and_long_tables_repeat_the_
              "parent_publish_date": "2026-11-11"}
     table = "| 序号 | 药品名称 |\n| --- | --- |\n" + "\n".join("| %d | %s |" % (i, "片" * 500) for i in range(8))
     text = attachment_with_parent("附件.docx", facts, "注销目录\n\n" + table)
-    head, about, lead, *groups = text.split("\n\n")
-    assert head == "# 附件.docx"
-    assert about == "所属公告：国家药监局关于注销药品注册证书的公告（2026年第106号），发布日期：2026-11-11"
+    head, lead, *groups = text.split("\n\n")
+    # 唯一的 # 标题：附件的真实名字（文件名只是“附件”，用正文开头的题名）加所属公告、文号、日期——知识库每块的
+    # 标题路径都以它开头（第二轮审计 B-D3、C-K1）
+    assert head == ("# 注销目录（所属公告：国家药监局关于注销药品注册证书的公告（2026年第106号），"
+                    "发布日期：2026-11-11）")
     assert lead == "注销目录" and len(groups) > 1
-    assert all(g.startswith("| 序号 | 药品名称 |\n| --- | --- |\n") for g in groups)
+    tables = [g for g in groups if not g.startswith("# ")]
+    assert all(g.startswith("| 序号 | 药品名称 |\n| --- | --- |\n") for g in tables)
+    # 没有小标题的长附件：表格组之间重复第 1 级标题（续），知识库每一块开头都是附件名和所属公告
+    assert [g for g in groups if g.startswith("# ")] == [head + "（续）"] * (len(tables) - 1)
     cleaned = ct.clean_markdown(text)
-    assert cleaned["text"] == text and [s["kind"] for s in cleaned["segments"]][:3] == ["heading", "paragraph",
-                                                                                         "paragraph"]
+    assert cleaned["text"] == text and [s["kind"] for s in cleaned["segments"]][:2] == ["heading", "paragraph"]
+
+
+def test_nmpa_attachment_headings_follow_the_numbering_rule_and_every_chunk_gets_the_parent():
+    from clean.clean_stage import attachment_name, attachment_with_parent
+
+    facts = {"parent_title": "某公告", "parent_publish_date": "2026-11-11"}
+    body = ("附件1\n\n某办法\n\n第一章 总 则\n\n第一条（目的） 为了规范。\n\n一、警示语应包含：\n\n"
+            "1.有证据表明，发病率较低；\n\n第二章 附则\n\n第九条 本办法自发布之日起施行。\n\n二、其他")
+    lines = attachment_with_parent("附件1.docx", facts, body, promote=True).split("\n\n")
+    assert lines[0] == "# 附件1 某办法（所属公告：某公告，发布日期：2026-11-11）"
+    assert lines[1:] == ["附件1", "某办法", "## 第一章 总 则", "### 第一条（目的）", "为了规范。", "#### 一、警示语应包含：",
+                         "1.有证据表明，发病率较低；", "## 第二章 附则", "第九条 本办法自发布之日起施行。",
+                         "二、其他"]  # 文末的标题后面没有内容：不当标题
+    assert attachment_name("食药监药化监便函 [2014]102号附件1.doc", "## 附件1\n\n药品GMP附录") == "附件1 药品GMP附录"
+    assert attachment_name("处方药网络零售合规指南.doc", "") == "处方药网络零售合规指南"

@@ -48,7 +48,7 @@ import time
 
 from sqlalchemy import text
 
-from clean import attachment_parse, clean_text, identifiers, profile, registry_changes
+from clean import attachment_parse, clean_text, headings, identifiers, profile, registry_changes
 from clean.processors import UNCLEANED_SOURCES
 from store.record_models import FabricError
 
@@ -129,7 +129,8 @@ def _clean_by_basis(source, inp, basis):
                              or ("/title" if seg.get("kind") == "title" else "/abstractText")}
         return out
     if basis == "attachment_with_parent":
-        return clean_text.clean_markdown(attachment_with_parent(inp["title"], inp["facts"], inp["text"]))
+        return clean_text.clean_markdown(attachment_with_parent(inp["title"], inp["facts"], inp["text"],
+                                                                promote=inp.get("method") not in WORD_METHODS))
     return clean_text.clean_markdown(inp["markdown"], source_id=inp.get("source_id") or source)
 
 
@@ -138,10 +139,42 @@ def _clean_by_basis(source, inp, basis):
 ATTACHMENT_HEADER_SOURCES = frozenset({"nmpa"})
 
 
-def attachment_with_parent(file_name, facts, body):
-    """附件正文前面加上所属公告的信息：
-    # 附件名
-    所属公告：标题（文号），发布日期：YYYY-MM-DD"""
+# Word 附件（clean.office_text）的小标题解析时已按格式（加粗）认过；其余（PDF、表格、MinerU）清洗时按文字认
+WORD_METHODS = frozenset({"office_docx", "libreoffice_docx"})
+_FILE_EXT = re.compile(r"\.(?:docx?|xlsx?|pdf|wps|et|ofd|zip|rar|txt)$", re.I)
+# 只是编号、不是名字的附件文件名：“附件1”“2026年第102号公告附件1”“食药监药化监便函 [2014]102号附件1”“17944…”
+_GENERIC_NAME = re.compile(r"(?:.{0,40}?(?:公告|通告|通知|函|号|文件))?\s*(?:附件|附表)\s*\d{0,2}|\d{6,}|未命名附件", re.I)
+_LABEL = re.compile(r"(附件|附表)\s*(\d{1,2})")
+_BARE_LABEL = re.compile(r"(?:附件|附表)\d{0,2}[：:]?")
+CONTINUED_CHARS = 3000  # 没有小标题的长附件：每这么多字重复一次第 1 级标题（加“（续）”）
+
+
+def _first_title(body) -> str:
+    """附件正文开头的文件题名（“附件1”下面那行“27批次不符合规定药品名单”）：前几段里第一个像题名的短行。"""
+    for block in (body or "").split("\n\n")[:8]:
+        line = block.strip().lstrip("#").strip()
+        if not line or "\n" in line or line.startswith("|") or _BARE_LABEL.fullmatch(line.replace(" ", "")):
+            continue
+        if 2 <= len(line) <= 60 and not re.search(r"[。；;，,：:]", line):
+            return line
+        return ""
+    return ""
+
+
+def attachment_name(file_name, body) -> str:
+    """附件的真实名字：文件名有名字就用它（去掉扩展名）；文件名只是“附件1”这类编号的，用“附件1 ”加正文开头的题名。"""
+    stem = _FILE_EXT.sub("", " ".join((file_name or "").split())).strip()
+    if stem and not _GENERIC_NAME.fullmatch(stem):
+        return stem
+    label = _LABEL.search(stem or "")
+    title = _first_title(body)
+    return " ".join(x for x in ((label.group(1) + label.group(2)) if label else "", title) if x) or stem or "附件"
+
+
+def attachment_with_parent(file_name, facts, body, *, promote=True):
+    """附件自己成一份文档：第 1 级标题是“附件真实名字（所属公告：标题（文号），发布日期：YYYY-MM-DD）”。
+    全文只有这一个 # 标题、小标题从 ## 起（headings.relevel），知识库按标题切块时每一块的标题路径（ContextHeader，
+    和正文一起向量化）都以它开头：每块都带着所属公告的标题、文号、日期（第二轮审计 B-D3、C-K1）。"""
     facts = facts or {}
     parent = facts.get("parent_title") or ""
     if facts.get("parent_doc_number") and facts["parent_doc_number"] not in parent:
@@ -149,8 +182,24 @@ def attachment_with_parent(file_name, facts, body):
     about = "，".join(x for x in ("所属公告：" + parent if parent else "",
                                   "发布日期：" + facts["parent_publish_date"] if facts.get("parent_publish_date")
                                   else "") if x)
-    head = "# " + (file_name or "附件") + ("\n\n" + about if about else "")
-    return head + "\n\n" + clean_text.group_pipe_tables(body or "")
+    body = headings.relevel(headings.strip_private_use(body or ""), promote=promote, base=2)
+    head = "# " + attachment_name(file_name, body) + ("（" + about + "）" if about else "")
+    return _continued(head, clean_text.group_pipe_tables(body))
+
+
+def _continued(head, body):
+    """没有小标题的长附件（整份是一张大表、一长串条文）：知识库按标题切不开、退回按字数切，后面的块就没有标题路径。
+    每 CONTINUED_CHARS 字在段落（表格分组）之间重复一次第 1 级标题加“（续）”，每块开头都是附件名和所属公告。"""
+    if len(body) <= CONTINUED_CHARS + 500 or re.search(r"(?m)^#{1,6} ", body):
+        return head + "\n\n" + body
+    parts, size = [head], 0
+    for block in body.split("\n\n"):
+        if size > 800 and size + len(block) > CONTINUED_CHARS:  # 开头的几行短字和第一组表格放在一起，不单成一块
+            parts.append(head + "（续）")
+            size = 0
+        parts.append(block)
+        size += len(block) + 2
+    return "\n\n".join(parts)
 
 
 def _final_attachment_texts(conn, version_ids):
@@ -160,7 +209,7 @@ def _final_attachment_texts(conn, version_ids):
     if not version_ids:
         return {}
     rows = conn.execute(text(
-        "SELECT DISTINCT ON (version_id) version_id,status,text,attempt FROM derived_clean_text "
+        "SELECT DISTINCT ON (version_id) version_id,status,text,attempt,parse_method FROM derived_clean_text "
         "WHERE version_id=ANY(:ids) AND processor_version=:pv ORDER BY version_id, attempt DESC"
     ), {"ids": list(version_ids), "pv": attachment_parse.PROCESSOR_VERSION}).mappings().all()
     return {r["version_id"]: dict(r) for r in rows
@@ -230,7 +279,7 @@ def _prepare_rows(conn, key, work, counts):
                 continue
             if r["source_id"] in ATTACHMENT_HEADER_SOURCES and done["status"] == "parsed" and done["text"]:
                 prepared.append((r, "attachment_with_parent", {"title": r.get("title"), "facts": r["facts"],
-                                                               "text": done["text"]}))
+                                                               "text": done["text"], "method": done.get("parse_method")}))
                 continue
             prepared.append((r, None, done))
             continue

@@ -38,7 +38,11 @@ from json.decoder import scanstring
 # v15 (2026-11-21): NMPA attachments get their own cleaned text: the parent notice's title, document number and date
 # on top (clean_stage.attachment_with_parent), long pipe tables split into groups that each repeat the header
 # (group_pipe_tables), so the knowledge base never cuts inside a row and every piece of a table has its header.
-PROCESSOR_VERSION = "datafabric.clean_text.v15"
+# v16 (2026-11-21, NMPA round-2 audit): an NMPA attachment's text has a single level-1 heading that carries the real
+# attachment name and the parent notice's title, document number and date, so the knowledge base's heading breadcrumb
+# brings that context into every chunk; its sub-headings follow clean/headings.py (the same rule as the pages, levels by
+# numbering pattern), private-use characters are removed or mapped to visible symbols.
+PROCESSOR_VERSION = "datafabric.clean_text.v16"
 
 # ---------------------------------------------------------------- 空白与语言
 

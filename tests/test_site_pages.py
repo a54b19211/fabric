@@ -483,8 +483,9 @@ def test_nmpa_short_numbered_lines_are_headings_and_paragraphs_are_kept_apart():
         "<p>一、背景</p><p>正文一段。</p><p>（一）申请人企业法人资格证明文件。</p><p>（二）工作要求</p>"
         "<p>1.产品的预期用途</p><p>一、各级药品监督管理部门应当按照本通知要求，认真组织实施，确保各项工作落到实处。</p>"
         "<p>第一章 总则</p><p>附件：1.某公告（征求意见稿）</p><p>2.意见建议反馈表</p>"))["body_text"]
-    assert body.split("\n\n") == ["## 一、背景", "正文一段。", "（一）申请人企业法人资格证明文件。", "### （二）工作要求",
-                                  "#### 1.产品的预期用途",
+    # 级别按编号样式的从属关系：章 > 一、 > （一） > 1.（这一页里出现了哪几种就依次排）
+    assert body.split("\n\n") == ["### 一、背景", "正文一段。", "（一）申请人企业法人资格证明文件。", "#### （二）工作要求",
+                                  "##### 1.产品的预期用途",
                                   "一、各级药品监督管理部门应当按照本通知要求，认真组织实施，确保各项工作落到实处。",
                                   "## 第一章 总则", "附件：1.某公告（征求意见稿）", "2.意见建议反馈表"]  # 附件目录不是标题
 
@@ -582,7 +583,8 @@ def test_nmpa_old_layout_table_is_a_compact_markdown_table_and_an_image_page_has
              "<div class='text'><table><tr><td>企业名称</td><td>甲公司</td></tr>"
              "<tr><td>检查发现</td><td>一大段文字 | 含竖线</td></tr></table></div></div></body></html>")
     assert extract_nmpa_detail(Selector(table))["body_text"].splitlines() == [
-        "| 企业名称 | 甲公司 |", "| --- | --- |", "| 检查发现 | 一大段文字 ｜ 含竖线 |"]
+        "|  |  |", "| --- | --- |", "| 企业名称 | 甲公司 |",
+        "| 检查发现 | 一大段文字 ｜ 含竖线 |"]  # 第一行不是表头（字段名 | 值）：表头行空着
     images = ("<html><head><meta name='ArticleTitle' content='图解政策'></head><body><div>中 En 无障碍</div>"
               "<div class='wenzhang'><div class='date'>发布时间：2017-09-06</div><div class='text'>"
               "<p><img src='/1.jpg'></p></div></div></body></html>")

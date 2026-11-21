@@ -3,7 +3,12 @@
 规则（NMPA 审计 A2/A3/A10）：
 - 只取实际有字的范围：不信文件里声明的范围（有的 xlsx 声明 A1:XFD1048576，以前补成 16,384 列、29.5 万字）；
   空行去掉，首尾全空的列去掉；
-- 合并单元格：值填进合并范围里的每一格，每行单独看也完整；
+- 合并单元格（第二轮审计 A7/D3/D10）：纵向合并的值往下带（每行单独看也完整）；横向合并的值只写在第一格，
+  跨过的格空着（以前“序号 | 序号”、一串勾选项重复 9 次）。读的时候跨过的格先记成 SPAN，两层表头合并时当作左边
+  那格，写出时是空格子；
+- 表头：第一行明显是表头（调用方说是，或格子大多是“名称”“序号”“日期”这类栏目名）才当表头；不像表头的
+  （“| 心脏疾病 | 心肌缺血 | 未知 |”）表头行空着，第一行照样是数据；
+- 表名上方的纵向合并（表名占两行）只写一次；只有一个 Sheet 的工作簿不写“## Sheet1”；
 - 表格不补空格：`| a | b |`，分隔行 `| --- | --- |`；
 - 单元格里的换行变成空格，`|` 转义成 `\\|`，一行表格永远是一行；
 - 表格上方只有一个值的行（表名“2017年……统计表”，合并成整行）写成表格前的一行字，不当表头；
@@ -13,6 +18,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from pathlib import Path
 
 from loguru import logger
@@ -33,41 +39,83 @@ def cell_text(value) -> str:
     return " ".join(str(value).split()).replace("|", "\\|")
 
 
+SPAN = "\x00span"  # 横向合并跨过的格（读表时的记号，写出时是空格子）
+# 栏目名常见的结尾字：表头行的格子大多以这些字结尾（“产品名称”“序号”“生产日期”“检验结果”）
+_HEADER_ENDINGS = set("号称期名人位量型格别注果据构间址况见由款节类式求准系目容品业次话箱级源标数率值限码种"
+                      "容况员门商地点域途法项件证书限价额径度态性因施理议核查论述明识")
+
+
+def _real(cell) -> str:
+    return "" if cell == SPAN else cell
+
+
+def is_header_row(row) -> bool:
+    """第一行像不像表头：有字的格子里至少 3/4 以栏目名常见的字结尾；或一半以上是、而且格子都是不带数字的短词
+    （“情形 | 市场独占期 | 中药 | 化药 | 备注”）。两列的表（“企业名称 | 甲公司”这种字段名 | 值）要全是栏目名。"""
+    cells = [c.replace("\\|", "").strip() for c in row if _real(c).strip()]
+    if not cells:
+        return False
+    named = sum(1 for c in cells if len(c) <= 20 and c[-1] in _HEADER_ENDINGS)
+    if len(row) <= 2:
+        return named == len(cells)
+    short = all(len(c) <= 12 and not re.search(r"\d", c) for c in cells)
+    return named >= 0.75 * len(cells) or (short and named >= 0.5 * len(cells))
+
+
 def _trim(rows: list[list[str]]) -> list[list[str]]:
     """去掉全空行和首尾全空的列，各行补到同样的列数。"""
-    rows = [r for r in rows if any(r)]
+    rows = [r for r in rows if any(_real(c) for c in r)]
     if not rows:
         return []
     width = max(len(r) for r in rows)
     rows = [r + [""] * (width - len(r)) for r in rows]
-    used = [i for i in range(width) if any(r[i] for r in rows)]
+    used = [i for i in range(width) if any(_real(r[i]) for r in rows)]
     first, last = used[0], used[-1]
     return [r[first:last + 1] for r in rows]
 
 
-def markdown_table(rows: list[list[str]]) -> str:
-    """二维字符串 → Markdown 表格；表格上方只有一个值的行写成单独一行字。不补空格。"""
-    rows = _trim(rows)
+def _lead_rows(rows):
+    """表格上方只有一个值的行（表名）：取出来写成表前的字；同一个表名纵向合并占两行的只写一次。"""
     lead = []
-    while len(rows) > 1 and len(rows[0]) > 1 and len({c for c in rows[0] if c}) == 1:
-        lead.append(next(c for c in rows[0] if c))
+    while len(rows) > 1 and len(rows[0]) > 1 and len({_real(c) for c in rows[0] if _real(c)}) == 1:
+        value = next(c for c in rows[0] if _real(c))
+        if not lead or lead[-1] != value:
+            lead.append(value)
         rows = _trim(rows[1:])
+    return lead, rows
+
+
+def markdown_table(rows: list[list[str]], header: bool | None = None) -> str:
+    """二维字符串 → Markdown 表格；表格上方只有一个值的行写成单独一行字。不补空格。
+    header：第一行是不是表头（None：按 is_header_row 看）；不是表头时表头行空着。"""
+    lead, rows = _lead_rows(_trim(rows))
     if not rows:
         return "\n\n".join(lead)
     rows = _merge_header_rows(rows)
     if len(rows[0]) == 1:  # 只有一列：不是表格，一行一段
-        return "\n\n".join(lead + [r[0] for r in rows])
+        return "\n\n".join(lead + [_real(r[0]) for r in rows])
     width = len(rows[0])
+    if not (is_header_row(rows[0]) if header is None else header):
+        rows = [[""] * width] + rows
+    rows = [[_real(c) for c in r] for r in rows]
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width]
     # 整行合并成一格的行（表中间的小标题“总体意见建议”）：值只写在第一格，不重复整行
     lines += ["| " + " | ".join(r if len(set(r)) > 1 else [r[0]] + [""] * (width - 1)) + " |" for r in rows[1:]]
     return "\n\n".join(lead + ["\n".join(lines)])
 
 
+def _filled(row):
+    """横向合并跨过的格当作左边那格（只用来比较两层表头）。"""
+    out = []
+    for c in row:
+        out.append(out[-1] if c == SPAN and out else _real(c))
+    return out
+
+
 def _merge_header_rows(rows: list[list[str]]) -> list[list[str]]:
     """两层表头（上一层横向合并、其余列纵向合并，带值以后前两行大半相同）并成一行：不同的列写“上层 下层”。"""
     while len(rows) > 2:
-        top, below = rows[0], rows[1]
+        top, below = _filled(rows[0]), _filled(rows[1])
         same = sum(1 for a, b in zip(top, below) if a == b)
         differ = [i for i, (a, b) in enumerate(zip(top, below)) if a != b]
         if same < 0.5 * len(top) or not differ or any(not top[i] or not below[i] for i in differ) \
@@ -78,7 +126,7 @@ def _merge_header_rows(rows: list[list[str]]) -> list[list[str]]:
 
 
 def _fill_merged(grid: list[list], ranges) -> None:
-    """ranges: [(r0, r1, c0, c1)]（0 起、含两端），左上角的值填满整个范围。"""
+    """ranges: [(r0, r1, c0, c1)]（0 起、含两端）：左上角的值往下带到每一行的第一列，跨过的列记 SPAN。"""
     for r0, r1, c0, c1 in ranges:
         if r0 >= len(grid):
             continue
@@ -87,8 +135,9 @@ def _fill_merged(grid: list[list], ranges) -> None:
             row = grid[r]
             if len(row) <= c1:
                 row.extend([""] * (c1 + 1 - len(row)))
-            for c in range(c0, c1 + 1):
-                row[c] = value
+            row[c0] = value
+            for c in range(c0 + 1, c1 + 1):
+                row[c] = SPAN
 
 
 _NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -155,9 +204,16 @@ def _parse_xlsx(file_path: str) -> str:
                             if r0 < rows_n and c0 < cols_n])
         table = markdown_table(grid)
         if table:
-            sections.append(f"## {ws.title}\n\n{table}")
+            sections.append((ws.title, table))
     wb.close()
-    return "\n\n".join(sections)
+    return _join_sheets(sections)
+
+
+def _join_sheets(sections) -> str:
+    """每个 Sheet 一节“## 名称”；只有一个 Sheet 时不写名称（“## Sheet1”不是内容）。"""
+    if len(sections) == 1:
+        return sections[0][1]
+    return "\n\n".join(f"## {name}\n\n{table}" for name, table in sections)
 
 
 def _xls_value(cell, datemode):
@@ -189,8 +245,8 @@ def _parse_xls(file_path: str) -> str:
         _fill_merged(grid, [(r0, r1 - 1, c0, c1 - 1) for r0, r1, c0, c1 in getattr(sheet, "merged_cells", [])])
         table = markdown_table(grid)
         if table:
-            sections.append(f"## {sheet.name}\n\n{table}")
-    return "\n\n".join(sections)
+            sections.append((sheet.name, table))
+    return _join_sheets(sections)
 
 
 def excel_to_markdown(file_path: str) -> str:

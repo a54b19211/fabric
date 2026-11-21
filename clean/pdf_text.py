@@ -11,6 +11,14 @@
 3. 表格以外的字按基线分行；一行写满到右边距、又没有以句末标点结尾的，和下一行接成一段（Word 自动换行）；
    页脚页码“- 2 -”去掉；
 4. 对照：这样读出的字数比 extract_text 少 5% 以上时，这一页退回 extract_text（读法有漏，不丢字）。
+
+第二轮审计（C-A4/A5）：
+- 合并格：纵向合并的值往下带，横向合并只在第一格写值（跨过的格空着）；
+- 接段：行尾是右括号、引号的不算句末（“（星光计划）”后面折行的“申报指南”接回去）；上一页最后一段没写完、下一页
+  第一段不是标题或编号的，跨页接成一段（join_pages）；
+- 字间空格：中文和“/”之间的空格去掉（“少发 /罕见”）；两段分开画的英文词，后一段大写开头的补空格（“forKids”）；
+- 没有 Unicode 映射的字（中文字体子集用单字节编码、又没有 ToUnicode 表：红头、个别标题）：文字层里读出来是乱码
+  或空白，这些字不收，页号记进 missing_glyph_pages（解析结果的 warnings），不编造。
 """
 
 from __future__ import annotations
@@ -19,11 +27,15 @@ import bisect
 import math
 import re
 
-from clean.excel_parser import markdown_table
+from clean.excel_parser import SPAN, markdown_table
 
-_END_PUNCT = "。：:；;！!？?）)”」』】"
+_END_PUNCT = "。：:；;！!？?"
 _LIST_START = re.compile(r"^(?:[一二三四五六七八九十]+[、．.]|[（(][一二三四五六七八九十\d]+[)）]|\d+[、．.]|第[一二三四五六七八九十\d]+[章节条])")
+_NUMBER_GAP = re.compile(r"^\S{1,5}? {2,}")  # 行首编号或项目符号后面的缩进
+_BULLETS = "•◆-" + "".join(map(chr, (0xF0B7, 0xF06C, 0xF0A7, 0xF0D8, 0xF076)))  # 项目符号（含 Word 符号字体的私用区字符）
 _PAGE_NUMBER = re.compile(r"^[-—–]\s*\d+\s*[-—–]$")
+_CJK_FONT = re.compile(r"GB2312|GBK|SimSun|SimHei|NSimSun|FangSong|KaiTi|Kai|Song|Hei|YaHei|STXihei|DengXian|"
+                       r"[\u4e00-\u9fff]", re.I)
 
 
 def _nonspace(text: str) -> int:
@@ -49,7 +61,7 @@ def _width(text: str, size: float) -> float:
 
 class _Page:
     def __init__(self, page):
-        self.frags, self.h, self.v = [], [], []
+        self.frags, self.h, self.v, self.missing = [], [], [], 0
         self._path, self._cur, self._start = [], None, None
         page.extract_text(visitor_operand_before=self._op, visitor_text=self._text)
 
@@ -57,6 +69,12 @@ class _Page:
     def _text(self, text, cm, tm, font, size):
         if not text:
             return
+        if _unmapped(font):  # 中文字体子集没有字码映射：汉字读出来是乱码，不收（记下缺字）；数字、英文照收
+            kept = _ascii_only(text)
+            self.missing += len("".join(text.split())) - len("".join(kept.split()))
+            text = kept
+            if not text.strip():
+                return
         scale = math.hypot(tm[0], tm[1]) * math.hypot(cm[0], cm[1]) or 1.0
         eff = (size or 10) * scale
         if tm[4] == 0 and tm[5] == 0 and self.frags:  # pypdf 对同一行接着显示的字给 (0,0)：接在上一段后面
@@ -114,6 +132,20 @@ class _Page:
                 elif w < 1 and h > 3:
                     self.v.append((x0, y0, y1))
         self._path, self._cur = [], None
+
+
+def _ascii_only(text: str) -> str:
+    return "".join(c if ord(c) < 128 else " " for c in text)
+
+
+def _unmapped(font) -> bool:
+    """中文字体子集按单字节编码（WinAnsi 等）又没有 ToUnicode 表：字形读不出是哪个字。"""
+    try:
+        if not font or "/ToUnicode" in font or font.get("/Subtype") == "/Type0":
+            return False
+        return bool(_CJK_FONT.search(str(font.get("/BaseFont") or "")))
+    except Exception:  # noqa: BLE001 -- 字体字典读不出：照常收字
+        return False
 
 
 def _merge(lines, tol=1.5, gap=2.0):
@@ -184,14 +216,16 @@ def _lines(frags):
             piece = f["text"]
             if end is not None and f["x"] - end > 1.5 * f["size"]:
                 text = text.rstrip() + "  " + piece.lstrip()  # 同一行里隔得远（落款、表外的两栏）：留两个空格
-            elif end is not None and f["x"] - end > 0.2 * f["size"] and text[-1:].isalnum() and text[-1:].isascii() \
-                    and piece[:1].isalnum() and piece[:1].isascii():
-                text += " " + piece  # 英文词之间的空格在 PDF 里常是位置间隔，不是空格字符
+            elif end is not None and text[-1:].isalnum() and text[-1:].isascii() and piece[:1].isalnum() \
+                    and piece[:1].isascii() and (f["x"] - end > 0.2 * f["size"]
+                                                 or (text[-1:].islower() and piece[:1].isupper())):
+                text += " " + piece  # 英文词之间的空格在 PDF 里常是位置间隔，不是空格字符（“for”“Kids”分开画）
             else:
                 text += piece
             end = f["x"] + _width(piece, f["size"])
         text = re.sub(r" {3,}", "  ", text.strip())
         text = re.sub(r"(?<![ \x00-\x7f]) (?![ \x00-\x7f])", "", text)  # 两端对齐撑出来的中文字间空格
+        text = re.sub(r"(?<=[^\x00-\x7f]) (?=/)|(?<=/) (?=[^\x00-\x7f])", "", text)  # “少发 /罕见”
         if text:
             out.append((items[0]["y"], items[0]["x"], end, text, max(f["size"] for f in items)))
     return out
@@ -248,8 +282,14 @@ def _table_markdown(table, frags):
         k = find((r, c))
         rights[k] = max(rights.get(k, 0), xs[c + 1])
     texts = {k: _cell_text(v, rights[k]) for k, v in members.items()}
-    grid = [[texts.get(find((r, c)), "") for c in range(cols)] for r in range(rows)]
-    return markdown_table(grid)
+    return markdown_table(_span_grid(rows, cols, find, texts))
+
+
+def _span_grid(rows, cols, find, texts):
+    """合并格：每行里同一个合并格只在最左一格写值，右边跨过的格空着（SPAN）；上下合并的每行都写（往下带）。"""
+    def cell(r, c):
+        return SPAN if c > 0 and find((r, c - 1)) == find((r, c)) else texts.get(find((r, c)), "")
+    return [[cell(r, c) for c in range(cols)] for r in range(rows)]
 
 
 def _inside(f, table):
@@ -262,20 +302,35 @@ def _paragraphs(lines) -> list[str]:
     不是编号开头的，接到上一行后面。"""
     if not lines:
         return []
-    right = max(x1 for _, _, x1, _, _ in lines)
+    # 右边距：长行（15 字以上）行尾位置的 3/4 分位，不用最右的一行（目录、表格外的长行会把边距撑宽，正常写满的行
+    # 就不算“写满”，一句话被拆成两段：“申请加入星”“光计划的具体方案”）
+    ends = sorted(x1 for _, _, x1, text, _ in lines if len(text) >= 15) or [max(x1 for _, _, x1, _, _ in lines)]
+    right = ends[(3 * (len(ends) - 1)) // 4]
     left = min(x0 for _, x0, _, _, _ in lines)
-    out, current, joinable = [], "", False
+    out, current, joinable, nearly, first = [], "", False, False, left
     for _, x0, x1, text, size in lines:
-        if current and joinable and x0 <= left + 0.5 * size and not _LIST_START.match(text):
+        # 编号、项目符号开头的段落是悬挂缩进：折下来的行对齐编号后面的字（比这一段第一行靠右一两个字）
+        hanging = _LIST_START.match(current) or current[:1] in _BULLETS
+        limit = (first + 2.5 * size) if hanging else (left + 0.5 * size)
+        tail = nearly and len(text) <= 4  # 折下来只剩一两个字（“……未满足的临床需”“求”），上一行差一点写满
+        if current and (joinable or tail) and x0 <= limit and not _LIST_START.match(text):
             current = join_cjk(current, text)
         else:
             if current:
                 out.append(current)
-            current = text
-        joinable = x1 >= right - 4 * size and text[-1] not in _END_PUNCT and "  " not in text
+            current, first = text, x0
+        joinable, nearly = _open_line(text, x1, right, size)
     if current:
         out.append(current)
     return out
+
+
+def _open_line(text, x1, right, size):
+    """(这一行写满了、句子没完：下一行接上；差一点写满：下一行只剩一两个字也接上)。行里隔得远的两段（落款、两栏）
+    不接；行首编号、项目符号后面的缩进（“1.  本实施框架”“•  拟开发”）不算隔得远。"""
+    open_end = text[-1] not in _END_PUNCT and text[-1] != "."
+    joinable = x1 >= right - 4 * size and open_end and "  " not in _NUMBER_GAP.sub("", text)
+    return joinable, x1 >= right - 8 * size and len(text) >= 15 and open_end and "  " not in text
 
 
 def _is_page_number(text: str) -> bool:
@@ -284,11 +339,18 @@ def _is_page_number(text: str) -> bool:
 
 def page_text(page) -> str:
     """一页的正文：段落一行一段（段间空行），表格是 Markdown 表格，按在页面上的上下顺序。"""
+    return page_reading(page)[0]
+
+
+def page_reading(page) -> tuple[str, int]:
+    """(一页的正文, 读不出的字数：没有字码映射的字体画的字)。"""
     plain = page.extract_text() or ""
     try:
         reader = _Page(page)
     except Exception:  # noqa: BLE001 -- 位置读不出：用 extract_text
-        return plain
+        return plain, 0
+    if reader.missing:
+        plain = _without_unmapped(page, plain)
     tables = _tables(reader.h, reader.v)
     flow = [f for f in reader.frags if not any(_inside(f, t) for t in tables)]
     lines = _without_page_numbers(_lines(flow), tables)
@@ -296,8 +358,47 @@ def page_text(page) -> str:
                   key=lambda x: -x[0])
     text = "\n\n".join(i for i in _interleave(lines, cuts) if i)
     if _nonspace(text.replace("|", "").replace("---", "")) < 0.95 * _nonspace(plain) - 5:
+        return plain, reader.missing
+    return text, reader.missing
+
+
+def _without_unmapped(page, plain):
+    """extract_text 的对照文字里也去掉读不出的字体画的字（不然对照偏多、退回到带乱码的 extract_text）。"""
+    kept = []
+
+    def visit(text, cm, tm, font, size):
+        if text:
+            kept.append(_ascii_only(text) if _unmapped(font) else text)
+    try:
+        page.extract_text(visitor_text=visit)
+    except Exception:  # noqa: BLE001
         return plain
-    return text
+    return "".join(kept)
+
+
+def _last_paragraph_open(text: str) -> bool:
+    """一页最后一段没写完：不以句末标点结尾，或括号还没有闭合（“（包括但不限于：”）。"""
+    last = text.rsplit("\n\n", 1)[-1].strip()
+    if len(last) < 15 or last.startswith("|") or "\n" in last:
+        return False
+    return last[-1] not in _END_PUNCT + "." or last.count("（") > last.count("）")
+
+
+def join_pages(texts: list[str]) -> list[str]:
+    """上一页最后一段没写完（不以句末标点结尾），下一页第一段不是表格、标题、编号开头的：把下一页的第一段
+    接到上一页最后一段后面（跨页断开的词接回去：“……儿”“童人群剂型开发”）。"""
+    from clean.headings import rank
+
+    out = list(texts)
+    for i in range(1, len(out)):
+        head, _, rest = out[i].strip().partition("\n\n")
+        if not out[i - 1] or not head or not _last_paragraph_open(out[i - 1]):
+            continue
+        if head.startswith("|") or _LIST_START.match(head) or rank(head) or _is_page_number(head):
+            continue
+        out[i - 1] = join_cjk(out[i - 1].rstrip(), head.strip())
+        out[i] = rest
+    return out
 
 
 def _without_page_numbers(lines, tables):

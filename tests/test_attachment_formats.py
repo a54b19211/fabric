@@ -66,8 +66,22 @@ def test_xlsx_declared_whole_sheet_merged_cells_and_newlines(tmp_path):
     path = tmp_path / "x.xlsx"
     path.write_bytes(out.getvalue())
     md = excel_to_markdown(str(path))
-    assert md == ("## 表1\n\n反馈表\n\n| 序号 | 章节 | 意见 |\n| --- | --- | --- |\n"
+    # 只有一个 Sheet：不写“## 表1”；表名整行合并只写一次；纵向合并往下带
+    assert md == ("反馈表\n\n| 序号 | 章节 | 意见 |\n| --- | --- | --- |\n"
                   "| 1 | 第一章 | 第一行 第二行 \\| 竖线 |\n| 2 | 第一章 | 无 |")
+
+
+def test_excel_two_row_title_once_horizontal_merge_once_and_no_header_row():
+    from clean.excel_parser import SPAN, _join_sheets, _lead_rows
+
+    lead, rows = _lead_rows([["名单", SPAN, SPAN], ["名单", SPAN, SPAN], ["序号", "名称", "备注"]])
+    assert lead == ["名单"] and rows == [["序号", "名称", "备注"]]  # 表名纵向合并两行：只写一次
+    assert markdown_table([["序号", "申请分类", SPAN, SPAN], ["1", "□ 甲", "", "x"]]).splitlines()[0] == \
+        "| 序号 | 申请分类 |  |  |"  # 横向合并：值只写一次，不是“申请分类 | 申请分类 | 申请分类”
+    assert markdown_table([["心脏疾病", "心肌缺血", "未知"], ["精神异常", "失眠", "未知"]]).splitlines()[:3] == [
+        "|  |  |  |", "| --- | --- | --- |", "| 心脏疾病 | 心肌缺血 | 未知 |"]  # 没有表头行：不把数据当表头
+    assert _join_sheets([("Sheet1", "| a |")]) == "| a |" and _join_sheets([("甲", "x"), ("乙", "y")]) == \
+        "## 甲\n\nx\n\n## 乙\n\ny"
 
 
 # ── Word（A4/A5/A8）──
@@ -122,12 +136,14 @@ def test_docx_numbering_headings_merged_cells_textbox_and_revisions(tmp_path):
     )
     out = office_text.parse_docx(_docx(tmp_path / "a.docx", body, NUMBERING, STYLES))
     texts = [b.get("text") or b.get("table_body") for b in out["content_list"]]
-    assert texts[:5] == ["# 修订要求", "一、警示语应包含：", "（一）本品含盐酸克仑特罗。", "二、不良反应：", "保留"]
+    # 标题样式的短行、“一、”编号短行是小标题，级别按编号样式（## 起，# 留给附件名）；带句号的“（一）……。”是正文
+    assert texts[:5] == ["## 修订要求", "### 一、警示语应包含：", "（一）本品含盐酸克仑特罗。", "### 二、不良反应：",
+                         "保留"]
     table = texts[5].splitlines()
     assert table[0] == "| 药品名称 | 批号 | 检验机构 |"
     assert table[2:5] == ["| 加替沙星滴眼液 | 2509161E | 天津市药品检验研究院 |",
                           "| 加替沙星滴眼液 | 2601271E | 天津市药品检验研究院 |",
-                          "| 合计两批 | 合计两批 | — |"]
+                          "| 合计两批 |  | — |"]  # 横向合并只在第一格写值
     assert table[5] == "| 批号 | x | y |"  # 文本框的字不并进格子
     assert texts[6:] == ["包括但不限于产品批号"]  # 文本框单独一块，兼容副本不重复
     assert "删掉的字" not in out["markdown"] and out["reference_chars"] > 0
@@ -189,10 +205,11 @@ def test_real_sichuan_pdf_table_is_read_cell_by_cell(no_mineru):
 
 
 def test_html_table_becomes_markdown_with_spans_and_private_bullets_are_removed():
-    html = ('<table><tr><td rowspan="2">加替沙星</td><td>210903</td></tr><tr><td>210904</td></tr>'
-            '<tr><td colspan="2">合计</td></tr></table>')
-    assert ap.tidy("前\n" + html + "\n 后") == (
-        "前\n\n| 加替沙星 | 210903 |\n| --- | --- |\n| 加替沙星 | 210904 |\n| 合计 |  |\n\n后")
+    html = ('<table><tr><td>药品名称</td><td>批号</td></tr><tr><td rowspan="2">加替沙星</td><td>210903</td></tr>'
+            '<tr><td>210904</td></tr><tr><td colspan="2">合计</td></tr></table>')
+    assert ap.tidy("前\n" + html + "\n\uf0b7后\uf0a8\ue004") == (
+        "前\n\n| 药品名称 | 批号 |\n| --- | --- |\n| 加替沙星 | 210903 |\n| 加替沙星 | 210904 |\n| 合计 |  |"
+        "\n\n• 后□")  # 私用区：已知的项目符号、勾选框换成可见符号，段落标记（U+E004）去掉
 
 
 def test_mineru_heading_levels_are_kept():
@@ -214,4 +231,4 @@ def test_result_far_shorter_than_the_reference_is_incomplete_not_parsed(tmp_path
 
 
 def test_old_versions_are_not_reused():
-    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v4"
+    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v5"

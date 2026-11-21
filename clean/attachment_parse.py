@@ -39,6 +39,15 @@ v4（2026-11-21，NMPA 审计 A1–A11）：
 - 所有正文过 tidy（A7）：HTML 表格转 Markdown 表格（合并格带值），去掉私用区项目符号（U+F000–U+F0FF），
   MinerU 的标题级别（text_level）写成 Markdown 标题；
 - 不再沿用旧版本的结果（A9）：v2/v3 复用来的正文里有原始 HTML 表格、页码标记；同一文件（sha256）只复用 v4 自己的结果。
+v5（2026-11-21，NMPA 第二轮审计）：
+- Word 小标题按 clean/headings.py（和网页同一套，不单凭大纲级别）；横向合并只在第一格写值；格内几段用 <br> 隔开；
+  勾选框 □ ☑ 保留；没有表头行的表格表头空着；来源里的 * 转义（clean.office_text）；
+- 私用区字符（U+E000–U+F8FF、补充私用区）全部处理：已知勾选框、项目符号换成 □ ☑ • ◆，其余去掉（以前只去 U+F000–U+F0FF，
+  U+E003/U+E004 段落标记留在正文里）；
+- PDF：跨页、右括号结尾的折行接成一段，“少发 /罕见”“forKids”字间空格；没有字码映射的字不收、页号记在
+  attempts（"pypdf_text:missing_glyphs:1,3"）（clean.pdf_text）；
+- Excel：表名纵向合并只写一次，单个 Sheet 不写“## Sheet1”，横向合并只在第一格（clean.excel_parser）。
+同一文件只复用 v5 自己的结果。
 """
 
 from __future__ import annotations
@@ -50,8 +59,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v4"
-# 旧版本的结果不再沿用（v4 改了所有格式的输出，见模块说明）
+PROCESSOR_VERSION = "datafabric.attachment_parse.v5"
+# 旧版本的结果不再沿用（v4、v5 改了所有格式的输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
 CLOUD_NATIVE = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
@@ -220,7 +229,7 @@ def _sheets(markdown: str) -> list:
         out.append({"start": match.start(), "sheet": match.group(1).strip()})
     for i, seg in enumerate(out):
         seg["end"] = out[i + 1]["start"] if i + 1 < len(out) else len(markdown)
-    return out
+    return out or ([{"start": 0, "end": len(markdown), "sheet": None}] if markdown else [])  # 只有一个 Sheet
 
 
 def _plan(ext):
@@ -274,15 +283,18 @@ def _pdf_text_layer(path: str) -> dict:
     """PDF 自带的文字层（pypdf），一页一块。文字层不可用（扫描件、乱码、大半是图片页）时交回失败，换 MinerU。"""
     from pypdf import PdfReader
 
-    from clean.pdf_text import page_text
+    from clean.pdf_text import join_pages, page_reading
 
     pages = PdfReader(path).pages
     if not _usable_text_layer([_readable(page.extract_text() or "") for page in pages]):
         return {"success": False, "markdown": "", "error": "no_usable_text_layer"}
-    texts = [_readable(page_text(page)) for page in pages]  # 表格按格读成 Markdown 表格（clean.pdf_text）
+    readings = [page_reading(page) for page in pages]  # 表格按格读成 Markdown 表格（clean.pdf_text）
+    texts = join_pages([_readable(text) for text, _ in readings])  # 跨页断开的段落接回去
     blocks = [{"type": "text", "text": t, "page_idx": index} for index, t in enumerate(texts)]
     markdown = "\n\n".join(t for t in texts if t)
-    return {"success": True, "markdown": markdown, "content_list": blocks, "error": ""}
+    missing = [str(i + 1) for i, (_, lost) in enumerate(readings) if lost]
+    return {"success": True, "markdown": markdown, "content_list": blocks, "error": "",
+            **({"missing_glyph_pages": missing} if missing else {})}
 
 
 def _pdf_pages(path) -> int:
@@ -294,16 +306,15 @@ def _pdf_pages(path) -> int:
         return 0
 
 
-# tidy（A7）：HTML 表格 → Markdown，去掉私用区项目符号
+# tidy（A7）：HTML 表格 → Markdown，私用区字符（v5：全部私用区，已知符号换成可见符号）
 _HTML_TABLE = re.compile(r"<table\b.*?</table>", re.S | re.I)
-_PRIVATE_BULLET = re.compile(r"[\uf000-\uf0ff][ \t]*")
 
 
 def html_table_to_markdown(html: str) -> str:
-    """一张 HTML 表格 → Markdown 表格；rowspan/colspan 的值填进它跨的每一格。"""
+    """一张 HTML 表格 → Markdown 表格；rowspan 的值往下带，colspan 只在第一格写值。"""
     from lxml import html as lxml_html
 
-    from clean.excel_parser import markdown_table
+    from clean.excel_parser import SPAN, markdown_table
 
     try:
         root = lxml_html.fragment_fromstring(html, create_parent="div")
@@ -320,9 +331,9 @@ def html_table_to_markdown(html: str) -> str:
             value = " ".join(" ".join(cell.itertext()).split()).replace("|", "\\|")
             rows = max(1, _span(cell.get("rowspan")))
             cols = max(1, _span(cell.get("colspan")))
-            for dr in range(rows):
+            for dr in range(rows):  # 纵向合并往下带；横向合并只在第一格写值
                 for dc in range(cols):
-                    grid.setdefault((r + dr, c + dc), value)
+                    grid.setdefault((r + dr, c + dc), value if dc == 0 else SPAN)
             c += cols
     if not grid:
         return ""
@@ -337,14 +348,22 @@ def _span(value) -> int:
         return 1
 
 
+def strip_private_use(text: str) -> str:
+    from clean.headings import strip_private_use as strip
+
+    return strip(text)
+
+
 def tidy(text: str) -> str:
     """解析结果的统一整理：HTML 表格转 Markdown 表格；<br> 记成换行；去掉 Word 项目符号留下的私用区字符。"""
     if not text:
         return text
     text = text.replace("\x00", "")  # 有的 PDF 文字层里有 NUL，PostgreSQL 的 text 存不了
     text = _HTML_TABLE.sub(lambda m: "\n\n" + html_table_to_markdown(m.group(0)) + "\n\n", text)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-    text = _PRIVATE_BULLET.sub("", text)
+    # <br> 记成换行；管道表格的行里不换（格子里的几段用 <br> 隔开，换行会把一行表格拆断）
+    text = "\n".join(line if line.lstrip().startswith("|") else re.sub(r"<br\s*/?>", "\n", line, flags=re.I)
+                     for line in text.split("\n"))
+    text = strip_private_use(text)
     lines = [line.rstrip() for line in text.split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
@@ -445,7 +464,9 @@ def _parse_copy(copy, ext):
             if method != "pypdf_text":  # 文字层不可用不算失败原因：结果按后面 MinerU 的失败原因记
                 error = failed
             continue
-        result = _parsed(answer, markdown, method, page_kind, ext, [*attempts, method + ":ok"])
+        done = [method + ":ok"] + ([method + ":missing_glyphs:" + ",".join(answer["missing_glyph_pages"])]
+                                   if answer.get("missing_glyph_pages") else [])
+        result = _parsed(answer, markdown, method, page_kind, ext, [*attempts, *done])
         short = incomplete(answer, result["text"], method, page_kind, copy)
         if short is None:
             return result
