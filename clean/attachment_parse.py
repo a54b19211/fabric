@@ -48,6 +48,14 @@ v5（2026-11-21，NMPA 第二轮审计）：
   attempts（"pypdf_text:missing_glyphs:1,3"）（clean.pdf_text）；
 - Excel：表名纵向合并只写一次，单个 Sheet 不写“## Sheet1”，横向合并只在第一格（clean.excel_parser）。
 同一文件只复用 v5 自己的结果。
+v6（2026-11-21，NMPA 第三轮审计）：
+- PDF 缺字按画字指令数（clean.pdf_text）；有缺字的结果照样是 parsed（其余正文可用），但 error 写
+  "missing_glyphs:<页号>"、attempts 记 "pypdf_text:missing_glyphs:<页号>"，清洗段据此给清洗正文加警告
+  attachment_missing_glyphs（画像格式 degraded）；同 sha256 复用时也带上（clean.derived_text）。没有做 OCR；
+- Word 格子里的软换行写 <br>，上下标（clean.office_text）；Excel 格内换行写 <br>；表名行只取合并成一格的，表单的
+  标签行留在表里；没有表头行的表格用前几行里的栏目名行或“列1…列N”当表头（clean.excel_parser）；
+- PDF 接段、➢、“/”“-”两侧空格（clean.pdf_text）。
+同一文件只复用 v6 自己的结果。
 """
 
 from __future__ import annotations
@@ -59,8 +67,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v5"
-# 旧版本的结果不再沿用（v4、v5 改了所有格式的输出，见模块说明）
+PROCESSOR_VERSION = "datafabric.attachment_parse.v6"
+# 旧版本的结果不再沿用（v4、v5、v6 改了所有格式的输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
 CLOUD_NATIVE = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
@@ -464,9 +472,11 @@ def _parse_copy(copy, ext):
             if method != "pypdf_text":  # 文字层不可用不算失败原因：结果按后面 MinerU 的失败原因记
                 error = failed
             continue
-        done = [method + ":ok"] + ([method + ":missing_glyphs:" + ",".join(answer["missing_glyph_pages"])]
-                                   if answer.get("missing_glyph_pages") else [])
+        missing = ",".join(answer.get("missing_glyph_pages") or [])
+        done = [method + ":ok"] + ([method + ":missing_glyphs:" + missing] if missing else [])
         result = _parsed(answer, markdown, method, page_kind, ext, [*attempts, *done])
+        if missing:  # 有字读不出（没有字码映射）：正文照用，但如实写明哪几页缺字
+            result["error"] = "missing_glyphs:" + missing
         short = incomplete(answer, result["text"], method, page_kind, copy)
         if short is None:
             return result

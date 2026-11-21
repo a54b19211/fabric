@@ -10,8 +10,11 @@
   （“| 心脏疾病 | 心肌缺血 | 未知 |”）表头行空着，第一行照样是数据；
 - 表名上方的纵向合并（表名占两行）只写一次；只有一个 Sheet 的工作簿不写“## Sheet1”；
 - 表格不补空格：`| a | b |`，分隔行 `| --- | --- |`；
-- 单元格里的换行变成空格，`|` 转义成 `\\|`，一行表格永远是一行；
-- 表格上方只有一个值的行（表名“2017年……统计表”，合并成整行）写成表格前的一行字，不当表头；
+- 单元格里的换行写成 `<br>`（和 Word 表格同一写法，第三轮审计 N3），`|` 转义成 `\\|`，一行表格永远是一行；
+- 表格上方合并成一格的表名行（“2017年……统计表”：值所在的格本身横跨几列）写成表格前的一行字，不当表头；
+  “申请编号 | （空着待填）”这种标签行、格子里分了几行的表单行留在表里（第三轮审计 D8）；
+- 没有表头行的表格（第三轮审计 D5）：前几行里第一个格子都有字、像栏目名的行（“序号 | 产品名称 | …”）当表头，它上面的
+  行照原顺序放在表头下面；没有这样的行就用“列1 | 列2 | …”。数据行不当表头；长表格分组时每组都带这个表头；
 - 每个 Sheet 一个 `## 名称` 小标题，空 Sheet 跳过。
 """
 
@@ -36,12 +39,13 @@ def cell_text(value) -> str:
         value = value.date().isoformat() if value.time() == dt.time() else value.isoformat(sep=" ")
     elif isinstance(value, (dt.date, dt.time)):
         value = value.isoformat()
-    return " ".join(str(value).split()).replace("|", "\\|")
+    lines = (" ".join(line.split()) for line in str(value).splitlines())
+    return "<br>".join(line for line in lines if line).replace("|", "\\|")
 
 
 SPAN = "\x00span"  # 横向合并跨过的格（读表时的记号，写出时是空格子）
 # 栏目名常见的结尾字：表头行的格子大多以这些字结尾（“产品名称”“序号”“生产日期”“检验结果”）
-_HEADER_ENDINGS = set("号称期名人位量型格别注果据构间址况见由款节类式求准系目容品业次话箱级源标数率值限码种"
+_HEADER_ENDINGS = set("号称期名人位量型格别注果据构间址况见由款节类式求准系目容品业次话箱级源标数率值限码种例"
                       "容况员门商地点域途法项件证书限价额径度态性因施理议核查论述明识")
 
 
@@ -49,13 +53,19 @@ def _real(cell) -> str:
     return "" if cell == SPAN else cell
 
 
+def _named(row) -> tuple[int, list[str]]:
+    """(以栏目名常见的字结尾的格子数, 有字的格子)；“产品类别（一级）”按“产品类别”看。"""
+    cells = [re.sub(r"[（(][^）)]{1,20}[)）]$", "", c.replace("\\|", "").strip()) or c
+             for c in row if _real(c).strip()]
+    return sum(1 for c in cells if len(c) <= 20 and c[-1] in _HEADER_ENDINGS), cells
+
+
 def is_header_row(row) -> bool:
     """第一行像不像表头：有字的格子里至少 3/4 以栏目名常见的字结尾；或一半以上是、而且格子都是不带数字的短词
     （“情形 | 市场独占期 | 中药 | 化药 | 备注”）。两列的表（“企业名称 | 甲公司”这种字段名 | 值）要全是栏目名。"""
-    cells = [c.replace("\\|", "").strip() for c in row if _real(c).strip()]
+    named, cells = _named(row)
     if not cells:
         return False
-    named = sum(1 for c in cells if len(c) <= 20 and c[-1] in _HEADER_ENDINGS)
     if len(row) <= 2:
         return named == len(cells)
     short = all(len(c) <= 12 and not re.search(r"\d", c) for c in cells)
@@ -74,10 +84,22 @@ def _trim(rows: list[list[str]]) -> list[list[str]]:
     return [r[first:last + 1] for r in rows]
 
 
-def _lead_rows(rows):
-    """表格上方只有一个值的行（表名）：取出来写成表前的字；同一个表名纵向合并占两行的只写一次。"""
+def _title_row(row, titles) -> bool:
+    """表名行：只有一个值，格里没有分行。titles="merged"（Word、PDF、网页表格）：值所在的格还要横跨几列（右边是
+    SPAN）——“申请编号 | （空格子待填）”是表单的标签行，不是表名；"single"（Excel：表名常写在 A1、不合并）：一个值就算。"""
+    values = [i for i, c in enumerate(row) if _real(c)]
+    if len({row[i] for i in values}) != 1 or "<br>" in row[values[0]]:
+        return False
+    if titles == "single":
+        return True
+    first = values[0]
+    return first + 1 < len(row) and row[first + 1] == SPAN and all(c == SPAN or not c for c in row[first + 1:])
+
+
+def _lead_rows(rows, titles="merged"):
+    """表格上方的表名行（_title_row）：取出来写成表前的字；同一个表名纵向合并占两行的只写一次。"""
     lead = []
-    while len(rows) > 1 and len(rows[0]) > 1 and len({_real(c) for c in rows[0] if _real(c)}) == 1:
+    while len(rows) > 1 and len(rows[0]) > 1 and _title_row(rows[0], titles):
         value = next(c for c in rows[0] if _real(c))
         if not lead or lead[-1] != value:
             lead.append(value)
@@ -85,23 +107,53 @@ def _lead_rows(rows):
     return lead, rows
 
 
-def markdown_table(rows: list[list[str]], header: bool | None = None) -> str:
+def markdown_table(rows: list[list[str]], header: bool | None = None, titles: str = "merged") -> str:
     """二维字符串 → Markdown 表格；表格上方只有一个值的行写成单独一行字。不补空格。
     header：第一行是不是表头（None：按 is_header_row 看）；不是表头时表头行空着。"""
-    lead, rows = _lead_rows(_trim(rows))
+    lead, rows = _lead_rows(_trim(rows), titles)
     if not rows:
         return "\n\n".join(lead)
     rows = _merge_header_rows(rows)
     if len(rows[0]) == 1:  # 只有一列：不是表格，一行一段
         return "\n\n".join(lead + [_real(r[0]) for r in rows])
     width = len(rows[0])
-    if not (is_header_row(rows[0]) if header is None else header):
-        rows = [[""] * width] + rows
+    rows = _with_header(rows, header)
     rows = [[_real(c) for c in r] for r in rows]
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width]
     # 整行合并成一格的行（表中间的小标题“总体意见建议”）：值只写在第一格，不重复整行
     lines += ["| " + " | ".join(r if len(set(r)) > 1 else [r[0]] + [""] * (width - 1)) + " |" for r in rows[1:]]
     return "\n\n".join(lead + ["\n".join(lines)])
+
+
+def _full(row) -> bool:
+    """格子都有字（SPAN 算有字），四列以上的允许空一格（表头里空着的角）；至少两个格子有字（合并成一整格的
+    “单位/企业名称<br>填写人”是表单的一栏，不是栏目名）。"""
+    empty = sum(1 for c in row if c != SPAN and not c.strip())
+    values = sum(1 for c in row if _real(c).strip())
+    return values >= min(2, len(row)) and (empty == 0 or (len(row) >= 4 and empty == 1))
+
+
+def _with_header(rows, declared):
+    """表头放在第一行：第一行是表头（调用方说是，或像栏目名）而且格子都有字就是它；否则前几行里第一个格子都有字、
+    像栏目名的行当表头，它上面的行照原顺序放在表头下面；都没有就是“列1 | 列2 | …”（不拿数据行当表头）。"""
+    first = _full(rows[0]) and (is_header_row(rows[0]) if declared is None else declared)
+    grouped = sum(1 for c in rows[0] if c == SPAN or not c.strip()) * 2 >= len(rows[0])  # 上层分组行（大半是合并格）
+    if first and not grouped:
+        return rows
+    for i in range(1, min(HEADER_SEARCH_ROWS, len(rows))):
+        if _label_row(rows[i]):
+            return [rows[i]] + rows[:i] + rows[i + 1:]
+    return rows if first else [["列%d" % (k + 1) for k in range(len(rows[0]))]] + rows
+
+
+HEADER_SEARCH_ROWS = 4
+
+
+def _label_row(row) -> bool:
+    """表格中间的栏目名行（“序号 | 产品名称 | 产品描述 | …”）：三列以上、没有合并格、格子都有字、3/4 以上是栏目名。
+    比 is_header_row 严：表单里“产品名称 | 中文名称 | 甲”这种字段行不当表头。"""
+    named, cells = _named(row)
+    return len(row) >= 3 and SPAN not in row and _full(row) and named >= 0.75 * len(cells)
 
 
 def _filled(row):
@@ -202,7 +254,7 @@ def _parse_xlsx(file_path: str) -> str:
             grid[r - 1][c - 1] = value
         _fill_merged(grid, [(r0, r1, c0, min(c1, cols_n - 1)) for r0, r1, c0, c1 in merges.get(ws.title, [])
                             if r0 < rows_n and c0 < cols_n])
-        table = markdown_table(grid)
+        table = markdown_table(grid, titles="single")
         if table:
             sections.append((ws.title, table))
     wb.close()
@@ -243,7 +295,7 @@ def _parse_xls(file_path: str) -> str:
         grid = [[cell_text(_xls_value(sheet.cell(i, j), wb.datemode)) for j in range(sheet.ncols)]
                 for i in range(sheet.nrows)]
         _fill_merged(grid, [(r0, r1 - 1, c0, c1 - 1) for r0, r1, c0, c1 in getattr(sheet, "merged_cells", [])])
-        table = markdown_table(grid)
+        table = markdown_table(grid, titles="single")
         if table:
             sections.append((sheet.name, table))
     return _join_sheets(sections)

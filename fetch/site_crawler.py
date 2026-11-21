@@ -126,7 +126,7 @@ def _article_record(site, key):
         conn.execute(text("SET LOCAL statement_timeout='10s'"))
         return conn.execute(text(
             "SELECT source_record_id FROM fabric_versions WHERE source_id=:s AND source_record_id LIKE :p "
-            "AND position('#' in source_record_id)=0 GROUP BY source_record_id "
+            "AND position('#' in source_record_id)=0 AND replaced_by IS NULL GROUP BY source_record_id "
             "ORDER BY min(first_seen_at), source_record_id LIMIT 1"), {"s": site, "p": "%/" + key + ".html"}).scalar()
 
 

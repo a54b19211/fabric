@@ -32,7 +32,8 @@ from fetch.evidence_types import FINE_TYPES, UNKNOWN, categories_of, document_ca
 PROCESSOR_VERSION = "datafabric.profile.v5"
 WEAK_CHARS = 200
 
-DEGRADING = ("field_truncated", "no_abstract", "no_title", "html_sup_sub_unpaired", "summary_missing")
+DEGRADING = ("field_truncated", "no_abstract", "no_title", "html_sup_sub_unpaired", "summary_missing",
+             "attachment_missing_glyphs")
 BREAKING = ("no_body", "invalid_json", "not_a_record")
 
 # 可信度类别按证据细类取自注册表（fetch.evidence_types），这里不另写一份

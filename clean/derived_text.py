@@ -56,7 +56,8 @@ def _parse(conn, facts):
     否则解析这个文件。"""
     reused = conn.execute(
         text("""
-          SELECT d.text, d.parse_method, d.file_ext, d.locator_kind, d.segments FROM derived_clean_text d
+          SELECT d.text, d.parse_method, d.file_ext, d.locator_kind, d.segments, d.parse_attempts, d.error
+          FROM derived_clean_text d
           JOIN fabric_versions v ON v.version_id=d.version_id
           WHERE d.processor_version=ANY(:pvs) AND d.status='parsed' AND v.payload->'facts'->>'sha256'=:sha
           ORDER BY d.processor_version=:pv DESC, d.created_at LIMIT 1
@@ -65,11 +66,14 @@ def _parse(conn, facts):
          "pvs": [attachment_parse.PROCESSOR_VERSION, *attachment_parse.REUSABLE_VERSIONS]},
     ).mappings().first()
     if reused:
-        # 复用的旧结果也过一遍“大文件几乎没字”的判断：扫描件以前记成了只有几个字的 parsed
+        # 复用的旧结果也过一遍“大文件几乎没字”的判断：扫描件以前记成了只有几个字的 parsed。
+        # 原结果的缺字记号（attempts 里的 missing_glyphs、error）照带过来（第三轮审计 D1：以前复用时丢了）
+        flags = [a for a in (reused["parse_attempts"] or []) if ":missing_glyphs:" in str(a)]
+        error = reused["error"] if str(reused["error"] or "").startswith("missing_glyphs:") else None
         return attachment_parse.without_text_layer(
             {"status": "parsed", "text": reused["text"], "file_ext": reused["file_ext"],
-             "parse_method": "reused_same_sha256:" + str(reused["parse_method"]), "error": None,
-             "attempts": ["reused_same_sha256"], "segments": reused["segments"],
+             "parse_method": "reused_same_sha256:" + str(reused["parse_method"]), "error": error,
+             "attempts": ["reused_same_sha256", *flags], "segments": reused["segments"],
              "locator_kind": reused["locator_kind"]}, int(facts.get("size") or 0))
     return attachment_parse.parse_file(
         store_path=facts.get("store_path"), sha256=facts.get("sha256"), file_ext=facts.get("file_ext")

@@ -19,6 +19,14 @@
 - 字间空格：中文和“/”之间的空格去掉（“少发 /罕见”）；两段分开画的英文词，后一段大写开头的补空格（“forKids”）；
 - 没有 Unicode 映射的字（中文字体子集用单字节编码、又没有 ToUnicode 表：红头、个别标题）：文字层里读出来是乱码
   或空白，这些字不收，页号记进 missing_glyph_pages（解析结果的 warnings），不编造。
+
+第三轮审计（D1/D2）：
+- 缺字：没有字码映射的字体画的字按指令里的字节数（不是可打印英文字符的字节），不按读出来的字数；
+  页面上画的图片（高宽都不小于 IMAGE_MIN_SIDE 点）也算这一页有读不出的字：四川局通告、星光计划的红头、标题、
+  子附件的“附件 1”是贴在页面上的图片，文字层里只有空格，以前没有标记；
+- 接段：行尾“：”但括号还没闭合的（“技术问题（包括但不限于：”）不算段落结束；“附件：1.……（星光计划）”折下来对齐在
+  编号后面的“申报指南”接回去；下一行以项目符号开头的不接；“第三章）和/或……”不是编号开头；
+- 中文和“/”“-”之间不加空格（“国家/地区”“局限性/不确定性”“暴露-效应”）；Wingdings 的 ➢ 照原样（headings.symbol）。
 """
 
 from __future__ import annotations
@@ -30,7 +38,9 @@ import re
 from clean.excel_parser import SPAN, markdown_table
 
 _END_PUNCT = "。：:；;！!？?"
-_LIST_START = re.compile(r"^(?:[一二三四五六七八九十]+[、．.]|[（(][一二三四五六七八九十\d]+[)）]|\d+[、．.]|第[一二三四五六七八九十\d]+[章节条])")
+_LIST_START = re.compile(r"^(?:[一二三四五六七八九十]+[、．.]|[（(][一二三四五六七八九十\d]+[)）]|\d+[、．.]|"
+                         r"第[一二三四五六七八九十\d]+[章节条](?![）)，,、。；;]))")
+_LISTING = re.compile(r"附\s*[件表]?\s*[：:]")  # “附件：1.……”清单，折下来的行对齐在编号后面
 _NUMBER_GAP = re.compile(r"^\S{1,5}? {2,}")  # 行首编号或项目符号后面的缩进
 _BULLETS = "•◆-" + "".join(map(chr, (0xF0B7, 0xF06C, 0xF0A7, 0xF0D8, 0xF076)))  # 项目符号（含 Word 符号字体的私用区字符）
 _PAGE_NUMBER = re.compile(r"^[-—–]\s*\d+\s*[-—–]$")
@@ -51,7 +61,7 @@ def join_cjk(a: str, b: str) -> str:
     if ord(a[-1]) > 127 and ord(b[0]) > 127:
         return a + b
     if ord(a[-1]) > 127 or ord(b[0]) > 127:
-        return a + b if a[-1] in "（(《“" or b[0] in "，。、；：）)》”" else a + " " + b
+        return a + b if a[-1] in "（(《“/-" or b[0] in "，。、；：）)》”/-" else a + " " + b
     return a + " " + b
 
 
@@ -63,7 +73,10 @@ class _Page:
     def __init__(self, page):
         self.frags, self.h, self.v, self.missing = [], [], [], 0
         self._path, self._cur, self._start = [], None, None
+        self._fonts, self._unmapped_font, self._missing_codes = _page_fonts(page), False, 0
+        self._images, self.images = _page_images(page), 0
         page.extract_text(visitor_operand_before=self._op, visitor_text=self._text)
+        self.missing = max(self.missing, self._missing_codes) + self.images
 
     # -- 字 --
     def _text(self, text, cm, tm, font, size):
@@ -93,7 +106,14 @@ class _Page:
             return (cm[0] * x + cm[2] * y + cm[4], cm[1] * x + cm[3] * y + cm[5])
 
         try:
-            if op == b"re":
+            if op == b"Tf":
+                self._unmapped_font = _unmapped(self._fonts.get(str(args[0])))
+            elif op in (b"Tj", b"TJ", b"'", b'"') and self._unmapped_font:
+                self._missing_codes += _drawn_codes(args)
+            elif op == b"Do" and str(args[0]) in self._images \
+                    and min(abs(cm[0]) + abs(cm[2]), abs(cm[1]) + abs(cm[3])) >= IMAGE_MIN_SIDE:
+                self.images += 1  # 贴在页面上的图片（红头、图片标题、印章）：里面的字文字层里没有
+            elif op == b"re":
                 x, y, w, h = (float(a) for a in args[:4])
                 self._path.append(("rect", pt(x, y), pt(x + w, y + h)))
             elif op == b"m":
@@ -132,6 +152,39 @@ class _Page:
                 elif w < 1 and h > 3:
                     self.v.append((x0, y0, y1))
         self._path, self._cur = [], None
+
+
+def _page_fonts(page) -> dict:
+    """这一页的字体字典 {资源名: 字体}（读不出就空）。"""
+    try:
+        fonts = (page.get("/Resources") or {}).get_object().get("/Font") or {}
+        return {str(k): v.get_object() for k, v in fonts.get_object().items()}
+    except Exception:  # noqa: BLE001 -- 资源读不出：不按字体判缺字
+        return {}
+
+
+IMAGE_MIN_SIDE = 10  # 点；更细的是装饰线
+
+
+def _page_images(page) -> set:
+    """这一页资源里的图片 XObject 名字（读不出就空）。"""
+    try:
+        objects = (page.get("/Resources") or {}).get_object().get("/XObject") or {}
+        return {str(k) for k, v in objects.get_object().items() if v.get_object().get("/Subtype") == "/Image"}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _drawn_codes(args) -> int:
+    """Tj/TJ 指令里画的字节中不是可打印英文字符的个数（没有字码映射的中文字体画的汉字；数字、英文、标点照收）。"""
+    count = 0
+    for arg in args:
+        items = arg if isinstance(arg, list) else [arg]
+        for item in items:
+            raw = getattr(item, "original_bytes", item)
+            if isinstance(raw, (bytes, bytearray)):
+                count += sum(1 for b in raw if not 0x20 <= b <= 0x7E)
+    return count
 
 
 def _ascii_only(text: str) -> str:
@@ -225,7 +278,7 @@ def _lines(frags):
             end = f["x"] + _width(piece, f["size"])
         text = re.sub(r" {3,}", "  ", text.strip())
         text = re.sub(r"(?<![ \x00-\x7f]) (?![ \x00-\x7f])", "", text)  # 两端对齐撑出来的中文字间空格
-        text = re.sub(r"(?<=[^\x00-\x7f]) (?=/)|(?<=/) (?=[^\x00-\x7f])", "", text)  # “少发 /罕见”
+        text = re.sub(r"(?<=[^\x00-\x7f]) (?=[/-])|(?<=[/-]) (?=[^\x00-\x7f])", "", text)  # “少发 /罕见”“暴露 -效应”
         if text:
             out.append((items[0]["y"], items[0]["x"], end, text, max(f["size"] for f in items)))
     return out
@@ -312,8 +365,11 @@ def _paragraphs(lines) -> list[str]:
         # 编号、项目符号开头的段落是悬挂缩进：折下来的行对齐编号后面的字（比这一段第一行靠右一两个字）
         hanging = _LIST_START.match(current) or current[:1] in _BULLETS
         limit = (first + 2.5 * size) if hanging else (left + 0.5 * size)
+        if _LISTING.match(current):  # “附件：1.……”：折下来的行对齐在“1.”后面的字
+            limit = first + 6 * size
         tail = nearly and len(text) <= 4  # 折下来只剩一两个字（“……未满足的临床需”“求”），上一行差一点写满
-        if current and (joinable or tail) and x0 <= limit and not _LIST_START.match(text):
+        if current and (joinable or tail) and x0 <= limit and not _LIST_START.match(text) \
+                and text[:1] not in _BULLETS:
             current = join_cjk(current, text)
         else:
             if current:
@@ -328,7 +384,8 @@ def _paragraphs(lines) -> list[str]:
 def _open_line(text, x1, right, size):
     """(这一行写满了、句子没完：下一行接上；差一点写满：下一行只剩一两个字也接上)。行里隔得远的两段（落款、两栏）
     不接；行首编号、项目符号后面的缩进（“1.  本实施框架”“•  拟开发”）不算隔得远。"""
-    open_end = text[-1] not in _END_PUNCT and text[-1] != "."
+    unclosed = text.count("（") + text.count("(") > text.count("）") + text.count(")")
+    open_end = (text[-1] not in _END_PUNCT and text[-1] != ".") or (text[-1] in "：:" and unclosed)
     joinable = x1 >= right - 4 * size and open_end and "  " not in _NUMBER_GAP.sub("", text)
     return joinable, x1 >= right - 8 * size and len(text) >= 15 and open_end and "  " not in text
 

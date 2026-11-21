@@ -21,6 +21,10 @@ zip，正文就在 XML 里，不需要版面识别。
 - 修订：按“接受全部修订”的样子读，修订里删掉的字（w:del / w:delText）不读；
 - w:tab 记成空格，w:br 记成换行。页眉页脚不读。没有页码：块定位用第几块（locator_kind=block）。
 reference_chars：document.xml 里全部文字（w:t）的字数，解析结果的完整性对照（clean.attachment_parse.incomplete）。
+
+第三轮审计（2026-11-21）：格子里的软换行（w:br）和分段一样用 <br> 隔开（“（一）……<br>（二）……”、“1.×××<br>2.……”
+各占一行，D6；窄表头里拆开的一个词“药品”“名称”照旧接上）；段落里的软换行是换行；上下标（w:vertAlign）按
+headings.scripted 写（“β₂”“C₂₁H₂₅N₃O₂S”，N4）。
 """
 
 from __future__ import annotations
@@ -35,7 +39,6 @@ from lxml import etree
 
 from clean import headings
 from clean.excel_parser import SPAN, markdown_table
-from clean.pdf_text import join_cjk
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
@@ -219,7 +222,15 @@ class _Reader:
             elif tag in (_MC_FALLBACK, _W + "pPr", _W + "del", _W + "rPr"):
                 continue
             elif tag == _W + "r":
-                self._runs(child, out, boxes, self._bold(child, bold))
+                place = _val(child.find(_W + "rPr"), _W + "vertAlign")
+                if place in ("superscript", "subscript"):  # 上标、下标：β₂、10⁶，没有对应字符的写 ^(…)/_(…)
+                    inner = []
+                    self._runs(child, inner, boxes, self._bold(child, bold))
+                    raw = "".join(t for t, _ in inner)
+                    script = headings.scripted(raw, "sup" if place == "superscript" else "sub") if raw.strip() else raw
+                    out.append((script, self._bold(child, bold)))
+                else:
+                    self._runs(child, out, boxes, self._bold(child, bold))
             elif isinstance(tag, str):
                 self._runs(child, out, boxes, bold)
 
@@ -278,15 +289,12 @@ class _Reader:
                 yield child
 
     def cell_text(self, tc, boxes) -> str:
-        """一格的字：一段一段用 <br> 隔开（“单位/企业名称”“填写人”两段不粘成一串）；一段里的换行（w:br）接起来，
-        中文之间不加空格（“药品\\n名称”→“药品名称”）。"""
+        """一格的字：一段一段、一段里的软换行（w:br）一行一行，都用 <br> 隔开（“单位/企业名称”“填写人”、
+        “（一）……”“（二）……”各占一行）；窄表头里拆开的一个词（“药品”“名称”）直接接上（_join_cell）。"""
         paragraphs = []
         for child in self._flat(tc):
             if child.tag == _W + "p":
-                text = ""
-                for part in self.paragraph(child, boxes, headings=False).split("\n"):
-                    text = join_cjk(text, " ".join(part.split()))
-                paragraphs.append(text)
+                paragraphs += [" ".join(part.split()) for part in self.paragraph(child, boxes, headings=False).split("\n")]
             elif child.tag == _W + "tbl":  # 格子里嵌套的表格：字算在这一格里
                 paragraphs += [" ".join(dict.fromkeys(_c for _c in row if _c and _c != SPAN))
                                for row in self.rows(child, boxes)[0]]

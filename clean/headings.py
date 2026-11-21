@@ -13,6 +13,16 @@ NMPA 审计第二轮（复查 A-D2/D7、B-D2/D4/D5/D8、C-A2/A3）。
   “附件：1.… 2.…”目录里的行从来不是标题（调用方按 listing 跳过）；目录（TOC）行、页码行不是标题。
 级别按编号样式在全文里的从属关系定（assign_levels）：附件分隔 > 无编号标题 > 编 > 章 > 节 > 条 > 一、 > 问句 > （一）
 > 1. > 1.1 > 1.1.1；文中出现了哪几种就依次排成 ##、###……（# 留给文件标题）。
+
+第三轮审计（2026-11-21）：
+- 居中的短行（页面 text-align:center，或用全角空格缩进到中间）是标题，不要求加粗，可带括号（页面 D4）；
+- “（三）联系方式：马 静 010-……”这种“字段：内容”的行不是标题（加粗的除外，页面 D2）；以“：”结尾的编号标题，
+  前后同级的编号行都是正文时是引出清单的导语，不是标题（附件 D7；同级都是标题的“一、警示语应包含：”照旧）；
+  “请仔细阅读说明书……”这种以“请/务必/注意”开头的提示句不是标题（附件 D7）；
+- “附件：1.… 2.…”清单里的行即使 Word 里已标成标题也不是标题（附件 D4）；
+- 星号只在可能成对（同一行、同一格里两个以上）或行首“* ”时转义（N2）；
+- 上下标（scripted）：都有 Unicode 上下标字符的（数字、+、−、=、括号）换成 ¹²³/₁₂₃，否则写成 ^(…)/_(…)
+  （和文献清洗 clean_text._mark_scripts 同一写法，N4）。
 """
 
 from __future__ import annotations
@@ -42,6 +52,9 @@ _BODY_PUNCT = re.compile(r"[。；;！!]")
 _COMMA = re.compile(r"[，,]")
 _TOC = re.compile(r"(?:…{2,}|\.{4,}|·{4,}|-{4,})\s*\d{1,3}$")
 _QUESTION_START = re.compile(r"问\s*[：:]")
+_FIELD = re.compile(r"[^：:]{1,20}[：:]\s*\S")  # “字段：内容”（冒号后面还有字）
+_NOTICE = re.compile(r"(?:请|务必|注意|严禁|禁止|必须)")  # 提示句的开头
+_BARE_ATTACHMENT = re.compile(r"附\s*[件表]")
 MAX_CHARS = 40
 MAX_QUESTION = 80
 MAX_EMPHASIZED = 120  # 整行加粗的编号标题（“十一、出口和接受委托生产出口麻醉药品……的说明”有 96 字）
@@ -55,15 +68,16 @@ def numbered_kind(line: str) -> str | None:
     return "tiao" if _ARTICLE.match(line) else None
 
 
-def rank(line: str, *, emphasized: bool = False, styled: bool = False) -> str | None:
-    """这一行若是小标题，给出它的编号样式（RANKS 之一），否则 None。emphasized：整行加粗；styled：作者设了标题样式。"""
+def rank(line: str, *, emphasized: bool = False, styled: bool = False, centered: bool = False) -> str | None:
+    """这一行若是小标题，给出它的编号样式（RANKS 之一），否则 None。emphasized：整行加粗；styled：作者设了标题样式；
+    centered：居中的行。"""
     s = " ".join((line or "").split())
     if _never(s):
         return None
     if _SEPARATOR.fullmatch(s) and not _BODY_PUNCT.search(s):
         return "sep"
     question = "？" in s or s.endswith("?") or bool(_QUESTION_START.match(s))
-    if _BODY_PUNCT.search(s):  # 带句号、分号、感叹号的是句子
+    if _sentence(s, question, emphasized):
         return None
     kind = numbered_kind(s)
     if kind == "tiao":
@@ -72,7 +86,21 @@ def rank(line: str, *, emphasized: bool = False, styled: bool = False) -> str | 
         return None
     if kind:
         return kind if not _COMMA.search(s) or question or emphasized else None
+    if centered and _centered_title(s):
+        return "u"
     return _unnumbered(s, question, emphasized or styled)
+
+
+def _sentence(s, question, emphasized) -> bool:
+    """句子（带句号、分号、感叹号），或“（三）联系方式：马 静 010-……”这种“字段：内容”（加粗、问句除外）。"""
+    return bool(_BODY_PUNCT.search(s)) or (not question and not emphasized and bool(_FIELD.match(s)))
+
+
+def _centered_title(s) -> bool:
+    """居中的短题名（“疫苗生产场地变更质量可比性研究技术指导原则”“严重缺陷(举例)”）：可带括号，不带逗号、冒号、
+    顿号，不是日期、电话一类的长数字、提示句，不是单独的“附件”。"""
+    return len(s) <= MAX_PLAIN and not _NOTICE.match(s) and not _BARE_ATTACHMENT.fullmatch(s) \
+        and not re.search(r"[，,：:、；;]|\d\s*[年月日]|\d{3,}", s)
 
 
 def _never(s) -> bool:
@@ -85,7 +113,7 @@ def _unnumbered(s, question, marked) -> str | None:
     """不带编号的行：“问：”开头的问句，或加粗（标题样式）的问句、短行。"""
     if question and (marked or _QUESTION_START.match(s)):
         return "q"
-    if marked and len(s) <= MAX_PLAIN and not re.search(r"[，,：:、；;（(]|\d\s*[年月日]", s):
+    if marked and len(s) <= MAX_PLAIN and not _NOTICE.match(s) and not re.search(r"[，,：:、；;（(]|\d\s*[年月日]", s):
         return "u"
     return None
 
@@ -120,7 +148,7 @@ def mark(text: str, level: int) -> str:
 _PUA = re.compile("[-\U000f0000-\U000ffffd\U00100000-\U0010fffd]")
 # Word 符号字体（Wingdings/Symbol）的私用区字符里常见的项目符号和勾选框
 _KNOWN_SYMBOLS = {
-    "": "•", "": "•", "": "•", "": "•", "": "◆", "": "◆", "": "◆",
+    "": "•", "": "•", "": "•", "": "•", "": "➢", "": "◆", "": "◆",
     "": "□", "": "□", "": "□", "": "□", "": "□",
     "": "☑", "": "☑", "": "☒", "": "☒", "": "✓",
 }
@@ -136,23 +164,54 @@ def strip_private_use(text: str) -> str:
     if not text or not _PUA.search(text):
         return text
     out = _PUA.sub(lambda m: symbol(m.group(0)), text)
-    return re.sub(r"(?m)^([•◆])(?=\S)", r"\1 ", re.sub(r"[ \t]+\n", "\n", out))
+    return re.sub(r"(?m)^([•◆➢])(?=\S)", r"\1 ", re.sub(r"[ \t]+\n", "\n", out))
 
 
 _MD_SPECIAL = re.compile(r"(?<!\\)\*")
 
 
+_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+
+
+def _escape_piece(piece: str) -> str:
+    """一段字里的星号：可能成对（两个以上：“**ml……**mg”“***”）或在开头当列表记号（“* ”）才转义；单个“*”原样。"""
+    if len(_MD_SPECIAL.findall(piece)) >= 2 or re.match(r"\s*\*(?:\s|$)", piece):
+        return _MD_SPECIAL.sub(r"\\*", piece)
+    return piece
+
+
 def escape_stars(text: str) -> str:
-    """只转义星号（已转义的不再转义）：表格、PDF 正文里的“**ml”“*”不当加粗。"""
-    return _MD_SPECIAL.sub(r"\\*", text or "")
+    """星号转义（已转义的不再转义），只在会被当成加粗、斜体、列表记号的地方（N2）：按行看，表格行按格看。"""
+    out = []
+    for line in (text or "").split("\n"):
+        if line.lstrip().startswith("|"):
+            out.append("|".join(_escape_piece(cell) for cell in _CELL_SPLIT.split(line)))
+        else:
+            out.append(_escape_piece(line))
+    return "\n".join(out)
 
 
 def escape_markdown(text: str) -> str:
-    """来源文字里的 Markdown 记号：星号转义（“**ml”不当加粗），行首的 # 转义（不当标题）。"""
+    """来源文字里的 Markdown 记号：会成对的星号转义（“**ml”不当加粗），行首的 # 转义（不当标题）。"""
     if not text:
         return text
-    text = _MD_SPECIAL.sub(r"\\*", text)
-    return re.sub(r"(?m)^(\s*)#", r"\1\\#", text)
+    return re.sub(r"(?m)^(\s*)#", r"\1\\#", escape_stars(text))
+
+
+_SUPER = dict(zip("0123456789+-−=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁻⁼⁽⁾"))
+_SUB = dict(zip("0123456789+-−=()", "₀₁₂₃₄₅₆₇₈₉₊₋₋₌₍₎"))
+
+
+def scripted(text: str, kind: str) -> str:
+    """上标（kind="sup"）、下标（"sub"）的字：每个字都有 Unicode 上下标的（β₂、10⁶、Ca²⁺）换成上下标字符，
+    否则写成 ^(…)/_(…)（文献清洗 clean_text._mark_scripts 的写法）。"""
+    s = (text or "").strip()
+    table = _SUPER if kind == "sup" else _SUB
+    if not s:
+        return text or ""
+    if all(c in table for c in s):
+        return "".join(table[c] for c in s)
+    return ("^(" if kind == "sup" else "_(") + s + ")"
 
 
 _LIST_NUMBER = re.compile(r"\d{1,2}[.．、]")
@@ -169,15 +228,20 @@ def _items(blocks, promote):
         if not s:
             continue
         found = _MD_HEADING.fullmatch(s) if "\n" not in s else None
-        if found:
+        if found and listing and _LIST_NUMBER.match(found.group(2)):  # 清单里的“2.xxx”：Word 里标成标题也不是（附件 D4）
+            items.append([found.group(2).strip(), None])
+        elif found:
             items.append([found.group(2).strip(), kind_of_heading(found.group(2))])
             listing = False
-        elif "\n" in s or s.startswith("|") or not promote:
+        elif "\n" in s or s.startswith("|"):
             items.append([s, None])
-            listing = listing and not ("\n" in s or s.startswith("|"))
+            listing = False
         elif LISTING_START.match(s) or (listing and (_LIST_NUMBER.match(s) or (_LISTING_TAIL.fullmatch(s) and not _SEPARATOR.fullmatch(s)))):
             items.append([s, None])
-            listing = True
+            listing = True  # 清单的状态不论 promote 都要记：Word 里已标成标题的清单行靠它认出来（附件 D4）
+        elif not promote:
+            items.append([s, None])
+            listing = False
         else:
             listing = False
             parts = split_article(s)
@@ -200,6 +264,31 @@ def _drop_toc_headings(items):
                 items[i][1] = None
 
 
+_NUMBER_KINDS = ("cn", "pcn", "d1", "d2", "d3")
+
+
+def _sibling(items, i, step):
+    """第 i 项前（step=-1）或后（step=1）最近的同级编号行（标题或正文都算）；隔着上一级的标题就没有。"""
+    kind, j = items[i][1], i + step
+    while 0 <= j < len(items):
+        text, k = items[j]
+        if k and RANKS.index(k) < RANKS.index(kind):
+            return None
+        if numbered_kind(" ".join(text.split())) == kind:
+            return items[j]
+        j += step
+    return None
+
+
+def _drop_lead_ins(items):
+    """以“：”结尾的编号标题，前后同级的编号行都是正文：它是引出清单的导语（“（二）……属于下列品种之一：”），不是标题。"""
+    for i, (text, kind) in enumerate(items):
+        if kind in _NUMBER_KINDS and text.rstrip().endswith(("：", ":")):
+            near = [x for x in (_sibling(items, i, -1), _sibling(items, i, 1)) if x]
+            if near and not any(k for _, k in near):
+                items[i][1] = None
+
+
 def relevel(markdown: str, *, promote: bool = False, base: int = 2) -> str:
     """整篇的小标题按编号样式重排级别（多页文章各页、附件各部分用同一套级别）。开头的“# 标题”保留为第 1 级。
     附件分隔行后面正文太少的不当标题；文末没有内容的标题退成普通段落。"""
@@ -218,6 +307,7 @@ def relevel(markdown: str, *, promote: bool = False, base: int = 2) -> str:
             break
         item[1] = None
     _drop_toc_headings(items)
+    _drop_lead_ins(items)
     levels = assign_levels([k for _, k in items if k], base)
     out = ([title] if title else []) + [mark(t, levels[k]) if k else t for t, k in items]
     return "\n\n".join(out)

@@ -38,8 +38,8 @@ def no_mineru(monkeypatch):
 
 
 def test_markdown_table_has_no_padding_and_title_row_becomes_text():
-    table = markdown_table([["2017年统计表", "2017年统计表", ""], ["序号", "名称", ""], ["1", "甲", ""], ["", "", ""]])
-    assert table == "2017年统计表\n\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 甲 |"
+    rows = [["2017年统计表", "2017年统计表", ""], ["序号", "名称", ""], ["1", "甲", ""], ["", "", ""]]
+    assert markdown_table(rows, titles="single") == "2017年统计表\n\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 甲 |"  # Excel
 
 
 def test_xlsx_declared_whole_sheet_merged_cells_and_newlines(tmp_path):
@@ -68,7 +68,7 @@ def test_xlsx_declared_whole_sheet_merged_cells_and_newlines(tmp_path):
     md = excel_to_markdown(str(path))
     # 只有一个 Sheet：不写“## 表1”；表名整行合并只写一次；纵向合并往下带
     assert md == ("反馈表\n\n| 序号 | 章节 | 意见 |\n| --- | --- | --- |\n"
-                  "| 1 | 第一章 | 第一行 第二行 \\| 竖线 |\n| 2 | 第一章 | 无 |")
+                  "| 1 | 第一章 | 第一行<br>第二行 \\| 竖线 |\n| 2 | 第一章 | 无 |")  # 格内换行 <br>（N3）
 
 
 def test_excel_two_row_title_once_horizontal_merge_once_and_no_header_row():
@@ -79,7 +79,7 @@ def test_excel_two_row_title_once_horizontal_merge_once_and_no_header_row():
     assert markdown_table([["序号", "申请分类", SPAN, SPAN], ["1", "□ 甲", "", "x"]]).splitlines()[0] == \
         "| 序号 | 申请分类 |  |  |"  # 横向合并：值只写一次，不是“申请分类 | 申请分类 | 申请分类”
     assert markdown_table([["心脏疾病", "心肌缺血", "未知"], ["精神异常", "失眠", "未知"]]).splitlines()[:3] == [
-        "|  |  |  |", "| --- | --- | --- |", "| 心脏疾病 | 心肌缺血 | 未知 |"]  # 没有表头行：不把数据当表头
+        "| 列1 | 列2 | 列3 |", "| --- | --- | --- |", "| 心脏疾病 | 心肌缺血 | 未知 |"]  # 没有表头行：不把数据当表头
     assert _join_sheets([("Sheet1", "| a |")]) == "| a |" and _join_sheets([("甲", "x"), ("乙", "y")]) == \
         "## 甲\n\nx\n\n## 乙\n\ny"
 
@@ -231,4 +231,4 @@ def test_result_far_shorter_than_the_reference_is_incomplete_not_parsed(tmp_path
 
 
 def test_old_versions_are_not_reused():
-    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v5"
+    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v6"

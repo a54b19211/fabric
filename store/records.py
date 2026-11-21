@@ -238,6 +238,7 @@ def _publish(conn, run, prepared, now, coverage, *, error=None, available_at=Non
         new_ids.append(version_id)
     _link_attachments(conn, run, prepared, version_ids)
     _retire_unlisted_attachments(conn, source_id, is_demo, prepared, version_ids)
+    _retire_mirrors(conn, source_id, is_demo, prepared, version_ids)
     conn.execute(text("UPDATE fabric_sources SET published_seq=:seq WHERE source_id=:id"),
                  {"seq": seq, "id": source_id})
     _close_run(conn, run, version_ids, new_ids, coverage, error, now)
@@ -275,6 +276,28 @@ def _retire_unlisted_attachments(conn, source_id, is_demo, prepared, version_ids
                     "UPDATE fabric_versions SET replaced_by=:page WHERE source_id=:source AND is_demo=:demo "
                     "AND source_record_id=:record AND replaced_by IS NULL"),
                     {"page": version_id, "source": source_id, "demo": is_demo, "record": stale})
+
+
+# 网页记录号末尾的文章编号（NMPA 详情页文件名里的时间戳：/xxgk/…/20201229164649143.html）
+_ARTICLE_FILE = re.compile(r"/(\d{12,})\.html$")
+
+
+def _retire_mirrors(conn, source_id, is_demo, prepared, version_ids):
+    """同一篇文章的另一个地址（NMPA /yaopin/ypggtg/<编号>.html 镜像，旧库迁来的）还有现行记录：来源自己读到这一篇的
+    网页版本（web_capture）以后，镜像地址的现行版本（页面和它的附件）退出现行，replaced_by 指向这个页面版本
+    （第三轮审计页面 D1：只补 replaced_by，不删原件）。按文章编号找，只看记录号以“/<编号>.html”结尾的和它的附件。"""
+    for (item, projected), version_id in zip(prepared, version_ids):
+        found = _ARTICLE_FILE.search(item.source_record_id)
+        if (projected.get("facts") or {}).get("role") != "web_capture" or _role(projected) != "source_record" \
+                or not found:
+            continue
+        conn.execute(text(
+            "UPDATE fabric_versions SET replaced_by=:page WHERE source_id=:source AND is_demo=:demo "
+            "AND replaced_by IS NULL AND source_record_id LIKE :pattern "
+            "AND split_part(source_record_id, '#', 1) <> :record "
+            "AND split_part(source_record_id, '#', 1) LIKE :tail"),
+            {"page": version_id, "source": source_id, "demo": is_demo, "record": item.source_record_id,
+             "pattern": "%/" + found.group(1) + ".html%", "tail": "%/" + found.group(1) + ".html"})
 
 
 def _insert_version(conn, run, item, projected, version_id, fp, seq, now, available_at):

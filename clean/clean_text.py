@@ -43,7 +43,10 @@ from json.decoder import scanstring
 # brings that context into every chunk; its sub-headings follow clean/headings.py (the same rule as the pages, levels by
 # numbering pattern), private-use characters are removed or mapped to visible symbols.
 # v17 (2026-11-21): stars in NMPA attachment text (Excel cells, PDF lines) are escaped too, not only Word text.
-PROCESSOR_VERSION = "datafabric.clean_text.v17"
+# v18 (2026-11-21, NMPA round-3 audit): attachment title = the whole title block (or the full link text), "附件2 ："
+# prefix noise normalized; stars escaped only where they could pair; header-less tables get a header; a PDF attachment
+# with unreadable glyphs carries the warning attachment_missing_glyphs:<pages>.
+PROCESSOR_VERSION = "datafabric.clean_text.v18"
 
 # ---------------------------------------------------------------- 空白与语言
 

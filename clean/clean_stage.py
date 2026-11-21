@@ -129,9 +129,16 @@ def _clean_by_basis(source, inp, basis):
                              or ("/title" if seg.get("kind") == "title" else "/abstractText")}
         return out
     if basis == "attachment_with_parent":
-        return clean_text.clean_markdown(attachment_with_parent(inp["title"], inp["facts"], inp["text"],
-                                                                promote=inp.get("method") not in WORD_METHODS))
+        out = clean_text.clean_markdown(attachment_with_parent(inp["title"], inp["facts"], inp["text"],
+                                                               promote=inp.get("method") not in WORD_METHODS))
+        return {**out, "warnings": [*(out.get("warnings") or []), *_parse_warnings(inp.get("attempts"))]}
     return clean_text.clean_markdown(inp["markdown"], source_id=inp.get("source_id") or source)
+
+
+def _parse_warnings(attempts) -> list[str]:
+    """解析时记下的缺字（"pypdf_text:missing_glyphs:1,2"）→ 清洗正文的警告 attachment_missing_glyphs:1,2（第三轮审计 D1）。"""
+    return ["attachment_missing_glyphs:" + str(a).rsplit(":", 1)[1] for a in attempts or []
+            if ":missing_glyphs:" in str(a)][:1]
 
 
 # 附件自己成一份文档进知识库（审计 K3）：开头是附件名、所属公告的标题、文号和发布日期，检索命中附件时知道它是哪份公告的；
@@ -149,26 +156,52 @@ _BARE_LABEL = re.compile(r"(?:附件|附表)\d{0,2}[：:]?")
 CONTINUED_CHARS = 3000  # 没有小标题的长附件：每这么多字重复一次第 1 级标题（加“（续）”）
 
 
+_FORM_FIELD = re.compile(r"[^：:]{1,12}[：:]")  # 题名上面的“申请编号：（自动带入）”
+_TITLE_PUNCT = re.compile(r"[。；;，,：:]")
+_LABEL_NOISE = re.compile(r"^((?:附件|附表)\s*\d{1,2})\s*[：:.．、]\s*")  # “附件2 ：”“附件2.”后面接名字
+TITLE_MAX = 100
+
+
+def _title_part(line) -> bool:
+    return 2 <= len(line) <= 60 and not _TITLE_PUNCT.search(line) and not headings.numbered_kind(line) \
+        and not re.fullmatch(r"目\s*录", line) and not line.startswith(("请", "["))
+
+
 def _first_title(body) -> str:
-    """附件正文开头的文件题名（“附件1”下面那行“27批次不符合规定药品名单”）：前几段里第一个像题名的短行。"""
-    for block in (body or "").split("\n\n")[:8]:
+    """附件正文开头的文件题名：“附件1”下面连着的题名行全部接起来（第三轮审计 D3：“增设允许药材进口口岸工作评估
+    考核”“实施方案”，“放射性药品管理条例”“（征求意见稿）”）；题名上面的“申请编号：……”这类表单栏跳过。"""
+    parts, skipped = [], 0
+    for block in (body or "").split("\n\n")[:12]:
         line = block.strip().lstrip("#").strip()
-        if not line or "\n" in line or line.startswith("|") or _BARE_LABEL.fullmatch(line.replace(" ", "")):
+        if not line or _BARE_LABEL.fullmatch(line.replace(" ", "")):
+            if parts:
+                break
             continue
-        if 2 <= len(line) <= 60 and not re.search(r"[。；;，,：:]", line):
-            return line
-        return ""
-    return ""
+        if "\n" in line or line.startswith("|") or (parts and block.lstrip().startswith("#")):
+            break  # 表格；题名后面的小标题（“### 暖宫七味散说明书”）：题名到此为止
+        if _title_part(line):
+            parts.append(line)
+            continue
+        if not parts and skipped < 2 and _FORM_FIELD.match(line):
+            skipped += 1
+            continue
+        break
+    title = "".join(parts)
+    return title if len(title) <= TITLE_MAX else (parts[0] if parts else "")
 
 
 def attachment_name(file_name, body) -> str:
-    """附件的真实名字：文件名有名字就用它（去掉扩展名）；文件名只是“附件1”这类编号的，用“附件1 ”加正文开头的题名。"""
-    stem = _FILE_EXT.sub("", " ".join((file_name or "").split())).strip()
+    """附件的真实名字：文件名有名字就用它（去掉扩展名，“附件2 ：”写成“附件2 ”）；文件名只是“附件1”这类编号的，用
+    “附件1 ”加正文开头的整个题名；正文里没有题名的用整个链接文字（“国家药品监督管理局2024年第59号公告附件4”），
+    不只写“附件4”。"""
+    stem = _LABEL_NOISE.sub(r"\1 ", _FILE_EXT.sub("", " ".join((file_name or "").split())).strip())
     if stem and not _GENERIC_NAME.fullmatch(stem):
         return stem
     label = _LABEL.search(stem or "")
     title = _first_title(body)
-    return " ".join(x for x in ((label.group(1) + label.group(2)) if label else "", title) if x) or stem or "附件"
+    if title:
+        return " ".join(x for x in ((label.group(1) + label.group(2)) if label else "", title) if x)
+    return stem or "附件"
 
 
 def attachment_with_parent(file_name, facts, body, *, promote=True):
@@ -210,7 +243,8 @@ def _final_attachment_texts(conn, version_ids):
     if not version_ids:
         return {}
     rows = conn.execute(text(
-        "SELECT DISTINCT ON (version_id) version_id,status,text,attempt,parse_method FROM derived_clean_text "
+        "SELECT DISTINCT ON (version_id) version_id,status,text,attempt,parse_method,parse_attempts "
+        "FROM derived_clean_text "
         "WHERE version_id=ANY(:ids) AND processor_version=:pv ORDER BY version_id, attempt DESC"
     ), {"ids": list(version_ids), "pv": attachment_parse.PROCESSOR_VERSION}).mappings().all()
     return {r["version_id"]: dict(r) for r in rows
@@ -280,7 +314,8 @@ def _prepare_rows(conn, key, work, counts):
                 continue
             if r["source_id"] in ATTACHMENT_HEADER_SOURCES and done["status"] == "parsed" and done["text"]:
                 prepared.append((r, "attachment_with_parent", {"title": r.get("title"), "facts": r["facts"],
-                                                               "text": done["text"], "method": done.get("parse_method")}))
+                                                               "text": done["text"], "method": done.get("parse_method"),
+                                                               "attempts": done.get("parse_attempts")}))
                 continue
             prepared.append((r, None, done))
             continue

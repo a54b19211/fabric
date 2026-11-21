@@ -27,6 +27,15 @@ h3.two-title（副标题或文号，常为空）、div.share（分享按钮）�
 - 文号（“国药监药注〔2024〕1号”“2026年第42号”）从副标题或标题里取，写进 extra.doc_number，附件记录继承它。
 以前 extra 里的 drug_name / manufacturer / approval_number 是在正文里找“申请人”“企业名称”后面的几个字，
 抽出来的多是半句话（manufacturer=“自检工作”“受理日期”），不再抽。
+第三轮审计（2026-11-21）：
+- 加粗、居中按“行”看（_marked_lines）：一个 <p> 里用 <br> 分成几行时，整行加粗的那一行（落款后面的
+  “<strong>优化中药补充申请……工作方案</strong>”）是加粗行；以前按整个 <p> 看，同段里有不加粗的行就不算（页面 D5）。
+  居中：所在块 text-align:center / align=center，或行首用全角空格缩进到中间（不到右边，落款那种靠右的不算）；
+  同一块里连着的两行居中短题名（“疫苗生产场地变更质量可比性”“研究技术指导原则”）接成一个标题（页面 D4）；
+- 上标、下标（<sup>/<sub>）按 headings.scripted 写；
+- 图片：正文区（含表格单元格里）的图片都记进 extra.media（以前表格先换成了占位，格子里的图丢了）；正文有字又有图的，
+  content_in_media = "partial"（图里的字没有识别：二维码、格子里的网址图，页面 D2/D3）；
+- 日期栏里转载的“文章来源：……”写进 extra.source_note，不进正文；正文里后面什么都没列的“附件：”去掉（页面 D6）。
 """
 import re
 from urllib.parse import urljoin
@@ -37,7 +46,7 @@ from clean import headings
 from clean.clean_text import group_pipe_tables
 from clean.excel_parser import markdown_table
 from fetch.extractors.dates import normalize_date
-from fetch.extractors.text_tools import block_text
+from fetch.extractors.text_tools import _BLOCK_TAGS, block_text
 
 SITE = "https://www.nmpa.gov.cn"
 _INDEX_NUMBER = re.compile(r"[A-Z]{2,6}-\d{4}-\d{3,6}")
@@ -50,10 +59,9 @@ _HIDDEN = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.I)
 _SUBPAGE = re.compile(r"^(?:.*/)?(\d{12,})_(\d{1,3})\.html$")
 _DOC_NUMBER = re.compile(r"[一-龥]{2,20}〔\d{4}〕\d+号|\d{4}年第\d+号")
 _LIST_NUMBER = re.compile(r"\d{1,2}[.．、]")
-_BOLD = "\u2063B\u2063"  # 整段加粗的段落在 block_text 之前打的记号（行首），_part_blocks 里取走
-_BOLD_XPATH = (".//strong[not(ancestor::strong)] | .//b[not(ancestor::b)] | .//*[contains(translate(@style,' ',''),"
-               "'font-weight:bold') or contains(translate(@style,' ',''),'font-weight:700')]")
-_SEE_FIGURE = re.compile(r"(?:见|如)(?:下|以下|附)图|图\s*\d+\s*所示|流程图如下|示意图如下")
+_SOURCE_NOTE = re.compile(r"文章来源\s*[：:]\s*(\S.*?)\s*(?:发布时间|$)")
+_CENTER = re.compile(r"text-align\s*:\s*center", re.I)
+_DANGLING = re.compile(r"附\s*件\s*[：:]?")
 _ICON = re.compile(r"/wbppimages/|share_|\.gif$", re.I)
 
 
@@ -95,16 +103,19 @@ def extract_nmpa_detail(page) -> dict:
     _drop_related(box)
     result["attachment_links"] = _attachments(box)
     _drop_hidden(box)
-    result["body_text"] = _body_text(box, {a["name"] for a in result["attachment_links"]})
-    media = _media(box)
+    note = _source_note(box)
+    if note:
+        extra["source_note"] = note
+    media = _media(box)  # 在取正文之前：取正文时表格换成了占位，格子里的图片就找不到了
     if media:
         extra["media"] = media
+    result["body_text"] = _body_text(box, {a["name"] for a in result["attachment_links"]})
     # 正文框在、却没有字（“图解政策”这类整页是图片，视频页）：如实是空正文，不交通用兜底——兜底会把整页导航当正文
     result["page_has_no_text"] = not result["body_text"]
     if result["page_has_no_text"] and media:
         extra["content_in_media"] = "video" if media.get("videos") else "image"
-    elif media.get("images") and _SEE_FIGURE.search(result["body_text"]):
-        extra["content_in_media"] = "partial"  # 正文说“见下图”：图里有正文内容，没有识别（图片地址在 media）
+    elif media.get("images"):
+        extra["content_in_media"] = "partial"  # 正文之外还有图（流程图、二维码、格子里的网址图）：图里的字没有识别
     result["extra"] = extra
     return result
 
@@ -220,31 +231,100 @@ def _media(box):
 _DEFAULT_LEVELS = headings.assign_levels(headings.RANKS)
 
 
-def heading(line: str, emphasized: bool = False) -> str:
+def heading(line: str, emphasized: bool = False, centered: bool = False) -> str:
     """一行是小标题就加上 Markdown 标题记号，否则原样返回（* 转义）。"""
-    kind = headings.rank(line, emphasized=emphasized)
+    kind = headings.rank(line, emphasized=emphasized, centered=centered)
     return headings.mark(line, _DEFAULT_LEVELS[kind]) if kind else headings.escape_markdown(line)
 
 
-def _mark_bold(part):
-    """整段加粗（<strong>/<b>/font-weight:bold 包住了全部文字）的段落：行首打记号，判标题时当作“加粗”。"""
-    for node in part.xpath(".//*[self::p or self::div or self::li or self::h3 or self::h4 or self::h5]"
-                           "[not(ancestor::table)][not(.//p or .//div or .//table)]"):
-        full = "".join(node.text_content().split())
-        bold = "".join("".join(b.text_content().split()) for b in node.xpath(_BOLD_XPATH))
-        if full and (len(bold) >= len(full) or node.tag in ("h3", "h4", "h5")):
-            node.text = _BOLD + (node.text or "")
+def _is_bold(node) -> bool:
+    style = (node.get("style") or "").replace(" ", "").lower()
+    return node.tag in ("strong", "b", "h3", "h4", "h5") or "font-weight:bold" in style or "font-weight:700" in style
+
+
+def _is_centered(node) -> bool:
+    return bool(_CENTER.search(node.get("style") or "")) or (node.get("align") or "").lower() == "center"
+
+
+def _indent(raw: str) -> float:
+    """行首缩进有几个字宽：全角空格算 1，&nbsp; 算半个；HTML 源码里的换行、普通空格不算。"""
+    width = 0.0
+    for ch in raw:
+        if ch == "　":
+            width += 1
+        elif ch == "\xa0":
+            width += 0.5
+        elif not ch.isspace():
+            break
+    return width
+
+
+INDENT_CENTER = 12  # 行首缩进至少这么多字宽、整行又到不了右边（LINE_WIDTH 以内）：用空格摆到中间的一行
+LINE_WIDTH = 34
+
+
+class _LineWalker:
+    """正文区按行（块、<br> 分行，同 text_tools.block_text）：lines = [(字, 整行加粗, 居中, 所在块的序号)]。
+    上标下标按 headings.scripted 写。"""
+
+    def __init__(self, part):
+        self.lines, self.current, self.block = [], [], 0
+        self.walk(part, False, False)
+        self.flush(False)
+
+    def flush(self, center):
+        raw = "".join(t for t, _ in self.current)
+        line = " ".join(raw.split())
+        if line:
+            width = sum(1 if ord(c) > 127 else 0.5 for c in line)
+            spaced = _indent(raw) >= INDENT_CENTER and _indent(raw) + width <= LINE_WIDTH
+            self.lines.append((line, all(b for t, b in self.current if t.strip()), center or spaced, self.block))
+        self.current.clear()
+
+    def walk(self, node, bold, center):
+        tag = node.tag.lower() if isinstance(node.tag, str) else ""
+        if tag and tag not in ("script", "style", "noscript", "template"):
+            self.element(node, tag, bold or _is_bold(node), center)
+        if node.tail:
+            self.current.append((node.tail, bold))
+
+    def element(self, node, tag, bold, center):
+        block = tag in _BLOCK_TAGS
+        inner = (center or _is_centered(node)) if block else center
+        if block or tag == "br":
+            self.flush(center)  # 前面接着的字（块外或 <br> 前）按所在块的居中算
+            self.block += block
+        if tag in ("sup", "sub"):
+            self.current.append((headings.scripted(node.text_content(), tag), bold))
+            return
+        self.current.append((node.text or "", bold))
+        for child in node:
+            self.walk(child, bold, inner)
+        if block:
+            self.flush(inner)
+            self.block += 1
+
+
+def _marked_lines(part) -> list[tuple[str, bool, bool, int]]:
+    return _LineWalker(part).lines
+
+
+def _source_note(box) -> str:
+    """日期栏里转载的“文章来源：四川省药品监督管理局网站”：写进 extra.source_note，不进正文（页面 D6）。"""
+    for date in box.xpath(".//div[" + _has_class("date") + "]"):
+        found = _SOURCE_NOTE.search(" ".join(date.text_content().split()))
+        if found:
+            return found.group(1)
+    return ""
 
 
 def _header_blocks(box):
-    """正文开头：h2 标题里的状态标记（【废止】）、副标题（文号）、日期栏里转载的“文章来源：…”（日期本身不留）。"""
+    """正文开头：h2 标题里的状态标记（【废止】）、副标题（文号）。日期栏不进正文（日期另有字段，“文章来源”在 extra）。"""
     blocks = []
     for title in box.xpath(".//h2[" + _has_class("title") + "]"):
         blocks.extend(_STATUS.findall(title.text_content()))
     for sub in box.xpath(".//h3[" + _has_class("two-title") + "]"):
         blocks.append(" ".join(sub.text_content().split()))
-    for date in box.xpath(".//div[" + _has_class("date") + "]"):
-        blocks.append(" ".join(_PUBLISHED.sub(" ", date.text_content()).split()))
     return blocks
 
 
@@ -260,14 +340,24 @@ def _text_parts(box):
     return [box]
 
 
+def _joined_titles(lines):
+    """同一块里连着的居中短题名（一个题名折成两行：“疫苗生产场地变更质量可比性”“研究技术指导原则”）接成一行。"""
+    out = []
+    for text, bold, center, block in lines:
+        if out and center and out[-1][2] and out[-1][3] == block and headings.rank(text, centered=True) == "u" \
+                and headings.rank(out[-1][0], centered=True) == "u" and len(out[-1][0] + text) <= headings.MAX_CHARS:
+            last = out[-1]
+            out[-1] = (last[0] + text, last[1] and bold, True, block)
+        else:
+            out.append((text, bold, center, block))
+    return out
+
+
 def _part_blocks(part, attachment_names):
     """一个正文区的块：一段一块，小标题加记号，表格整块（分组）。“附件：1.… 2.…”目录里的编号行不是小标题。"""
     blocks, listing = [], False
     tables = _tables_to_placeholders(part)
-    _mark_bold(part)
-    for line in block_text(lxml_html.tostring(part, encoding="unicode")).split("\n"):
-        emphasized = line.strip().startswith(_BOLD)
-        line = line.replace(_BOLD, "").strip()
+    for line, emphasized, centered, _ in _joined_titles(_marked_lines(part)):
         if not line or line in attachment_names:
             continue
         found = re.fullmatch("⁣TABLE(\\d+)⁣", line)
@@ -280,8 +370,10 @@ def _part_blocks(part, attachment_names):
         if article:
             blocks += [headings.mark(article[0], _DEFAULT_LEVELS["tiao"]), headings.escape_markdown(article[1])]
         else:
-            blocks.append(headings.escape_markdown(line) if listing else heading(line, emphasized))
-    return blocks
+            blocks.append(headings.escape_markdown(line) if listing else heading(line, emphasized, centered))
+    # “附件：”后面的附件链接行已经去掉（附件另有记录），它后面什么都没列：这一行也去掉（页面 D6）
+    return [b for i, b in enumerate(blocks) if not (_DANGLING.fullmatch(b) and not (
+        i + 1 < len(blocks) and _LIST_NUMBER.match(blocks[i + 1])))]
 
 
 def _body_text(box, attachment_names=frozenset(), header=True) -> str:
