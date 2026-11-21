@@ -150,10 +150,11 @@ HEADER_SEARCH_ROWS = 4
 
 
 def _label_row(row) -> bool:
-    """表格中间的栏目名行（“序号 | 产品名称 | 产品描述 | …”）：三列以上、没有合并格、格子都有字、3/4 以上是栏目名。
-    比 is_header_row 严：表单里“产品名称 | 中文名称 | 甲”这种字段行不当表头。"""
+    """表格中间的栏目名行（“序号 | 产品名称 | 产品描述 | …”，可以有一个横跨两列的“品名举例”）：三列以上、格子都有字、
+    有字的格子占六成以上（上层分组行大半是合并格）、3/4 以上是栏目名。比 is_header_row 严：表单里“产品名称 | 中文名称 |
+    甲”这种字段行不当表头。"""
     named, cells = _named(row)
-    return len(row) >= 3 and SPAN not in row and _full(row) and named >= 0.75 * len(cells)
+    return len(row) >= 3 and _full(row) and len(cells) >= 0.6 * len(row) and named >= 0.75 * len(cells)
 
 
 def _filled(row):

@@ -231,4 +231,4 @@ def test_result_far_shorter_than_the_reference_is_incomplete_not_parsed(tmp_path
 
 
 def test_old_versions_are_not_reused():
-    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v6"
+    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v7"

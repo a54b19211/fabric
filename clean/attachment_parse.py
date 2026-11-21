@@ -56,6 +56,8 @@ v6（2026-11-21，NMPA 第三轮审计）：
   标签行留在表里；没有表头行的表格用前几行里的栏目名行或“列1…列N”当表头（clean.excel_parser）；
 - PDF 接段、➢、“/”“-”两侧空格（clean.pdf_text）。
 同一文件只复用 v6 自己的结果。
+v7（2026-11-21）：表格中间的栏目名行里有一个横跨两列的格（“品名举例”占两列）也认作栏目名行（v6 只认没有合并格的，
+d2705923 的几张分表表头仍是上层分组行）。同一文件只复用 v7 自己的结果。
 """
 
 from __future__ import annotations
@@ -67,8 +69,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v6"
-# 旧版本的结果不再沿用（v4、v5、v6 改了所有格式的输出，见模块说明）
+PROCESSOR_VERSION = "datafabric.attachment_parse.v7"
+# 旧版本的结果不再沿用（v4–v7 改了输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
 CLOUD_NATIVE = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}

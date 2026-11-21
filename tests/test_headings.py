@@ -101,6 +101,9 @@ def test_round3_tables_form_rows_stay_and_headerless_tables_get_column_names():
                                ["1", "甲", "乙", "/"]])
     assert labelled.splitlines()[:3] == ["| 序号 | 产品名称 | 产品描述 | 备注 |", "| --- | --- | --- | --- |",
                                          "| 已发布的产品信息 |  |  | 对应关系 |"]  # 栏目名行当表头，上层分组行放在下面
+    merged = markdown_table([["目录", SPAN, SPAN, SPAN, "新目录"], ["序号", "品名举例", SPAN, "对应位置", "备注"],
+                             ["1", "刀", "刀", "02-01", "/"]])
+    assert merged.splitlines()[0] == "| 序号 | 品名举例 |  | 对应位置 | 备注 |"  # 栏目名行里有横跨两列的格
 
 
 def test_round3_word_cell_soft_breaks_and_subscripts(tmp_path):

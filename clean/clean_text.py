@@ -46,7 +46,8 @@ from json.decoder import scanstring
 # v18 (2026-11-21, NMPA round-3 audit): attachment title = the whole title block (or the full link text), "附件2 ："
 # prefix noise normalized; stars escaped only where they could pair; header-less tables get a header; a PDF attachment
 # with unreadable glyphs carries the warning attachment_missing_glyphs:<pages>.
-PROCESSOR_VERSION = "datafabric.clean_text.v18"
+# v19 (2026-11-21): follows attachment_parse v7 (a column-name row with one merged cell is the table header).
+PROCESSOR_VERSION = "datafabric.clean_text.v19"
 
 # ---------------------------------------------------------------- 空白与语言
 
