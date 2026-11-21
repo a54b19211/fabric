@@ -154,3 +154,11 @@ def test_html_cap_only_blocks_html():
                      count=0, html=mineru_cloud.HTML_PER_DAY)
     assert mineru_cloud._reserve(True)["deferred"] is True
     assert mineru_cloud._reserve(False) is None
+
+
+def test_pdf_over_200_pages_is_not_submitted(tmp_path, monkeypatch):
+    path = tmp_path / "big.pdf"
+    path.write_bytes(b"%PDF-1.4 synthetic")
+    monkeypatch.setattr(mineru_cloud, "_pages", lambda f: 350)
+    out = mineru_cloud.parse(str(path), token="T", client=respond(lambda r: 1 / 0))
+    assert out["error"] == "cloud_too_many_pages:350"

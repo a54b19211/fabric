@@ -32,6 +32,7 @@ import httpx
 
 BASE = "https://mineru.net"
 MAX_BYTES = 200 * 1024 * 1024
+MAX_PAGES = 200
 PER_MINUTE = 50
 PER_DAY = 5000
 HTML_PER_DAY = 100
@@ -127,14 +128,25 @@ def _classify(code, msg, status=None):
     return _defer("cloud_rejected", detail, until)
 
 
+def _pages(file):
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(file)).pages)
+    except Exception:  # noqa: BLE001 -- 读不出页数就交给云端判断
+        return 0
+
+
 def parse(path, *, token=None, client=None, model_version="pipeline", poll_seconds=MIN_POLL_SECONDS,
-          timeout_seconds=600):
+          timeout_seconds=1800):
     token = token or os.environ.get("DATAFABRIC_MINERU_CLOUD_TOKEN", "")
     if not token:
         return _fail("cloud_not_configured")
     file = Path(path)
     if file.stat().st_size > MAX_BYTES:
         return _fail("cloud_file_too_large")
+    if file.suffix.lower() == ".pdf" and _pages(file) > MAX_PAGES:  # 云端会拒（-60006），不占提交名额
+        return _fail("cloud_too_many_pages", _pages(file))
     busy = _reserve(file.suffix.lower() in (".html", ".htm"))
     if busy:
         return busy
