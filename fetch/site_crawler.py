@@ -106,6 +106,40 @@ def _stored_attachment_links(site, parent_url):
     return [{"url": r[0], "text": r[1] or ""} for r in rows]
 
 
+@lru_cache(maxsize=1)
+def _fabric_reader():
+    from sqlalchemy import create_engine
+
+    url = os.environ.get("DATAFABRIC_DATABASE_URL", "")
+    return create_engine(url, pool_size=1, max_overflow=1, pool_pre_ping=True) if url else None
+
+
+def _article_record(site, key):
+    """这篇文章（编号 key）在库里的记录号：最早存下它的那个页面地址（同时存过几个地址的，取最早的，再按地址排）。
+    没存过、或没配资料库（单元测试）返回 None。只读、有界。"""
+    engine = _fabric_reader()
+    if engine is None:
+        return None
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout='10s'"))
+        return conn.execute(text(
+            "SELECT source_record_id FROM fabric_versions WHERE source_id=:s AND source_record_id LIKE :p "
+            "AND position('#' in source_record_id)=0 GROUP BY source_record_id "
+            "ORDER BY min(first_seen_at), source_record_id LIMIT 1"), {"s": site, "p": "%/" + key + ".html"}).scalar()
+
+
+def _duplicate_article(site, url, key, seen):
+    """一篇一条记录（审计 F4）：同一篇文章（编号相同）挂在几个栏目、几个地址下，记录号是最早存下它的那个地址，
+    别的地址都跳过（存量里已经两个地址各存一份的，也只再读最早的那个）。这次读取里已经见过这个编号也跳过。"""
+    if key in seen:
+        return True
+    seen.add(key)
+    canonical = _article_record(site, key)
+    return canonical is not None and canonical != url
+
+
 def attachment_record_id(parent_id: str, url: str) -> str:
     """附件记录身份 = 父页面 + 附件链接。同一文件挂在两个页面下（NMPA 同一公告在两个栏目各有地址）是两条
     稳定记录，不会来回换版本；同一份文件的原件按 sha256 只存一份，解析结果也按 sha256 复用。"""
@@ -528,14 +562,15 @@ def _read_detail_pages(request, reader, start):
     with closing(make_driver(reader.site, reader.profile, request.query).iter_detail_urls()) as urls:
         for url in urls:  # 读满不再要，浏览器就收工，不再翻下一页
             seen += 1
+            if seen < start_i:
+                if article_key and article_key(url):
+                    articles.add(article_key(url))
+                continue
             key = article_key(url) if article_key else None
             reason = ("off_site_link" if not _on_site(reader.site, url)
                       else "outside_column" if column and not re.search(column, url)
-                      else "duplicate_article" if key and key in articles else None)
-            if key:
-                articles.add(key)
-            if seen < start_i:
-                continue
+                      else "duplicate_article" if key and _duplicate_article(reader.site, url, key, articles)
+                      else None)
             reader.position = seen
             first = seen == start_i
             if reason:

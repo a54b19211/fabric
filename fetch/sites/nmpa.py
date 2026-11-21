@@ -23,10 +23,12 @@ def article_key(url: str) -> str | None:
 _YP = "https://www.nmpa.gov.cn/yaopin"
 _XX = "https://www.nmpa.gov.cn/xxgk"
 LIST_FILTERS = {
-    _YP + "/ypggtg/index.html": r"/xxgk/ggtg/ypggtg/",            # 药品公告通告
+    # 2021 年 5–6 月前后的条目，列表里有的链到 /yaopin/ypggtg/<编号>.html（同一篇的镜像地址）：照收，
+    # 已用 /xxgk/ 地址存过的按编号判重跳过（duplicate_article）
+    _YP + "/ypggtg/index.html": r"/xxgk/ggtg/ypggtg/|/yaopin/ypggtg/\d",  # 药品公告通告（站点无“共N页”，约 80 页）
     _YP + "/ypfgwj/index.html": r"/xxgk/fgwj/",                    # 药品法规文件（75 页，最早 1998 年）
     _XX + "/zhqyj/index.html": r"/xxgk/zhqyj/zhqyjyp/",            # 征求意见，只要药品子栏（29 页 570 条，混器械、化妆品）
-    _YP + "/ypzhcjd/index.html": r"/xxgk/zhcjd/zhcjdyp/",          # 药品政策解读；图解海报 tjzhc、药你知道 shpjd 不采
+    _YP + "/ypzhcjd/index.html": r"/xxgk/zhcjd/zhcjdyp/|/yaopin/ypzhcjd/\d",  # 药品政策解读；图解 tjzhc、药你知道 shpjd 不采
     _XX + "/fxjzh/ypfxjch/index.html": r"/xxgk/fxjzh/ypfxjch/",    # 药品飞行检查（8 页 148 条，2014-10 至 2019-01）
     "https://www.nmpa.gov.cn/zwfw/zwfwgggs/zypzbhslgs/index.html": r"/zwfw/zwfwgggs/zypzbhslgs/",  # 中药品种保护受理公示
 }
@@ -40,7 +42,7 @@ CONFIG = {
     "article_key": article_key,
     # 列表按发布日期从新到旧；一页里出现 2014 年以前的条目就不再往后翻（法规文件列表一直到 1998 年）
     "history_from": "2014-01-01",
-    "max_pages": 120,
+    "max_pages": 1000,  # 药品公告通告列表很长：2026-11-21 实测第 120 页 2019-09、第 200 页 2019-01
 
     # ── 列表页解析 ──
     "wait_selector": ".yp-child-list .list ul li",
