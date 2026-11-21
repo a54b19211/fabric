@@ -341,6 +341,7 @@ def tidy(text: str) -> str:
     """解析结果的统一整理：HTML 表格转 Markdown 表格；<br> 记成换行；去掉 Word 项目符号留下的私用区字符。"""
     if not text:
         return text
+    text = text.replace("\x00", "")  # 有的 PDF 文字层里有 NUL，PostgreSQL 的 text 存不了
     text = _HTML_TABLE.sub(lambda m: "\n\n" + html_table_to_markdown(m.group(0)) + "\n\n", text)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = _PRIVATE_BULLET.sub("", text)
