@@ -482,11 +482,11 @@ def test_nmpa_short_numbered_lines_are_headings_and_paragraphs_are_kept_apart():
     body = extract_nmpa_detail(_nmpa(
         "<p>一、背景</p><p>正文一段。</p><p>（一）申请人企业法人资格证明文件。</p><p>（二）工作要求</p>"
         "<p>1.产品的预期用途</p><p>一、各级药品监督管理部门应当按照本通知要求，认真组织实施，确保各项工作落到实处。</p>"
-        "<p>第一章 总则</p>"))["body_text"]
+        "<p>第一章 总则</p><p>附件：1.某公告（征求意见稿）</p><p>2.意见建议反馈表</p>"))["body_text"]
     assert body.split("\n\n") == ["## 一、背景", "正文一段。", "（一）申请人企业法人资格证明文件。", "### （二）工作要求",
                                   "#### 1.产品的预期用途",
                                   "一、各级药品监督管理部门应当按照本通知要求，认真组织实施，确保各项工作落到实处。",
-                                  "## 第一章 总则"]
+                                  "## 第一章 总则", "附件：1.某公告（征求意见稿）", "2.意见建议反馈表"]  # 附件目录不是标题
 
 
 def test_nmpa_related_links_hidden_and_textless_anchors_are_not_kept():

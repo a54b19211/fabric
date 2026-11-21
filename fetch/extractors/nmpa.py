@@ -52,6 +52,7 @@ _HEADINGS = (
     (re.compile(r"\d{1,2}[.．、](?!\d)"), "#### "),
 )
 HEADING_MAX_CHARS = 40
+_LIST_NUMBER = re.compile(r"\d{1,2}[.．、]")
 _SENTENCE = re.compile(r"[。；;！？!?]")
 _ICON = re.compile(r"/wbppimages/|share_|\.gif$", re.I)
 
@@ -217,38 +218,49 @@ def heading(line: str) -> str:
     return line
 
 
-def _body_text(box, attachment_names=frozenset(), header=True) -> str:
-    """正文：状态标记、副标题、正文区 div.text（没有 div.text 的页面取整个正文框，去掉上面列的导航块）。
-    一段一块，块之间空一行；表格整块（分组）保留。"""
+def _header_blocks(box):
+    """正文开头：h2 标题里的状态标记（【废止】）、副标题（文号）、日期栏里转载的“文章来源：…”（日期本身不留）。"""
     blocks = []
-    if header:
-        for title in box.xpath(".//h2[" + _has_class("title") + "]"):
-            blocks.extend(_STATUS.findall(title.text_content()))
-        for sub in box.xpath(".//h3[" + _has_class("two-title") + "]"):
-            text = " ".join(sub.text_content().split())
-            if text:
-                blocks.append(text)
-        for date in box.xpath(".//div[" + _has_class("date") + "]"):  # 日期栏里转载的“文章来源：…”留下，日期本身不留
-            text = " ".join(_PUBLISHED.sub(" ", date.text_content()).split())
-            if text:
-                blocks.append(text)
+    for title in box.xpath(".//h2[" + _has_class("title") + "]"):
+        blocks.extend(_STATUS.findall(title.text_content()))
+    for sub in box.xpath(".//h3[" + _has_class("two-title") + "]"):
+        blocks.append(" ".join(sub.text_content().split()))
+    for date in box.xpath(".//div[" + _has_class("date") + "]"):
+        blocks.append(" ".join(_PUBLISHED.sub(" ", date.text_content()).split()))
+    return blocks
+
+
+def _text_parts(box):
+    """正文区 div.text（嵌套的只算一次）；没有 div.text 的页面取整个正文框，去掉导航块。"""
     parts = box.xpath(".//div[" + _has_class("text") + "]")
-    if not parts:
-        nav = " or ".join(_has_class(name) for name in _NAV)
-        for junk in box.xpath(".//div[" + nav + "] | .//h2[" + _has_class("title") + "] | .//h3["
-                              + _has_class("two-title") + "]"):
-            junk.drop_tree()
-        parts = [box]
-    else:
-        parts = [p for p in parts if not any(p in q.iterdescendants() for q in parts)]  # 嵌套的 div.text 只算一次
-    for part in parts:
-        tables = _tables_to_placeholders(part)
-        for line in block_text(lxml_html.tostring(part, encoding="unicode")).split("\n"):
-            line = line.strip()
-            if not line or line in attachment_names:
-                continue
-            found = re.fullmatch(r"⁣TABLE(\d+)⁣", line)
-            blocks.append(tables[int(found.group(1))] if found else heading(line))
+    if parts:
+        return [p for p in parts if not any(p in q.iterdescendants() for q in parts)]
+    nav = " or ".join(_has_class(name) for name in _NAV)
+    for junk in box.xpath(".//div[" + nav + "] | .//h2[" + _has_class("title") + "] | .//h3["
+                          + _has_class("two-title") + "]"):
+        junk.drop_tree()
+    return [box]
+
+
+def _part_blocks(part, attachment_names):
+    """一个正文区的块：一段一块，小标题加记号，表格整块（分组）。“附件：1.… 2.…”目录里的编号行不是小标题。"""
+    blocks, listing = [], False
+    tables = _tables_to_placeholders(part)
+    for line in block_text(lxml_html.tostring(part, encoding="unicode")).split("\n"):
+        line = line.strip()
+        if not line or line in attachment_names:
+            continue
+        found = re.fullmatch("⁣TABLE(\\d+)⁣", line)
+        listing = line.startswith("附件") or (listing and bool(_LIST_NUMBER.match(line)))
+        blocks.append(tables[int(found.group(1))] if found else line if listing else heading(line))
+    return blocks
+
+
+def _body_text(box, attachment_names=frozenset(), header=True) -> str:
+    """正文：开头的状态标记、副标题，再是正文区。块之间空一行。"""
+    blocks = _header_blocks(box) if header else []
+    for part in _text_parts(box):
+        blocks.extend(_part_blocks(part, attachment_names))
     return "\n\n".join(b for b in blocks if b)
 
 
