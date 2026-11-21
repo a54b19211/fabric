@@ -79,7 +79,7 @@ def test_excel_two_row_title_once_horizontal_merge_once_and_no_header_row():
     assert markdown_table([["序号", "申请分类", SPAN, SPAN], ["1", "□ 甲", "", "x"]]).splitlines()[0] == \
         "| 序号 | 申请分类 |  |  |"  # 横向合并：值只写一次，不是“申请分类 | 申请分类 | 申请分类”
     assert markdown_table([["心脏疾病", "心肌缺血", "未知"], ["精神异常", "失眠", "未知"]]).splitlines()[:3] == [
-        "| 列1 | 列2 | 列3 |", "| --- | --- | --- |", "| 心脏疾病 | 心肌缺血 | 未知 |"]  # 没有表头行：不把数据当表头
+        "| 心脏疾病 | 心肌缺血 | 未知 |", "| --- | --- | --- |", "| 精神异常 | 失眠 | 未知 |"]  # 没有栏目名行：第一行当表头，不补“列1”（第四轮 N2）
     assert _join_sheets([("Sheet1", "| a |")]) == "| a |" and _join_sheets([("甲", "x"), ("乙", "y")]) == \
         "## 甲\n\nx\n\n## 乙\n\ny"
 
@@ -231,4 +231,4 @@ def test_result_far_shorter_than_the_reference_is_incomplete_not_parsed(tmp_path
 
 
 def test_old_versions_are_not_reused():
-    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v7"
+    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v8"

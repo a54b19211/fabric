@@ -94,16 +94,17 @@ def test_round3_tables_form_rows_stay_and_headerless_tables_get_column_names():
     from clean.excel_parser import SPAN, markdown_table
 
     form = markdown_table([["申请编号", "", SPAN], ["产品名称", "中文名称", "甲"]])
-    assert form.splitlines() == ["| 列1 | 列2 | 列3 |", "| --- | --- | --- |", "| 申请编号 |  |  |",
-                                 "| 产品名称 | 中文名称 | 甲 |"]  # 附件 D8/D5：标签行留在表里，字段行不当表头
+    assert form.splitlines() == ["| 申请编号 |  |  |", "| --- | --- | --- |",
+                                 "| 产品名称 | 中文名称 | 甲 |"]  # 附件 D8：标签行留在表里；第四轮 N2：不补“列1”
     assert markdown_table([["名单", SPAN, SPAN], ["序号", "名称", "备注"], ["1", "甲", ""]]).startswith("名单\n\n| 序号")
     labelled = markdown_table([["已发布的产品信息", SPAN, SPAN, "对应关系"], ["序号", "产品名称", "产品描述", "备注"],
                                ["1", "甲", "乙", "/"]])
-    assert labelled.splitlines()[:3] == ["| 序号 | 产品名称 | 产品描述 | 备注 |", "| --- | --- | --- | --- |",
-                                         "| 已发布的产品信息 |  |  | 对应关系 |"]  # 栏目名行当表头，上层分组行放在下面
+    assert labelled.splitlines()[:4] == ["已发布的产品信息 | 对应关系", "",
+                                         "| 序号 | 产品名称 | 产品描述 | 备注 |", "| --- | --- | --- | --- |"]
+    # 栏目名行当表头，上面的分组行照原顺序写在表前（第四轮 D-D）
     merged = markdown_table([["目录", SPAN, SPAN, SPAN, "新目录"], ["序号", "品名举例", SPAN, "对应位置", "备注"],
                              ["1", "刀", "刀", "02-01", "/"]])
-    assert merged.splitlines()[0] == "| 序号 | 品名举例 |  | 对应位置 | 备注 |"  # 栏目名行里有横跨两列的格
+    assert merged.splitlines()[2] == "| 序号 | 品名举例 |  | 对应位置 | 备注 |"  # 栏目名行里有横跨两列的格
 
 
 def test_round3_word_cell_soft_breaks_and_subscripts(tmp_path):
@@ -173,3 +174,53 @@ def test_round3_nmpa_page_line_bold_centered_titles_source_note_and_media():
     assert got["extra"]["source_note"] == "四川省药品监督管理局网站"
     assert got["extra"]["media"]["images"] == ["https://www.nmpa.gov.cn/x/1715674733267076102.png"]  # 页面 D3
     assert got["extra"]["content_in_media"] == "partial"
+
+
+def test_round4_question_with_full_stop_centered_title_above_separators_and_toc_leaders():
+    from clean import headings
+
+    q = "二、《规定》要求，批件持有人在批件有效期内完成研究，提出药品注册申请。“药品注册申请”如何理解？"
+    assert headings.rank(q) == "cn"  # N1：以“？”结尾的编号问句前面带句号也是标题
+    assert headings.rank("二、提出药品注册申请。请按要求办理。") is None
+    body = "正文" * 120
+    md = headings.relevel("\n\n".join(["# 通知", "## 风险评定指导原则", "### 一、缺陷的分类", body, "## 附件1",
+                                         "## 严重缺陷(举例)", "### 一、厂房", body]))
+    assert "## 风险评定指导原则" in md and "## 附件1 严重缺陷(举例)" in md and "### 一、厂房" in md  # N3
+    assert "### 一、缺陷的分类" in md
+    toc = headings.relevel("目录\n\n1、有效性外推（如适用）....................9\n\n正文")
+    assert "1、有效性外推（如适用）\n\n正文" in toc  # D-B：目录点线和页码去掉
+
+
+def test_round4_word_centered_title_and_subscript_from_character_style(tmp_path):
+    import zipfile
+
+    from clean import office_text
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    styles = (f'<w:styles {w}><w:style w:type="character" w:styleId="Font101"><w:rPr><w:vertAlign w:val="subscript"/>'
+              '</w:rPr></w:style><w:style w:type="paragraph" w:styleId="Mid"><w:pPr><w:jc w:val="center"/></w:pPr>'
+              '</w:style></w:styles>')
+    centered = '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>参加改革工作</w:t></w:r></w:p>' \
+               '<w:p><w:pPr><w:pStyle w:val="Mid"/></w:pPr><w:r><w:t>申报资料要求</w:t></w:r></w:p>'
+    sub = '<w:p><w:r><w:t>按C</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Font101"/></w:rPr><w:t>13</w:t></w:r>' \
+          '<w:r><w:t>H计。</w:t></w:r></w:p>'
+    path = tmp_path / "a.docx"
+    with zipfile.ZipFile(path, "w") as package:
+        package.writestr("word/document.xml", f"<w:document {w}><w:body>{centered}{sub}</w:body></w:document>")
+        package.writestr("word/styles.xml", styles)
+    markdown = office_text.parse_docx(str(path))["markdown"]
+    assert markdown.startswith("## 参加改革工作申报资料要求\n\n")  # S1：居中（含样式里的居中）的题名，两行接成一个
+    assert "按C₁₃H计。" in markdown  # D-C：字符样式里的下标
+
+
+def test_round4_pdf_reference_wrap_and_table_cell_across_pages():
+    from clean import pdf_text
+
+    assert pdf_text._reference_wrap("2.US FDA Guidance for Industry: Pediatric Study Plans:", "Content of and Process")
+    assert not pdf_text._reference_wrap("1.《儿童抗肿瘤药物临床研发技术指导原则》.", "2.US FDA")
+    page = "| 项目 | 说明 |\n| --- | --- |\n| 非临床研究计划 | 简要概述拟定的非临床研究计划和/或现有数据 |"
+    out = pdf_text.join_pages([page, "如何支持儿童研究和使用。\n\n（表格中斜体内容提交时删除）"])
+    assert out[0].endswith("| 非临床研究计划 | 简要概述拟定的非临床研究计划和/或现有数据如何支持儿童研究和使用。 |")
+    assert out[1] == "（表格中斜体内容提交时删除）"
+    main = {"x": 90, "y": 405.24, "size": 16.08, "text": "如 C"}
+    assert pdf_text._script_place({"x": 121, "y": 403.8, "size": 10.56, "text": "max"}, main, 122.0) == "sub"

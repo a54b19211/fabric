@@ -92,21 +92,28 @@ def rank(line: str, *, emphasized: bool = False, styled: bool = False, centered:
 
 
 def _sentence(s, question, emphasized) -> bool:
-    """句子（带句号、分号、感叹号），或“（三）联系方式：马 静 010-……”这种“字段：内容”（加粗、问句除外）。"""
+    """句子（带句号、分号、感叹号），或“（三）联系方式：马 静 010-……”这种“字段：内容”（加粗、问句除外）。
+    以“？”结尾的编号问句（“二、《规定》要求，……提出药品注册申请。“药品注册申请”如何理解？”）前面带句号也是标题
+    （第四轮 N1；字数限制照旧 MAX_QUESTION）。"""
+    if question and s.endswith(("？", "?")) and numbered_kind(s) in _NUMBER_KINDS:
+        return False
     return bool(_BODY_PUNCT.search(s)) or (not question and not emphasized and bool(_FIELD.match(s)))
 
 
 def _centered_title(s) -> bool:
     """居中的短题名（“疫苗生产场地变更质量可比性研究技术指导原则”“严重缺陷(举例)”）：可带括号，不带逗号、冒号、
     顿号，不是日期、电话一类的长数字、提示句，不是单独的“附件”。"""
+    bare = re.sub(r"[（(][^）)]{1,10}[)）]", "", s)  # 括号里的顿号不算（“XX省（区、市）药品监督管理局”）
     return len(s) <= MAX_PLAIN and not _NOTICE.match(s) and not _BARE_ATTACHMENT.fullmatch(s) \
-        and not re.search(r"[，,：:、；;]|\d\s*[年月日]|\d{3,}", s)
+        and not re.search(r"[，,：:、；;]|\d\s*[年月日]|\d{3,}", bare)
 
 
 def _never(s) -> bool:
     """空行、表格行、已有记号的行、目录行、“附件：”清单行：一定不是小标题。"""
-    # 以英文句点结尾的（参考文献条目“1.《……指导原则》.”）也不是
-    return not s or s[0] in "|#>-*•[!" or bool(_TOC.search(s)) or bool(LISTING_START.match(s)) or s.endswith(".")
+    # 以英文句点结尾的（参考文献条目“1.《……指导原则》.”）也不是；“目 录”也不是（第四轮：居中的“目 录”成了标题，
+    # 它下面的正文小标题就成了目录的下级）
+    return not s or s[0] in "|#>-*•[!" or bool(_TOC.search(s)) or bool(LISTING_START.match(s)) or s.endswith(".") \
+        or bool(_TOC_TITLE.fullmatch(s.replace(" ", "")))
 
 
 def _unnumbered(s, question, marked) -> str | None:
@@ -289,6 +296,34 @@ def _drop_lead_ins(items):
                 items[i][1] = None
 
 
+def _title_level(items):
+    """文中有“附件N”分隔时：分隔行后面紧跟的无编号题名并进分隔行（“附件1 严重缺陷(举例)”）；第一个分隔行之前、
+    任何编号标题之前的无编号题名（正文的文件题名“药品生产现场检查风险评定指导原则”）和分隔行同级——它和各附件是
+    并列的，不是附件的下级（第四轮 N3；没有分隔行的同类页面本来就是 ## 题名）。"""
+    seps = [i for i, (_, k) in enumerate(items) if k == "sep"]
+    if not seps:
+        return items
+    for i in range(seps[0]):
+        kind = items[i][1]
+        if kind and kind != "u":
+            break
+        if kind == "u":
+            items[i][1] = "sep"
+    out = []
+    for item in items:
+        prev = out[-1] if out else None
+        if item[1] == "u" and prev and prev[1] == "sep" and _SEPARATOR.fullmatch(prev[0]) \
+                and not (_SEPARATOR.fullmatch(prev[0]).group(1) or "") \
+                and len(prev[0]) + len(item[0]) < MAX_CHARS:
+            prev[0] = prev[0] + " " + item[0]
+            continue
+        out.append(item)
+    return out
+
+
+_TOC_LEADER = re.compile(r"\s*(?:…{2,}|\.{4,}|·{4,}|-{4,})\s*\d{1,3}$")
+
+
 def relevel(markdown: str, *, promote: bool = False, base: int = 2) -> str:
     """整篇的小标题按编号样式重排级别（多页文章各页、附件各部分用同一套级别）。开头的“# 标题”保留为第 1 级。
     附件分隔行后面正文太少的不当标题；文末没有内容的标题退成普通段落。"""
@@ -308,6 +343,9 @@ def relevel(markdown: str, *, promote: bool = False, base: int = 2) -> str:
         item[1] = None
     _drop_toc_headings(items)
     _drop_lead_ins(items)
+    items = _title_level(items)
     levels = assign_levels([k for _, k in items if k], base)
-    out = ([title] if title else []) + [mark(t, levels[k]) if k else t for t, k in items]
+    # 目录行的点线和页码去掉（“1、有效性外推（如适用）……9”→“1、有效性外推（如适用）”，第四轮 D-B）
+    out = ([title] if title else []) + [mark(t, levels[k]) if k else _TOC_LEADER.sub("", t) if "\n" not in t else t
+                                        for t, k in items]
     return "\n\n".join(out)

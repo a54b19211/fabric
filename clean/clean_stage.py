@@ -160,6 +160,8 @@ _FORM_FIELD = re.compile(r"[^：:]{1,12}[：:]")  # 题名上面的“申请编�
 _TITLE_PUNCT = re.compile(r"[。；;，,：:]")
 _LABEL_NOISE = re.compile(r"^((?:附件|附表)\s*\d{1,2})\s*[：:.．、]\s*")  # “附件2 ：”“附件2.”后面接名字
 TITLE_MAX = 100
+_NOTE = re.compile(r"[（(].{1,20}[)）]")  # 题名下面的“（征求意见稿）”
+_LEADING_LABEL = re.compile(r"^(?:附件|附表)\s*\d{1,2}\s*[：:]?\s+(?=\S)")
 
 
 def _title_part(line) -> bool:
@@ -170,15 +172,17 @@ def _title_part(line) -> bool:
 def _first_title(body) -> str:
     """附件正文开头的文件题名：“附件1”下面连着的题名行全部接起来（第三轮审计 D3：“增设允许药材进口口岸工作评估
     考核”“实施方案”，“放射性药品管理条例”“（征求意见稿）”）；题名上面的“申请编号：……”这类表单栏跳过。"""
-    parts, skipped = [], 0
+    parts, skipped, marked = [], 0, False
     for block in (body or "").split("\n\n")[:12]:
-        line = block.strip().lstrip("#").strip()
+        line = _LEADING_LABEL.sub("", block.strip().lstrip("#").strip())  # “## 附件1 题名”：编号不算题名（第四轮 N3）
         if not line or _BARE_LABEL.fullmatch(line.replace(" ", "")):
             if parts:
                 break
             continue
-        if "\n" in line or line.startswith("|") or (parts and block.lstrip().startswith("#")):
-            break  # 表格；题名后面的小标题（“### 暖宫七味散说明书”）：题名到此为止
+        heading = block.lstrip().startswith("#")
+        if "\n" in line or line.startswith("|") or (parts and (heading or (marked and not _NOTE.fullmatch(line)))):
+            break  # 表格；题名后面的小标题（“### 暖宫七味散说明书”）；标成标题的题名后面的正文行（表单栏“单位名称 填写人”）
+        marked = marked or heading
         if _title_part(line):
             parts.append(line)
             continue

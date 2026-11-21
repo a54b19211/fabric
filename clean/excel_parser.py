@@ -117,7 +117,8 @@ def markdown_table(rows: list[list[str]], header: bool | None = None, titles: st
     if len(rows[0]) == 1:  # 只有一列：不是表格，一行一段
         return "\n\n".join(lead + [_real(r[0]) for r in rows])
     width = len(rows[0])
-    rows = _with_header(rows, header)
+    above, rows = _with_header(rows, header)
+    lead += [_row_line(r) for r in above]
     rows = [[_real(c) for c in r] for r in rows]
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width]
     # 整行合并成一格的行（表中间的小标题“总体意见建议”）：值只写在第一格，不重复整行
@@ -134,16 +135,24 @@ def _full(row) -> bool:
 
 
 def _with_header(rows, declared):
-    """表头放在第一行：第一行是表头（调用方说是，或像栏目名）而且格子都有字就是它；否则前几行里第一个格子都有字、
-    像栏目名的行当表头，它上面的行照原顺序放在表头下面；都没有就是“列1 | 列2 | …”（不拿数据行当表头）。"""
+    """(表头上面的行, 表格行)：第一行是表头（调用方说是，或像栏目名）就是它；否则前几行里第一个格子都有字、像栏目名
+    的行当表头，它上面的行（表单的填写行“单位/企业名称 填写人”、分组行“第一类医疗器械产品目录 | 新医疗器械分类目录”）
+    照原顺序写在表格前面（第四轮 D-D：不挪到表头下面）；都没有就拿第一行当表头，和同类表格一样，不补原文没有的
+    “列1 | 列2”（第四轮 N2）。"""
     first = _full(rows[0]) and (is_header_row(rows[0]) if declared is None else declared)
     grouped = sum(1 for c in rows[0] if c == SPAN or not c.strip()) * 2 >= len(rows[0])  # 上层分组行（大半是合并格）
     if first and not grouped:
-        return rows
+        return [], rows
     for i in range(1, min(HEADER_SEARCH_ROWS, len(rows))):
         if _label_row(rows[i]):
-            return [rows[i]] + rows[:i] + rows[i + 1:]
-    return rows if first else [["列%d" % (k + 1) for k in range(len(rows[0]))]] + rows
+            return rows[:i], rows[i:]
+    return [], rows
+
+
+def _row_line(row) -> str:
+    """表头上面的一行写成表前的一行字：有字的格子去重后用“ | ”隔开，格内分行用空格。"""
+    values = dict.fromkeys(_real(c).replace("<br>", " ") for c in row if _real(c).strip())
+    return " | ".join(values)
 
 
 HEADER_SEARCH_ROWS = 4

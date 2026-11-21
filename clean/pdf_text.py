@@ -73,32 +73,67 @@ class _Page:
     def __init__(self, page):
         self.frags, self.h, self.v, self.missing = [], [], [], 0
         self._path, self._cur, self._start = [], None, None
-        self._fonts, self._unmapped_font, self._missing_codes = _page_fonts(page), False, 0
-        self._images, self.images = _page_images(page), 0
+        self._fonts, self._unmapped_font = _page_fonts(page), False
+        self._images = _page_images(page)
+        self._actual, self._marks = actual_texts(page), []  # 结构树里的 ActualText；正在画的标记内容（MCID）栈
+        self._lost = {}  # MCID（None：不在标记内容里）→ [读不出的字数, 字码数, 图片数, 第一次画的位置]
         page.extract_text(visitor_operand_before=self._op, visitor_text=self._text)
-        self.missing = max(self.missing, self._missing_codes) + self.images
+        self._recover()
+
+    def _mcid(self):
+        return next((m for m in reversed(self._marks) if m is not None), None)
+
+    def _note(self, slot, amount, where=None):
+        entry = self._lost.setdefault(self._mcid(), [0, 0, 0, None])
+        entry[slot] += amount
+        if where and entry[3] is None:
+            entry[3] = where
+
+    def _recover(self):
+        """读不出的字（没有字码映射的字体、贴图、只画了空格）：所在的标记内容在结构树里有 ActualText 的，用它补回
+        （Word 导出的 PDF 把红头、标题的字写在这里，第四轮 D-A）；补不回的记缺字。"""
+        missing = 0
+        for mcid, (chars, codes, images, where) in self._lost.items():
+            actual = self._actual.get(mcid) if mcid is not None else None
+            blank = bool(where) and where[3]  # 这段标记内容画的是图片、读不出的字或只有空格
+            if actual and blank:
+                self.frags = [f for f in self.frags if f.get("mcid") != mcid]
+                x, y, w, size = where[0], where[1], where[2], where[4]
+                if w:  # 图片：字号按宽度均分，不超过图片高度
+                    size = min(size, w / max(1.0, _width(actual, 1.0)))
+                self.frags.append({"x": x, "y": y, "size": size, "text": actual, "mcid": mcid})
+            else:
+                missing += max(chars, codes) + images
+        self.missing = missing
 
     # -- 字 --
     def _text(self, text, cm, tm, font, size):
         if not text:
             return
-        if _unmapped(font):  # 中文字体子集没有字码映射：汉字读出来是乱码，不收（记下缺字）；数字、英文照收
+        scale = math.hypot(tm[0], tm[1]) * math.hypot(cm[0], cm[1]) or 1.0
+        eff = (size or 10) * scale
+        x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+        y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+        mcid, unmapped = self._mcid(), _unmapped(font)
+        if mcid is not None and self._actual.get(mcid) and (tm[4] or tm[5]):
+            # 有 ActualText 的标记内容第一次画字的位置；只画了空格或读不出的字的，算“没读出”（红头“通 告”是空格加图形）
+            self._note(0, 0, (x, y, 0, not text.strip() or unmapped, eff))
+            entry = self._lost[mcid]
+            if text.strip() and not unmapped and entry[3][3]:
+                entry[3] = entry[3][:3] + (False,) + entry[3][4:]
+        if unmapped:  # 中文字体子集没有字码映射：汉字读出来是乱码，不收（记下缺字）；数字、英文照收
             kept = _ascii_only(text)
-            self.missing += len("".join(text.split())) - len("".join(kept.split()))
+            self._note(0, len("".join(text.split())) - len("".join(kept.split())))
             text = kept
             if not text.strip():
                 return
-        scale = math.hypot(tm[0], tm[1]) * math.hypot(cm[0], cm[1]) or 1.0
-        eff = (size or 10) * scale
-        if tm[4] == 0 and tm[5] == 0 and self.frags:  # pypdf 对同一行接着显示的字给 (0,0)：接在上一段后面
-            last = self.frags[-1]
+        last = self.frags[-1] if self.frags else None
+        if tm[4] == 0 and tm[5] == 0 and last:  # pypdf 对同一行接着显示的字给 (0,0)：接在上一段后面
             last["text"] += text
             return
         if not text.strip():
             return
-        x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
-        y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
-        self.frags.append({"x": x, "y": y, "size": eff, "text": text})
+        self.frags.append({"x": x, "y": y, "size": eff, "text": text, "mcid": mcid})
 
     # -- 线 --
     def _op(self, op, args, cm, tm):
@@ -106,14 +141,9 @@ class _Page:
             return (cm[0] * x + cm[2] * y + cm[4], cm[1] * x + cm[3] * y + cm[5])
 
         try:
-            if op == b"Tf":
-                self._unmapped_font = _unmapped(self._fonts.get(str(args[0])))
-            elif op in (b"Tj", b"TJ", b"'", b'"') and self._unmapped_font:
-                self._missing_codes += _drawn_codes(args)
-            elif op == b"Do" and str(args[0]) in self._images \
-                    and min(abs(cm[0]) + abs(cm[2]), abs(cm[1]) + abs(cm[3])) >= IMAGE_MIN_SIDE:
-                self.images += 1  # 贴在页面上的图片（红头、图片标题、印章）：里面的字文字层里没有
-            elif op == b"re":
+            if self._marked(op, args, cm):
+                return
+            if op == b"re":
                 x, y, w, h = (float(a) for a in args[:4])
                 self._path.append(("rect", pt(x, y), pt(x + w, y + h)))
             elif op == b"m":
@@ -132,6 +162,29 @@ class _Page:
                 self._path, self._cur = [], None
         except (TypeError, ValueError, IndexError):
             self._path, self._cur = [], None
+
+    def _marked(self, op, args, cm) -> bool:
+        """字体、标记内容（BDC/BMC/EMC）、读不出的字和图片：处理了返回 True。"""
+        if op == b"Tf":
+            self._unmapped_font = _unmapped(self._fonts.get(str(args[0])))
+        elif op == b"BDC":
+            props = args[1] if len(args) > 1 else None
+            self._marks.append(props.get("/MCID") if isinstance(props, dict) else None)
+        elif op == b"BMC":
+            self._marks.append(None)
+        elif op == b"EMC":
+            if self._marks:
+                self._marks.pop()
+        elif op in (b"Tj", b"TJ", b"'", b'"'):
+            if self._unmapped_font:
+                self._note(1, _drawn_codes(args))
+        elif op == b"Do" and str(args[0]) in self._images:
+            w, h = abs(cm[0]) + abs(cm[2]), abs(cm[1]) + abs(cm[3])
+            if min(w, h) >= IMAGE_MIN_SIDE:  # 贴在页面上的图片（红头、图片标题、印章）：里面的字文字层里没有
+                self._note(2, 1, (cm[4], cm[5] + 0.15 * h, w, True, h))
+        else:
+            return False
+        return True
 
     def _commit(self, stroke):
         for kind, (x0, y0), (x1, y1) in self._path:
@@ -152,6 +205,50 @@ class _Page:
                 elif w < 1 and h > 3:
                     self.v.append((x0, y0, y1))
         self._path, self._cur = [], None
+
+
+def actual_texts(page) -> dict:
+    """这一页标记内容（MCID）→ 结构树里写的 ActualText（标注过的 PDF 才有；读不出就空）。整份文件读一次，记在 reader 上。"""
+    try:
+        reader, ref = page.pdf, page.indirect_reference
+        cache = getattr(reader, "_actual_texts", None)
+        if cache is None:
+            cache = {}
+            root = reader.trailer["/Root"].get_object().get("/StructTreeRoot")
+            if root is not None:
+                _walk_struct(root.get_object(), None, None, cache)
+            reader._actual_texts = cache
+        return cache.get(ref.idnum, {}) if ref is not None else {}
+    except Exception:  # noqa: BLE001 -- 结构树读不出：不补
+        return {}
+
+
+def _walk_struct(node, page, actual, out, depth=0):
+    """结构树往下走：带 ActualText 的元素，这段字记在它（含子元素）的第一个 MCID 上。"""
+    if depth > 100:
+        return
+    node = node.get_object() if hasattr(node, "get_object") else node
+    if isinstance(node, int):
+        if page is not None and actual and not actual[1]:
+            out.setdefault(page, {}).setdefault(node, actual[0])
+            actual[1] = True
+        return
+    if isinstance(node, list):
+        for item in node:
+            _walk_struct(item, page, actual, out, depth + 1)
+        return
+    if not isinstance(node, dict):
+        return
+    pg = node.get("/Pg")
+    page = pg.idnum if hasattr(pg, "idnum") else page
+    if "/MCID" in node:  # 标记内容引用 {/Type /MCR /MCID n}
+        _walk_struct(int(node["/MCID"]), page, actual, out, depth + 1)
+        return
+    if actual is None and "/ActualText" in node and str(node["/ActualText"]).strip():
+        actual = [" ".join(str(node["/ActualText"]).split()), False]
+    kids = node.get("/K")
+    if kids is not None:
+        _walk_struct(kids, page, actual, out, depth + 1)
 
 
 def _page_fonts(page) -> dict:
@@ -265,16 +362,15 @@ def _lines(frags):
     for (items,) in rows:
         items.sort(key=lambda f: f["x"])
         text, end = "", None
+        main = max(items, key=lambda f: (f["size"], len(f["text"])))
         for f in items:
-            piece = f["text"]
-            if end is not None and f["x"] - end > 1.5 * f["size"]:
-                text = text.rstrip() + "  " + piece.lstrip()  # 同一行里隔得远（落款、表外的两栏）：留两个空格
-            elif end is not None and text[-1:].isalnum() and text[-1:].isascii() and piece[:1].isalnum() \
-                    and piece[:1].isascii() and (f["x"] - end > 0.2 * f["size"]
-                                                 or (text[-1:].islower() and piece[:1].isupper())):
-                text += " " + piece  # 英文词之间的空格在 PDF 里常是位置间隔，不是空格字符（“for”“Kids”分开画）
+            piece = f["text"].replace("\n", "")  # pypdf 把后面画的空格、换行接在同一段里（“——  \n\n”）
+            place = _script_place(f, main, end)
+            if place:  # 字号小、基线偏下（上）、紧贴前一个字的短字：下标、上标（“Cmax”的 max，第四轮 D-B）
+                from clean.headings import scripted
+                text += scripted(piece, place)
             else:
-                text += piece
+                text = _append(text, piece, f, end)
             end = f["x"] + _width(piece, f["size"])
         text = re.sub(r" {3,}", "  ", text.strip())
         text = re.sub(r"(?<![ \x00-\x7f]) (?![ \x00-\x7f])", "", text)  # 两端对齐撑出来的中文字间空格
@@ -282,6 +378,35 @@ def _lines(frags):
         if text:
             out.append((items[0]["y"], items[0]["x"], end, text, max(f["size"] for f in items)))
     return out
+
+
+_CJK_SPACE = re.compile(r"[^\x00-\x7f] +$")
+
+
+def _append(text, piece, f, end) -> str:
+    """一行里接上一段字。"""
+    if end is not None and f["x"] - end > 1.5 * f["size"]:
+        return text.rstrip() + "  " + piece.lstrip()  # 同一行里隔得远（落款、表外的两栏）：留两个空格
+    if end is not None and text[-1:].isalnum() and text[-1:].isascii() and piece[:1].isalnum() \
+            and piece[:1].isascii() and (f["x"] - end > 0.2 * f["size"] or (text[-1:].islower() and piece[:1].isupper())):
+        return text + " " + piece  # 英文词之间的空格在 PDF 里常是位置间隔，不是空格字符（“for”“Kids”分开画）
+    # 中文后面画的空格紧接着又是中文（“——  ”“星光计划”）：空格不要
+    return (text.rstrip() if _CJK_SPACE.search(text) and ord(piece[:1] or " ") > 127 else text) + piece
+
+
+def _script_place(f, main, end):
+    """这段字是不是紧跟在前一个字后面的下标（"sub"）、上标（"sup"）：字号不到这一行主字号的 3/4、不超过 6 个字、
+    离前一个字不到半个字宽、基线比主字低（高）一成字号以上。"""
+    piece = f["text"].strip()
+    if end is None or f is main or not piece or len(piece) > 6 or f["size"] > 0.75 * main["size"] \
+            or abs(f["x"] - end) > 0.5 * main["size"]:
+        return None
+    shift = f["y"] - main["y"]
+    if shift <= -0.05 * main["size"]:
+        return "sub"
+    if shift >= 0.2 * main["size"]:
+        return "sup"
+    return None
 
 
 def _cell_text(frags, right) -> str:
@@ -362,14 +487,10 @@ def _paragraphs(lines) -> list[str]:
     left = min(x0 for _, x0, _, _, _ in lines)
     out, current, joinable, nearly, first = [], "", False, False, left
     for _, x0, x1, text, size in lines:
-        # 编号、项目符号开头的段落是悬挂缩进：折下来的行对齐编号后面的字（比这一段第一行靠右一两个字）
-        hanging = _LIST_START.match(current) or current[:1] in _BULLETS
-        limit = (first + 2.5 * size) if hanging else (left + 0.5 * size)
-        if _LISTING.match(current):  # “附件：1.……”：折下来的行对齐在“1.”后面的字
-            limit = first + 6 * size
+        limit = _wrap_limit(current, first, left, size)
         tail = nearly and len(text) <= 4  # 折下来只剩一两个字（“……未满足的临床需”“求”），上一行差一点写满
-        if current and (joinable or tail) and x0 <= limit and not _LIST_START.match(text) \
-                and text[:1] not in _BULLETS:
+        if current and (joinable or tail or _reference_wrap(current, text)) and x0 <= limit \
+                and not _LIST_START.match(text) and text[:1] not in _BULLETS:
             current = join_cjk(current, text)
         else:
             if current:
@@ -379,6 +500,26 @@ def _paragraphs(lines) -> list[str]:
     if current:
         out.append(current)
     return out
+
+
+def _wrap_limit(current, first, left, size):
+    """折下来的行最多从哪里起：编号、项目符号开头的段落是悬挂缩进，折下来的行对齐编号后面的字（比这一段第一行
+    靠右一两个字）；“附件：1.……”对齐在“1.”后面的字；其余从左边距起。"""
+    if _LISTING.match(current):
+        return first + 6 * size
+    if _LIST_START.match(current) or current[:1] in _BULLETS:
+        return first + 2.5 * size
+    return left + 0.5 * size
+
+
+_REFERENCE = re.compile(r"\d{1,3}[.．]\s*[A-Za-z]")
+
+
+def _reference_wrap(current, text) -> bool:
+    """英文参考文献条目（“2.US FDA Guidance for Industry: Pediatric Study Plans:”）折下来的行：条目还没以“.”结束、
+    下一行是英文或数字开头，就接上（英文行的宽度估不准，不靠“写满”判断，第四轮 D-B）。"""
+    return bool(_REFERENCE.match(current)) and current[-1] != "." and (current[-1].isascii() or current[-1] in "–—") \
+        and text[:1].isascii() and text[:1].isalnum()
 
 
 def _open_line(text, x1, right, size):
@@ -449,6 +590,10 @@ def join_pages(texts: list[str]) -> list[str]:
     out = list(texts)
     for i in range(1, len(out)):
         head, _, rest = out[i].strip().partition("\n\n")
+        if out[i - 1] and head and _table_cell_continues(out[i - 1], head):
+            out[i - 1] = _continue_last_cell(out[i - 1].rstrip(), head.strip())
+            out[i] = rest
+            continue
         if not out[i - 1] or not head or not _last_paragraph_open(out[i - 1]):
             continue
         if head.startswith("|") or _LIST_START.match(head) or rank(head) or _is_page_number(head):
@@ -456,6 +601,27 @@ def join_pages(texts: list[str]) -> list[str]:
         out[i - 1] = join_cjk(out[i - 1].rstrip(), head.strip())
         out[i] = rest
     return out
+
+
+def _table_cell_continues(previous: str, head: str) -> bool:
+    """上一页以表格结束、最后一格的字没写完（不以句末标点结尾），这一页第一段不是表格、标题、编号、页码：
+    （最后一格至少 15 字）它是最后一格跨页的续行（“……现有数据”“如何支持儿童研究和使用。……”，第四轮 D-B）。"""
+    from clean.headings import rank
+
+    last = previous.rstrip().rsplit("\n", 1)[-1]
+    if not last.startswith("|") or "\n" in head or head.startswith("|"):
+        return False
+    cells = [c.strip() for c in last.strip().strip("|").split(" | ")]
+    filled = [c for c in cells if c]
+    if not filled or filled[-1] != cells[-1] or len(filled[-1]) < 15 or filled[-1][-1] in _END_PUNCT + "）)":
+        return False
+    return not (_LIST_START.match(head) or rank(head) or _is_page_number(head) or head.startswith("（"))
+
+
+def _continue_last_cell(previous: str, head: str) -> str:
+    body, _, last = previous.rpartition("\n")
+    inner = last.rstrip()[:-1].rstrip()  # 去掉行尾的“|”
+    return (body + "\n" if body else "") + join_cjk(inner, head.replace("|", "\\|")) + " |"
 
 
 def _without_page_numbers(lines, tables):

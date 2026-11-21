@@ -47,7 +47,12 @@ from json.decoder import scanstring
 # prefix noise normalized; stars escaped only where they could pair; header-less tables get a header; a PDF attachment
 # with unreadable glyphs carries the warning attachment_missing_glyphs:<pages>.
 # v19 (2026-11-21): follows attachment_parse v7 (a column-name row with one merged cell is the table header).
-PROCESSOR_VERSION = "datafabric.clean_text.v19"
+# v20 (2026-11-21, NMPA round-4 audit): follows attachment_parse v8; headings (clean/headings.py): a numbered question
+# ending with "？" is a heading even with a full stop earlier; with "附件N" separators the document-title heading before
+# them is at the separators' level and a separator absorbs the title right below it ("附件1 严重缺陷(举例)"); TOC dot
+# leaders and page numbers are removed; "目录" is never a heading. The attachment title skips a leading "附件N" and stops
+# after a title that is a heading.
+PROCESSOR_VERSION = "datafabric.clean_text.v20"
 
 # ---------------------------------------------------------------- 空白与语言
 

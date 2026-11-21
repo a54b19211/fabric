@@ -176,6 +176,9 @@ class _Styles:
             self.styles[node.get(_W + "styleId")] = {
                 "name": name or None,
                 "bold": _on(rpr.find(_W + "b")) if rpr is not None and rpr.find(_W + "b") is not None else None,
+                "jc": _val(ppr, _W + "jc"),  # 段落对齐（居中的题名，第四轮 S1）
+                "vert": _val(rpr, _W + "vertAlign"),  # 字符样式里的上下标（.doc 转出的 rStyle，第四轮 D-C）
+                "sz": _val(rpr, _W + "sz"),
                 "based": _val(node, _W + "basedOn"),
                 "level": int(heading.group(1)) if heading else (_int(outline) + 1 if outline and _int(outline) < 9
                                                                 else None),
@@ -195,7 +198,7 @@ class _Styles:
 
 class _Reader:
     def __init__(self, numbering, styles):
-        self.numbering, self.styles = numbering, styles
+        self.numbering, self.styles, self._size = numbering, styles, ""
 
     def _bold(self, run, inherited):
         rpr = run.find(_W + "rPr")
@@ -222,7 +225,8 @@ class _Reader:
             elif tag in (_MC_FALLBACK, _W + "pPr", _W + "del", _W + "rPr"):
                 continue
             elif tag == _W + "r":
-                place = _val(child.find(_W + "rPr"), _W + "vertAlign")
+                rpr = child.find(_W + "rPr")
+                place = _val(rpr, _W + "vertAlign") or self.styles.get(_val(rpr, _W + "rStyle"), "vert")
                 if place in ("superscript", "subscript"):  # 上标、下标：β₂、10⁶，没有对应字符的写 ^(…)/_(…)
                     inner = []
                     self._runs(child, inner, boxes, self._bold(child, bold))
@@ -257,16 +261,31 @@ class _Reader:
         text = label + text if text else ""
         if not headings or not text or "\n" in text or (self.styles.get(style, "name") or "").startswith("toc"):
             return headings_escape(text)
+        self._size = self._font_size(p, style)
         return self._heading_or_text(text, ppr, style, out, label)
+
+    def _font_size(self, p, style) -> str:
+        """段落里有字的 run 最常见的字号（w:sz，run 自己的或字符样式、段落样式里的）：连着的两行居中题名字号相同
+        才接成一个（“非处方药说明书范本”下面小一号的“暖宫七味散说明书”是另一行标题）。"""
+        sizes = []
+        for run in p.iter(_W + "r"):
+            if not "".join((t.text or "") for t in run.iter(_W + "t")).strip():
+                continue
+            rpr = run.find(_W + "rPr")
+            sizes.append(_val(rpr, _W + "sz") or self.styles.get(_val(rpr, _W + "rStyle"), "sz")
+                         or self.styles.get(style, "sz") or "")
+        return max(set(sizes), key=sizes.count) if sizes else ""
 
     def _heading_or_text(self, text, ppr, style, pieces, label) -> str:
         """按 headings 的规则：标题段落记下编号样式（_heading_marks 再定级别），“第X条（标题） 正文”拆成两段。"""
         outline = _val(ppr, _W + "outlineLvl")
         styled = bool(self.styles.get(style, "level")) or (outline is not None and _int(outline) < 9)
         plain = "".join(t for t, b in pieces if t.strip() and not b)
-        kind = headings_rank(text, emphasized=not "".join(plain.split()), styled=styled)
+        jc = _val(ppr, _W + "jc") or self.styles.get(style, "jc")
+        centered = jc == "center" and not label  # 居中的题名（和页面同一条规则，第四轮 S1）
+        kind = headings_rank(text, emphasized=not "".join(plain.split()), styled=styled, centered=centered)
         if kind:
-            return _HEADING + kind + "\x01" + text
+            return _HEADING + kind + ("\x02" + self._size if centered and kind == "u" else "") + "\x01" + text
         article = headings_split(text) or _bold_article(text, pieces, label)
         if article:
             return _HEADING + "tiao\x01" + article[0] + "\n\n" + headings_escape(article[1])
@@ -385,8 +404,35 @@ def docx_blocks(path: str) -> tuple[list[dict], int]:
     return _heading_marks(blocks), reference_chars(root)
 
 
+def _join_centered(blocks):
+    """连着的两行居中题名（“参加中药补充申请审评审批程序改革工作”“申报资料要求”）接成一个标题（和页面一样，不超过
+    headings.MAX_CHARS 字）。"""
+    out = []
+    for b in blocks:
+        text, prev = b.get("text") or "", (out[-1].get("text") or "") if out else ""
+        mark, _, title = text.partition("\x01")
+        if text.startswith(_HEADING + "u\x02") and prev.startswith(_HEADING + "u\x02") and "\n" not in prev \
+                and not re.fullmatch(r"目\s*录", title) and len(prev) + len(title) <= headings.MAX_CHARS + len(mark) \
+                and (prev.startswith(mark + "\x01") or _TITLE_TAIL.fullmatch(title) or _ISSUER.search(prev)):
+            out[-1] = {**out[-1], "text": prev + title}
+            continue
+        out.append(b)
+    return out
+
+
+# 两行居中题名接成一个：字号相同；或下一行是“（征求意见稿）”这种括注；或上一行是发文机关（“XX省（区、市）药品监督
+# 管理局”下面是“医疗器械产品预分类界定意见书（格式）”）。字号不同的另一行（“非处方药说明书范本”下面的
+# “暖宫七味散说明书”）是下一级标题
+_TITLE_TAIL = re.compile(r"[（(][^）)]{1,12}[)）]")
+_ISSUER = re.compile(r"(?:局|中心|委员会|办公室|办公厅)$")
+
+
 def _heading_marks(blocks):
     """标题级别按编号样式在文中的从属关系排（headings.assign_levels，## 起，# 留给附件名），不按作者设的级别。"""
+    blocks = _join_centered(blocks)
+    for b in blocks:
+        if (b.get("text") or "").startswith(_HEADING):
+            b["text"] = re.sub(r"\x02[^\x01]*", "", b["text"], count=1)
     kinds = [(b.get("text") or "")[1:].split("\x01", 1)[0] for b in blocks if (b.get("text") or "").startswith(_HEADING)]
     levels = headings.assign_levels(kinds)
     for b in blocks:

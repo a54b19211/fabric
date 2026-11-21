@@ -58,6 +58,15 @@ v6（2026-11-21，NMPA 第三轮审计）：
 同一文件只复用 v6 自己的结果。
 v7（2026-11-21）：表格中间的栏目名行里有一个横跨两列的格（“品名举例”占两列）也认作栏目名行（v6 只认没有合并格的，
 d2705923 的几张分表表头仍是上层分组行）。同一文件只复用 v7 自己的结果。
+v8（2026-11-21，NMPA 第四轮审计）：
+- PDF：读不出的字（贴图、没有字码映射的字体、只画了空格）所在的标记内容，结构树里有 ActualText 的用它补回（红头、
+  总标题、子附件的“附件 1”和题名，D-A；补不回的照旧记 missing_glyphs）；英文参考文献折行接回、表格最后一格跨页的
+  续行接回格里、Cmax 这类小字号偏下（上）的字写成下标（上标）（D-B）（clean.pdf_text）；
+- Word：居中（段落或样式里的 jc=center）的无编号短行是标题，和页面同一条规则；连着两行居中题名同字号（或下一行是
+  “（征求意见稿）”、上一行是发文机关）接成一个（S1）；字符样式（rStyle）里的上下标（D-C）（clean.office_text）；
+- 表格：表头上面的填写行、分组行照原顺序写在表前，不挪到表头下面（D-D）；没有栏目名行时第一行当表头，不补原文没有的
+  “列1 | 列2”（N2）（clean.excel_parser）。
+同一文件只复用 v8 自己的结果。
 """
 
 from __future__ import annotations
@@ -69,7 +78,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v7"
+PROCESSOR_VERSION = "datafabric.attachment_parse.v8"
 # 旧版本的结果不再沿用（v4–v7 改了输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}
