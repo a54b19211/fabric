@@ -432,3 +432,20 @@ def test_fiercepharma_template_drops_navigation_and_footer_only_for_that_site():
     assert out["text"] == "\n\n".join(["# Pfizer trial", body, body, body])
     other = ct.clean_markdown(md, source_id="nmpa")
     assert "Subscribe" in other["text"] and "©" in other["text"]
+
+
+def test_nmpa_attachment_text_starts_with_its_notice_and_long_tables_repeat_the_header():
+    from clean.clean_stage import attachment_with_parent
+
+    facts = {"parent_title": "国家药监局关于注销药品注册证书的公告（2026年第106号）", "parent_doc_number": "2026年第106号",
+             "parent_publish_date": "2026-11-11"}
+    table = "| 序号 | 药品名称 |\n| --- | --- |\n" + "\n".join("| %d | %s |" % (i, "片" * 500) for i in range(8))
+    text = attachment_with_parent("附件.docx", facts, "注销目录\n\n" + table)
+    head, about, lead, *groups = text.split("\n\n")
+    assert head == "# 附件.docx"
+    assert about == "所属公告：国家药监局关于注销药品注册证书的公告（2026年第106号），发布日期：2026-11-11"
+    assert lead == "注销目录" and len(groups) > 1
+    assert all(g.startswith("| 序号 | 药品名称 |\n| --- | --- |\n") for g in groups)
+    cleaned = ct.clean_markdown(text)
+    assert cleaned["text"] == text and [s["kind"] for s in cleaned["segments"]][:3] == ["heading", "paragraph",
+                                                                                         "paragraph"]

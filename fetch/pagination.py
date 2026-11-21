@@ -51,12 +51,38 @@ class BasePaginationDriver(ABC):
         模板方法：逐页 yield 详情页 URL，边翻页边产出，不等全部列表页采集完。
         JsClickDriver 会覆盖此方法，其余子类复用。
         """
+        history_from = self.site_cfg.get("history_from")
         for page in self._iter_list_pages():
+            if history_from and self.site_cfg.get("list_row_selector"):
+                rows = self._dated_rows(page)
+                urls = [url for url, day in rows if not day or day >= history_from]
+                older = any(day and day < history_from for _, day in rows)
+                logger.info(f"  提取到 {len(rows)} 条详情页链接，{len(rows) - len(urls)} 条早于 {history_from}")
+                if not rows:
+                    return
+                yield from urls
+                if older:  # 列表从新到旧：这一页已经有早于起点的条目，后面的页全是更早的，不再翻
+                    return
+                continue
             urls = self._extract_detail_urls(page)
             logger.info(f"  提取到 {len(urls)} 条详情页链接")
             if not urls:  # 这一页一条都没有：列表到头了（或页面改版）；不再往后翻，再翻只会得到更多空页或 404
                 return
             yield from urls
+
+    def _dated_rows(self, page) -> list[tuple[str, str]]:
+        """列表的每一行：(详情页链接, 行里写的日期 YYYY-MM-DD，没有为空)。站点配置 list_row_selector 选行。"""
+        rows, seen = [], set()
+        for row in page.css(self.site_cfg["list_row_selector"]):
+            links = [a for a in row.css("a") if a.attrib.get("href")]
+            if not links:
+                continue
+            full = urljoin(self.start_url, links[0].attrib["href"])
+            found = re.search(r"\d{4}-\d{2}-\d{2}", row.get_all_text(strip=True) or "")
+            if full not in seen:
+                seen.add(full)
+                rows.append((full, found.group(0) if found else ""))
+        return rows
 
     @abstractmethod
     def _iter_list_pages(self):
@@ -136,9 +162,16 @@ class UrlPatternDriver(BasePaginationDriver):
                 for n in range(1, self.max_pages)
             ]
 
-        for url in urls:
+        for number, url in enumerate(urls):
             logger.info(f"[列表页] {url}")
-            page_data = self._fetch(url)
+            try:
+                page_data = self._fetch(url)
+            except RuntimeError as exc:
+                # 站点配置 last_page_404：翻过最后一页时站点回 404，是列表到头了（第 1 页 404 仍是失败）
+                if number and pagination.get("last_page_404") and str(exc).startswith("HTTP 404"):
+                    logger.info(f"  第 {number + 1} 页 404：列表到头了")
+                    return
+                raise
             yield page_data["page"]
 
 

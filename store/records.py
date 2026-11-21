@@ -524,8 +524,12 @@ def _read_filters(conn, source, is_demo, cutoff, max_seq, run_id, ids, terms, ki
     term_clauses = []
     for index, term in enumerate(sorted(set(terms))):
         escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # 站点页面的正文只在原件 /parsed/markdown 里（投影不再放一份，fetch.site_crawler.project_capture）
         term_clauses.append(f"(payload->>'title' ILIKE :term{index} ESCAPE '\\' "
-                            f"OR payload->>'clean_text' ILIKE :term{index} ESCAPE '\\')")
+                            f"OR payload->>'clean_text' ILIKE :term{index} ESCAPE '\\' "
+                            f"OR (CASE WHEN payload->>'clean_text'='' AND payload->'facts'->>'role' IN "
+                            f"('web_capture','site_record') THEN (payload->>'raw_content')::jsonb "
+                            f"#>> '{{parsed,markdown}}' END) ILIKE :term{index} ESCAPE '\\')")
         params[f"term{index}"] = "%" + escaped + "%"
     return " AND ".join(where), params, " AND ".join(term_clauses) or "true"
 

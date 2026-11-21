@@ -41,12 +41,13 @@ import re
 from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 
 from fetch import transport
 from fetch.catalog import SITE_SOURCES, spec  # noqa: F401  SITE_SOURCES 供调用方使用
+from fetch.extractors.text_tools import remove_extra_whitespace
 from fetch.page_parser import route_webpage
 from fetch.pagination import make_driver
 from fetch.web_client import download_pdf, fetch_page
@@ -218,8 +219,10 @@ class _Reader:
         if self.unread_in_a_row >= SITE_DOWN_AFTER:
             raise FabricError("site_down", f"连续 {SITE_DOWN_AFTER} 条读不出来，站点可能出了故障；最近一条 {unread.url}：{unread.reason}")
 
-    def attachment(self, link, parent_id, cookies, discovered):
-        """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。额度用完抛 transport.Stop。"""
+    def attachment(self, link, parent_id, cookies, discovered, parent=None):
+        """下载一个附件；返回父页面附件清单里的一项，成功时同时加一条附件版本。额度用完抛 transport.Stop。
+        parent：所属页面的标题、发布日期、文号（_parent_context），写进附件原件：附件记录继承所属公告的日期，
+        进知识库时开头写所属公告的标题和文号。"""
         url = (link or {}).get("url") or ""
         key = (link or {}).get("key") or ""
         record_id = attachment_record_id(parent_id, _name(link))
@@ -261,20 +264,21 @@ class _Reader:
                     "store_path": info["local_path"],
                     "discovered_from": discovered,
                     "status": "stored",
+                    **({"parent": parent} if parent else {}),
                 },
             )
         )
         self.coverage.append({"parent_record_id": parent_id, **entry})
         return entry
 
-    def attachments(self, links, parent_id, cookies, discovered, skip):
+    def attachments(self, links, parent_id, cookies, discovered, skip, parent=None):
         """下载一个父项的附件（前 skip 个上一轮读过了，跳过）。预算在中途用完：后面的记成 not_attempted，
         抛 _Resume，续读位置指向下一个要读的附件。"""
         for position, link in enumerate(links):
             if position < skip:
                 continue
             try:
-                self.attachment(link, parent_id, cookies, discovered)
+                self.attachment(link, parent_id, cookies, discovered, parent)
             except transport.Stop as stop:
                 for later in links[position:]:
                     self.coverage.append({"parent_record_id": parent_id, "url": _kept_url(later),
@@ -308,7 +312,8 @@ class _Reader:
             self.unread_in_a_row = 0
             if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
                 return
-        self.attachments(links, record_id, None, "site_record", skip_attachments)
+        self.attachments(links, record_id, None, "site_record", skip_attachments,
+                         _parent_context(self.profile, parsed))
 
     def page(self, url, skip_attachments=0, record_page=True):
         """读一个详情页和它的附件。skip_attachments：续读时这一页前面已读过的附件数；record_page=False：
@@ -325,6 +330,7 @@ class _Reader:
             use_simple_fetch=cfg.get("use_simple_fetch", False),
         )
         parsed = route_webpage(page_data, site_key=self.site)
+        subpages = self.continuation(url, page_data["page"], parsed)
         html = getattr(page_data["page"], "html_content", "") or ""
         raw = html.encode("utf-8")
         html_sha = hashlib.sha256(raw).hexdigest()
@@ -344,6 +350,8 @@ class _Reader:
             if not path.exists():
                 path.write_bytes(raw)
             capture["html_store_path"] = str(path)
+        if subpages:
+            capture["continuation_pages"] = subpages
         index = len(self.records)
         if record_page:
             self.add(None)  # 占位：父页面排在它的附件前面
@@ -357,7 +365,58 @@ class _Reader:
             self.unread_in_a_row = 0
             if self.budget.known(record):  # 增量读取：已存且没变，附件也是上一轮存的，不再下载
                 return
-        self.attachments(links, url, cookies, "detail_page", skip_attachments)
+        self.attachments(links, url, cookies, "detail_page", skip_attachments, _parent_context(cfg, parsed))
+
+    def continuation(self, url, page, parsed):
+        """多页文章（站点配置有 continuation_links / continuation_extractor，如 NMPA“共3页”）：逐页抓子页，
+        正文接在第 1 页后面（空一行），子页上的附件并进附件清单；返回各子页的原件 [{url, html 或 html_store_path}]，
+        存进第 1 页的原件。子页读不出来，整篇算读不到（抛出），不存只有第 1 页的半篇。"""
+        extract, find = self.profile.get("continuation_extractor"), self.profile.get("continuation_links")
+        hrefs = find(page) if extract and find else []
+        if not hrefs:
+            return []
+        cfg, pages = self.profile, []
+        known = {link.get("url") for link in parsed.get("attachment_links") or []}
+        for href in hrefs:
+            sub_url = urljoin(url, href)
+            if not _on_site(self.site, sub_url):
+                continue
+            sub = fetch_page(sub_url, wait_selector=cfg.get("detail_wait_selector"),
+                             disable_resources=cfg.get("disable_resources", True),
+                             solve_cloudflare=cfg.get("solve_cloudflare", False),
+                             use_simple_fetch=cfg.get("use_simple_fetch", False))
+            got = extract(sub["page"])
+            body = remove_extra_whitespace(got.get("body_text") or "")
+            if body:
+                parsed["markdown"] = ((parsed.get("markdown") or "# " + (parsed.get("title") or "")) + "\n\n" + body)
+            for link in got.get("attachment_links") or []:
+                if link.get("url") not in known:
+                    known.add(link.get("url"))
+                    parsed.setdefault("attachment_links", []).append(link)
+            raw = (getattr(sub["page"], "html_content", "") or "").encode("utf-8")
+            entry = {"url": sub_url}
+            if len(raw) <= HTML_INLINE_BYTES:
+                entry["html"] = raw.decode("utf-8")
+            else:
+                path = _store_root() / self.site / "html" / (hashlib.sha256(raw).hexdigest() + ".html")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_bytes(raw)
+                entry["html_store_path"] = str(path)
+            pages.append(entry)
+        if pages:
+            parsed["extra"] = {**(parsed.get("extra") or {}), "page_count": 1 + len(pages)}
+        return pages
+
+
+def _parent_context(profile, parsed):
+    """附件继承的所属页面信息（站点配置 attachments_inherit_parent 打开的站点）：标题、发布日期、文号。"""
+    if not profile.get("attachments_inherit_parent"):
+        return None
+    extra = parsed.get("extra") or {}
+    context = {"title": parsed.get("title") or "", "publish_date": parsed.get("publish_date") or "",
+               "doc_number": extra.get("doc_number") or ""}
+    return {k: v for k, v in context.items() if v} or None
 
 
 def _site_results(reader, query, resume_at=0):
@@ -463,16 +522,25 @@ def _read_detail_pages(request, reader, start):
     start_i, start_a, start_recorded = start[:3]
     if request.query not in reader.profile.get("start_urls", []):
         raise FabricError("unknown_start_url", "列表入口不在该站点配置的 start_urls 里")
-    seen = -1
+    seen, articles = -1, set()
+    column = (reader.profile.get("list_filters") or {}).get(request.query)
+    article_key = reader.profile.get("article_key")
     with closing(make_driver(reader.site, reader.profile, request.query).iter_detail_urls()) as urls:
         for url in urls:  # 读满不再要，浏览器就收工，不再翻下一页
             seen += 1
+            key = article_key(url) if article_key else None
+            reason = ("off_site_link" if not _on_site(reader.site, url)
+                      else "outside_column" if column and not re.search(column, url)
+                      else "duplicate_article" if key and key in articles else None)
+            if key:
+                articles.add(key)
             if seen < start_i:
                 continue
             reader.position = seen
             first = seen == start_i
-            if not _on_site(reader.site, url):
-                reader.skipped.append({"url": url, "reason": "off_site_link"})
+            if reason:
+                # 别站的链接；栏目里不采的子栏（器械、化妆品、图解）；同一篇文章在列表里出现第二次（一篇一条记录）
+                reader.skipped.append({"url": url, "reason": reason})
                 reader.position = seen + 1
                 continue
             try:
@@ -609,7 +677,13 @@ def _attachment_fields(data):
         for k in ("parent_record_id", "file_name", "file_ext", "sha256", "size", "store_path", "discovered_from")
     }
     facts["role"] = "attachment"
-    return facts, data.get("file_name") or "", "", None
+    # 所属页面的标题、文号（附件进知识库时写在开头），发布日期就是附件的发布日期（附件自己没有日期）
+    parent = data.get("parent") or {}
+    for key in ("title", "doc_number", "publish_date"):
+        if parent.get(key):
+            facts["parent_" + key] = parent[key]
+    published = source_time(parent.get("publish_date") or None, "parent_publish_date")
+    return facts, data.get("file_name") or "", "", published
 
 
 # role → (它必须带的 schema 版本, 它的 (facts, 标题, 清洗正文, 发布时间) 投影)
@@ -644,6 +718,10 @@ def project_capture(source_id: str, item: ArchiveRecord) -> dict:
     facts, title, clean_text, published = kind[1](data)
     if _expected_capture_id(role, data) != item.source_record_id or data.get("site") != source_id:
         raise FabricError("native_id_mismatch", "站点原件的链接或来源与记录不一致")
+    if role in ("web_capture", "site_record") and SITE_PROFILES.get(source_id, {}).get("single_clean_text"):
+        # 正文只有一份：清洗段从原件 /parsed/markdown 洗出的 derived_clean_text。投影里不再放一份提取器原样输出
+        # （以前两份字数不同，下游不知该用哪份）
+        clean_text = ""
     return {
         "record_kind": "document",
         "title": title,

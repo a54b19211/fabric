@@ -193,7 +193,7 @@ def pages_of(batch):
 
 def test_list_mode_reuses_old_pagination_and_resumes(fake_web, monkeypatch):
     """max_records 数的是版本（父页面和附件都算）：每页 1 个页面 + 2 个附件。"""
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(5)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(5)]
 
     class Driver:
         def iter_detail_urls(self):
@@ -222,7 +222,7 @@ def test_full_reader_stops_asking_the_driver_for_more_list_pages(fake_web, monke
             try:
                 for page in range(200):  # 站点配置翻 200 页
                     seen["pages"] += 1
-                    yield f"https://www.nmpa.gov.cn/xxgk/ggtg/{page:04d}.html"
+                    yield f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{page:04d}.html"
             finally:
                 seen["closed"] = True
 
@@ -317,7 +317,9 @@ def test_projection_of_capture_and_attachment(fake_web):
     batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
     page, att = batch["records"][0], batch["records"][1]
     p = project_record("nmpa", page)
-    assert p["title"] == "关于某药品的公告" and p["clean_text"].endswith("正文。")
+    # NMPA 的正文只有一份（清洗段从原件 /parsed/markdown 洗出的那份），投影里不再放提取器原样输出
+    assert p["title"] == "关于某药品的公告" and p["clean_text"] == ""
+    assert json.loads(page.raw_content)["parsed"]["markdown"].endswith("正文。")
     assert p["source_url"] == PAGE and p["facts"]["role"] == "web_capture"
     assert p["facts"]["attachment_record_ids"] == [
         site_crawler.attachment_record_id(PAGE, ATT1), site_crawler.attachment_record_id(PAGE, ATT2)
@@ -327,6 +329,9 @@ def test_projection_of_capture_and_attachment(fake_web):
     assert a["facts"]["role"] == "attachment" and a["facts"]["parent_record_id"] == PAGE
     assert a["source_url"] == ATT1
     assert a["clean_text"] == "" and a["facts"]["sha256"]  # 正文由加工层 attachment_parse 产出
+    # 附件没有自己的日期：继承所属公告的发布日期，也带上公告标题
+    assert a["source_published_at"] == {"value": "2026-11-01", "precision": "day", "meaning": "parent_publish_date"}
+    assert a["facts"]["parent_title"] == "关于某药品的公告" and a["facts"]["parent_publish_date"] == "2026-11-01"
     with pytest.raises(FabricError):
         project_record(
             "nmpa", ArchiveRecord(source_record_id=PAGE, record_kind="document", raw_content=json.dumps({"x": 1}))
@@ -343,6 +348,47 @@ def test_same_file_under_two_channel_pages_is_two_stable_records(fake_web, monke
     assert len(set(ids)) == 2 and all(i.endswith("#attachment=" + ATT1) for i in ids)
     again = read_public(FetchRequest(source_id="nmpa", query="stored_attachments", source_record_ids=[PAGE]))
     assert again["records"][0].raw_content == batch["records"][0].raw_content
+
+
+def test_nmpa_list_reads_only_its_drug_column_and_each_article_once(fake_web, monkeypatch):
+    """药品公告通告入口：器械子栏、别站链接、同一篇在列表里第二次出现（另一栏目路径、同一编号）都跳过，不打开。"""
+    drug = "https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/ypqtggtg/20261111164740198.html"
+    urls = [drug, "https://www.nmpa.gov.cn/xxgk/ggtg/ylqxggtg/20261111164740111.html",
+            "https://www.cde.org.cn/main/news/viewInfoCommon/abc", "https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/x/20261111164740198.html"]
+
+    class Driver:
+        def iter_detail_urls(self):
+            yield from urls
+
+    monkeypatch.setattr(site_crawler, "make_driver", lambda site, profile, url: Driver())
+    got = read_public(FetchRequest(source_id="nmpa", query="https://www.nmpa.gov.cn/yaopin/ypggtg/index.html",
+                                   max_records=100))
+    assert pages_of(got) == [drug]
+    assert [s["reason"] for s in got["skipped_items"]] == ["outside_column", "off_site_link", "duplicate_article"]
+
+
+def test_nmpa_multi_page_article_joins_its_sub_pages(fake_web, monkeypatch):
+    """“共3页”的文章：子页 _1、_2 的正文接在后面，子页上的附件也收；子页原件存在第 1 页的原件里。"""
+    profile = dict(site_crawler.SITE_PROFILES["nmpa"])
+    profile["continuation_links"] = lambda page: ["20261101120000123_1.html", "20261101120000123_2.html"]
+    profile["continuation_extractor"] = lambda page: {
+        "body_text": "第%s页正文。" % page.n, "attachment_links": [{"url": ATT1, "name": "附件1"}]}
+    monkeypatch.setitem(site_crawler.SITE_PROFILES, "nmpa", profile)
+    real = site_crawler.fetch_page
+
+    def fetch_page(url, **kwargs):
+        got = real(url, **kwargs)
+        page = FakePage()
+        page.n = url[-6] if "_" in url.rsplit("/", 1)[1] else "1"
+        return {**got, "page": page}
+
+    monkeypatch.setattr(site_crawler, "fetch_page", fetch_page)
+    batch = read_public(FetchRequest(source_id="nmpa", query="by_url", source_record_ids=[PAGE]))
+    data = json.loads(batch["records"][0].raw_content)
+    assert data["parsed"]["markdown"] == "# 关于某药品的公告\n\n正文。\n\n第1页正文。\n\n第2页正文。"
+    assert [p["url"] for p in data["continuation_pages"]] == [PAGE[:-5] + "_1.html", PAGE[:-5] + "_2.html"]
+    assert data["parsed"]["extra"]["page_count"] == 3
+    assert len(data["attachments"]) == 2  # 子页上的附件1 与第 1 页的是同一个链接，不重复
 
 
 def test_very_long_pair_falls_back_to_a_hashed_attachment_key():
@@ -800,7 +846,7 @@ def _list_site(monkeypatch, urls):
 
 
 def test_known_stop_stops_after_three_known_in_a_row_and_does_not_download_their_attachments(fake_web, monkeypatch, stored):
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(8)]
     stored.update(urls[2:])  # 前两条是新的，从第三条起都读过了
     start = _list_site(monkeypatch, urls)
     batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
@@ -811,7 +857,7 @@ def test_known_stop_stops_after_three_known_in_a_row_and_does_not_download_their
 
 
 def test_without_known_stop_the_same_list_is_read_to_the_end(fake_web, monkeypatch, stored):
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(8)]
     stored.update(urls[2:])
     start = _list_site(monkeypatch, urls)
     batch = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100))  # 手动抓取、回填：known_stop=0
@@ -820,7 +866,7 @@ def test_without_known_stop_the_same_list_is_read_to_the_end(fake_web, monkeypat
 
 def test_an_unread_item_resets_the_count_so_known_ones_after_it_do_not_hide_it(fake_web, monkeypatch, stored):
     """没存的不能被“遇到已存的就停”跳过：读不到的这一条打断连续数，后面要再连续三条已存的才停。"""
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(8)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(8)]
     stored.update(set(urls) - {urls[2]})  # 第 3 条读不到，别的都读过了
     original = site_crawler.fetch_page
 
@@ -840,7 +886,7 @@ def test_an_unread_item_resets_the_count_so_known_ones_after_it_do_not_hide_it(f
 
 def test_a_read_that_stored_nothing_new_is_not_a_failure_but_an_empty_list_is(fake_web, monkeypatch, stored):
     """“解析到了但全是已存的”是正常读到旧的了；“一条都没解析到”才是可能改版，标成失败。"""
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(4)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(4)]
     stored.update(urls)
     start = _list_site(monkeypatch, urls)
     quiet = read_public(FetchRequest(source_id="nmpa", query=start, max_records=100, known_stop=3))
@@ -869,7 +915,7 @@ def test_api_site_stops_at_known_records_and_an_empty_result_is_an_alarm_too(fak
 
 
 def test_a_detail_page_that_cannot_be_read_does_not_stop_the_list(fake_web, monkeypatch, stored):
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(3)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(3)]
     original = site_crawler.fetch_page
 
     def fetch(url, **kwargs):
@@ -906,7 +952,7 @@ def test_a_stop_while_replaying_to_the_cursor_does_not_move_the_cursor_back(fake
 
 
 def test_five_detail_pages_in_a_row_that_cannot_be_read_are_a_site_fault_not_five_unread_items(fake_web, monkeypatch, stored):
-    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/{i:04d}.html" for i in range(9)]
+    urls = [f"https://www.nmpa.gov.cn/xxgk/ggtg/ypggtg/{i:04d}.html" for i in range(9)]
     original = site_crawler.fetch_page
 
     def fetch(url, **kwargs):

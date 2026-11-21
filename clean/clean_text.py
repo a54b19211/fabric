@@ -35,7 +35,10 @@ from json.decoder import scanstring
 # v14 (2026-11-17): openFDA label fields that hold an HTML table (the *_table fields) are written as Markdown tables
 # (same converter as the WHO notices): an HTML table is one unsplittable block for the knowledge base, and the long
 # ones got no vector at all.
-PROCESSOR_VERSION = "datafabric.clean_text.v14"
+# v15 (2026-11-21): NMPA attachments get their own cleaned text: the parent notice's title, document number and date
+# on top (clean_stage.attachment_with_parent), long pipe tables split into groups that each repeat the header
+# (group_pipe_tables), so the knowledge base never cuts inside a row and every piece of a table has its header.
+PROCESSOR_VERSION = "datafabric.clean_text.v15"
 
 # ---------------------------------------------------------------- 空白与语言
 
@@ -90,6 +93,38 @@ def _result(text, segments, language, removed_lines, warnings):
         "removed_lines": removed_lines,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------- 长表格分组
+
+TABLE_GROUP_CHARS = 3000  # 一组表格最多这么多字（知识库 cn_regulatory 一块 4000 字，一组放得进一块）
+_TABLE_SEPARATOR = re.compile(r"\|(?:\s*:?-{3,}:?\s*\|)+")
+
+
+def group_pipe_tables(text: str, max_chars: int = TABLE_GROUP_CHARS) -> str:
+    """Markdown 管道表格太长时分成几组：每组以表头行和分隔行开头，组之间空一行。知识库按空行切块，切点只会落在
+    组和组之间，不会切在一行中间，切开后每块都有表头。一行本身超过上限的，自成一组（不切行）。其余文字原样不动。"""
+    lines, out, i = text.split("\n"), [], 0
+    while i < len(lines):
+        if (lines[i].lstrip().startswith("|") and i + 1 < len(lines)
+                and _TABLE_SEPARATOR.fullmatch(lines[i + 1].strip())):
+            header, rule, j = lines[i], lines[i + 1], i + 2
+            group = [header, rule]
+            size = len(header) + len(rule) + 2
+            while j < len(lines) and lines[j].lstrip().startswith("|"):
+                row = lines[j]
+                if len(group) > 2 and size + len(row) + 1 > max_chars:
+                    out.extend(group + [""])
+                    group, size = [header, rule], len(header) + len(rule) + 2
+                group.append(row)
+                size += len(row) + 1
+                j += 1
+            out.extend(group)
+            i = j
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- 模板行

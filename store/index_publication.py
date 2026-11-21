@@ -283,9 +283,11 @@ def _enqueue(conn, target, record, artifact, meta, pieces):
     return inserted
 
 
-def enqueue_versions(conn, version_ids, *, configured=None):
+def enqueue_versions(conn, version_ids, *, configured=None, sampling=False):
     """把这些版本的当前产物放进已启用索引目标的待办（同一事务）。清洗段写画像后调用；回填扫描也用它。
-    没有配置索引目标时什么也不做；没画像、正文为空的版本跳过（画像后会再来）。"""
+    没有配置索引目标时什么也不做；没画像、正文为空的版本跳过（画像后会再来）。
+    带抽样上限的目标：只有抽样扫描（sampling=True，_sample_newest 按发布日期从新到旧挑的）才收新记录；
+    清洗段顺手入队时只更新已经收了的记录。以前谁先洗完谁先占名额，NMPA 的 40 个名额全被 2014、2020 年的旧记录占了。"""
     configured = targets() if configured is None else configured
     if not configured or not version_ids:
         return 0
@@ -312,7 +314,7 @@ def enqueue_versions(conn, version_ids, *, configured=None):
         pieces = index_pieces.plan(artifact["body"], artifact.get("segments") or [])
         for target in wanted:
             if (target.source_id, target.is_demo) == (record.source_id, record.is_demo) and _admitted(
-                    conn, target, record.source_record_id):
+                    conn, target, record.source_record_id, fill=sampling):
                 count += _enqueue(conn, target, record, artifact, meta, pieces)
     return count
 
@@ -332,14 +334,42 @@ def _records(conn, target):
                              "AND state<>'disabled'"), {"t": target.key()}).scalar_one()
 
 
-def _admitted(conn, target, record_id):
-    """抽样上限（IndexTarget.limit）：没写上限、这条记录已经收了、或者还没收满，才收。"""
+def _admitted(conn, target, record_id, fill=True):
+    """抽样上限（IndexTarget.limit）：没写上限、这条记录已经收了、或者（fill：抽样扫描挑的）还没收满，才收。"""
     if target.limit is None:
         return True
     if conn.execute(text("SELECT 1 FROM index_publications WHERE target_id=:t AND source_record_id=:n "
                          "AND state<>'disabled' LIMIT 1"), {"t": target.key(), "n": record_id}).first():
         return True
-    return _records(conn, target) < target.limit
+    return fill and _records(conn, target) < target.limit
+
+
+# 抽样目标还没收的记录里，发布日期最新的几条（有画像、有非空正文的）
+_NEWEST_UNSAMPLED = """
+SELECT v.version_id FROM fabric_versions v
+WHERE v.source_id=:source AND v.is_demo=:demo AND v.record_kind<>'graph'
+  AND EXISTS (SELECT 1 FROM derived_profiles p JOIN derived_clean_text d
+                ON d.version_id=p.version_id AND d.processor_version=p.text_processor_version
+              WHERE p.version_id=v.version_id AND p.processor_version=:profile AND d.status='parsed' AND d.chars>0)
+  AND NOT EXISTS (SELECT 1 FROM index_publications i WHERE i.target_id=:t AND i.source_record_id=v.source_record_id
+                  AND i.state<>'disabled')
+ORDER BY v.payload->'source_published_at'->>'value' DESC NULLS LAST, v.published_seq DESC
+LIMIT :n
+"""
+
+
+def _sample_newest(conn, target, batch_size):
+    """抽样目标（带 limit）补名额：按来源报告的发布日期从新到旧挑还没收的记录入队，直到收满。不按 published_seq 水位
+    从旧往新扫——那样先收的是最早入库的记录（NMPA 是 2014、2020 年的）。"""
+    from clean import profile
+
+    room = target.limit - _records(conn, target)
+    if room <= 0:
+        return 0
+    ids = conn.execute(text(_NEWEST_UNSAMPLED), {
+        "source": target.source_id, "demo": target.is_demo, "t": target.key(), "profile": profile.PROCESSOR_VERSION,
+        "n": min(batch_size, room)}).scalars().all()
+    return enqueue_versions(conn, ids, configured=[target], sampling=True) if ids else 0
 
 
 def _readable(conn, source_id):
@@ -381,8 +411,9 @@ def scan_committed(*, batch_size=100):
             ).mappings().first()
             if row is None or not _readable(conn, target.source_id):
                 continue
-            if target.limit is not None and _records(conn, target) >= target.limit:
-                continue  # 抽样收满了：不扫，水位也不动
+            if target.limit is not None:  # 抽样目标：从最新的挑，收满为止（水位不用）
+                count += _sample_newest(conn, target, batch_size)
+                continue
             versions = conn.execute(text("""
                 SELECT version_id,published_seq FROM fabric_versions
                 WHERE source_id=:source AND is_demo=:demo AND published_seq>:seq
@@ -391,8 +422,6 @@ def scan_committed(*, batch_size=100):
                     "seq": row["scanned_seq"], "limit": batch_size}).mappings().all()
             if versions:
                 count += enqueue_versions(conn, [v["version_id"] for v in versions], configured=[target])
-                if target.limit is not None and _records(conn, target) >= target.limit:
-                    continue  # 这一批里收满了：水位不动（没收的那些以后去掉上限时还要扫到）
                 conn.execute(text("""
                     UPDATE index_targets SET scanned_seq=:seq,scanned_at=clock_timestamp() WHERE id=:id
                 """), {"seq": versions[-1]["published_seq"], "id": target.key()})

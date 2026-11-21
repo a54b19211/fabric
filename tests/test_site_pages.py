@@ -462,10 +462,82 @@ def test_nmpa_body_is_the_document_not_the_info_table_share_bar_or_related_links
     assert got["publish_date"] == "2025-12-25"
     assert body.startswith("为支持医疗器械出口贸易")
     assert "索引号" not in body and "发布时间" not in body and "相关链接" not in body and "分享" not in body
-    assert body.rstrip().endswith("国家药品监督管理局2025年第126号公告附件.doc")
-    assert got["extra"] == {"index_number": "FGWJ-2025-10097"}  # 不再从正文里猜药名、企业、批准文号
+    # 段落之间空一行；只是一个附件链接的那一行不留在正文里（附件另有记录）
+    assert body.endswith("附件：医疗器械出口销售证明管理规定\n\n国家药监局\n\n2025年12月24日")
+    # 不再从正文里猜药名、企业、批准文号；文号从标题里取
+    assert got["extra"] == {"index_number": "FGWJ-2025-10097", "doc_number": "2025年第126号"}
     assert got["attachment_links"] == [{"name": "国家药品监督管理局2025年第126号公告附件.doc",
                                         "url": "https://www.nmpa.gov.cn/directory/web/nmpa/images/1766628495442076887.doc"}]
+
+
+def _nmpa(text_html, after=""):
+    return Selector("<html><head><meta name='ArticleTitle' content='某通知'></head><body><div class='wenzhang'>"
+                    "<h2 class='title'>某通知</h2><div class='text'>" + text_html + "</div>" + after
+                    + "</div></body></html>")
+
+
+def test_nmpa_short_numbered_lines_are_headings_and_paragraphs_are_kept_apart():
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    body = extract_nmpa_detail(_nmpa(
+        "<p>一、背景</p><p>正文一段。</p><p>（一）申请人企业法人资格证明文件。</p><p>（二）工作要求</p>"
+        "<p>1.产品的预期用途</p><p>一、各级药品监督管理部门应当按照本通知要求，认真组织实施，确保各项工作落到实处。</p>"
+        "<p>第一章 总则</p>"))["body_text"]
+    assert body.split("\n\n") == ["## 一、背景", "正文一段。", "（一）申请人企业法人资格证明文件。", "### （二）工作要求",
+                                  "#### 1.产品的预期用途",
+                                  "一、各级药品监督管理部门应当按照本通知要求，认真组织实施，确保各项工作落到实处。",
+                                  "## 第一章 总则"]
+
+
+def test_nmpa_related_links_hidden_and_textless_anchors_are_not_kept():
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    got = extract_nmpa_detail(_nmpa(
+        "<p>正文。</p><p><a href='/directory/web/nmpa/images/a.docx'>附件1.docx</a></p>"
+        "<p><a href='/directory/web/nmpa/images/b.doc'></a></p>"
+        "<p style='display:none'><a href='/directory/web/nmpa/images/c.doc'>附件1.doc</a></p>"
+        "<p>【相关链接】</p><p><a href='../x/1.html'>另一篇</a></p>",
+        "<div class='about'><div class='title'>【相关链接】</div><ul><li><a href='y.html'>又一篇</a></li></ul></div>"))
+    assert got["body_text"] == "正文。"
+    assert got["attachment_links"] == [{"name": "附件1.docx", "url": "https://www.nmpa.gov.cn/directory/web/nmpa/images/a.docx"}]
+
+
+def test_nmpa_image_and_video_pages_say_the_content_is_in_the_media():
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    video = extract_nmpa_detail(_nmpa("<p><video src='/directory/web/nmpa/video/1.mp4'><source src='/directory/web/"
+                                      "nmpa/video/1.mp4'></video></p>"))
+    assert video["body_text"] == "" and video["page_has_no_text"]
+    assert video["extra"] == {"media": {"videos": ["https://www.nmpa.gov.cn/directory/web/nmpa/video/1.mp4"]},
+                              "content_in_media": "video"}
+    poster = extract_nmpa_detail(_nmpa("<div class='special-swipe'><p><img src='/directory/web/nmpa/images/1.png'>"
+                                       "</p></div><p><br></p>"))
+    assert poster["extra"]["content_in_media"] == "image"
+    assert poster["extra"]["media"] == {"images": ["https://www.nmpa.gov.cn/directory/web/nmpa/images/1.png"]}
+
+
+def test_nmpa_sub_pages_of_a_multi_page_article_are_found_in_page_order():
+    from fetch.extractors.nmpa import continuation_links, extract_nmpa_continuation
+
+    pager = ("<div class='page'><div class='gray'><a href='20140207154501788.html'>首页</a><span>1</span>"
+             "<a href='20140207154501788_1.html'>2</a><a href='20140207154501788_2.html'>3</a>"
+             "<a href='20140207154501788_1.html'>下一页</a><span>共3页</span></div></div>")
+    first = _nmpa("<p>第五条 甲。</p>", pager)
+    assert continuation_links(first) == ["20140207154501788_1.html", "20140207154501788_2.html"]
+    assert continuation_links(_nmpa("<p>单页。</p>")) == []
+    sub = extract_nmpa_continuation(_nmpa("<p>第六条 乙。</p>", pager))
+    assert sub["body_text"] == "第六条 乙。"  # 标题、状态标记、翻页条都不重复
+
+
+def test_nmpa_long_table_is_split_into_groups_that_each_repeat_the_header():
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    rows = "".join("<tr><td>%d</td><td>%s</td></tr>" % (i, "药" * 400) for i in range(12))
+    body = extract_nmpa_detail(_nmpa("<table><tr><td>序号</td><td>名称</td></tr>" + rows + "</table>"))["body_text"]
+    groups = body.split("\n\n")
+    assert len(groups) > 1 and all(g.startswith("| 序号 | 名称 |\n| --- | --- |\n") for g in groups)
+    assert all(len(g) <= 3000 for g in groups)
+    assert sum(g.count("\n| ") - 1 for g in groups) == 12  # 每行都在，且只在一组里
 
 
 def test_phirda_list_takes_the_column_items_not_the_hot_news_sidebar():

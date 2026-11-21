@@ -128,7 +128,29 @@ def _clean_by_basis(source, inp, basis):
             seg["source"] = {"json_pointer": (seg.get("source") or {}).get("json_pointer")
                              or ("/title" if seg.get("kind") == "title" else "/abstractText")}
         return out
+    if basis == "attachment_with_parent":
+        return clean_text.clean_markdown(attachment_with_parent(inp["title"], inp["facts"], inp["text"]))
     return clean_text.clean_markdown(inp["markdown"], source_id=inp.get("source_id") or source)
+
+
+# 附件自己成一份文档进知识库（审计 K3）：开头是附件名、所属公告的标题、文号和发布日期，检索命中附件时知道它是哪份公告的；
+# 长表格分组、每组带表头（K1/K2）。只对站点配置 attachments_inherit_parent 的来源（NMPA）这样做
+ATTACHMENT_HEADER_SOURCES = frozenset({"nmpa"})
+
+
+def attachment_with_parent(file_name, facts, body):
+    """附件正文前面加上所属公告的信息：
+    # 附件名
+    所属公告：标题（文号），发布日期：YYYY-MM-DD"""
+    facts = facts or {}
+    parent = facts.get("parent_title") or ""
+    if facts.get("parent_doc_number") and facts["parent_doc_number"] not in parent:
+        parent += "（" + facts["parent_doc_number"] + "）"
+    about = "，".join(x for x in ("所属公告：" + parent if parent else "",
+                                  "发布日期：" + facts["parent_publish_date"] if facts.get("parent_publish_date")
+                                  else "") if x)
+    head = "# " + (file_name or "附件") + ("\n\n" + about if about else "")
+    return head + "\n\n" + clean_text.group_pipe_tables(body or "")
 
 
 def _final_attachment_texts(conn, version_ids):
@@ -206,6 +228,10 @@ def _prepare_rows(conn, key, work, counts):
                     "ON CONFLICT DO NOTHING"), {"k": key, "v": r["version_id"]})
                 counts["waiting_for_attachment_text"] += 1
                 continue
+            if r["source_id"] in ATTACHMENT_HEADER_SOURCES and done["status"] == "parsed" and done["text"]:
+                prepared.append((r, "attachment_with_parent", {"title": r.get("title"), "facts": r["facts"],
+                                                               "text": done["text"]}))
+                continue
             prepared.append((r, None, done))
             continue
         inp, basis = _cleaner_input(r)
@@ -230,10 +256,11 @@ def _version_text(r, basis, extra, cleaned, counts, clean_rows):
     if basis is None:  # 附件：正文来自加工层
         body = extra["text"] if extra["status"] == "parsed" else ""
         return body, attachment_parse.PROCESSOR_VERSION, [], extra["status"]
+    status = "parsed" if basis == "attachment_with_parent" else None  # 附件：加工层已解析成功
     done = cleaned.get(r["version_id"])
     if done is not None:
         counts["reused"] += 1
-        return done["text"], clean_text.PROCESSOR_VERSION, list(done["warnings"] or []), None
+        return done["text"], clean_text.PROCESSOR_VERSION, list(done["warnings"] or []), status
     result = _clean_by_basis(r["source_id"], extra, basis)
     counts["cleaned"] += 1
     body, text_pv = result["text"], clean_text.PROCESSOR_VERSION
@@ -247,7 +274,7 @@ def _version_text(r, basis, extra, cleaned, counts, clean_rows):
         "segments": json.dumps(_anchored(result.get("segments"), basis), ensure_ascii=False),
         "lang": result.get("language"), "warnings": json.dumps(warnings),
     })
-    return body, text_pv, warnings, None
+    return body, text_pv, warnings, status
 
 
 def _profile_of(r, body, warnings, found, parse_status):
@@ -475,7 +502,9 @@ def _read_products(conn, eligible, params):
         "SELECT DISTINCT ON (version_id) version_id,processor_version,parse_method AS basis,text,text_sha256,"
         "segments,language,warnings,"
         "locator_kind,status FROM derived_clean_text WHERE version_id=ANY(:ids) AND processor_version=ANY(:pvs) "
-        "ORDER BY version_id, attempt DESC"), params).mappings().all()  # 当前处理器（或指定的那一版）
+        # NMPA 附件有两份：加工层的解析结果和清洗段加了所属公告信息的那份；给后者（画像、索引用的也是它）
+        "ORDER BY version_id, (processor_version=:cleaner) DESC, attempt DESC"),
+        {**params, "cleaner": clean_text.PROCESSOR_VERSION}).mappings().all()  # 当前处理器（或指定的那一版）
     ids = conn.execute(text(
         "SELECT version_id,text_processor_version,kind,value,start_offset,end_offset FROM derived_identifiers "
         "WHERE version_id=ANY(:ids) AND processor_version=:idpv ORDER BY version_id,start_offset"),
