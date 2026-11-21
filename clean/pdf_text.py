@@ -490,8 +490,8 @@ def _paragraphs(lines) -> list[str]:
         limit = _wrap_limit(current, first, left, size)
         tail = nearly and len(text) <= 4  # 折下来只剩一两个字（“……未满足的临床需”“求”），上一行差一点写满
         lone = current.strip() in _BULLETS  # 只有一个项目符号的行（“●”，字在下一行）：和下一行接成一条（第五轮 E1）
-        if current and (lone or (joinable or tail or _reference_wrap(current, text)) and x0 <= limit
-                        and not _LIST_START.match(text) and text[:1] not in _BULLETS):
+        wrap = joinable or tail or _hanging(current, first, x0, size) or _reference_wrap(current, text)
+        if current and (lone or wrap and x0 <= limit and not _LIST_START.match(text) and text[:1] not in _BULLETS):
             current = join_cjk(current, text)
         else:
             if current:
@@ -501,6 +501,12 @@ def _paragraphs(lines) -> list[str]:
     if current:
         out.append(current)
     return out
+
+
+def _hanging(current, first, x0, size) -> bool:
+    """项目符号那一条的悬挂缩进续行（比符号靠右、对齐符号后面的字）：句号后面的续句也接回这一条（复查6 D1）；
+    首行缩进两字的新段落（x0 ≥ 符号 + 2 字）不接。"""
+    return current[:1] in _BULLETS and first + 0.8 * size <= x0 < first + 1.9 * size
 
 
 def _wrap_limit(current, first, left, size):

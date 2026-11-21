@@ -70,6 +70,8 @@ v8（2026-11-21，NMPA 第四轮审计）：
 v9（2026-11-21，NMPA 第五轮审计）：PDF 的 ● ■ ◆ ▪ ○ ➢ ★ 等项目符号和 • 一样认，只有一个项目符号的行和下一行接成
 一条（E1，clean.pdf_text）；表头上面的分组行（“6801 基础外科手术器械 | 对应关系 | 备注”）写进表头，分块后每块都带
 类别名（E3，clean.excel_parser）。同一文件只复用 v9 自己的结果。
+v10（2026-11-21，复查6）：项目符号那一条的悬挂缩进续行（句号后面的续句）接回这一条（D1）；Word 里连成一张的两张分表，
+后一张的分组行 + 栏目名行另起一张表、带自己的类别表头（D2）。同一文件只复用 v10 自己的结果。
 """
 
 from __future__ import annotations
@@ -81,7 +83,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v9"
+PROCESSOR_VERSION = "datafabric.attachment_parse.v10"
 # 旧版本的结果不再沿用（v4–v7 改了输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}

@@ -113,6 +113,9 @@ def markdown_table(rows: list[list[str]], header: bool | None = None, titles: st
     lead, rows = _lead_rows(_trim(rows), titles)
     if not rows:
         return "\n\n".join(lead)
+    cut = _next_subtable(rows)
+    if cut:  # Word 里连成一张的两张分表：后一张从它自己的分组行、栏目名行起另起一张（复查6 D2）
+        return "\n\n".join(lead + [markdown_table(rows[:cut], header, titles), markdown_table(rows[cut:], None, titles)])
     rows = _merge_header_rows(rows)
     if len(rows[0]) == 1:  # 只有一列：不是表格，一行一段
         return "\n\n".join(lead + [_real(r[0]) for r in rows])
@@ -164,6 +167,22 @@ def _group_row(row) -> bool:
     两个以上不同的值、有横向合并、每格是短名称（没有分行、不超过 30 字）。表单的填写行（一整格）、带说明的行不算。"""
     values = [c for c in row if _real(c).strip()]
     return SPAN in row and len(set(values)) >= 2 and all(len(c) <= 30 and "<br>" not in c for c in values)
+
+
+def _next_subtable(rows) -> int:
+    """表格中间又出现“分组行（一到两行）+ 和前面相同的栏目名行”时，后一张分表从分组行起（返回行号；没有返回 0）。
+    栏目名要和前面某一行的栏目名一样（按有字的格子的集合比），表单里的字段行不算。"""
+    names = lambda row: frozenset(_real(c).strip() for c in row if _real(c).strip())  # noqa: E731
+    seen = set()
+    for i in range(len(rows) - 1):
+        k = i
+        while k < len(rows) and k - i < 2 and _group_row(rows[k]):
+            k += 1
+        if i >= 2 and k > i and k < len(rows) and _label_row(rows[k]) and names(rows[k]) in seen:
+            return i
+        if _label_row(rows[i]):
+            seen.add(names(rows[i]))
+    return 0
 
 
 def _with_groups(header, groups):

@@ -249,3 +249,19 @@ def test_round5_hidden_title_bullets_attachment_label_and_group_rows_in_header()
     table = markdown_table([["第一类目录", SPAN, "新目录"], ["6801 基础外科", SPAN, "备注"],
                             ["序号", "产品类别", "备注"], ["1", "刀", "/"]])
     assert table.splitlines()[0] == "| 第一类目录 6801 基础外科 序号 | 产品类别 | 新目录 备注 |"  # E3
+
+
+def test_final6_bullet_hanging_lines_and_second_subtable_inside_one_table():
+    from clean import pdf_text
+    from clean.excel_parser import SPAN, markdown_table
+
+    lines = [(700, 90, 510, "●请阐明样本量的计算方式，以确定受试者人数。", 16.08),
+             (680, 117.9, 505, "样本量应支持研究目的。", 16.08),
+             (660, 122, 508, "如适用，对于不属于上述研究类型的研究。", 16.08)]
+    assert pdf_text._paragraphs(lines) == ["●请阐明样本量的计算方式，以确定受试者人数。样本量应支持研究目的。",
+                                           "如适用，对于不属于上述研究类型的研究。"]  # D1：续行接回，首行缩进两字的新段不接
+    rows = [["第一类目录", SPAN, "新目录"], ["6822 光学", SPAN, "备注"], ["序号", "产品类别", "备注"], ["1", "镜", "/"],
+            ["第一类目录", SPAN, "新目录"], ["6823 超声", SPAN, "备注"], ["序号", "产品类别", "备注"], ["1", "耦合剂", "/"]]
+    out = markdown_table(rows)
+    assert "| 第一类目录 6823 超声 序号 | 产品类别 | 新目录 备注 |" in out  # D2：表中间的第二张分表另起表头
+    assert out.count("\n| --- |") == 2
