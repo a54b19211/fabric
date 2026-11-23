@@ -75,6 +75,8 @@ v10（2026-11-21，复查6）：项目符号那一条的悬挂缩进续行（句
 v11（2026-11-23，真推知识库切块审计）：表格写出时格内分行连成一行（“；”隔开，括号、标点后直接接），表格里不留
 <br>；分组名和栏目名之间用“／”隔开；分组行里的长编辑备注写在表格前面、分组名照样进表头（062004cc）；表头一格
 横跨“大类名 | 序号”两列时表头名放到序号那一列（6ea7bcfb）（clean.excel_parser）。同一文件只复用 v11 自己的结果。
+v12（2026-11-23，切块审计2）：格内折行直接接上，只在下一行是编号、勾选框、“字段名：”或上一行是单位名时用“；”
+隔开（v11 往“国药准字；Z34020868”这种词中间插了分号）。同一文件只复用 v12 自己的结果。
 """
 
 from __future__ import annotations
@@ -86,7 +88,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PROCESSOR_VERSION = "datafabric.attachment_parse.v11"
+PROCESSOR_VERSION = "datafabric.attachment_parse.v12"
 # 旧版本的结果不再沿用（v4–v7 改了输出，见模块说明）
 REUSABLE_VERSIONS: tuple[str, ...] = ()
 SELF_HOSTED_NATIVE = {".pdf", ".docx"}

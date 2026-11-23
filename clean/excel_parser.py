@@ -107,19 +107,25 @@ def _lead_rows(rows, titles="merged"):
     return lead, rows
 
 
-_NO_JOINER = "（(、，,；;：:。"
+_NUMBERED = re.compile(r"(?:\d{1,3}(?:\.\d{1,3})*[.、．]|[（(][一二三四五六七八九十\d]{1,3}[）)]|[一二三四五六七八九十]{1,3}、|[●■◆▪○•➢★□☐☑]|[^，。；：:\s]{2,10}[：:])")
+_UNIT_END = ("局", "中心", "公司", "院", "所", "部", "委", "厅", "处", "站", "室", "会", "办")
 
 
 def flat_cell(value: str) -> str:
     """写出前把格内分行（内部用 <br> 记）连成一行字：进知识库的表格里不留 <br> 标签（切块审计 FAIL）。
-    下一段以括号开头、或上一段以标点结尾时直接接上（“社会信用代码（组织机构代码）”），否则用“；”隔开
-    （“国家药监局核查中心；湖北省药监局”“1.……；2.……”）。"""
+    格里的分行大多是版面折行（“国药准字”/“Z34020868”、“南充制药”/“有限公司”），直接接上；只有下一行
+    以编号开头（“1.”“（一）”“一、”、项目符号、勾选框“□”）或是“字段名：”，或上一行是一个单位名（以“局”“中心”“公司”等结尾、下一行
+    也是一个完整的名字）时，才用“；”隔开（“核查中心；湖北省药监局”）。不往词中间插标点（切块审计2 FAIL）。"""
     parts = [x.strip() for x in value.split("<br>") if x.strip()]
     if not parts:
         return ""
     out = parts[0]
     for part in parts[1:]:
-        out += ("" if part[0] in "（(" or out[-1] in _NO_JOINER else "；") + part
+        separate = bool(_NUMBERED.match(part)) or (out.endswith(_UNIT_END) and len(part) >= 4
+                                                   and part[0] not in "（(")
+        if out[-1] in "；;。，,、：:":
+            separate = False
+        out += ("；" if separate else "") + part
     return out
 
 

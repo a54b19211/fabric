@@ -82,6 +82,11 @@ def test_table_cells_header_span_group_notes_and_bare_attachment_label():
     assert flat_cell("核查中心<br>湖北省局") == "核查中心；湖北省局"
     assert flat_cell("社会信用代码<br>（组织机构代码）") == "社会信用代码（组织机构代码）"
     assert flat_cell("1.1 核实。<br>1.2 审核。") == "1.1 核实。1.2 审核。"
+    # 版面折行直接接上，不往词中间插“；”（切块审计2 FAIL）；勾选项、“字段名：”另起
+    assert flat_cell("国药准字<br>Z34020868") == "国药准字Z34020868"
+    assert flat_cell("太极集团四川南充制药<br>有限公司") == "太极集团四川南充制药有限公司"
+    assert flat_cell("□ 是<br>□ 否") == "□ 是；□ 否"
+    assert flat_cell("分类编码：xx-xx<br>判定依据：一致") == "分类编码：xx-xx；判定依据：一致"
     # “序号”横跨两列，前一列是大类名、后一列是序号：表头名挪到序号那一列（切块审计 6ea7bcfb）
     got = markdown_table([["序号", SPAN, "标准内容"], ["一、战略规划", "1", "甲"], ["一、战略规划", "2", "乙"]])
     assert got.split("\n")[0] == "|  | 序号 | 标准内容 |"

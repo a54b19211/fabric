@@ -59,7 +59,8 @@ from json.decoder import scanstring
 # plain short line right below it (one line, at most 40 chars, no colon, no closing punctuation) as its name.
 # Table groups and the repeated "# title（续）" of long attachments every 1500 chars (was 3000), so with the
 # knowledge base chunk_size 2000 every chunk starts at a group with its header.
-PROCESSOR_VERSION = "datafabric.clean_text.v23"
+# v24 (2026-11-23, chunk audit 2): follows attachment_parse v12.
+PROCESSOR_VERSION = "datafabric.clean_text.v24"
 
 # ---------------------------------------------------------------- 空白与语言
 
