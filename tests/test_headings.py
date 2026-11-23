@@ -51,9 +51,52 @@ def test_nmpa_page_bold_question_cell_paragraphs_and_colspan():
     got = extract_nmpa_detail(Selector(html))
     blocks = got["body_text"].split("\n\n")
     assert blocks[0] == "## 问：《意见》的起草背景是什么？"  # B-D2：加粗问句
-    assert "| 检查单位 | 国家食品药品监督管理总局核查中心<br>镇江市食品药品监督管理局 |" in blocks[-1]  # C-P1
-    assert "| 一、工艺验证。 |  |" in blocks[-1]  # colspan：值只写一次
+    # 格内两段连成一行（切块审计：表格里不留 <br>）；整行一格的行不进表格，是正文
+    assert blocks[-2] == "| 检查单位 | 国家食品药品监督管理总局核查中心；镇江市食品药品监督管理局 |\n| --- | --- |"
+    assert blocks[-1] == "一、工艺验证。"
     assert got["extra"]["content_in_media"] == "partial" and got["extra"]["subject_category"] == "法规文件 / 规范性文件"
+
+
+def test_nmpa_inspection_report_full_width_rows_become_sections():
+    """飞行检查通报：“检查发现问题”整行一格是小标题，下一行整行一格的正文按段落写，不塞进表格（切块审计 FAIL）。"""
+    from fetch.extractors.nmpa import extract_nmpa_detail
+
+    html = ("<html><head><meta name='ArticleTitle' content='飞检'></head><body><div class='wenzhang'><div class='text'>"
+            "<table><tr><td>企业名称</td><td>甲公司</td><td>法定代表人</td><td>乙</td></tr>"
+            "<tr><td>注册地址</td><td colspan='3'>某市某路1号</td></tr>"
+            "<tr><td colspan='4'>检查发现问题</td></tr>"
+            "<tr><td colspan='4'><p>1.企业擅自改变注册地址。</p><p>2.计算机系统不符合要求。</p></td></tr>"
+            "<tr><td colspan='4'>处理措施</td></tr>"
+            "<tr><td colspan='4'>省局已依法撤销该企业认证证书，对企业涉嫌违法违规经营行为立案调查。</td></tr>"
+            "</table></div></div></body></html>")
+    blocks = extract_nmpa_detail(Selector(html))["body_text"].split("\n\n")
+    assert blocks[0].startswith("| 企业名称 | 甲公司 | 法定代表人 | 乙 |")
+    assert "| 注册地址 | 某市某路1号 |  |  |" in blocks[0]
+    assert blocks[1:] == ["## 检查发现问题", "1.企业擅自改变注册地址。", "2.计算机系统不符合要求。", "## 处理措施",
+                          "省局已依法撤销该企业认证证书，对企业涉嫌违法违规经营行为立案调查。"]
+
+
+def test_table_cells_header_span_group_notes_and_bare_attachment_label():
+    from clean.excel_parser import SPAN, flat_cell, markdown_table
+
+    assert flat_cell("核查中心<br>湖北省局") == "核查中心；湖北省局"
+    assert flat_cell("社会信用代码<br>（组织机构代码）") == "社会信用代码（组织机构代码）"
+    assert flat_cell("1.1 核实。<br>1.2 审核。") == "1.1 核实。1.2 审核。"
+    # “序号”横跨两列，前一列是大类名、后一列是序号：表头名挪到序号那一列（切块审计 6ea7bcfb）
+    got = markdown_table([["序号", SPAN, "标准内容"], ["一、战略规划", "1", "甲"], ["一、战略规划", "2", "乙"]])
+    assert got.split("\n")[0] == "|  | 序号 | 标准内容 |"
+    # 分组行里的长编辑备注写在表格前面，分组名进表头（切块审计 062004cc）
+    rows = [["产品信息", SPAN, "对应关系", "1.本列整体去掉<br>2.只整理确定的产品。"],
+            ["序号", "产品名称", "新目录位置", "包类"], ["1", "支具", "19-03", "包含"]]
+    lead, table = markdown_table(rows).split("\n\n")
+    assert lead == "1.本列整体去掉；2.只整理确定的产品。"
+    assert table.split("\n")[0] == "| 产品信息／序号 | 产品名称 | 对应关系／新目录位置 | 包类 |"
+    # 光秃秃的“附件2”下面一行短字是附件名，并进标题；带冒号的表单栏不并（切块审计 c39a2aad）
+    body = "正文。" * 120
+    got = headings.relevel("## 附件2\n\n儿童抗肿瘤药物研发实施框架\n\n" + body)
+    assert got.startswith("## 附件2 儿童抗肿瘤药物研发实施框架\n\n")
+    got = headings.relevel("## 附件4\n\n申请编号：（自动带入）\n\n" + body)
+    assert got.startswith("## 附件4\n\n申请编号：（自动带入）\n\n")
 
 
 def test_pdf_paragraph_broken_at_a_page_end_is_joined():
@@ -99,12 +142,12 @@ def test_round3_tables_form_rows_stay_and_headerless_tables_get_column_names():
     assert markdown_table([["名单", SPAN, SPAN], ["序号", "名称", "备注"], ["1", "甲", ""]]).startswith("名单\n\n| 序号")
     labelled = markdown_table([["已发布的产品信息", SPAN, SPAN, "对应关系"], ["序号", "产品名称", "产品描述", "备注"],
                                ["1", "甲", "乙", "/"]])
-    assert labelled.splitlines()[:2] == ["| 已发布的产品信息 序号 | 产品名称 | 产品描述 | 对应关系 备注 |",
+    assert labelled.splitlines()[:2] == ["| 已发布的产品信息／序号 | 产品名称 | 产品描述 | 对应关系／备注 |",
                                          "| --- | --- | --- | --- |"]
     # 栏目名行当表头，上面的分组行写进表头（第五轮 E3，第四轮 D-D 是写在表前）
     merged = markdown_table([["目录", SPAN, SPAN, SPAN, "新目录"], ["序号", "品名举例", SPAN, "对应位置", "备注"],
                              ["1", "刀", "刀", "02-01", "/"]])
-    assert merged.splitlines()[0] == "| 目录 序号 | 品名举例 |  | 对应位置 | 新目录 备注 |"  # 栏目名行里有横跨两列的格
+    assert merged.splitlines()[0] == "| 目录／序号 | 品名举例 |  | 对应位置 | 新目录／备注 |"  # 栏目名行里有横跨两列的格
 
 
 def test_round3_word_cell_soft_breaks_and_subscripts(tmp_path):
@@ -121,7 +164,7 @@ def test_round3_word_cell_soft_breaks_and_subscripts(tmp_path):
         package.writestr("word/document.xml", f"<w:document {w}><w:body>{sub}<w:tbl><w:tr><w:tc><w:p><w:r><w:t>条款"
                                               f"</w:t></w:r></w:p></w:tc>{cell}</w:tr></w:tbl></w:body></w:document>")
     markdown = office_text.parse_docx(str(path))["markdown"]
-    assert "β₂受体激动剂" in markdown and "应当确保：<br>（一）甲；<br>（二）乙。" in markdown  # N4、附件 D6
+    assert "β₂受体激动剂" in markdown and "应当确保：（一）甲；（二）乙。" in markdown  # N4、附件 D6
 
 
 def test_round3_attachment_title_block_label_noise_and_missing_glyph_warning():
@@ -248,7 +291,7 @@ def test_round5_hidden_title_bullets_attachment_label_and_group_rows_in_header()
     assert "## 附件4 申请表（格式）\n\n申请编号：（自动带入）" in md  # E2：中间隔一行短字
     table = markdown_table([["第一类目录", SPAN, "新目录"], ["6801 基础外科", SPAN, "备注"],
                             ["序号", "产品类别", "备注"], ["1", "刀", "/"]])
-    assert table.splitlines()[0] == "| 第一类目录 6801 基础外科 序号 | 产品类别 | 新目录 备注 |"  # E3
+    assert table.splitlines()[0] == "| 第一类目录／6801 基础外科／序号 | 产品类别 | 新目录／备注 |"  # E3
 
 
 def test_final6_bullet_hanging_lines_and_second_subtable_inside_one_table():
@@ -263,5 +306,5 @@ def test_final6_bullet_hanging_lines_and_second_subtable_inside_one_table():
     rows = [["第一类目录", SPAN, "新目录"], ["6822 光学", SPAN, "备注"], ["序号", "产品类别", "备注"], ["1", "镜", "/"],
             ["第一类目录", SPAN, "新目录"], ["6823 超声", SPAN, "备注"], ["序号", "产品类别", "备注"], ["1", "耦合剂", "/"]]
     out = markdown_table(rows)
-    assert "| 第一类目录 6823 超声 序号 | 产品类别 | 新目录 备注 |" in out  # D2：表中间的第二张分表另起表头
+    assert "| 第一类目录／6823 超声／序号 | 产品类别 | 新目录／备注 |" in out  # D2：表中间的第二张分表另起表头
     assert out.count("\n| --- |") == 2

@@ -318,8 +318,26 @@ def _title_level(items):
             label = out[-1] if bare[-1] == len(out[-2:]) - 1 else out[-2]
             label[0] = label[0] + " " + item[0]
             continue
+        if _names_bare_label(out, item):
+            out[-1][0] = out[-1][0] + " " + item[0].strip()
+            continue
         out.append(item)
     return out
+
+
+BARE_TITLE_CHARS = 40
+
+
+def _names_bare_label(out, item) -> bool:
+    """光秃秃的“附件2”下面紧跟一行短字（PDF、Excel 里的附件题名不加粗不居中，认不成标题）：它就是附件的名字，
+    并进分隔行（切块审计：“## 附件2”“## 附件3”标题路径里没有名字）。"""
+    return not item[1] and bool(out) and out[-1][1] == "sep" and _bare_label(out[-1][0]) and _bare_title(item[0])
+
+
+def _bare_title(text) -> bool:
+    """能当附件名字的一行：不超过 40 字，只有一行，不是表格行、标题行，不以句中或句末标点结尾，不带冒号（“申请编号：（自动带入）”是表单的一栏）。"""
+    line = text.strip()
+    return 0 < len(line) <= BARE_TITLE_CHARS and "\n" not in line and line[0] not in "|#" and not re.search("[：:]", line) and line[-1] not in "。；;，,：:、"
 
 
 def _bare_label(text) -> bool:

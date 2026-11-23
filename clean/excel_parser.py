@@ -107,6 +107,22 @@ def _lead_rows(rows, titles="merged"):
     return lead, rows
 
 
+_NO_JOINER = "（(、，,；;：:。"
+
+
+def flat_cell(value: str) -> str:
+    """写出前把格内分行（内部用 <br> 记）连成一行字：进知识库的表格里不留 <br> 标签（切块审计 FAIL）。
+    下一段以括号开头、或上一段以标点结尾时直接接上（“社会信用代码（组织机构代码）”），否则用“；”隔开
+    （“国家药监局核查中心；湖北省药监局”“1.……；2.……”）。"""
+    parts = [x.strip() for x in value.split("<br>") if x.strip()]
+    if not parts:
+        return ""
+    out = parts[0]
+    for part in parts[1:]:
+        out += ("" if part[0] in "（(" or out[-1] in _NO_JOINER else "；") + part
+    return out
+
+
 def markdown_table(rows: list[list[str]], header: bool | None = None, titles: str = "merged") -> str:
     """二维字符串 → Markdown 表格；表格上方只有一个值的行写成单独一行字。不补空格。
     header：第一行是不是表头（None：按 is_header_row 看）；不是表头时表头行空着。"""
@@ -117,17 +133,41 @@ def markdown_table(rows: list[list[str]], header: bool | None = None, titles: st
     if cut:  # Word 里连成一张的两张分表：后一张从它自己的分组行、栏目名行起另起一张（复查6 D2）
         return "\n\n".join(lead + [markdown_table(rows[:cut], header, titles), markdown_table(rows[cut:], None, titles)])
     rows = _merge_header_rows(rows)
-    if len(rows[0]) == 1:  # 只有一列：不是表格，一行一段
-        return "\n\n".join(lead + [_real(r[0]) for r in rows])
+    if len(rows[0]) == 1:  # 只有一列：不是表格，一行一段（格内几段各成一段）
+        return "\n\n".join(lead + [x for r in rows for x in _real(r[0]).split("<br>") if x.strip()])
     width = len(rows[0])
     above, rows = _with_header(rows, header)
     lead += [_row_line(r) for r in above if not _group_row(r)]
+    lead += [flat_cell(n) for r in above if _group_row(r) for n in _group_notes(r)]
+    rows = _shift_span_header(rows)
     rows = [[_real(c) for c in r] for r in rows]
     rows[0] = _with_groups(rows[0], [r for r in above if _group_row(r)])
+    rows = [[flat_cell(c) for c in r] for r in rows]
     lines = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width]
     # 整行合并成一格的行（表中间的小标题“总体意见建议”）：值只写在第一格，不重复整行
     lines += ["| " + " | ".join(r if len(set(r)) > 1 else [r[0]] + [""] * (width - 1)) + " |" for r in rows[1:]]
     return "\n\n".join(lead + ["\n".join(lines)])
+
+
+_NUMBER = re.compile(r"\d{1,4}(?:\.\d{1,3})*\.?")
+
+
+def _shift_span_header(rows):
+    """表头“序号”横跨两列（原件第 1 列是竖排的大类名“一、国家、区域战略规划”，第 2 列才是序号）：数据里前一列
+    没有一个是数字、后一列大多是数字时，表头名挪到后一列，前一列表头空着，不让“序号”下面装大类名（切块审计
+    6ea7bcfb）。"""
+    header = rows[0]
+    for i in range(len(header) - 1):
+        if not _real(header[i]).strip() or header[i + 1] != SPAN:
+            continue
+        left = [_real(r[i]).strip() for r in rows[1:] if _real(r[i]).strip()]
+        right = [_real(r[i + 1]).strip() for r in rows[1:] if _real(r[i + 1]).strip()]
+        numbers = sum(1 for x in right if _NUMBER.fullmatch(x))
+        if left and right and not any(_NUMBER.fullmatch(x) for x in left) and numbers * 2 > len(right):
+            header = list(header)
+            header[i], header[i + 1] = SPAN, header[i]
+            rows = [header] + rows[1:]
+    return rows
 
 
 def _full(row) -> bool:
@@ -165,8 +205,18 @@ HEADER_SEARCH_ROWS = 4
 def _group_row(row) -> bool:
     """表头上面的分组行（“第一类医疗器械产品目录 | 新医疗器械分类目录”“6801 基础外科手术器械 | 对应关系 | 备注”）：
     两个以上不同的值、有横向合并、每格是短名称（没有分行、不超过 30 字）。表单的填写行（一整格）、带说明的行不算。"""
-    values = [c for c in row if _real(c).strip()]
-    return SPAN in row and len(set(values)) >= 2 and all(len(c) <= 30 and "<br>" not in c for c in values)
+    return SPAN in row and len(set(_group_names(row))) >= 2
+
+
+def _group_names(row) -> list[str]:
+    """分组行里的分组名：不超过 30 字、没有分行的格子（长的是编辑备注，写在表格前面，不进表头）。"""
+    return [c for c in row if _real(c).strip() and len(c) <= 30 and "<br>" not in c]
+
+
+def _group_notes(row) -> list[str]:
+    """分组行里不是分组名的长格子（“1.在最后表格中本列整体去掉 2.只整理确定的产品。”这类编辑备注）。"""
+    names = set(_group_names(row))
+    return list(dict.fromkeys(_real(c).strip() for c in row if _real(c).strip() and c not in names))
 
 
 def _next_subtable(rows) -> int:
@@ -192,8 +242,8 @@ def _with_groups(header, groups):
     for row in reversed(groups):  # 上层在前：“第一类医疗器械产品目录 6801 基础外科手术器械 序号”
         for i, c in enumerate(row[:len(header)]):
             value = _real(c).strip()
-            if value and value != header[i]:
-                header[i] = (value + " " + header[i]).strip()
+            if value and value != header[i] and value in _group_names(row):
+                header[i] = (value + "／" + header[i]) if header[i] else value
     return header
 
 

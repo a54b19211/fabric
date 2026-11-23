@@ -401,8 +401,9 @@ def _span(value) -> int:
         return 1
 
 
-def _grid(table):
-    """表格 → (行列表, 第一行是 <th>)：colspan 的值只写在第一格、跨过的格空着；rowspan 的值往下带。"""
+def _grid(table, spans=None):
+    """表格 → (行列表, 第一行是 <th>)：colspan 的值只写在第一格、跨过的格空着；rowspan 的值往下带。
+    spans：给了就记下每行第一格横跨的列数（{行: 列数}），找“整行一格”的行用。"""
     grid, header = {}, False
     for r, tr in enumerate(table.xpath(".//tr")):
         c = 0
@@ -411,6 +412,8 @@ def _grid(table):
                 c += 1
             value, cols = _cell(cell), _span(cell.get("colspan"))
             header = header or (r == 0 and cell.tag == "th")
+            if spans is not None and c == 0:
+                spans[r] = cols
             for dr in range(_span(cell.get("rowspan"))):
                 grid[(r + dr, c)] = value
                 for dc in range(1, cols):
@@ -427,14 +430,49 @@ def _markdown_table(rows, header=None) -> str:
     return group_pipe_tables(markdown_table(rows, header=header))
 
 
+_FULL_ROW_HEADING = 40
+
+
+def _table_blocks(rows, header, full):
+    """表格按“整行一格”的行拆开（飞行检查通报：“检查发现问题”“已采取的处理措施”一格占满整行，下一行整行一格写正文）：
+    短的（不超过 40 字、没有分行）是小标题，长的是正文、格里的几段各成一段；其余的行照常是表格。"""
+    blocks, rest = [], []
+
+    def flush():
+        if rest:
+            blocks.append(_markdown_table(list(rest), header=True if header and not blocks else None))
+            rest.clear()
+
+    for i, row in enumerate(rows):
+        if i not in full:
+            rest.append(row)
+            continue
+        flush()
+        text = row[0]
+        if len(text) <= _FULL_ROW_HEADING and "<br>" not in text and text[-1] not in "。；;":
+            blocks.append(headings.mark(text, 2))
+        else:
+            blocks.extend(x for x in text.split("<br>") if x.strip())
+    flush()
+    return "\n\n".join(blocks)
+
+
 def _tables_to_placeholders(part):
     """把 part 里最外层的表格换成占位行，返回 {序号: Markdown 表格}；block_text 之后再换回来，表格整块成一段。"""
     tables = {}
     for n, table in enumerate(part.xpath(".//table[not(ancestor::table)]")):
-        rows, header = _grid(table)
-        rows = [row for row in rows if any(row)]
+        spans = {}
+        rows, header = _grid(table, spans)
+        width = len(rows[0]) if rows else 0
+        full_rows = {r for r, cols in spans.items() if width >= 2 and cols >= width and rows[r][0]}
+        kept = [(r, row) for r, row in enumerate(rows) if any(row)]
+        rows = [row for _, row in kept]
+        full = {i for i, (r, _) in enumerate(kept) if r in full_rows}
         holder = lxml_html.Element("p")
-        if rows:
+        if rows and full and len(full) < len(rows):
+            tables[n] = _table_blocks(rows, header, full)
+            holder.text = "⁣TABLE%d⁣" % n
+        elif rows:
             tables[n] = _markdown_table(rows, header=True if header else None)
             holder.text = "⁣TABLE%d⁣" % n
         holder.tail = table.tail

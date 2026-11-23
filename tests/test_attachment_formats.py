@@ -68,7 +68,7 @@ def test_xlsx_declared_whole_sheet_merged_cells_and_newlines(tmp_path):
     md = excel_to_markdown(str(path))
     # 只有一个 Sheet：不写“## 表1”；表名整行合并只写一次；纵向合并往下带
     assert md == ("反馈表\n\n| 序号 | 章节 | 意见 |\n| --- | --- | --- |\n"
-                  "| 1 | 第一章 | 第一行<br>第二行 \\| 竖线 |\n| 2 | 第一章 | 无 |")  # 格内换行 <br>（N3）
+                  "| 1 | 第一章 | 第一行；第二行 \\| 竖线 |\n| 2 | 第一章 | 无 |")  # 格内换行连成一行（N3；切块审计不留 <br>）
 
 
 def test_excel_two_row_title_once_horizontal_merge_once_and_no_header_row():
@@ -231,4 +231,4 @@ def test_result_far_shorter_than_the_reference_is_incomplete_not_parsed(tmp_path
 
 
 def test_old_versions_are_not_reused():
-    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v10"
+    assert ap.REUSABLE_VERSIONS == () and ap.PROCESSOR_VERSION == "datafabric.attachment_parse.v11"

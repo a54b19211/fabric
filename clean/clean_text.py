@@ -55,7 +55,9 @@ from json.decoder import scanstring
 # v21 (2026-11-21, NMPA round-5 audit): follows attachment_parse v9; a bare "附件N" separator absorbs the title right
 # below it even when the two are longer than 40 chars, or when one short line ("申请编号：（自动带入）") sits between them.
 # v22 (2026-11-21, final check 6): follows attachment_parse v10.
-PROCESSOR_VERSION = "datafabric.clean_text.v22"
+# v23 (2026-11-23, real WeKnora chunk audit): follows attachment_parse v11; a bare "附件N" separator also absorbs the
+# plain short line right below it (one line, at most 40 chars, no colon, no closing punctuation) as its name.
+PROCESSOR_VERSION = "datafabric.clean_text.v23"
 
 # ---------------------------------------------------------------- 空白与语言
 
