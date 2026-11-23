@@ -57,6 +57,8 @@ from json.decoder import scanstring
 # v22 (2026-11-21, final check 6): follows attachment_parse v10.
 # v23 (2026-11-23, real WeKnora chunk audit): follows attachment_parse v11; a bare "附件N" separator also absorbs the
 # plain short line right below it (one line, at most 40 chars, no colon, no closing punctuation) as its name.
+# Table groups and the repeated "# title（续）" of long attachments every 1500 chars (was 3000), so with the
+# knowledge base chunk_size 2000 every chunk starts at a group with its header.
 PROCESSOR_VERSION = "datafabric.clean_text.v23"
 
 # ---------------------------------------------------------------- 空白与语言
@@ -116,7 +118,7 @@ def _result(text, segments, language, removed_lines, warnings):
 
 # ---------------------------------------------------------------- 长表格分组
 
-TABLE_GROUP_CHARS = 3000  # 一组表格最多这么多字（知识库 cn_regulatory 一块 4000 字，一组放得进一块）
+TABLE_GROUP_CHARS = 1500  # 一组表格最多这么多字（知识库 cn_regulatory 一块 2000 字：一组连表头放得进一块，块从组的开头起）
 _TABLE_SEPARATOR = re.compile(r"\|(?:\s*:?-{3,}:?\s*\|)+")
 
 

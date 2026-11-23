@@ -153,7 +153,7 @@ _FILE_EXT = re.compile(r"\.(?:docx?|xlsx?|pdf|wps|et|ofd|zip|rar|txt)$", re.I)
 _GENERIC_NAME = re.compile(r"(?:.{0,40}?(?:公告|通告|通知|函|号|文件))?\s*(?:附件|附表)\s*\d{0,2}|\d{6,}|未命名附件", re.I)
 _LABEL = re.compile(r"(附件|附表)\s*(\d{1,2})")
 _BARE_LABEL = re.compile(r"(?:附件|附表)\d{0,2}[：:]?")
-CONTINUED_CHARS = 3000  # 没有小标题的长附件：每这么多字重复一次第 1 级标题（加“（续）”）
+CONTINUED_CHARS = 1500  # 与表格分组（clean_text.TABLE_GROUP_CHARS）一致。没有小标题的长附件：每这么多字重复一次第 1 级标题（加“（续）”）
 
 
 _FORM_FIELD = re.compile(r"[^：:]{1,12}[：:]")  # 题名上面的“申请编号：（自动带入）”

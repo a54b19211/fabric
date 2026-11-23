@@ -94,12 +94,15 @@ def file_name(title):
 
 
 def compact_metadata(meta):
-    """Fabric retrieval metadata as one native metadata value (at most 1000 characters; identifiers are dropped
-    first when it does not fit). Descriptive only: not identity, not part of conflict checks; the full value
-    stays in the receipt journal and is returned with hits."""
+    """Fabric retrieval metadata as one native metadata value (at most 1000 characters; when it does not fit,
+    identifiers, then the parent title, then the title are dropped - the title is also the document name).
+    Descriptive only: not identity, not part of conflict checks; the full value stays in the receipt journal and
+    is returned with hits."""
     if not meta:
         return None
-    for value in (meta, {k: v for k, v in meta.items() if k != "identifiers"}):
+    value = dict(meta)
+    for drop in (None, "identifiers", "parent_title", "title"):
+        value.pop(drop, None)
         text = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         if len(text) <= 1000:
             return text

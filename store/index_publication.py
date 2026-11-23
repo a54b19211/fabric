@@ -194,11 +194,18 @@ def metadata(record, proof_available_at, artifact, identifiers):
     """检索元数据（桥接服务写进 WeKnora，命中原样带回）。值都是字符串或字符串列表；没有的不写。
     时间：published_at / source_updated_at 是来源报告的（精度见值本身：年、年-月、日期或时刻），各带 *_meaning
     说明它是什么时间（例如 GDELT 的 source_updated_at 是 gdelt_first_observed，GDELT 的观察时间，不是来源修改时间）；
-    first_seen_at 是 Fabric 首次见到，proof_available_at 是有证明的可得时间（只有审核过的档案才有）。"""
+    first_seen_at 是 Fabric 首次见到，proof_available_at 是有证明的可得时间（只有审核过的档案才有）。
+    出处（切块审计：每一块都要知道出自哪篇、哪天、哪个网址）：标题、原网址、文号、索引号；附件另带所属公告的标题。"""
     proof = record.availability_proof
+    facts = getattr(record, "facts", None) or {}
+    extra = facts.get("extra") or {}
     values = {
         "source_id": record.source_id, "source_record_id": record.source_record_id,
         "version_id": record.version_id,
+        "title": record.title, "source_url": getattr(record, "source_url", None),
+        "doc_number": extra.get("doc_number") or facts.get("parent_doc_number"),
+        "index_number": extra.get("index_number") or facts.get("parent_index_number"),
+        "parent_title": facts.get("parent_title"),
         "published_at": _time(record.source_published_at),
         "published_at_meaning": _meaning(record.source_published_at),
         "source_updated_at": _time(record.source_updated_at),
